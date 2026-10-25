@@ -12,6 +12,8 @@ import { parsePortGrant } from './house.mjs';
 
 const TERMINAL = new Set(['done', 'failed', 'stopped', 'lost']);
 const LIVE = new Set(['wanted', 'starting', 'running', 'stopping']);
+/** How many claims in a row may fail before the house does. */
+export const MAX_CLAIM_TRIES = 5;
 /** A house secret that comes from the agent's subscriptions, not a fixed name. */
 const SUB_SOURCE = /^sub:(anthropic|openai)$/;
 const FACT = /^[a-z][a-z0-9-]{0,31}(:[A-Za-z0-9._ +-]{1,64})?$/;
@@ -359,6 +361,14 @@ export function claim(env, effects, caller, { id }) {
       // The house stays waiting; the token it was about to get goes (or is queued to).
       revokeOrQueue(s, effects, label);
       const e = err instanceof StateError ? err : new StateError(`couldn't get ${h.agent}'s house secrets: ${err.message}`, 500);
+      // Not forever: a house that can't be claimed MAX_CLAIM_TRIES times running
+      // fails, saying why, so whatever asked for it (a wake, a service) sees it.
+      h.claimTries = (h.claimTries ?? 0) + 1;
+      if (h.claimTries >= MAX_CLAIM_TRIES) {
+        h.state = 'failed'; h.updated = now(effects);
+        h.log = `the box couldn't claim it ${h.claimTries} times: ${e.message}`;
+        if (h.service) serviceHouseEnded(s, h, effects);
+      }
       e.saveState = true;
       throw e;
     }

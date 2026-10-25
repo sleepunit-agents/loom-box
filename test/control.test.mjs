@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { api, meets } from '../src/control.mjs';
+import { MAX_CLAIM_TRIES, api, meets } from '../src/control.mjs';
 
 let env, fx, minted, revoked;
 const owner = { kind: 'owner' };
@@ -278,4 +278,16 @@ test('a secret from sub:<provider> is the agent\'s subscription with room left, 
   const h2 = ok(call(art, 'up', { task: 't2' }));
   ok(call(box(h2.box), 'poll'));
   assert.equal(call(box(h2.box), 'claim', { id: h2.id }).status, 500);
+});
+
+test('a house that can\'t be claimed fails after a few tries, saying why, instead of waiting forever', () => {
+  fx.secret = () => { throw new Error('the secrets store is down'); };
+  const h = ok(call(art, 'up', { task: 't' }));
+  for (let i = 0; i < MAX_CLAIM_TRIES; i++) {
+    ok(call(box(h.box), 'poll'));
+    assert.equal(call(box(h.box), 'claim', { id: h.id }).status, 500);
+  }
+  const after = ok(call(owner, 'list')).houses.find((x) => x.id === h.id);
+  assert.equal(after.state, 'failed');
+  assert.match(after.log, /couldn't claim it 5 times: .*secrets store is down/);
 });
