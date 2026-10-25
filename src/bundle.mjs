@@ -80,9 +80,13 @@ export function importPart(env, part, { force = false } = {}) {
       }
       for (const [name, b] of Object.entries(cur.boxes ?? {})) {
         const label = `box · ${name}`;
-        if (!b.local && !b.revoked && !(s.boxes[name] && !s.boxes[name].revoked) && !s.pendingRevokes.includes(label)) s.pendingRevokes.push(label);
+        // Every one, even a box the bundle also has: labels can't tell this
+        // machine's credential from the bundle's. A box that should stay is re-added.
+        if (!b.local && !b.revoked && !s.pendingRevokes.includes(label)) s.pendingRevokes.push(label);
       }
     }
+    // House ids (and so token labels) are never reused, across a restore too.
+    s.seq = Math.max(s.seq ?? 0, cur.seq ?? 0);
     for (const k of Object.keys(cur)) delete cur[k];
     Object.assign(cur, s);
   });

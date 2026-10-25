@@ -304,6 +304,9 @@ export function claim(env, effects, caller, { id }) {
     const a = s.agents[h.agent];
     if (!a) fail(`${h.agent} has no house config`, 409);
     const label = houseTokenLabel(h);
+    // Never mint under a label that's still waiting to be revoked: the revoke would take the new token.
+    retryRevokes(s, effects);
+    if ((s.pendingRevokes ?? []).includes(label)) fail(`an old token for ${id} isn't revoked yet; try again shortly`, 409);
     const token = effects.mint(['--agent', h.agent], label);
     try {
       const secrets = {};
