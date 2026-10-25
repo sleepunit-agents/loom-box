@@ -131,6 +131,7 @@ function agentsPage(env) {
       { type: 'kv', items: [
         { label: 'Repo', value: c.repo }, { label: 'House file', value: c.houseFile || 'house/house.json' },
         { label: 'Nested containers', value: c.nested ? 'allowed' : 'not allowed' },
+        { label: 'Ports it may publish', value: (c.ports ?? []).join(', ') || 'none' },
         { label: 'Branch', value: c.branch || 'default' }, { label: 'Repo secret', value: c.repoSecret || 'none' },
         { label: 'Secrets a house gets', value: Object.entries(c.secrets || {}).map(([k, v]) => (k === v ? k : `${k} (from ${v})`)).join(', ') || 'none' },
       ] },
@@ -147,6 +148,7 @@ function agentForm(agent, c) {
     { name: 'repo', label: 'Repo', kind: 'text', required: true, value: c?.repo ?? '' },
     { name: 'house_file', label: 'House file', kind: 'text', value: c?.houseFile ?? 'house/house.json', hint: 'A path in the repo: the image, and where each secret lands' },
     { name: 'nested', label: 'Nested containers', kind: 'choice', value: c?.nested ? 'yes' : 'no', options: [{ value: 'no', label: 'Not allowed' }, { value: 'yes', label: 'Allowed', detail: 'The house may run containers of its own (more capabilities, still rootless)' }] },
+    { name: 'ports', label: 'Ports', kind: 'text', value: (c?.ports ?? []).join(', '), hint: 'Ports a house of this agent may publish on its box, comma separated' },
     { name: 'branch', label: 'Branch', kind: 'text', value: c?.branch ?? '' },
     { name: 'repo_secret', label: 'Repo secret', kind: 'text', value: c?.repoSecret ?? '', hint: 'A secrets-store name, for a private repo over https' },
     { name: 'secrets', label: 'Secrets', kind: 'text', value: Object.entries(c?.secrets || {}).map(([k, v]) => `${k}=${v}`).join(', '), hint: 'name-in-house=store-name, comma separated' },

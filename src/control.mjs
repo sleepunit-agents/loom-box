@@ -170,11 +170,11 @@ export function setPrimary(env, effects, { agent, box }) {
 /**
  * How an agent's house is made: its repo, the house file in it (house.mjs:
  * the image and where things land), whether its house may run nested
- * containers, and which secrets a house of it gets, by the name the house file
+ * containers, which ports it may publish on a box, and which secrets a house of it gets, by the name the house file
  * uses and the secrets-store name they come from. Kept here, not read from
  * the repo, so neither a box nor the repo can widen it.
  */
-export function setAgent(env, effects, { agent, repo, houseFile, nested, branch, repoSecret, secrets }) {
+export function setAgent(env, effects, { agent, repo, houseFile, nested, branch, repoSecret, secrets, ports }) {
   const a = str(agent, 'an agent', 40);
   if (!AGENT_NAME.test(a)) fail('an agent name is lowercase letters, digits and dashes');
   const r = str(repo, 'the repo', 400);
@@ -192,8 +192,13 @@ export function setAgent(env, effects, { agent, repo, houseFile, nested, branch,
       || !Object.entries(sec).every(([k, v]) => SECRET_NAME.test(k) && typeof v === 'string' && SECRET_NAME.test(v))) {
     fail('secrets map the name a house sees to a secrets-store name, like github-token=github-art-e-fish-token');
   }
+  let pt = ports ?? [];
+  if (typeof pt === 'string') pt = pt.split(/[\s,]+/).filter(Boolean);
+  if (!Array.isArray(pt) || pt.length > 8) fail('ports is a list of up to 8 port numbers');
+  pt = pt.map(Number);
+  if (!pt.every((n) => Number.isInteger(n) && n >= 1024 && n <= 65535)) fail('a port a house may publish is a number from 1024 to 65535');
   return update(env, (s) => {
-    s.agents[a] = { repo: r, houseFile: file, nested: nest, branch: br, repoSecret: rs, secrets: sec };
+    s.agents[a] = { repo: r, houseFile: file, nested: nest, branch: br, repoSecret: rs, secrets: sec, ports: [...new Set(pt)] };
     return { agent: a, ...s.agents[a] };
   });
 }
@@ -323,7 +328,7 @@ export function claim(env, effects, caller, { id }) {
       const saved = h.service ? stateMeta(env, s, serviceKey(h.agent, h.service)) : undefined;
       // The state itself comes after, a part at a time (state-part): just its shape here.
       const state = saved ? { bytes: saved.bytes, sha256: saved.sha256, parts: partsOf(saved.bytes) } : null;
-      return { id, agent: h.agent, token, secrets, repoAuth, nested: !!a.nested, ...(h.service ? { service: h.service, state } : {}) };
+      return { id, agent: h.agent, token, secrets, repoAuth, nested: !!a.nested, ports: a.ports ?? [], ...(h.service ? { service: h.service, state } : {}) };
     } catch (err) {
       // The house stays waiting; the token it was about to get goes (or is queued to).
       revokeOrQueue(s, effects, label);

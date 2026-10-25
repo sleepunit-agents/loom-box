@@ -330,7 +330,7 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
       const dirs = { mirror };
       for (const d of ['state', 'nested']) { dirs[d] = pathJoin(dir, d); mkdirSync(dirs[d], { mode: 0o700 }); }
       if (h.service) restoreState(dirs.state, await fetchState(client, h.id, claimed.state));
-      const args = runArgs(house, { id: h.id, agent: h.agent, loomUrl, task: h.task, service: h.service, image: tag, dirs, allowNested: !!claimed.nested });
+      const args = runArgs(house, { id: h.id, agent: h.agent, loomUrl, task: h.task, service: h.service, image: tag, dirs, allowNested: !!claimed.nested, allowPorts: claimed.ports ?? [] });
       // The house's own podman secrets, each value on stdin (never argv).
       for (const name of Object.keys(house.secrets)) {
         // podman reads `-` only from a real pipe (node hands a child a socket),

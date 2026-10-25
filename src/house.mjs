@@ -19,7 +19,9 @@
 //     },
 //     "nested": true,                               wants the nested-container capabilities:
 //                                                   only if the owner allows it for this agent
-//     "hostname": "art-house"
+//     "hostname": "art-house",
+//     "ports": ["7401", "127.0.0.1:4747"]          a port published on the box (same number
+//                                                   inside): only ones the owner allows this agent
 //   }
 //
 // Files land under /run/secrets/<file> (podman secrets, 0400). LOOM_URL,
@@ -35,6 +37,7 @@ const MOUNT_KINDS = new Set(['state', 'nested', 'mirror']);
 const REL_PATH = /^[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*$/;
 const ABS_PATH = /^\/[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*$/;
 const HOSTNAME = /^[a-z0-9][a-z0-9-]{0,62}$/;
+const PORT = /^(?:(\d{1,3}(?:\.\d{1,3}){3}):)?(\d{4,5})$/;
 
 /** The capabilities nested containers need, and nothing more (Art's tank, t-1473). */
 export const NESTED_ARGS = ['--cap-add=SYS_ADMIN,NET_ADMIN,SYS_PTRACE', '--device', '/dev/net/tun', '--security-opt', 'unmask=/proc/sys'];
@@ -94,11 +97,22 @@ function runSpec(h, where, { task: allowTask }) {
   }
   if (h.nested !== undefined && typeof h.nested !== 'boolean') fail(`${where}nested is true or false`);
   if (h.hostname !== undefined && !HOSTNAME.test(h.hostname)) fail(`${where}hostname is lowercase letters, digits and dashes`);
-  return { command, task, secrets, env, mounts, nested: !!h.nested, hostname: h.hostname ?? null };
+  const ports = [];
+  if (h.ports !== undefined) {
+    if (!Array.isArray(h.ports) || h.ports.length > 8) fail(`${where}ports is a list of up to 8`);
+    for (const p of h.ports) {
+      const m = typeof p === 'string' ? PORT.exec(p) : null;
+      const n = m ? Number(m[2]) : NaN;
+      if (!m || n < 1024 || n > 65535 || (m[1] && m[1].split('.').some((o) => Number(o) > 255))) fail(`${where}port ${JSON.stringify(p)}: a number from 1024, optionally after an IPv4 address to bind ("127.0.0.1:4747")`);
+      if (ports.some((q) => q.port === n)) fail(`${where}port ${n} is listed twice`);
+      ports.push({ ip: m[1] ?? null, port: n });
+    }
+  }
+  return { command, task, secrets, env, mounts, nested: !!h.nested, hostname: h.hostname ?? null, ports };
 }
 
 const SERVICE_NAME = /^[a-z][a-z0-9-]{0,39}$/;
-const RUN_KEYS = ['command', 'secrets', 'env', 'mounts', 'nested', 'hostname'];
+const RUN_KEYS = ['command', 'secrets', 'env', 'mounts', 'nested', 'hostname', 'ports'];
 
 /**
  * Validate a house file. Anything unexpected is refused, not ignored. A house
@@ -153,7 +167,7 @@ export const containerName = (id) => `loom-house-${id}`;
  * named here: the house's own secrets, its own dirs, plain env. `allowNested`
  * is the owner's say; the house file only asks.
  */
-export function runArgs(house, { id, agent, loomUrl, task, service, image, dirs, allowNested }) {
+export function runArgs(house, { id, agent, loomUrl, task, service, image, dirs, allowNested, allowPorts = [] }) {
   const args = ['run', '--rm', '--name', containerName(id), '--hostname', house.hostname ?? `${agent}-house`];
   if (house.task === 'stdin') args.push('-i');
   // A service runs until it's stopped; podman stop gives it this long to finish.
@@ -161,6 +175,10 @@ export function runArgs(house, { id, agent, loomUrl, task, service, image, dirs,
   if (house.nested) {
     if (!allowNested) throw new HouseFileError(`${agent}'s house asks for nested containers, and the owner hasn't allowed that`);
     args.push(...NESTED_ARGS);
+  }
+  for (const { ip, port } of house.ports ?? []) {
+    if (!allowPorts.includes(port)) throw new HouseFileError(`${agent}'s house asks to publish port ${port}, and the owner hasn't allowed that`);
+    args.push('-p', `${ip ? `${ip}:` : ''}${port}:${port}`);
   }
   for (const [name, where] of Object.entries(house.secrets)) {
     const ps = podmanSecret(id, name);

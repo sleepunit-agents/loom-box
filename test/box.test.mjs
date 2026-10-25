@@ -22,7 +22,7 @@ import { MAX_STATE_BYTES, api } from '../src/control.mjs';
 import { PART_RAW, partsOf } from '../src/blobs.mjs';
 import { randomBytes } from 'node:crypto';
 import { joinLoom, runner } from '../src/box.mjs';
-import { NESTED_ARGS } from '../src/house.mjs';
+import { HouseFileError, NESTED_ARGS, parseHouseFile } from '../src/house.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 let env, fx, revoked, repo, client, r, fake;
@@ -127,6 +127,28 @@ test('nested containers only when the owner allows them', async () => {
   await r.tick();
   await until(() => house(h2.id).state === 'done');
   assert.ok(!ran(h2.id).args.some((a) => a.startsWith('--cap-add') || a === '/dev/net/tun'));
+});
+
+test('a port is published only when the owner allows it for that agent', async () => {
+  agentRepo(repo, { ...HOUSE, nested: false, ports: ['7401', '127.0.0.1:4747'] });
+  setAgent({ nested: false, ports: [7401] });
+  const h = up();
+  await r.tick();
+  assert.equal(house(h.id).state, 'failed');
+  assert.match(house(h.id).log, /publish port 4747, and the owner hasn't allowed that/);
+  assert.equal(existsSync(join(fake, 'runs', `loom-house-${h.id}.json`)), false);
+  setAgent({ nested: false, ports: [7401, 4747] });
+  const h2 = up();
+  await r.tick();
+  await until(() => house(h2.id).state === 'done');
+  const a = ran(h2.id).args;
+  assert.deepEqual(a.flatMap((x, i) => (a[i - 1] === '-p' ? [x] : [])), ['7401:7401', '127.0.0.1:4747:4747']);
+});
+
+test('a house file\'s ports are checked', () => {
+  for (const bad of [['80'], ['70000'], ['1.2.3:7401'], ['999.0.0.1:7401'], [7401], ['7401', '7401'], 'x']) {
+    assert.throws(() => parseHouseFile(JSON.stringify({ ...HOUSE, ports: bad })), HouseFileError, JSON.stringify(bad));
+  }
 });
 
 test('a house file that wants a secret its agent\'s houses don\'t get is refused', async () => {
