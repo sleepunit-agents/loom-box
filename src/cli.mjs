@@ -189,6 +189,9 @@ async function main(argv, env) {
 
 function out(v) { process.stdout.write(JSON.stringify(v) + '\n'); }
 
+// `loom box list | head` closes stdout early: that's fine, not a crash.
+process.stdout.on('error', (e) => { if (e.code === 'EPIPE') process.exit(0); throw e; });
+
 const isMain = (() => { try { return realpathSync(process.argv[1]) === fileURLToPath(import.meta.url); } catch { return false; } })();
 if (isMain) {
   main(process.argv.slice(2), process.env).then(

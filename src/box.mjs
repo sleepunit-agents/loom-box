@@ -234,8 +234,13 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
       const args = runArgs(house, { id: h.id, agent: h.agent, loomUrl, task: h.task, image: tag, dirs, allowNested: !!claimed.nested });
       // The house's own podman secrets, each value on stdin (never argv).
       for (const name of Object.keys(house.secrets)) {
-        const r = pod(env, ['secret', 'create', '--replace', podmanSecret(h.id, name), '-'], { input: given[name] });
-        if (r.status !== 0) throw new BoxError(`couldn't make the house's ${name} secret`);
+        // podman reads `-` only from a real pipe (node hands a child a socket),
+        // so the value goes through cat: still stdin only, never argv or disk.
+        const r = spawnSync('sh', ['-c', 'cat | exec "$0" secret create --replace "$1" -', podman(env), podmanSecret(h.id, name)], {
+          input: given[name], encoding: 'utf-8', timeout: 60_000,
+          env: { PATH: env.PATH, HOME: env.HOME, ...(env.XDG_RUNTIME_DIR ? { XDG_RUNTIME_DIR: env.XDG_RUNTIME_DIR } : {}) },
+        });
+        if (r.status !== 0) throw new BoxError(`couldn't make the house's ${name} secret: ${(r.stderr || '').trim().split('\n').pop() || `exit ${r.status}`}`);
         made.push(name);
       }
       // The repo was only needed to build: the house clones what it wants itself.
