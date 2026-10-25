@@ -12,6 +12,7 @@
 //   loom box agent <agent> --repo <url> [--house-file house/house.json] [--nested]
 //                  [--branch b] [--repo-secret <store-name>] [--secret as=from]...   how its house is made
 //   loom box primary <agent> [<box>]                       an agent's primary (default: this machine)
+//   loom box rename-local                                  after renaming this machine: its box takes the new name
 //   loom box run --local                                   run houses here (a user service)
 // Anywhere (here as the owner; elsewhere with LOOM_URL + LOOM_TOKEN_FILE, as that token):
 //   loom box up [--agent a] [--box b] [--needs gpu:5090] --task <text|->   ask for a house
@@ -35,7 +36,7 @@ import { addBox, api, down, list, revokeBox, setAgent, setPrimary, up } from './
 import { realEffects } from './effects.mjs';
 import { act, manifest, page } from './ui.mjs';
 import { BoxError, joinLoom, loadConfig, POLL_MS, remoteClient, restoreState, runner } from './box.mjs';
-import { localBoxName, stateDir } from './state.mjs';
+import { localBoxName, renameLocal, stateDir } from './state.mjs';
 import { exportPart, importPart } from './bundle.mjs';
 
 const USAGE = readFileSync(fileURLToPath(import.meta.url), 'utf-8').split('\n').slice(1).filter((l) => l.startsWith('//')).map((l) => l.slice(3)).join('\n') + '\n';
@@ -134,6 +135,7 @@ async function main(argv, env) {
       out(setAgent(env, realEffects(env), { agent, repo: flag(rest, '--repo'), houseFile: flag(rest, '--house-file'), nested: rest.includes('--nested'), branch: flag(rest, '--branch'), repoSecret: flag(rest, '--repo-secret'), secrets }));
       return;
     }
+    case 'rename-local': { out(renameLocal(env)); return; }
     case 'primary': { const [agent, box] = positional(rest); out(setPrimary(env, realEffects(env), { agent, box })); return; }
     case 'up': {
       let task = flag(rest, '--task');

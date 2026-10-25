@@ -40,7 +40,7 @@ function empty(env) {
   };
 }
 
-export function load(env = process.env) {
+export function load(env = process.env, { renaming = false } = {}) {
   const path = join(stateDir(env), 'state.json');
   if (!existsSync(path)) return empty(env);
   const st = statSync(path);
@@ -49,10 +49,41 @@ export function load(env = process.env) {
   if (s?.v !== 1 || typeof s.boxes !== 'object') throw new StateError(`${path}: not a loom-box state file`, 500);
   for (const k of ['primaries', 'agents', 'houses']) s[k] ??= {};
   s.seq ??= 0;
-  // loom's own machine is always a box, whatever this file says.
+  // loom's own machine is always a box, whatever this file says. If the machine
+  // was renamed, say so rather than quietly start a second one beside the first.
   const local = localBoxName(env);
-  s.boxes[local] ??= { local: true, mayHost: '*', facts: [], created: new Date().toISOString() };
+  const was = Object.keys(s.boxes).find((n) => s.boxes[n].local);
+  if (was && was !== local && !renaming) {
+    throw new StateError(`loom's own box is ${was}, but this machine is now called ${local}; run \`loom box rename-local\` (or set LOOM_BOX_LOCAL_NAME=${was})`, 500);
+  }
+  if (!was) s.boxes[local] = { local: true, mayHost: '*', facts: [], created: new Date().toISOString() };
   return s;
+}
+
+/**
+ * After loom's machine is renamed: its box takes the new name, and everything
+ * that named the old one follows. Its houses have to be ended first (take its
+ * services down), so no box is running one under a name that's gone.
+ */
+export function renameLocal(env = process.env) {
+  return update(env, (s) => {
+    const to = localBoxName(env);
+    const from = Object.keys(s.boxes).find((n) => s.boxes[n].local);
+    if (from === to) return { box: to, renamed: false };
+    if (s.boxes[to]) throw new StateError(`there's already a box named ${to}`, 409);
+    const live = Object.values(s.houses).filter((h) => h.box === from && !['done', 'failed', 'stopped', 'lost'].includes(h.state));
+    if (live.length) throw new StateError(`${from} still has houses running (${live.map((h) => h.id).join(', ')}); end them first`, 409);
+    s.boxes[to] = s.boxes[from];
+    delete s.boxes[from];
+    for (const h of Object.values(s.houses)) if (h.box === from) h.box = to;
+    for (const v of Object.values(s.services ?? {})) {
+      if (v.box === from) v.box = to;
+      if (v.moveTo === from) v.moveTo = to;
+    }
+    for (const [a, b] of Object.entries(s.primaries)) if (b === from) s.primaries[a] = to;
+    for (const v of Object.values(s.serviceState ?? {})) if (v.box === from) v.box = to;
+    return { box: to, was: from, renamed: true };
+  }, { renaming: true });
 }
 
 function save(env, s) {
@@ -74,7 +105,7 @@ function alive(pid) {
  * holding the holder's pid; a holder that's gone is cleared, a live one is
  * waited for (5s), never broken.
  */
-export function update(env, f) {
+export function update(env, f, { renaming = false } = {}) {
   const dir = stateDir(env);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const lock = join(dir, 'state.lock');
@@ -92,7 +123,7 @@ export function update(env, f) {
   }
   try {
     writeSync(fd, String(process.pid));
-    const s = load(env);
+    const s = load(env, { renaming });
     let out;
     try { out = f(s); } catch (err) {
       // A failure that still changed something worth keeping (a revoke to retry).
