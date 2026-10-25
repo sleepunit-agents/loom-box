@@ -20,6 +20,7 @@
 //     "nested": true,                               wants the nested-container capabilities:
 //                                                   only if the owner allows it for this agent
 //     "hostname": "art-house",
+//     "attach": ["/home/art/Art/house/attach"],    what `loom box attach` runs in a session house
 //     "ports": ["7401", "127.0.0.1:4747"]          a port published on the box (same number
 //                                                   inside): only ones the owner allows this agent,
 //                                                   bound where the owner's grant says
@@ -33,7 +34,7 @@ import { SECRET_NAME } from './state.mjs';
 export class HouseFileError extends Error {}
 
 const ENV_NAME = /^[A-Z_][A-Z0-9_]{0,63}$/;
-const RESERVED_ENV = new Set(['LOOM_URL', 'HOUSE_ID', 'HOUSE_AGENT', 'HOUSE_TASK', 'HOUSE_SERVICE', 'PATH', 'HOME', 'LD_PRELOAD', 'LD_LIBRARY_PATH']);
+const RESERVED_ENV = new Set(['LOOM_URL', 'HOUSE_ID', 'HOUSE_AGENT', 'HOUSE_TASK', 'HOUSE_SERVICE', 'HOUSE_SESSION', 'PATH', 'HOME', 'LD_PRELOAD', 'LD_LIBRARY_PATH']);
 const MOUNT_KINDS = new Set(['state', 'nested', 'mirror']);
 const REL_PATH = /^[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*$/;
 const ABS_PATH = /^\/[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*$/;
@@ -138,7 +139,7 @@ export function parseHouseFile(text) {
   let h;
   try { h = JSON.parse(text); } catch (e) { fail(`the house file isn't JSON (${e.message})`); }
   if (!isObj(h)) fail('the house file is a JSON object');
-  const known = new Set(['build', 'task', 'services', ...RUN_KEYS]);
+  const known = new Set(['build', 'task', 'services', 'attach', ...RUN_KEYS]);
   for (const k of Object.keys(h)) if (!known.has(k)) fail(`the house file has an unknown key: ${k}`);
 
   if (!isObj(h.build) || !relOk(h.build.containerfile) || !relOk(h.build.context)) {
@@ -156,7 +157,13 @@ export function parseHouseFile(text) {
       services[name] = runSpec(sv, `service ${name}: `, { task: false });
     }
   }
-  return { build: { containerfile: h.build.containerfile, context: h.build.context }, ...runSpec(h, '', { task: true }), services };
+  // What `loom box attach` runs in a session house, at a terminal: the house's own shell by default.
+  let attach = ['sh'];
+  if (h.attach !== undefined) {
+    if (!Array.isArray(h.attach) || !h.attach.length || h.attach.length > 16 || !h.attach.every((c) => typeof c === 'string' && c.length <= 400)) fail('attach is a list of up to 16 strings');
+    attach = h.attach;
+  }
+  return { build: { containerfile: h.build.containerfile, context: h.build.context }, ...runSpec(h, '', { task: true }), services, attach };
 }
 
 /** What runs for one house: the house itself, or one of its services. */
@@ -181,7 +188,7 @@ export const containerName = (id) => `loom-house-${id}`;
  * named here: the house's own secrets, its own dirs, plain env. `allowNested`
  * is the owner's say; the house file only asks.
  */
-export function runArgs(house, { id, agent, loomUrl, task, service, image, dirs, allowNested, allowPorts = [] }) {
+export function runArgs(house, { id, agent, loomUrl, task, service, session, image, dirs, allowNested, allowPorts = [] }) {
   const args = ['run', '--rm', '--name', containerName(id), '--hostname', house.hostname ?? `${agent}-house`];
   if (house.task === 'stdin') args.push('-i');
   // A service runs until it's stopped; podman stop gives it this long to finish.
@@ -206,6 +213,8 @@ export function runArgs(house, { id, agent, loomUrl, task, service, image, dirs,
   for (const [k, v] of Object.entries(house.env)) args.push('-e', `${k}=${v}`);
   args.push('-e', `LOOM_URL=${loomUrl}`, '-e', `HOUSE_ID=${id}`, '-e', `HOUSE_AGENT=${agent}`);
   if (house.task === 'env') args.push('-e', `HOUSE_TASK=${task}`);
+  // A session house waits for someone to attach, instead of working a task.
+  if (session) args.push('-e', 'HOUSE_SESSION=1');
   if (!house.task) args.push('-e', `HOUSE_SERVICE=${service}`);
   for (const [kind, target] of Object.entries(house.mounts)) {
     const src = dirs[kind];

@@ -207,7 +207,7 @@ export function setAgent(env, effects, { agent, repo, houseFile, nested, branch,
 
 // ------------------------------------------------------- owner and agents
 
-export function up(env, effects, caller, { agent, box, needs, task }) {
+export function up(env, effects, caller, { agent, box, needs, task, session }) {
   let a;
   if (caller.kind === 'agent') {
     if (agent && agent !== caller.agent) fail(`this token is ${caller.agent}'s; it can only ask for its own house`, 403);
@@ -216,7 +216,9 @@ export function up(env, effects, caller, { agent, box, needs, task }) {
     a = str(agent, 'an agent', 40);
   }
   if (!AGENT_NAME.test(a)) fail('an agent name is lowercase letters, digits and dashes');
-  const t = str(task, 'the task', MAX_TASK);
+  // A session house has no task: it waits for someone to attach (loom box session).
+  const sess = session === true;
+  const t = sess ? '(an interactive session)' : str(task, 'the task', MAX_TASK);
   const n = listOf(needs, 'needs', FACT);
   if (box !== undefined && box !== null && box !== '' && !BOX_NAME.test(box)) fail('no box by that name', 404);
   return update(env, (s) => {
@@ -224,8 +226,8 @@ export function up(env, effects, caller, { agent, box, needs, task }) {
     const where = placeHouse(s, a, { box: box || undefined, needs: n }, env);
     const id = nextHouseId(s);
     const at = now(effects);
-    s.houses[id] = { id, agent: a, box: where, task: t, needs: n, state: 'wanted', created: at, updated: at, by: caller.kind === 'agent' ? caller.agent : 'owner' };
-    return { id, agent: a, box: where, state: 'wanted' };
+    s.houses[id] = { id, agent: a, box: where, task: t, needs: n, state: 'wanted', created: at, updated: at, by: caller.kind === 'agent' ? caller.agent : 'owner', ...(sess ? { session: true } : {}) };
+    return { id, agent: a, box: where, state: 'wanted', ...(sess ? { session: true } : {}) };
   });
 }
 
@@ -293,7 +295,7 @@ export function poll(env, effects, caller, { facts } = {}) {
     return {
       start: mine.filter((h) => h.state === 'wanted' && mayHost(b, h.agent) && !(h.notBefore && Date.parse(h.notBefore) > Date.parse(now(effects)))).map((h) => {
         const a = s.agents[h.agent] || {};
-        return { id: h.id, agent: h.agent, task: h.task, service: h.service ?? null, repo: a.repo, houseFile: a.houseFile || 'house/house.json', branch: a.branch ?? null };
+        return { id: h.id, agent: h.agent, task: h.task, service: h.service ?? null, session: !!h.session, repo: a.repo, houseFile: a.houseFile || 'house/house.json', branch: a.branch ?? null };
       }),
       stop: mine.filter((h) => h.state === 'stopping').map((h) => h.id),
       // Taken by this box and not over: one the box doesn't have (it restarted) is lost.

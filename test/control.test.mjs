@@ -248,3 +248,15 @@ test('the runtime\'s part of the bundle comes back on another machine, as that m
   assert.throws(() => importPart({ ...there, LOOM_BOX_HOME: join(env.HOME, 'clash'), LOOM_BOX_LOCAL_NAME: 'thor' }, part), /a box named thor, this machine's name/);
   assert.throws(() => importPart({ ...there, LOOM_BOX_HOME: join(env.HOME, 'x'), LOOM_IMPORT_IDENTITY: join(env.HOME, 'nokey') }, part), /doesn't decrypt/);
 });
+
+test('a session house needs no task, and its box is told it\'s one', () => {
+  const h = ok(call(owner, 'up', { agent: 'art', session: true }));
+  assert.equal(h.session, true);
+  const p = ok(call(box(h.box), 'poll'));
+  const s = p.start.find((x) => x.id === h.id);
+  assert.equal(s.session, true);
+  // An ordinary house still needs its task, and isn't a session.
+  assert.equal(call(owner, 'up', { agent: 'art' }).status, 400);
+  const t = ok(call(owner, 'up', { agent: 'art', task: 'x' }));
+  assert.equal(ok(call(box(t.box), 'poll')).start.find((x) => x.id === t.id).session, false);
+});

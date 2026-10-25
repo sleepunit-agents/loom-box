@@ -41,6 +41,8 @@ loom box up --task "render the frames"                     # the agent's primary
 loom box up --needs gpu:5090 --task "train the thing"      # the one box with a 5090 that may host the agent
 loom box up --box laptop --task "…"                        # that box
 loom box list | loom box down h-12
+loom box session                                           # a house here with you in it, at this terminal; it goes when you leave
+loom box attach h-14                                       # back into a session house on this box
 ```
 
 As the owner on loom's machine, add `--agent <name>`. From a body anywhere, with `LOOM_URL` and `LOOM_TOKEN_FILE` set, it goes through loom's piece API as that body's own agent token. An agent asks only for its own houses.

@@ -18,6 +18,8 @@
 // Anywhere (here as the owner; elsewhere with LOOM_URL + LOOM_TOKEN_FILE, as that token):
 //   loom box up [--agent a] [--box b] [--needs gpu:5090] --task <text|->   ask for a house
 //   loom box list [--json]   |   loom box down <house>
+//   loom box session [--agent a]                           a house with an interactive session, here, at this terminal
+//   loom box attach <house>                                into a session house on this box (again)
 //   loom box service up <name> [--agent a] [--box b]       a long-lived house (a bridge), kept up
 //   loom box service move <name> <box> [--force]           hand it off: stopped there, then started here
 //   loom box service down <name>
@@ -183,6 +185,27 @@ async function main(argv, env) {
       }
       throw new Fail('usage: loom box service up|move|down <name> …', 2);
     }
+    case 'session': {
+      // A house on this box that waits instead of working a task; you're
+      // attached to it at this terminal, and it goes when you leave.
+      const call = ownerOrRemote(env);
+      const agent = flag(rest, '--agent') ?? defaultAgent(env);
+      const r = await call('up', { agent, box: localBoxName(env), session: true });
+      process.stderr.write(`${r.id}: ${r.agent}'s session house on ${r.box}; starting (a first build can take a while)…\n`);
+      const ready = await waitRunning(call, r.id);
+      if (ready !== 'running') throw new Fail(`${r.id} didn't start (${ready}); see loom box list`);
+      const code = attachHere(env, r.id);
+      await call('down', { id: r.id }).catch(() => {});
+      process.stderr.write(`${r.id}: left; the house is going (what it left unpushed is pushed first)\n`);
+      process.exitCode = code;
+      return;
+    }
+    case 'attach': {
+      const id = positional(rest)[0];
+      if (!/^h-\d+$/.test(id ?? '')) throw new Fail('usage: loom box attach <house>', 2);
+      process.exitCode = attachHere(env, id);
+      return;
+    }
     case 'down': { out(await ownerOrRemote(env)('down', { id: positional(rest)[0] })); return; }
     case 'list': {
       const r = await ownerOrRemote(env)('list', {});
@@ -232,6 +255,27 @@ async function main(argv, env) {
 }
 
 function out(v) { process.stdout.write(JSON.stringify(v) + '\n'); }
+
+/** Until a house is running (or over): its state then. */
+async function waitRunning(call, id, timeoutMs = 30 * 60_000) {
+  const until = Date.now() + timeoutMs;
+  for (;;) {
+    const h = (await call('list', {})).houses.find((x) => x.id === id);
+    const st = h?.state ?? 'gone';
+    if (!['wanted', 'starting'].includes(st)) return st;
+    if (Date.now() > until) return st;
+    await new Promise((res) => setTimeout(res, 3000));
+  }
+}
+
+/** Into a session house that runs on this box, at this terminal: what its house file says to run. */
+function attachHere(env, id) {
+  const f = `${env.LOOM_BOX_DATA || `${env.HOME}/.local/share/loom-box`}/houses/${id}/attach.json`;
+  if (!existsSync(f)) throw new Fail(`${id} isn't a session house on this box`);
+  const { container, command } = JSON.parse(readFileSync(f, 'utf-8'));
+  const r = spawnSync(env.LOOM_BOX_PODMAN || 'podman', ['exec', '-it', container, ...command], { stdio: 'inherit' });
+  return r.status ?? 1;
+}
 
 // `loom box list | head` closes stdout early: that's fine, not a crash.
 process.stdout.on('error', (e) => { if (e.code === 'EPIPE') process.exit(0); throw e; });

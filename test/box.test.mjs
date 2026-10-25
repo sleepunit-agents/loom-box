@@ -369,3 +369,17 @@ test('join keeps the credential 0600 and refuses one that names another box', as
   assert.equal(statSync(join(env.LOOM_BOX_HOME, 'credential')).mode & 0o777, 0o600);
   await assert.rejects(joinLoom(env, { url: 'https://loom.test', name: 'thor', credential: 'hunter2' }, fakeFetch('thor')), /isn't a loom credential/);
 });
+
+test('a session house is told it is one, and the box keeps what attaching runs', async () => {
+  agentRepo(repo, { ...HOUSE, attach: ['/home/art/Art/house/attach'] });
+  setAgent();
+  podmanCfg({ run: 'sleep' });
+  const h = ok(api(env, fx, { caller: owner, path: 'up', body: { agent: 'art', session: true } }));
+  await r.tick();
+  await until(() => existsSync(join(fake, 'runs', `loom-house-${h.id}.json`)));
+  try {
+  assert.ok(ran(h.id).args.includes('HOUSE_SESSION=1'));
+  const a = JSON.parse(readFileSync(join(env.LOOM_BOX_DATA, 'houses', h.id, 'attach.json'), 'utf-8'));
+  assert.deepEqual(a, { container: `loom-house-${h.id}`, command: ['/home/art/Art/house/attach'] });
+  } finally { process.kill(-r.houses.get(h.id).child.pid, 'SIGKILL'); }
+});
