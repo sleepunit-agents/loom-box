@@ -74,7 +74,9 @@ beforeEach(() => {
   fx = { now: () => new Date(), mint: () => 'loom_house_token_aaaaaaaaaaaaaaaa', revoke: (l) => revoked.push(l), secret: (n) => `secret:${n}` };
   repo = join(home, 'art-repo');
   const caller = { kind: 'piece', subject: 'one' };
-  client = { async call(path, body) { const x = api(env, fx, { caller, path, body }); if (x.status !== 200) throw new Error(x.body.error); return x.body; } };
+  // This test's own state, captured: a house from an earlier test that ends late must not report into this one.
+  const myEnv = env, myFx = fx;
+  client = { async call(path, body) { const x = api(myEnv, myFx, { caller, path, body }); if (x.status !== 200) throw new Error(x.body.error); return x.body; } };
   r = runner(env, client, { loomUrl: 'http://loom.test/mcp', log: () => {} });
 });
 
@@ -213,6 +215,42 @@ test('a box that restarted under a house removes what\'s left of it and says so'
   assert.ok(existsSync(join(fake, 'runs', `loom-house-${h.id}.rm`)));
   assert.deepEqual(readdirSync(join(fake, 'secrets')), []);
   process.kill(-pid, 'SIGKILL');
+});
+
+test('a service moves between boxes by hand-off, and its state goes with it', async () => {
+  const withService = { ...HOUSE, services: { discord: {
+    command: ['python3', '/home/art/Code/shuttle/adapters/discord.py'],
+    secrets: { 'loom-token': { file: 'loom-token' }, 'github-token': { file: 'github-token' } },
+    mounts: { state: '/home/art/.local/state/art-discord', mirror: '/garage/git/art.git' },
+  } } };
+  agentRepo(repo, withService);
+  setAgent();
+  ok(api(env, fx, { caller: owner, path: 'add-box', body: { name: 'laptop' } }));
+  podmanCfg({ run: 'sleep' });
+  const lapEnv = { ...env, LOOM_BOX_DATA: join(env.HOME, 'laptop-data') };
+  const lapClient = { async call(path, body) { const x = api(env, fx, { caller: { kind: 'piece', subject: 'laptop' }, path, body }); if (x.status !== 200) throw new Error(x.body.error); return x.body; } };
+  const lap = runner(lapEnv, lapClient, { loomUrl: 'http://loom.test/mcp', log: () => {} });
+  const sweep = () => { for (const x of [r, lap]) for (const e of x.houses.values()) { try { process.kill(-e.child.pid, 'SIGKILL'); } catch { /* gone */ } } };
+  try {
+  const up1 = ok(api(env, fx, { caller: { kind: 'agent', agent: 'art' }, path: 'service-up', body: { name: 'discord' } }));
+  await r.tick();
+  await until(() => existsSync(join(fake, 'runs', `loom-house-${up1.house}.json`)));
+  const first = ran(up1.house);
+  assert.equal(first.stateBefore, null);
+  assert.ok(first.args.includes('HOUSE_SERVICE=discord') && first.args.includes('--stop-timeout'));
+  assert.ok(!first.args.includes('-i'), 'a service has no task on stdin');
+  ok(api(env, fx, { caller: owner, path: 'service-move', body: { agent: 'art', name: 'discord', box: 'laptop' } }));
+  await lap.tick();
+  assert.equal(lap.houses.size, 0, 'the laptop waits for the hand-off');
+  await r.tick(); // the old box stops it, saves its state, reports
+  const list = () => ok(api(env, fx, { caller: owner, path: 'list', body: {} }));
+  await until(() => list().services[0].box === 'laptop');
+  await lap.tick();
+  const second = list().services[0].house;
+  await until(() => existsSync(join(fake, 'runs', `loom-house-${second}.json`)));
+  assert.equal(ran(second).stateBefore, `loom-house-${up1.house};`, 'the laptop picked up where the first box left off');
+  assert.equal(house(up1.house).state, 'stopped');
+  } finally { sweep(); }
 });
 
 test('join keeps the credential 0600 and refuses one that names another box', async () => {

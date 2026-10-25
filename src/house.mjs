@@ -30,7 +30,7 @@ import { SECRET_NAME } from './state.mjs';
 export class HouseFileError extends Error {}
 
 const ENV_NAME = /^[A-Z_][A-Z0-9_]{0,63}$/;
-const RESERVED_ENV = new Set(['LOOM_URL', 'HOUSE_ID', 'HOUSE_AGENT', 'HOUSE_TASK', 'PATH', 'HOME', 'LD_PRELOAD', 'LD_LIBRARY_PATH']);
+const RESERVED_ENV = new Set(['LOOM_URL', 'HOUSE_ID', 'HOUSE_AGENT', 'HOUSE_TASK', 'HOUSE_SERVICE', 'PATH', 'HOME', 'LD_PRELOAD', 'LD_LIBRARY_PATH']);
 const MOUNT_KINDS = new Set(['state', 'nested', 'mirror']);
 const REL_PATH = /^[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*$/;
 const ABS_PATH = /^\/[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*$/;
@@ -44,12 +44,73 @@ const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const relOk = (p) => typeof p === 'string' && REL_PATH.test(p) && !p.split('/').some((s) => s === '.' || s === '..');
 const absOk = (p) => typeof p === 'string' && ABS_PATH.test(p) && !p.split('/').some((s) => s === '.' || s === '..');
 
-/** Validate a house file. Anything unexpected is refused, not ignored. */
+/** The parts a house and each of its services share: what runs, with what. */
+function runSpec(h, where, { task: allowTask }) {
+  let command = null;
+  if (h.command !== undefined) {
+    if (!Array.isArray(h.command) || !h.command.length || h.command.length > 32 || !h.command.every((c) => typeof c === 'string' && c.length <= 400)) {
+      fail(`${where}command is a list of up to 32 strings`);
+    }
+    command = h.command;
+  }
+  let task = null;
+  if (allowTask) {
+    task = h.task ?? 'stdin';
+    if (task !== 'stdin' && task !== 'env') fail('task is "stdin" or "env"');
+  }
+
+  const secrets = {};
+  const files = new Set();
+  const envs = new Set();
+  for (const [name, at] of Object.entries(h.secrets ?? {})) {
+    if (!SECRET_NAME.test(name)) fail(`${where}secret name ${JSON.stringify(name)} has odd characters`);
+    if (!isObj(at) || Object.keys(at).length !== 1) fail(`${where}secret ${name} goes to one place: {"file": …} or {"env": …}`);
+    if ('file' in at) {
+      if (!SECRET_NAME.test(at.file ?? '') || files.has(at.file)) fail(`${where}secret ${name}: the file is a plain name, used once`);
+      files.add(at.file);
+      secrets[name] = { file: at.file };
+    } else if ('env' in at) {
+      if (!ENV_NAME.test(at.env ?? '') || RESERVED_ENV.has(at.env) || envs.has(at.env)) fail(`${where}secret ${name}: ${at.env} can't be its variable`);
+      envs.add(at.env);
+      secrets[name] = { env: at.env };
+    } else fail(`${where}secret ${name} goes to {"file": …} or {"env": …}`);
+  }
+  if (Object.keys(secrets).length > 32) fail(`${where}at most 32 secrets`);
+
+  const env = {};
+  for (const [k, v] of Object.entries(h.env ?? {})) {
+    if (!ENV_NAME.test(k) || RESERVED_ENV.has(k) || envs.has(k)) fail(`${where}env ${k} isn't allowed`);
+    if (typeof v !== 'string' || v.length > 2000 || /[\x00-\x1f]/.test(v)) fail(`${where}env ${k} is a plain string`);
+    env[k] = v;
+  }
+
+  const mounts = {};
+  const targets = new Set();
+  for (const [kind, target] of Object.entries(h.mounts ?? {})) {
+    if (!MOUNT_KINDS.has(kind)) fail(`${where}mount ${kind}: a house can mount only state, nested and mirror`);
+    if (!absOk(target) || target === '/' || targets.has(target) || target === '/run/secrets' || target.startsWith('/run/secrets/')) fail(`${where}mount ${kind}: ${target} isn't a usable path`);
+    targets.add(target);
+    mounts[kind] = target;
+  }
+  if (h.nested !== undefined && typeof h.nested !== 'boolean') fail(`${where}nested is true or false`);
+  if (h.hostname !== undefined && !HOSTNAME.test(h.hostname)) fail(`${where}hostname is lowercase letters, digits and dashes`);
+  return { command, task, secrets, env, mounts, nested: !!h.nested, hostname: h.hostname ?? null };
+}
+
+const SERVICE_NAME = /^[a-z][a-z0-9-]{0,39}$/;
+const RUN_KEYS = ['command', 'secrets', 'env', 'mounts', 'nested', 'hostname'];
+
+/**
+ * Validate a house file. Anything unexpected is refused, not ignored. A house
+ * file may also name services: long-lived houses from the same image, each
+ * with its own command, secrets, env and mounts, and no task. A service's
+ * `state` mount is the state that travels with it (a bridge's read position).
+ */
 export function parseHouseFile(text) {
   let h;
   try { h = JSON.parse(text); } catch (e) { fail(`the house file isn't JSON (${e.message})`); }
   if (!isObj(h)) fail('the house file is a JSON object');
-  const known = new Set(['build', 'command', 'task', 'secrets', 'env', 'mounts', 'nested', 'hostname']);
+  const known = new Set(['build', 'task', 'services', ...RUN_KEYS]);
   for (const k of Object.keys(h)) if (!known.has(k)) fail(`the house file has an unknown key: ${k}`);
 
   if (!isObj(h.build) || !relOk(h.build.containerfile) || !relOk(h.build.context)) {
@@ -57,52 +118,25 @@ export function parseHouseFile(text) {
   }
   for (const k of Object.keys(h.build)) if (!['containerfile', 'context'].includes(k)) fail(`build has an unknown key: ${k}`);
 
-  let command = null;
-  if (h.command !== undefined) {
-    if (!Array.isArray(h.command) || !h.command.length || h.command.length > 32 || !h.command.every((c) => typeof c === 'string' && c.length <= 400)) {
-      fail('command is a list of up to 32 strings');
+  const services = {};
+  if (h.services !== undefined) {
+    if (!isObj(h.services) || Object.keys(h.services).length > 16) fail('services is an object of up to 16 services');
+    for (const [name, sv] of Object.entries(h.services)) {
+      if (!SERVICE_NAME.test(name)) fail(`service name ${JSON.stringify(name)}: lowercase letters, digits and dashes`);
+      if (!isObj(sv)) fail(`service ${name} is an object`);
+      for (const k of Object.keys(sv)) if (!RUN_KEYS.includes(k)) fail(`service ${name} has an unknown key: ${k}`);
+      services[name] = runSpec(sv, `service ${name}: `, { task: false });
     }
-    command = h.command;
   }
-  const task = h.task ?? 'stdin';
-  if (task !== 'stdin' && task !== 'env') fail('task is "stdin" or "env"');
+  return { build: { containerfile: h.build.containerfile, context: h.build.context }, ...runSpec(h, '', { task: true }), services };
+}
 
-  const secrets = {};
-  const files = new Set();
-  const envs = new Set();
-  for (const [name, where] of Object.entries(h.secrets ?? {})) {
-    if (!SECRET_NAME.test(name)) fail(`secret name ${JSON.stringify(name)} has odd characters`);
-    if (!isObj(where) || Object.keys(where).length !== 1) fail(`secret ${name} goes to one place: {"file": …} or {"env": …}`);
-    if ('file' in where) {
-      if (!SECRET_NAME.test(where.file ?? '') || files.has(where.file)) fail(`secret ${name}: the file is a plain name, used once`);
-      files.add(where.file);
-      secrets[name] = { file: where.file };
-    } else if ('env' in where) {
-      if (!ENV_NAME.test(where.env ?? '') || RESERVED_ENV.has(where.env) || envs.has(where.env)) fail(`secret ${name}: ${where.env} can't be its variable`);
-      envs.add(where.env);
-      secrets[name] = { env: where.env };
-    } else fail(`secret ${name} goes to {"file": …} or {"env": …}`);
-  }
-  if (Object.keys(secrets).length > 32) fail('at most 32 secrets');
-
-  const env = {};
-  for (const [k, v] of Object.entries(h.env ?? {})) {
-    if (!ENV_NAME.test(k) || RESERVED_ENV.has(k) || envs.has(k)) fail(`env ${k} isn't allowed`);
-    if (typeof v !== 'string' || v.length > 2000 || /[\x00-\x1f]/.test(v)) fail(`env ${k} is a plain string`);
-    env[k] = v;
-  }
-
-  const mounts = {};
-  const targets = new Set();
-  for (const [kind, target] of Object.entries(h.mounts ?? {})) {
-    if (!MOUNT_KINDS.has(kind)) fail(`mount ${kind}: a house can mount only state, nested and mirror`);
-    if (!absOk(target) || target === '/' || targets.has(target) || target === '/run/secrets' || target.startsWith('/run/secrets/')) fail(`mount ${kind}: ${target} isn't a usable path`);
-    targets.add(target);
-    mounts[kind] = target;
-  }
-  if (h.nested !== undefined && typeof h.nested !== 'boolean') fail('nested is true or false');
-  if (h.hostname !== undefined && !HOSTNAME.test(h.hostname)) fail('hostname is lowercase letters, digits and dashes');
-  return { build: { containerfile: h.build.containerfile, context: h.build.context }, command, task, secrets, env, mounts, nested: !!h.nested, hostname: h.hostname ?? null };
+/** What runs for one house: the house itself, or one of its services. */
+export function specFor(house, service) {
+  if (!service) return house;
+  const sv = house.services[service];
+  if (!sv) throw new HouseFileError(`the house file has no service ${service}`);
+  return { ...sv, build: house.build };
 }
 
 /** Which of the house's secrets the control plane didn't hand over. */
@@ -119,9 +153,11 @@ export const containerName = (id) => `loom-house-${id}`;
  * named here: the house's own secrets, its own dirs, plain env. `allowNested`
  * is the owner's say; the house file only asks.
  */
-export function runArgs(house, { id, agent, loomUrl, task, image, dirs, allowNested }) {
+export function runArgs(house, { id, agent, loomUrl, task, service, image, dirs, allowNested }) {
   const args = ['run', '--rm', '--name', containerName(id), '--hostname', house.hostname ?? `${agent}-house`];
   if (house.task === 'stdin') args.push('-i');
+  // A service runs until it's stopped; podman stop gives it this long to finish.
+  if (!house.task) args.push('--stop-timeout', '25');
   if (house.nested) {
     if (!allowNested) throw new HouseFileError(`${agent}'s house asks for nested containers, and the owner hasn't allowed that`);
     args.push(...NESTED_ARGS);
@@ -134,6 +170,7 @@ export function runArgs(house, { id, agent, loomUrl, task, image, dirs, allowNes
   for (const [k, v] of Object.entries(house.env)) args.push('-e', `${k}=${v}`);
   args.push('-e', `LOOM_URL=${loomUrl}`, '-e', `HOUSE_ID=${id}`, '-e', `HOUSE_AGENT=${agent}`);
   if (house.task === 'env') args.push('-e', `HOUSE_TASK=${task}`);
+  if (!house.task) args.push('-e', `HOUSE_SERVICE=${service}`);
   for (const [kind, target] of Object.entries(house.mounts)) {
     const src = dirs[kind];
     if (!src) throw new HouseFileError(`no ${kind} dir for this house`);

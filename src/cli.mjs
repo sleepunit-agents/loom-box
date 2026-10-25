@@ -16,6 +16,9 @@
 // Anywhere (here as the owner; elsewhere with LOOM_URL + LOOM_TOKEN_FILE, as that token):
 //   loom box up [--agent a] [--box b] [--needs gpu:5090] --task <text|->   ask for a house
 //   loom box list [--json]   |   loom box down <house>
+//   loom box service up <name> [--agent a] [--box b]       a long-lived house (a bridge), kept up
+//   loom box service move <name> <box> [--force]           hand it off: stopped there, then started here
+//   loom box service down <name>
 // On a box:
 //   loom box join <loom-url> --name <name> [--labels x,y]  the credential on stdin, or prompted
 //   loom box run                                           poll and run houses (a user service)
@@ -140,11 +143,21 @@ async function main(argv, env) {
       process.stdout.write(`${r.id}: ${r.agent} on ${r.box} (${r.state})\n`);
       return;
     }
+    case 'service': {
+      const [sub, name, box] = positional(rest);
+      const call = ownerOrRemote(env);
+      const agent = flag(rest, '--agent') ?? (env.LOOM_URL && env.LOOM_TOKEN_FILE ? undefined : defaultAgent(env));
+      if (sub === 'up') return out(await call('service-up', { agent, name, box: flag(rest, '--box') }));
+      if (sub === 'down') return out(await call('service-down', { agent, name }));
+      if (sub === 'move') return out(await call('service-move', { agent, name, box, force: rest.includes('--force') }));
+      throw new Fail('usage: loom box service up|move|down <name> …', 2);
+    }
     case 'down': { out(await ownerOrRemote(env)('down', { id: positional(rest)[0] })); return; }
     case 'list': {
       const r = await ownerOrRemote(env)('list', {});
       if (json) return out(r);
       for (const b of r.boxes) process.stdout.write(`box ${b.name}${b.local ? ' (loom\'s own)' : ''}${b.revoked ? ' REVOKED' : ''}: ${b.facts.join(', ')}\n`);
+      for (const v of r.services ?? []) process.stdout.write(`service ${v.service} on ${v.box}${v.moveTo ? ` → ${v.moveTo}` : ''}: ${v.want}, house ${v.house} ${v.state ?? ''}\n`);
       for (const h of r.houses) process.stdout.write(`${h.id} ${h.agent} on ${h.box}: ${h.state}  ${h.task.slice(0, 60)}\n`);
       return;
     }

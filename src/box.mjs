@@ -15,7 +15,7 @@ import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, re
 import { arch, cpus, homedir, platform, totalmem } from 'node:os';
 import { join as pathJoin } from 'node:path';
 import { BOX_NAME, stateDir } from './state.mjs';
-import { containerName, missingSecrets, parseHouseFile, podmanSecret, runArgs } from './house.mjs';
+import { containerName, missingSecrets, parseHouseFile, podmanSecret, runArgs, specFor } from './house.mjs';
 
 export const POLL_MS = 15_000;
 const STOP_GRACE_MS = 30_000;
@@ -182,6 +182,24 @@ function image(env, h, house, repo, logFd) {
   return tag;
 }
 
+/**
+ * A service's state travels through loom as base64 of a gzipped tar. Restored
+ * into a fresh dir with no symlinks left in it (a tarball from a compromised
+ * box can't point the next house, or this box, anywhere else).
+ */
+function restoreState(dir, b64) {
+  if (!b64) return;
+  const r = spawnSync('tar', ['-C', dir, '--no-same-owner', '--no-same-permissions', '-xzf', '-'], { input: Buffer.from(b64, 'base64'), timeout: 60_000 });
+  if (r.status !== 0) throw new BoxError(`the service's saved state didn't unpack: ${(r.stderr || '').toString().trim().split('\n').pop()}`);
+  spawnSync('find', [dir, '-type', 'l', '-delete']);
+}
+
+function packState(dir) {
+  const r = spawnSync('tar', ['-C', dir, '-czf', '-', '.'], { maxBuffer: 64 * 1024 * 1024, timeout: 60_000 });
+  if (r.status !== 0) return null;
+  return r.stdout.toString('base64');
+}
+
 function rootless(env) {
   const r = pod(env, ['info', '--format', '{{.Host.Security.Rootless}}']);
   return r.status === 0 && r.stdout.trim() === 'true';
@@ -222,7 +240,7 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
     try {
       const logFd = openSync(pathJoin(dir, 'log'), 'a', 0o600);
       const { repo, mirror } = checkout(env, h, dir, claimed.repoAuth);
-      const house = parseHouseFile(readFileSync(inside(repo, h.houseFile || 'house/house.json', 'house file'), 'utf-8'));
+      const house = specFor(parseHouseFile(readFileSync(inside(repo, h.houseFile || 'house/house.json', 'house file'), 'utf-8')), h.service);
       // Every house gets its own loom token; the rest are what the control plane chose.
       const given = { ...(claimed.secrets || {}), 'loom-token': claimed.token };
       const missing = missingSecrets(house, given);
@@ -231,7 +249,8 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
       const tag = image(env, h, house, repo, logFd);
       const dirs = { mirror };
       for (const d of ['state', 'nested']) { dirs[d] = pathJoin(dir, d); mkdirSync(dirs[d], { mode: 0o700 }); }
-      const args = runArgs(house, { id: h.id, agent: h.agent, loomUrl, task: h.task, image: tag, dirs, allowNested: !!claimed.nested });
+      if (h.service) restoreState(dirs.state, claimed.state);
+      const args = runArgs(house, { id: h.id, agent: h.agent, loomUrl, task: h.task, service: h.service, image: tag, dirs, allowNested: !!claimed.nested });
       // The house's own podman secrets, each value on stdin (never argv).
       for (const name of Object.keys(house.secrets)) {
         // podman reads `-` only from a real pipe (node hands a child a socket),
@@ -257,9 +276,17 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
       houses.set(h.id, { child, dir });
       log(`started ${h.id} (${h.agent})`);
       await client.call('report', { id: h.id, state: 'running' }).catch((e) => log(`report ${h.id}: ${e.message}`));
-      child.on('exit', (code, signal) => {
+      child.on('exit', async (code, signal) => {
         const entry = houses.get(h.id);
         houses.delete(h.id);
+        // A service's state goes back to loom before anything else knows it stopped,
+        // so the next box (a move, or a restart) picks up where this one left off.
+        if (h.service) {
+          const packed = packState(pathJoin(dir, 'state'));
+          if (packed !== null) {
+            await client.call('save-state', { id: h.id, state: packed }).catch((e) => log(`couldn't save ${h.service}'s state: ${e.message}`));
+          }
+        }
         clean(h, dir, secretNames);
         const state = entry?.stopAt ? 'stopped' : code === 0 ? 'done' : 'failed';
         log(`${h.id} ${state} (${signal ?? `exit ${code}`})`);

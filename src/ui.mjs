@@ -3,7 +3,7 @@
 // controls. Data only; loom renders it. Every action is the owner's (the page
 // is), and a box's credential is shown once, in the message after adding it.
 import { StateError, load, localBoxName } from './state.mjs';
-import { addBox, factsOf, list, primaryOf, revokeBox, setAgent, setMayHost, setPrimary, up, down, LIVE } from './control.mjs';
+import { addBox, factsOf, list, primaryOf, revokeBox, serviceDown, serviceMove, serviceUp, setAgent, setMayHost, setPrimary, up, down, LIVE } from './control.mjs';
 
 const OWNER = { kind: 'owner' };
 const ago = (iso, nowMs = Date.now()) => {
@@ -66,6 +66,25 @@ function boxesPage(env, nowMs) {
       ],
     })),
   ] });
+
+  if (view.services.length) {
+    sections.push({ id: 'services', title: 'Services', blocks: [
+      { type: 'table', columns: ['Service', 'Box', 'Wanted', 'House', 'Restarts', 'State saved'], rows: view.services.map((v) => [
+        v.service, v.moveTo ? `${v.box} → ${v.moveTo}` : v.box, v.want, `${v.house} ${v.state ?? ''}`, String(v.restarts), ago(v.stateSaved, nowMs),
+      ]) },
+      ...view.services.slice(0, 8).map((v) => ({
+        type: 'details', summary: v.service, meta: v.want === 'up' ? `on ${v.box}` : 'down',
+        blocks: [
+          ...(v.want === 'up' ? [{ type: 'form', title: `Move ${v.service}`, action: 'service-move', submit: 'Hand it off', hidden: { agent: v.agent, name: v.name },
+            note: 'Stopped where it is, then started there: never two at once.',
+            fields: [{ name: 'box', label: 'To', kind: 'choice', required: true, options: live_boxes.filter((b) => b.name !== v.box).map((b) => ({ value: b.name, label: b.name })) }] }] : []),
+          { type: 'buttons', items: [v.want === 'up'
+            ? { action: 'service-down', label: `Take ${v.name} down`, tone: 'danger', fields: { agent: v.agent, name: v.name } }
+            : { action: 'service-up', label: `Bring ${v.name} up`, tone: 'primary', fields: { agent: v.agent, name: v.name } }] },
+        ],
+      })),
+    ] });
+  }
 
   sections.push({ id: 'houses', title: 'Houses', blocks: view.houses.length ? [
     { type: 'table', columns: ['House', 'Agent', 'Box', 'State', 'Task', 'Updated'], rows: view.houses.slice(0, 25).map((h) => [
@@ -163,6 +182,12 @@ export function act(env, effects, { action, fields: raw = {} }, publicUrl) {
         return { ok: true, message: `${r.id}: ${r.agent} on ${r.box}, waiting for the box to start it.`, page: '' };
       }
       case 'down': { const r = down(env, effects, OWNER, fields); return { ok: true, message: `${r.id} is ${r.state}.`, page: '' }; }
+      case 'service-up': { const r = serviceUp(env, effects, OWNER, fields); return { ok: true, message: `${r.service} is coming up on ${r.box}.`, page: '' }; }
+      case 'service-down': { const r = serviceDown(env, effects, OWNER, fields); return { ok: true, message: `${r.service} is going down.`, page: '' }; }
+      case 'service-move': {
+        const r = serviceMove(env, effects, OWNER, fields);
+        return { ok: true, message: r.moving ? `${r.service}: stopping on ${r.box}; it starts on ${r.moveTo} once that's confirmed.` : `${r.service} is on ${r.box}.`, page: '' };
+      }
       default: return { ok: false, message: `No action ${action}.` };
     }
   } catch (err) {

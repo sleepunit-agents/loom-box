@@ -46,7 +46,14 @@ if (args[0] === 'run') {
     const [ps, type, target] = a.split(',');
     seen[`${type.split('=')[1]}:${target.split('=')[1]}`] = readFileSync(join(D, 'secrets', ps), 'utf-8');
   });
-  writeFileSync(join(D, 'runs', `${name}.json`), JSON.stringify({ args, seen, stdin: args.includes('-i') ? stdin() : null }));
+  // A service's state mount: read what's there, and leave a mark (its "cursor").
+  const stateSrc = args.filter((a, i) => args[i - 1] === '-v').map((v) => v.split(':')[0]).find((p) => p.endsWith('/state'));
+  let before = null;
+  if (stateSrc) {
+    try { before = readFileSync(join(stateSrc, 'cursor'), 'utf-8'); } catch { before = null; }
+    writeFileSync(join(stateSrc, 'cursor'), `${before ?? ''}${name};`);
+  }
+  writeFileSync(join(D, 'runs', `${name}.json`), JSON.stringify({ args, seen, stdin: args.includes('-i') ? stdin() : null, stateBefore: before }));
   writeFileSync(join(D, 'runs', `${name}.pid`), String(process.pid));
   const how = cfg().run || 'exit:0';
   if (how.startsWith('exit:')) { console.log('the house says hi'); process.exit(Number(how.slice(5))); }

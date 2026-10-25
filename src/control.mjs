@@ -225,6 +225,7 @@ export function down(env, effects, caller, { id }) {
   return update(env, (s) => {
     const h = s.houses[id];
     if (!h || (caller.kind === 'agent' && h.agent !== caller.agent)) fail(`no house ${id}`, 404);
+    if (h.service && LIVE.has(h.state)) fail(`${id} is the ${h.service} service's house: take the service down (service-down) or move it`, 409);
     if (TERMINAL.has(h.state)) return houseView(h);
     if (h.state === 'wanted') h.state = 'stopped';
     else h.state = 'stopping';
@@ -244,7 +245,10 @@ export function list(env, caller) {
     .filter(([, b]) => caller.kind === 'owner' || (!b.revoked && caller.kind === 'agent' && mayHost(b, caller.agent)))
     .map(([name, b]) => ({ name, local: !!b.local, facts: factsOf(b), lastSeen: b.lastSeen, ...(caller.kind === 'owner' ? { mayHost: b.mayHost, revoked: b.revoked ?? null, created: b.created } : {}) }));
   const primary = caller.kind === 'agent' ? primaryOf(s, caller.agent, env) : undefined;
-  return { boxes, houses, ...(primary ? { primary } : {}) };
+  const services = Object.entries(s.services ?? {})
+    .filter(([, v]) => caller.kind === 'owner' || (caller.kind === 'agent' && v.agent === caller.agent))
+    .map(([key, v]) => ({ service: key, agent: v.agent, name: v.name, box: v.box, want: v.want, moveTo: v.moveTo ?? null, house: v.house, state: s.houses[v.house]?.state ?? null, restarts: v.restarts ?? 0, stateSaved: s.serviceState?.[key]?.at ?? null }));
+  return { boxes, houses, services, ...(primary ? { primary } : {}) };
 }
 
 // ------------------------------------------------------------------ boxes
@@ -279,9 +283,9 @@ export function poll(env, effects, caller, { facts } = {}) {
     retryRevokes(s, effects);
     const mine = Object.values(s.houses).filter((h) => h.box === caller.subject);
     return {
-      start: mine.filter((h) => h.state === 'wanted' && mayHost(b, h.agent)).map((h) => {
+      start: mine.filter((h) => h.state === 'wanted' && mayHost(b, h.agent) && !(h.notBefore && Date.parse(h.notBefore) > Date.parse(now(effects)))).map((h) => {
         const a = s.agents[h.agent] || {};
-        return { id: h.id, agent: h.agent, task: h.task, repo: a.repo, houseFile: a.houseFile || 'house/house.json', branch: a.branch ?? null };
+        return { id: h.id, agent: h.agent, task: h.task, service: h.service ?? null, repo: a.repo, houseFile: a.houseFile || 'house/house.json', branch: a.branch ?? null };
       }),
       stop: mine.filter((h) => h.state === 'stopping').map((h) => h.id),
       // Taken by this box and not over: one the box doesn't have (it restarted) is lost.
@@ -315,7 +319,8 @@ export function claim(env, effects, caller, { id }) {
       for (const [as, from] of Object.entries(a.secrets || {})) secrets[as] = effects.secret(from);
       const repoAuth = a.repoSecret ? effects.secret(a.repoSecret) : null;
       h.state = 'starting'; h.tokenLabel = label; h.updated = now(effects);
-      return { id, agent: h.agent, token, secrets, repoAuth, nested: !!a.nested };
+      const saved = h.service ? s.serviceState?.[serviceKey(h.agent, h.service)] : undefined;
+      return { id, agent: h.agent, token, secrets, repoAuth, nested: !!a.nested, ...(h.service ? { service: h.service, state: saved?.data ?? null } : {}) };
     } catch (err) {
       // The house stays waiting; the token it was about to get goes (or is queued to).
       revokeOrQueue(s, effects, label);
@@ -342,10 +347,141 @@ export function report(env, effects, caller, { id, state, exit, log }) {
     // A house asked to stop stays "stopping" while it's still up.
     if (!(h.state === 'stopping' && state === 'running')) h.state = state;
     h.updated = now(effects);
+    if (state === 'running') h.started ??= h.updated;
     if (Number.isInteger(exit)) h.exit = exit;
     if (typeof log === 'string') h.log = log.slice(-MAX_LOG);
     if (TERMINAL.has(h.state) && h.tokenLabel) revokeOrQueue(s, effects, h.tokenLabel);
+    if (TERMINAL.has(h.state) && h.service) serviceHouseEnded(s, h, effects);
     return houseView(h);
+  });
+}
+
+// --------------------------------------------------------------- services
+//
+// A service is a long-lived house: no task, kept up, restarted if it dies,
+// and at most one live house at a time, anywhere (runtime.md, "Decided
+// 2026-10-25": two copies of a bridge answer every message). Moving one is a
+// hand-off: the old box stops it and says so, and only then does the new box
+// get it. Its state (a bridge's read position) travels through loom: the box
+// saves it when the house stops, and the next box gets it when it claims.
+
+const SERVICE_NAME = /^[a-z][a-z0-9-]{0,39}$/;
+const RESTART_BASE_MS = 5_000;
+const RESTART_MAX_MS = 300_000;
+export const MAX_STATE_BYTES = 700_000; // base64 of the tarball, inside loom's 1 MB body cap
+export const serviceKey = (agent, name) => `${agent}/${name}`;
+
+function serviceOf(s, caller, { agent, name }) {
+  const a = caller.kind === 'agent' ? caller.agent : agent;
+  if (caller.kind === 'agent' && agent && agent !== caller.agent) fail(`this token is ${caller.agent}'s`, 403);
+  if (!AGENT_NAME.test(a ?? '')) fail('an agent name is lowercase letters, digits and dashes');
+  if (!SERVICE_NAME.test(name ?? '')) fail('a service name is lowercase letters, digits and dashes, like discord');
+  return { a, key: serviceKey(a, name) };
+}
+
+function startService(s, svc, effects, delayMs = 0) {
+  const id = nextHouseId(s);
+  const at = now(effects);
+  s.houses[id] = {
+    id, agent: svc.agent, box: svc.box, service: svc.name, task: `(service ${svc.name})`, needs: [], state: 'wanted', created: at, updated: at, by: 'service',
+    ...(delayMs ? { notBefore: new Date(Date.parse(at) + delayMs).toISOString() } : {}),
+  };
+  svc.house = id;
+  return id;
+}
+
+/** Bring a service up (on its box, or the agent's primary), or say where it already is. */
+export function serviceUp(env, effects, caller, body) {
+  return update(env, (s) => {
+    const { a, key } = serviceOf(s, caller, body);
+    if (!s.agents[a]) fail(`${a} has no house yet: the owner sets its repo on the Boxes page`, 409);
+    s.services ??= {};
+    const svc = s.services[key];
+    if (svc?.want === 'up') return { service: key, box: svc.box, house: svc.house, state: s.houses[svc.house]?.state };
+    const box = placeHouse(s, a, { box: body.box || svc?.box || undefined }, env);
+    const next = { agent: a, name: body.name, box, want: 'up', restarts: 0, created: svc?.created ?? now(effects) };
+    s.services[key] = next;
+    const id = startService(s, next, effects);
+    return { service: key, box, house: id, state: 'wanted' };
+  });
+}
+
+/** Take a service down: its house stops, and nothing restarts it. */
+export function serviceDown(env, effects, caller, body) {
+  return update(env, (s) => {
+    const { key } = serviceOf(s, caller, body);
+    const svc = s.services?.[key];
+    if (!svc) fail(`no service ${key}`, 404);
+    svc.want = 'down';
+    delete svc.moveTo;
+    const h = s.houses[svc.house];
+    if (h && LIVE.has(h.state)) { h.state = h.state === 'wanted' ? 'stopped' : 'stopping'; h.updated = now(effects); }
+    return { service: key, want: 'down', house: svc.house, state: h?.state };
+  });
+}
+
+/**
+ * Move a service to another box: a hand-off. Its house there starts only once
+ * the old box has said this one stopped. `force` is for an old box that's gone
+ * for good: its house is written off and its token revoked without waiting.
+ * If that box is in fact still up, two copies run until it's revoked too, so
+ * it's the owner's call, never the default.
+ */
+export function serviceMove(env, effects, caller, body) {
+  return update(env, (s) => {
+    const { a, key } = serviceOf(s, caller, body);
+    const svc = s.services?.[key];
+    if (!svc || svc.want !== 'up') fail(`${key} isn't up`, 404);
+    const to = placeHouse(s, a, { box: body.box }, env);
+    if (to === svc.box && !svc.moveTo) return { service: key, box: to, moving: false };
+    const h = s.houses[svc.house];
+    if (!h || TERMINAL.has(h.state) || h.state === 'wanted') {
+      // Nothing is running it anywhere: just put it there.
+      if (h && h.state === 'wanted') { h.state = 'stopped'; h.updated = now(effects); }
+      svc.box = to; delete svc.moveTo;
+      const id = startService(s, svc, effects);
+      return { service: key, box: to, house: id, moving: false };
+    }
+    if (body.force === true || body.force === 'true') {
+      if (caller.kind !== 'owner') fail('forcing a move is the owner\'s call', 403);
+      if (h.tokenLabel) revokeOrQueue(s, effects, h.tokenLabel);
+      h.state = 'lost'; h.note = `written off by a forced move to ${to}`; h.updated = now(effects);
+      svc.box = to; delete svc.moveTo;
+      const id = startService(s, svc, effects);
+      return { service: key, box: to, house: id, moving: false, forced: true };
+    }
+    svc.moveTo = to;
+    if (h.state !== 'stopping') { h.state = 'stopping'; h.updated = now(effects); }
+    return { service: key, box: svc.box, moveTo: to, house: h.id, moving: true };
+  });
+}
+
+/** When a service's house ends: move it, restart it (backing off), or leave it down. */
+function serviceHouseEnded(s, h, effects) {
+  const svc = s.services?.[serviceKey(h.agent, h.service)];
+  if (!svc || svc.house !== h.id) return;
+  if (svc.want !== 'up') return;
+  if (svc.moveTo) {
+    svc.box = svc.moveTo; delete svc.moveTo; svc.restarts = 0;
+    startService(s, svc, effects);
+    return;
+  }
+  // A clean stop the owner didn't ask for, or a crash: up again, more slowly each time.
+  const ranMs = Date.parse(h.updated) - Date.parse(h.started ?? h.created);
+  svc.restarts = ranMs > 10 * 60_000 ? 1 : (svc.restarts ?? 0) + 1;
+  startService(s, svc, effects, Math.min(RESTART_BASE_MS * 2 ** (svc.restarts - 1), RESTART_MAX_MS));
+}
+
+/** A box saves a service's state when its house stops (base64 of a tarball). */
+export function saveState(env, effects, caller, { id, state }) {
+  return update(env, (s) => {
+    boxOf(s, caller);
+    const h = s.houses[id];
+    if (!h || h.box !== caller.subject || !h.service) fail(`no service house ${id} for this box`, 404);
+    if (typeof state !== 'string' || state.length > MAX_STATE_BYTES || !/^[A-Za-z0-9+/=]*$/.test(state)) fail(`a service's state is base64, ${MAX_STATE_BYTES} bytes at most`, 413);
+    s.serviceState ??= {};
+    s.serviceState[serviceKey(h.agent, h.service)] = { from: id, box: caller.subject, at: now(effects), data: state };
+    return { saved: state.length };
   });
 }
 
@@ -354,7 +490,7 @@ export function report(env, effects, caller, { id, state, exit, log }) {
 const OWNER_ONLY = {
   'add-box': addBox, 'revoke-box': revokeBox, 'may-host': setMayHost, 'set-primary': setPrimary, 'set-agent': setAgent,
 };
-const BOX_ONLY = { hello, poll, claim, report };
+const BOX_ONLY = { hello, poll, claim, report, 'save-state': saveState };
 
 /** One API call, as loom's piece API hands it over: {caller, path, body} → {status, body}. */
 export function api(env, effects, { caller, path, body }) {
@@ -370,6 +506,9 @@ export function api(env, effects, { caller, path, body }) {
     if (path === 'up') return { status: 200, body: up(env, effects, caller, b) };
     if (path === 'down') return { status: 200, body: down(env, effects, caller, b) };
     if (path === 'list' || path === '') return { status: 200, body: list(env, caller) };
+    if (path === 'service-up') return { status: 200, body: serviceUp(env, effects, caller, b) };
+    if (path === 'service-down') return { status: 200, body: serviceDown(env, effects, caller, b) };
+    if (path === 'service-move') return { status: 200, body: serviceMove(env, effects, caller, b) };
     if (OWNER_ONLY[path]) {
       if (caller.kind !== 'owner') fail(`${path} is the owner's`, 403);
       return { status: 200, body: OWNER_ONLY[path](env, effects, b) };
