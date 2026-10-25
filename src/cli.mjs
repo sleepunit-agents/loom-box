@@ -27,14 +27,14 @@
 // For loom (the piece contract):
 //   loom box ui --json | ui page --json | ui act --json | api --json
 //   loom box bundle export | bundle import [--force]       its part of loom's bundle
-import { readFileSync, realpathSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
 import { addBox, api, down, list, revokeBox, setAgent, setPrimary, up } from './control.mjs';
 import { realEffects } from './effects.mjs';
 import { act, manifest, page } from './ui.mjs';
-import { BoxError, joinLoom, loadConfig, POLL_MS, remoteClient, runner } from './box.mjs';
+import { BoxError, joinLoom, loadConfig, POLL_MS, remoteClient, restoreState, runner } from './box.mjs';
 import { localBoxName, stateDir } from './state.mjs';
 import { exportPart, importPart } from './bundle.mjs';
 
@@ -162,8 +162,10 @@ async function main(argv, env) {
       if (sub === 'state') {
         const to = flag(rest, '--to');
         const r = await call('saved-state', { agent, name });
-        const t = spawnSync('tar', ['-C', to, '--no-same-owner', '-xzf', '-'], { input: Buffer.from(r.state, 'base64') });
-        if (t.status !== 0) throw new Fail(`couldn't unpack into ${to}`);
+        // Into a new, empty dir, with the box's own checks: sized first, plain files only.
+        if (existsSync(to) && readdirSync(to).length) throw new Fail(`${to} isn't empty: unpack into a new directory, then move what you need`);
+        mkdirSync(to, { recursive: true, mode: 0o700 });
+        restoreState(to, r.state);
         process.stdout.write(`unpacked ${r.service}'s state from ${r.at} (${r.from}) into ${to}\n`);
         return;
       }

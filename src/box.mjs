@@ -190,13 +190,19 @@ function image(env, h, house, repo, logFd) {
 const MAX_STATE_UNPACKED = 64 * 1024 * 1024;
 const MAX_STATE_ENTRIES = 10_000;
 
-function restoreState(dir, b64) {
+export function restoreState(dir, b64) {
   if (!b64) return;
   // Sized up before it's unpacked: a small tarball can unpack to a full disk.
   const list = spawnSync('tar', ['-tvzf', '-'], { input: Buffer.from(b64, 'base64'), maxBuffer: 16 * 1024 * 1024, timeout: 60_000, encoding: 'utf-8' });
   if (list.status !== 0) throw new BoxError('the service\'s saved state isn\'t a readable tarball');
   const lines = list.stdout.split('\n').filter(Boolean);
-  const total = lines.reduce((n, l) => n + (Number(l.trim().split(/\s+/)[2]) || 0), 0);
+  let total = 0;
+  for (const l of lines) {
+    // Fail closed: only plain files and directories, each with a size we can read.
+    const f = l.trim().split(/\s+/);
+    if (!/^[-d]/.test(f[0] ?? '') || !/^\d+$/.test(f[2] ?? '')) throw new BoxError('the service\'s saved state holds something other than plain files and directories');
+    total += Number(f[2]);
+  }
   if (lines.length > MAX_STATE_ENTRIES || total > MAX_STATE_UNPACKED) throw new BoxError(`the service's saved state is too big to unpack (${lines.length} entries, ${total} bytes)`);
   const r = spawnSync('tar', ['-C', dir, '--no-same-owner', '--no-same-permissions', '-xzf', '-'], { input: Buffer.from(b64, 'base64'), timeout: 60_000 });
   if (r.status !== 0) throw new BoxError(`the service's saved state didn't unpack: ${(r.stderr || '').toString().trim().split('\n').pop()}`);
