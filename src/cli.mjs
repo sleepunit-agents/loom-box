@@ -80,6 +80,14 @@ function ownerOrRemote(env) {
   };
 }
 
+/** The household's default agent ($LOOM_HOME/household.json), if there's one. */
+function defaultAgent(env) {
+  try {
+    const h = JSON.parse(readFileSync(`${env.LOOM_HOME || `${env.HOME}/.config/loom`}/household.json`, 'utf-8'));
+    return typeof h.default === 'string' ? h.default : undefined;
+  } catch { return undefined; }
+}
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function main(argv, env) {
@@ -125,7 +133,9 @@ async function main(argv, env) {
       let task = flag(rest, '--task');
       if (task === '-' || task === undefined) task = await readStdin();
       const call = ownerOrRemote(env);
-      const r = await call('up', { agent: flag(rest, '--agent'), box: flag(rest, '--box'), needs: flag(rest, '--needs'), task });
+      // On loom's own machine, a body asking for "a house" means its own: the household's default agent.
+      const agent = flag(rest, '--agent') ?? (env.LOOM_URL && env.LOOM_TOKEN_FILE ? undefined : defaultAgent(env));
+      const r = await call('up', { agent, box: flag(rest, '--box'), needs: flag(rest, '--needs'), task });
       if (json) return out(r);
       process.stdout.write(`${r.id}: ${r.agent} on ${r.box} (${r.state})\n`);
       return;
