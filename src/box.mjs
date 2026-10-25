@@ -397,8 +397,20 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
     // it restarted under them. Say so rather than leave them "running" forever.
     for (const id of want.active || []) {
       if (houses.has(id)) continue;
-      // Whatever of it is still here goes: its container, its secrets.
+      // A service's house keeps what it had: stopped the way a move stops it
+      // (so it can finish writing), and its state sent back before anything
+      // of it goes. The control plane takes it only from a live service house.
+      pod(env, ['stop', '-t', '25', containerName(id)]);
+      const dir = pathJoin(dataDir(env), 'houses', id);
+      const stateDir = pathJoin(dir, 'state');
+      if (existsSync(stateDir)) {
+        const packed = packState(stateDir);
+        if (packed) await sendState(client, id, packed).catch((e) => log(`${id}: its state wasn't kept (${e.message})`));
+      }
+      // Whatever of it is still here goes: its container, its secrets, its dirs.
       pod(env, ['rm', '-f', containerName(id)]);
+      clean({ id }, dir, []);
+      rmSync(dir, { recursive: true, force: true });
       const ls = pod(env, ['secret', 'ls', '--format', '{{.Name}}']);
       const mine = (ls.stdout || '').split('\n').filter((n) => n.startsWith(`loom-${id}-`));
       if (mine.length) pod(env, ['secret', 'rm', ...mine]);

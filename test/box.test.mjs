@@ -246,6 +246,23 @@ test('a box that restarted under a house removes what\'s left of it and says so'
   process.kill(-pid, 'SIGKILL');
 });
 
+test('a box that restarts under a service\'s house sends its state back first', async () => {
+  agentRepo(repo, { ...HOUSE, services: { discord: { command: ['x'], mounts: { state: '/s' } } } });
+  setAgent();
+  podmanCfg({ run: 'sleep' });
+  const s = ok(api(env, fx, { caller: { kind: 'agent', agent: 'art' }, path: 'service-up', body: { name: 'discord' } }));
+  await r.tick();
+  await until(() => house(s.house).state === 'running');
+  const pid = r.houses.get(s.house).child.pid;
+  const fresh = runner(env, client, { loomUrl: 'http://loom.test/mcp', log: () => {} });
+  await fresh.tick();
+  const saved = ok(api(env, fx, { caller: owner, path: 'saved-state', body: { agent: 'art', name: 'discord' } }));
+  assert.equal(saved.from, s.house, 'the restarted box sent the house\'s state before removing it');
+  assert.ok(existsSync(join(fake, 'runs', `loom-house-${s.house}.stop`)), 'stopped first, so it could finish writing');
+  assert.equal(existsSync(join(env.LOOM_BOX_DATA ?? join(env.HOME, '.local/share/loom-box'), 'houses', s.house)), false);
+  process.kill(-pid, 'SIGKILL');
+});
+
 test('a service moves between boxes by hand-off, and its state goes with it', async () => {
   const withService = { ...HOUSE, services: { discord: {
     command: ['python3', '/home/art/Code/shuttle/adapters/discord.py'],
