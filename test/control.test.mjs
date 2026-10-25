@@ -206,3 +206,27 @@ test('needs match a fact\'s key and part of its value; a bare need is a label', 
   assert.ok(meets(['jonathan-rig'], 'jonathan-rig'));
   assert.ok(!meets(['arch:x86_64'], 'arch:arm64'));
 });
+
+test('the runtime\'s part of the bundle comes back on another machine, as that machine\'s box', { skip: !process.env.PATH.split(':').some((d) => { try { return statSync(join(d, 'age')).isFile(); } catch { return false; } }) && 'no age' }, async () => {
+  const { exportPart, importPart } = await import('../src/bundle.mjs');
+  const { spawnSync } = await import('node:child_process');
+  const key = join(env.HOME, 'owner.key');
+  spawnSync('age-keygen', ['-o', key]);
+  const recipient = spawnSync('age-keygen', ['-y', key], { encoding: 'utf-8' }).stdout.trim();
+  ok(call(owner, 'add-box', { name: 'thor' }));
+  ok(call(owner, 'set-primary', { agent: 'mark', box: 'one' }));
+  ok(call(art, 'up', { task: 'x' }));
+  const part = exportPart({ ...env, LOOM_EXPORT_RECIPIENTS: recipient, PATH: process.env.PATH });
+  assert.match(part, /BEGIN AGE ENCRYPTED FILE/);
+  assert.equal(part.includes('thor'), false);
+  // A new machine, named differently.
+  const there = { HOME: env.HOME, LOOM_BOX_HOME: join(env.HOME, 'elsewhere'), LOOM_BOX_LOCAL_NAME: 'two', PATH: process.env.PATH, LOOM_IMPORT_IDENTITY: key };
+  assert.deepEqual(importPart(there, part), { boxes: 2, houses: 1 });
+  const l = ok(api(there, fx, { caller: owner, path: 'list', body: {} }));
+  assert.deepEqual(l.boxes.map((b) => [b.name, b.local]).sort(), [['thor', false], ['two', true]]);
+  // The waiting house doesn't start again by itself on the new machine.
+  assert.equal(l.houses[0].state, 'lost');
+  assert.deepEqual(ok(api(there, fx, { caller: { kind: 'piece', subject: 'two' }, path: 'poll', body: {} })).start, []);
+  assert.throws(() => importPart(there, part), /already has runtime state/);
+  assert.throws(() => importPart({ ...there, LOOM_BOX_HOME: join(env.HOME, 'x'), LOOM_IMPORT_IDENTITY: join(env.HOME, 'nokey') }, part), /doesn't decrypt/);
+});

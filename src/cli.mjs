@@ -21,6 +21,7 @@
 //   loom box run                                           poll and run houses (a user service)
 // For loom (the piece contract):
 //   loom box ui --json | ui page --json | ui act --json | api --json
+//   loom box bundle export | bundle import [--force]       its part of loom's bundle
 import { readFileSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
@@ -29,6 +30,7 @@ import { realEffects } from './effects.mjs';
 import { act, manifest, page } from './ui.mjs';
 import { BoxError, joinLoom, loadConfig, POLL_MS, remoteClient, runner } from './box.mjs';
 import { localBoxName, stateDir } from './state.mjs';
+import { exportPart, importPart } from './bundle.mjs';
 
 const USAGE = readFileSync(fileURLToPath(import.meta.url), 'utf-8').split('\n').slice(1).filter((l) => l.startsWith('//')).map((l) => l.slice(3)).join('\n') + '\n';
 
@@ -94,6 +96,15 @@ async function main(argv, env) {
     case 'api': {
       if (!json) throw new Fail(USAGE, 2);
       return out(api(env, realEffects(env), JSON.parse(await readStdin())));
+    }
+    case 'bundle': {
+      if (rest[0] === 'export') { process.stdout.write(exportPart(env)); return; }
+      if (rest[0] === 'import') {
+        const r = importPart(env, await readStdin(), { force: rest.includes('--force') });
+        process.stderr.write(`loom-box: restored ${r.boxes} boxes and ${r.houses} houses\n`);
+        return;
+      }
+      throw new Fail('usage: loom-box bundle export | bundle import [--force]', 2);
     }
     case 'add': {
       const [name] = positional(rest);

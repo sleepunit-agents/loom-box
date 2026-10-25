@@ -49,6 +49,9 @@ export function load(env = process.env) {
   if (s?.v !== 1 || typeof s.boxes !== 'object') throw new StateError(`${path}: not a loom-box state file`, 500);
   for (const k of ['primaries', 'agents', 'houses']) s[k] ??= {};
   s.seq ??= 0;
+  // loom's own machine is always a box, whatever this file says.
+  const local = localBoxName(env);
+  s.boxes[local] ??= { local: true, mayHost: '*', facts: [], created: new Date().toISOString() };
   return s;
 }
 
@@ -102,6 +105,14 @@ export function update(env, f) {
     closeSync(fd);
     rmSync(lock, { force: true });
   }
+}
+
+/** Lay down a whole state (a restore), under the lock. */
+export function replaceState(env, next) {
+  return update(env, (s) => {
+    for (const k of Object.keys(s)) delete s[k];
+    Object.assign(s, next);
+  });
 }
 
 /** A new house id: h-<n>, never reused. */
