@@ -155,7 +155,7 @@ async function main(argv, env) {
       if (sub === 'move') return out(await call('service-move', { agent, name, box, force: rest.includes('--force') }));
       if (sub === 'seed') {
         const from = flag(rest, '--from');
-        const t = spawnSync('tar', ['-C', from, '-czf', '-', '.'], { maxBuffer: 64 * 1024 * 1024 });
+        const t = spawnSync('tar', ['--format=ustar', '-C', from, '-czf', '-', '.'], { maxBuffer: 64 * 1024 * 1024 });
         if (t.status !== 0) throw new Fail(`couldn't pack ${from}`);
         return out(await call('seed-state', { agent, name, state: t.stdout.toString('base64') }));
       }

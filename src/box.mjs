@@ -11,6 +11,7 @@
 // read-only. No agent code runs on the box itself. When it ends, its secrets,
 // clone and dirs go.
 import { spawn, spawnSync } from 'node:child_process';
+import { gunzipSync } from 'node:zlib';
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { arch, cpus, homedir, platform, totalmem } from 'node:os';
 import { join as pathJoin } from 'node:path';
@@ -192,25 +193,36 @@ const MAX_STATE_ENTRIES = 10_000;
 
 export function restoreState(dir, b64) {
   if (!b64) return;
-  // Sized up before it's unpacked: a small tarball can unpack to a full disk.
-  const list = spawnSync('tar', ['-tvzf', '-'], { input: Buffer.from(b64, 'base64'), maxBuffer: 16 * 1024 * 1024, timeout: 60_000, encoding: 'utf-8' });
-  if (list.status !== 0) throw new BoxError('the service\'s saved state isn\'t a readable tarball');
-  const lines = list.stdout.split('\n').filter(Boolean);
-  let total = 0;
-  for (const l of lines) {
-    // Fail closed: only plain files and directories, each with a size we can read.
-    const f = l.trim().split(/\s+/);
-    if (!/^[-d]/.test(f[0] ?? '') || !/^\d+$/.test(f[2] ?? '')) throw new BoxError('the service\'s saved state holds something other than plain files and directories');
-    total += Number(f[2]);
+  // Decompressed here with a hard cap (a small tarball can't unpack to a full
+  // disk), then every header checked: plain files and directories only, no
+  // links, no absolute or ".." names. Only then does tar see the bytes.
+  let tarball;
+  try {
+    tarball = gunzipSync(Buffer.from(b64, 'base64'), { maxOutputLength: MAX_STATE_UNPACKED });
+  } catch {
+    throw new BoxError('the service\'s saved state is too big to unpack, or isn\'t a gzipped tarball');
   }
-  if (lines.length > MAX_STATE_ENTRIES || total > MAX_STATE_UNPACKED) throw new BoxError(`the service's saved state is too big to unpack (${lines.length} entries, ${total} bytes)`);
-  const r = spawnSync('tar', ['-C', dir, '--no-same-owner', '--no-same-permissions', '-xzf', '-'], { input: Buffer.from(b64, 'base64'), timeout: 60_000 });
+  let entries = 0;
+  for (let off = 0; off + 512 <= tarball.length;) {
+    const hdr = tarball.subarray(off, off + 512);
+    if (hdr.every((b) => b === 0)) break; // the end
+    if (++entries > MAX_STATE_ENTRIES) throw new BoxError('the service\'s saved state has too many entries');
+    const field = (a, n) => hdr.subarray(a, a + n).toString('latin1').replace(/\0.*$/s, '');
+    const name = field(345, 155) ? `${field(345, 155)}/${field(0, 100)}` : field(0, 100);
+    const type = String.fromCharCode(hdr[156] || 48);
+    const size = parseInt(field(124, 12).trim() || '0', 8);
+    if (!['0', '5'].includes(type)) throw new BoxError('the service\'s saved state holds something other than plain files and directories');
+    if (!Number.isFinite(size) || size < 0) throw new BoxError('the service\'s saved state has a bad header');
+    if (name.startsWith('/') || name.split('/').includes('..')) throw new BoxError('the service\'s saved state names a path outside its dir');
+    off += 512 + Math.ceil(size / 512) * 512;
+  }
+  const r = spawnSync('tar', ['-C', dir, '--no-same-owner', '--no-same-permissions', '-xf', '-'], { input: tarball, timeout: 60_000 });
   if (r.status !== 0) throw new BoxError(`the service's saved state didn't unpack: ${(r.stderr || '').toString().trim().split('\n').pop()}`);
-  spawnSync('find', [dir, '-type', 'l', '-delete']);
 }
 
 function packState(dir) {
-  const r = spawnSync('tar', ['-C', dir, '-czf', '-', '.'], { maxBuffer: 64 * 1024 * 1024, timeout: 60_000 });
+  // ustar: plain headers only, the kind restoreState accepts.
+  const r = spawnSync('tar', ['--format=ustar', '-C', dir, '-czf', '-', '.'], { maxBuffer: 64 * 1024 * 1024, timeout: 60_000 });
   if (r.status !== 0) return null;
   return r.stdout.toString('base64');
 }
