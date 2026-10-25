@@ -260,3 +260,22 @@ test('a session house needs no task, and its box is told it\'s one', () => {
   const t = ok(call(owner, 'up', { agent: 'art', task: 'x' }));
   assert.equal(ok(call(box(t.box), 'poll')).start.find((x) => x.id === t.id).session, false);
 });
+
+test('a secret from sub:<provider> is the agent\'s subscription with room left, picked at claim and recorded', () => {
+  const picks = [];
+  fx.pick = (agent, provider) => { picks.push([agent, provider]); return 'claude-spare'; };
+  ok(call(owner, 'set-agent', { agent: 'art', repo: 'https://x/art.git', secrets: { 'claude-oauth': 'sub:anthropic', 'github-token': 'gh-art' } }));
+  assert.equal(call(owner, 'set-agent', { agent: 'art', repo: 'https://x/art.git', secrets: { x: 'sub:nobody' } }).status, 400);
+  const h = ok(call(art, 'up', { task: 't' }));
+  ok(call(box(h.box), 'poll'));
+  const c = ok(call(box(h.box), 'claim', { id: h.id }));
+  assert.deepEqual(picks, [['art', 'anthropic']]);
+  assert.equal(c.secrets['claude-oauth'], 'value-of-claude-spare');
+  assert.equal(c.secrets['github-token'], 'value-of-gh-art');
+  assert.deepEqual(ok(call(owner, 'list')).houses.find((x) => x.id === h.id).runsOn, { 'claude-oauth': 'claude-spare' });
+  // A pick that isn't a secret's name is refused, not passed on.
+  fx.pick = () => 'not a name!';
+  const h2 = ok(call(art, 'up', { task: 't2' }));
+  ok(call(box(h2.box), 'poll'));
+  assert.equal(call(box(h2.box), 'claim', { id: h2.id }).status, 500);
+});

@@ -23,6 +23,13 @@ export function realEffects(env = process.env) {
       return token;
     },
     revoke(label) { run(loom, ['token', 'revoke', label], env, 'revoking a token'); },
+    /**
+     * Which secret an agent's next body runs on, for a provider: the
+     * subscriptions piece's pick (its order, the first with room left).
+     */
+    pick(agent, provider) {
+      return run(loom, ['subscriptions', 'pick', agent, provider], env, `picking ${agent}'s ${provider} subscription`).trim();
+    },
     /** The control plane is the host side, so it may pass the secrets piece's body gate. */
     secret(name) {
       return run(secrets, ['get', name, '--reveal'], { ...env, LOOM_SECRETS_ALLOW_GET: '1' }, `reading secret ${name}`);

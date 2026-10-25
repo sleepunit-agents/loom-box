@@ -12,6 +12,8 @@ import { parsePortGrant } from './house.mjs';
 
 const TERMINAL = new Set(['done', 'failed', 'stopped', 'lost']);
 const LIVE = new Set(['wanted', 'starting', 'running', 'stopping']);
+/** A house secret that comes from the agent's subscriptions, not a fixed name. */
+const SUB_SOURCE = /^sub:(anthropic|openai)$/;
 const FACT = /^[a-z][a-z0-9-]{0,31}(:[A-Za-z0-9._ +-]{1,64})?$/;
 const MAX_TASK = 8000;
 const MAX_LOG = 4000;
@@ -190,8 +192,8 @@ export function setAgent(env, effects, { agent, repo, houseFile, nested, branch,
   let sec = secrets ?? {};
   if (typeof sec === 'string') sec = Object.fromEntries(sec.split(/[\s,]+/).filter(Boolean).map((p) => { const [k, v] = p.split('='); return [k, v ?? k]; }));
   if (typeof sec !== 'object' || Array.isArray(sec) || Object.keys(sec).length > 32
-      || !Object.entries(sec).every(([k, v]) => SECRET_NAME.test(k) && typeof v === 'string' && SECRET_NAME.test(v))) {
-    fail('secrets map the name a house sees to a secrets-store name, like github-token=github-art-e-fish-token');
+      || !Object.entries(sec).every(([k, v]) => SECRET_NAME.test(k) && typeof v === 'string' && (SECRET_NAME.test(v) || SUB_SOURCE.test(v)))) {
+    fail('secrets map the name a house sees to a secrets-store name (github-token=github-art-e-fish-token), or to sub:<provider> (claude-oauth=sub:anthropic: the agent\'s subscription with room left)');
   }
   let pt = ports ?? [];
   if (typeof pt === 'string') pt = pt.split(/[\s,]+/).filter(Boolean);
@@ -332,7 +334,17 @@ export function claim(env, effects, caller, { id }) {
     const token = effects.mint(['--agent', h.agent], label);
     try {
       const secrets = {};
-      for (const [as, from] of Object.entries(a.secrets || {})) secrets[as] = effects.secret(from);
+      // A secret named `sub:<provider>` is whichever of the agent's subscriptions
+      // has room now (the subscriptions piece); the house records which, by name.
+      const runsOn = {};
+      for (const [as, from] of Object.entries(a.secrets || {})) {
+        const sub = SUB_SOURCE.exec(from);
+        const name = sub ? effects.pick(h.agent, sub[1]) : from;
+        if (sub && !SECRET_NAME.test(name)) throw new StateError(`the subscriptions piece picked something that isn't a secret's name for ${h.agent}`, 500);
+        if (sub) runsOn[as] = name;
+        secrets[as] = effects.secret(name);
+      }
+      if (Object.keys(runsOn).length) h.runsOn = runsOn;
       const repoAuth = a.repoSecret ? effects.secret(a.repoSecret) : null;
       h.state = 'starting'; h.tokenLabel = label; h.updated = now(effects);
       const key = stateKeyOf(h);
