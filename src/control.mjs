@@ -167,18 +167,20 @@ export function setPrimary(env, effects, { agent, box }) {
 }
 
 /**
- * How an agent's house is made: its repo, the command in it that runs a house
- * (given a task and a directory of secrets), and which secrets a house of it
- * gets, by the name the house sees them under and the secrets-store name they
- * come from. Kept here, not read from the repo, so a box can't widen it.
+ * How an agent's house is made: its repo, the house file in it (house.mjs:
+ * the image and where things land), whether its house may run nested
+ * containers, and which secrets a house of it gets, by the name the house file
+ * uses and the secrets-store name they come from. Kept here, not read from
+ * the repo, so neither a box nor the repo can widen it.
  */
-export function setAgent(env, effects, { agent, repo, houseCmd, branch, repoSecret, secrets }) {
+export function setAgent(env, effects, { agent, repo, houseFile, nested, branch, repoSecret, secrets }) {
   const a = str(agent, 'an agent', 40);
   if (!AGENT_NAME.test(a)) fail('an agent name is lowercase letters, digits and dashes');
   const r = str(repo, 'the repo', 400);
   if (!/^(https:\/\/[^\s]+|git@[^\s:]+:[^\s]+|\/[^\s]+)$/.test(r)) fail('the repo is an https:// or git@ URL (or an absolute path)');
-  const cmd = str(houseCmd ?? 'house/up', 'the house command', 200);
-  if (cmd.startsWith('/') || cmd.split('/').some((p) => p === '..' || p === '') || !/^[A-Za-z0-9._/-]+$/.test(cmd)) fail('the house command is a path inside the repo, like house/up');
+  const file = str(houseFile || 'house/house.json', 'the house file', 200);
+  if (file.startsWith('/') || file.split('/').some((p) => p === '..' || p === '.' || p === '') || !/^[A-Za-z0-9._/-]+$/.test(file)) fail('the house file is a path inside the repo, like house/house.json');
+  const nest = nested === true || nested === 'true' || nested === 'yes';
   const br = branch ? str(branch, 'the branch', 100) : null;
   if (br && !/^[A-Za-z0-9._/-]+$/.test(br)) fail('the branch name has odd characters');
   const rs = repoSecret ? str(repoSecret, 'the repo secret', 64) : null;
@@ -190,7 +192,7 @@ export function setAgent(env, effects, { agent, repo, houseCmd, branch, repoSecr
     fail('secrets map the name a house sees to a secrets-store name, like github-token=github-art-e-fish-token');
   }
   return update(env, (s) => {
-    s.agents[a] = { repo: r, houseCmd: cmd, branch: br, repoSecret: rs, secrets: sec };
+    s.agents[a] = { repo: r, houseFile: file, nested: nest, branch: br, repoSecret: rs, secrets: sec };
     return { agent: a, ...s.agents[a] };
   });
 }
@@ -210,7 +212,7 @@ export function up(env, effects, caller, { agent, box, needs, task }) {
   const n = listOf(needs, 'needs', FACT);
   if (box !== undefined && box !== null && box !== '' && !BOX_NAME.test(box)) fail('no box by that name', 404);
   return update(env, (s) => {
-    if (!s.agents[a]) fail(`${a} has no house yet: the owner sets its repo and house command on the Boxes page`, 409);
+    if (!s.agents[a]) fail(`${a} has no house yet: the owner sets its repo on the Boxes page`, 409);
     const where = placeHouse(s, a, { box: box || undefined, needs: n }, env);
     const id = nextHouseId(s);
     const at = now(effects);
@@ -279,7 +281,7 @@ export function poll(env, effects, caller, { facts } = {}) {
     return {
       start: mine.filter((h) => h.state === 'wanted' && mayHost(b, h.agent)).map((h) => {
         const a = s.agents[h.agent] || {};
-        return { id: h.id, agent: h.agent, task: h.task, repo: a.repo, houseCmd: a.houseCmd, branch: a.branch ?? null };
+        return { id: h.id, agent: h.agent, task: h.task, repo: a.repo, houseFile: a.houseFile || 'house/house.json', branch: a.branch ?? null };
       }),
       stop: mine.filter((h) => h.state === 'stopping').map((h) => h.id),
       // Taken by this box and not over: one the box doesn't have (it restarted) is lost.
@@ -313,7 +315,7 @@ export function claim(env, effects, caller, { id }) {
       for (const [as, from] of Object.entries(a.secrets || {})) secrets[as] = effects.secret(from);
       const repoAuth = a.repoSecret ? effects.secret(a.repoSecret) : null;
       h.state = 'starting'; h.tokenLabel = label; h.updated = now(effects);
-      return { id, agent: h.agent, token, secrets, repoAuth };
+      return { id, agent: h.agent, token, secrets, repoAuth, nested: !!a.nested };
     } catch (err) {
       // The house stays waiting; the token it was about to get goes (or is queued to).
       revokeOrQueue(s, effects, label);

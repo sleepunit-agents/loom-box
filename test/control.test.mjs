@@ -190,8 +190,8 @@ test('revoking a box: its credential and its houses\' tokens go, its houses are 
 test('an agent\'s house config is checked: a repo URL, a house command inside the repo, store names', () => {
   for (const bad of [
     { agent: 'art', repo: 'file:///etc' },
-    { agent: 'art', repo: 'https://x/y', houseCmd: '../../bin/sh' },
-    { agent: 'art', repo: 'https://x/y', houseCmd: '/bin/sh' },
+    { agent: 'art', repo: 'https://x/y', houseFile: '../../etc/house.json' },
+    { agent: 'art', repo: 'https://x/y', houseFile: '/etc/house.json' },
     { agent: 'art', repo: 'https://x/y', secrets: { 'a/b': 'c' } },
     { agent: 'Art', repo: 'https://x/y' },
   ]) assert.equal(call(owner, 'set-agent', bad).status, 400, JSON.stringify(bad));

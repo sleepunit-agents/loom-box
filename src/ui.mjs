@@ -110,7 +110,8 @@ function agentsPage(env) {
   const sections = Object.entries(s.agents).sort().slice(0, 8).map(([a, c]) => ({
     id: `agent-${a}`, title: a, blocks: [
       { type: 'kv', items: [
-        { label: 'Repo', value: c.repo }, { label: 'House command', value: c.houseCmd },
+        { label: 'Repo', value: c.repo }, { label: 'House file', value: c.houseFile || 'house/house.json' },
+        { label: 'Nested containers', value: c.nested ? 'allowed' : 'not allowed' },
         { label: 'Branch', value: c.branch || 'default' }, { label: 'Repo secret', value: c.repoSecret || 'none' },
         { label: 'Secrets a house gets', value: Object.entries(c.secrets || {}).map(([k, v]) => (k === v ? k : `${k} (from ${v})`)).join(', ') || 'none' },
       ] },
@@ -125,7 +126,8 @@ function agentForm(agent, c) {
   return { type: 'form', title: agent ? `Change ${agent}'s house` : undefined, action: 'set-agent', submit: 'Save', ...(agent ? { hidden: { agent } } : {}), fields: [
     ...(agent ? [] : [{ name: 'agent', label: 'Agent', kind: 'text', required: true }]),
     { name: 'repo', label: 'Repo', kind: 'text', required: true, value: c?.repo ?? '' },
-    { name: 'house_cmd', label: 'House command', kind: 'text', value: c?.houseCmd ?? 'house/up', hint: 'A path in the repo. It gets HOUSE_TASK and HOUSE_SECRETS_DIR.' },
+    { name: 'house_file', label: 'House file', kind: 'text', value: c?.houseFile ?? 'house/house.json', hint: 'A path in the repo: the image, and where each secret lands' },
+    { name: 'nested', label: 'Nested containers', kind: 'choice', value: c?.nested ? 'yes' : 'no', options: [{ value: 'no', label: 'Not allowed' }, { value: 'yes', label: 'Allowed', detail: 'The house may run containers of its own (more capabilities, still rootless)' }] },
     { name: 'branch', label: 'Branch', kind: 'text', value: c?.branch ?? '' },
     { name: 'repo_secret', label: 'Repo secret', kind: 'text', value: c?.repoSecret ?? '', hint: 'A secrets-store name, for a private repo over https' },
     { name: 'secrets', label: 'Secrets', kind: 'text', value: Object.entries(c?.secrets || {}).map(([k, v]) => `${k}=${v}`).join(', '), hint: 'name-in-house=store-name, comma separated' },
@@ -142,7 +144,7 @@ export function page(env, { path }, nowMs = Date.now()) {
 export function act(env, effects, { action, fields: raw = {} }, publicUrl) {
   // The page's field names are lowercase (loom's vocabulary); the runtime's are camelCase.
   const fields = { ...raw };
-  for (const [from, to] of [['may_host', 'mayHost'], ['house_cmd', 'houseCmd'], ['repo_secret', 'repoSecret']]) {
+  for (const [from, to] of [['may_host', 'mayHost'], ['house_file', 'houseFile'], ['repo_secret', 'repoSecret']]) {
     if (from in fields) { fields[to] = fields[from]; delete fields[from]; }
   }
   try {

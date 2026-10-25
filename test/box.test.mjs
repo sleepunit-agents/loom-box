@@ -1,31 +1,51 @@
-// The box (loom docs/specs/runtime.md, "Boxes"), end to end against the real
-// control plane in-process, with a real git repo as the agent's and a real
-// house command:
-//  - a house gets its task, its loom token and its secrets as 0600 files, and
-//    runs in a fresh clone of the agent's repo;
-//  - when it ends, the secrets and the clone are gone, the control plane
-//    hears how it went, and the house's token is revoked;
-//  - a stop request ends a running house (its whole process group);
-//  - a box that restarted under its houses says they're gone;
+// The box (loom docs/specs/runtime.md), end to end against the real control
+// plane in-process, a real git repo as the agent's, and a stand-in podman
+// that records what it was asked (test/fake-podman.mjs):
+//  - a house is a container and only a container: the box builds the image
+//    from the repo's house file and runs it with exactly the house's own
+//    secrets (as podman secrets), env and per-house dirs, and nothing of the
+//    box's; no agent code runs on the box;
+//  - nested containers only when the owner allows them; a secret the control
+//    plane didn't give is refused; a Containerfile can't point outside the repo;
+//  - the image is cached by the build context's tree;
+//  - when a house ends, its secrets, clone and dirs go, and its token is revoked;
+//  - stop ends a running house; a box that restarted cleans up and reports;
 //  - join keeps the credential 0600 and refuses one that isn't this box's.
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { api } from '../src/control.mjs';
 import { joinLoom, runner } from '../src/box.mjs';
+import { NESTED_ARGS } from '../src/house.mjs';
 
-let env, fx, revoked, repo, client, r;
+const here = dirname(fileURLToPath(import.meta.url));
+let env, fx, revoked, repo, client, r, fake;
 const owner = { kind: 'owner' };
 const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
 const ok = (x) => { assert.equal(x.status, 200, JSON.stringify(x.body)); return x.body; };
+const house = (id) => ok(api(env, fx, { caller: owner, path: 'list', body: {} })).houses.find((h) => h.id === id);
+const ran = (id) => JSON.parse(readFileSync(join(fake, 'runs', `loom-house-${id}.json`), 'utf-8'));
+const podmanCfg = (c) => { mkdirSync(fake, { recursive: true }); writeFileSync(join(fake, 'config.json'), JSON.stringify(c)); };
 
-function agentRepo(dir, houseUp) {
+const HOUSE = {
+  build: { containerfile: 'house/Containerfile', context: 'house' },
+  command: ['claude', '-p'],
+  secrets: { 'loom-token': { file: 'loom-token' }, 'github-token': { file: 'github-token' }, 'claude-oauth': { env: 'CLAUDE_CODE_OAUTH_TOKEN' } },
+  env: { ART_REPO: 'https://example.com/art.git' },
+  mounts: { state: '/home/art/.local/state', nested: '/var/lib/containers', mirror: '/garage/git/art.git' },
+  nested: true,
+  hostname: 'art-house',
+};
+
+function agentRepo(dir, houseFile = HOUSE, extra = () => {}) {
   mkdirSync(join(dir, 'house'), { recursive: true });
-  writeFileSync(join(dir, 'house', 'up'), houseUp);
-  chmodSync(join(dir, 'house', 'up'), 0o755);
+  writeFileSync(join(dir, 'house', 'Containerfile'), 'FROM scratch\n');
+  writeFileSync(join(dir, 'house', 'house.json'), typeof houseFile === 'string' ? houseFile : JSON.stringify(houseFile));
+  extra(dir);
   for (const args of [['init', '-q', '-b', 'main'], ['add', '-A'], ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'house']]) {
     assert.equal(spawnSync('git', args, { cwd: dir }).status, 0);
   }
@@ -33,15 +53,23 @@ function agentRepo(dir, houseUp) {
 
 async function until(f, ms = 8000) {
   const end = Date.now() + ms;
-  while (Date.now() < end) { const v = f(); if (v) return v; await sleep(50); }
+  while (Date.now() < end) { const v = f(); if (v) return v; await sleep(25); }
   throw new Error('timed out');
 }
 
-const house = (id) => ok(api(env, fx, { caller: owner, path: 'list', body: {} })).houses.find((h) => h.id === id);
+function setAgent(body = {}) {
+  ok(api(env, fx, { caller: owner, path: 'set-agent', body: { agent: 'art', repo, nested: true, secrets: { 'github-token': 'gh-art', 'claude-oauth': 'claude-oauth-token' }, ...body } }));
+}
+const up = (task = 'say hi') => ok(api(env, fx, { caller: { kind: 'agent', agent: 'art' }, path: 'up', body: { task } }));
 
 beforeEach(() => {
   const home = mkdtempSync(join(tmpdir(), 'loom-box-run-'));
-  env = { HOME: home, PATH: process.env.PATH, LOOM_BOX_HOME: join(home, 'state'), LOOM_BOX_DATA: join(home, 'data'), LOOM_BOX_LOCAL_NAME: 'one' };
+  const bin = join(home, 'bin');
+  mkdirSync(bin);
+  copyFileSync(join(here, 'fake-podman.mjs'), join(bin, 'podman'));
+  chmodSync(join(bin, 'podman'), 0o755);
+  fake = join(bin, 'podman-state');
+  env = { HOME: home, PATH: process.env.PATH, LOOM_BOX_HOME: join(home, 'state'), LOOM_BOX_DATA: join(home, 'data'), LOOM_BOX_LOCAL_NAME: 'one', LOOM_BOX_PODMAN: join(bin, 'podman'), SECRET_IN_BOX_ENV: 'never-in-a-house' };
   revoked = [];
   fx = { now: () => new Date(), mint: () => 'loom_house_token_aaaaaaaaaaaaaaaa', revoke: (l) => revoked.push(l), secret: (n) => `secret:${n}` };
   repo = join(home, 'art-repo');
@@ -50,74 +78,140 @@ beforeEach(() => {
   r = runner(env, client, { loomUrl: 'http://loom.test/mcp', log: () => {} });
 });
 
-test('a house runs its task in a fresh clone with its secrets, and leaves nothing behind', async () => {
-  const out = join(env.HOME, 'out.json');
-  agentRepo(repo, `#!/bin/sh
-cat > ${out} <<EOF
-{"task": "$HOUSE_TASK", "agent": "$HOUSE_AGENT", "url": "$LOOM_URL", "token": "$(cat "$HOUSE_SECRETS_DIR/loom-token")",
- "gh": "$(cat "$HOUSE_SECRETS_DIR/github-token")", "mode": "$(stat -c %a "$HOUSE_SECRETS_DIR/github-token")", "pwd": "$(pwd)", "dir": "$HOUSE_SECRETS_DIR"}
-EOF
-`);
-  ok(api(env, fx, { caller: owner, path: 'set-agent', body: { agent: 'art', repo, secrets: { 'github-token': 'gh-art' } } }));
-  const h = ok(api(env, fx, { caller: { kind: 'agent', agent: 'art' }, path: 'up', body: { task: 'say hi' } }));
+test('a house is a container with exactly its own secrets, env and dirs, and nothing of the box\'s', async () => {
+  agentRepo(repo);
+  setAgent();
+  const h = up('say hi');
   await r.tick();
   await until(() => house(h.id).state === 'done');
-  const got = JSON.parse(readFileSync(out, 'utf-8'));
-  assert.deepEqual([got.task, got.agent, got.url, got.token, got.gh, got.mode], ['say hi', 'art', 'http://loom.test/mcp', 'loom_house_token_aaaaaaaaaaaaaaaa', 'secret:gh-art', '600']);
-  assert.match(got.pwd, /houses\/h-1\/repo$/);
-  assert.equal(existsSync(got.dir), false, 'the secrets are gone');
-  assert.equal(existsSync(got.pwd), false, 'the clone is gone');
+  const { args, seen, stdin } = ran(h.id);
+  assert.equal(stdin, 'say hi');
+  assert.deepEqual(seen, {
+    'mount:loom-token': 'loom_house_token_aaaaaaaaaaaaaaaa', 'mount:github-token': 'secret:gh-art', 'env:CLAUDE_CODE_OAUTH_TOKEN': 'secret:claude-oauth-token',
+  });
+  const s = args.join(' ');
+  for (const want of ['--rm', '--name loom-house-h-1', '--hostname art-house', '-i', ...NESTED_ARGS,
+    '-e ART_REPO=https://example.com/art.git', '-e LOOM_URL=http://loom.test/mcp', '-e HOUSE_ID=h-1', '-e HOUSE_AGENT=art']) assert.ok(s.includes(want), want);
+  const vols = args.filter((_, i) => args[i - 1] === '-v');
+  assert.deepEqual(vols.map((v) => v.split(':').slice(1).join(':')), ['/home/art/.local/state', '/var/lib/containers', '/garage/git/art.git:ro']);
+  for (const v of vols) assert.ok(v.startsWith(env.LOOM_BOX_DATA), `${v} is the box's own per-house or mirror dir`);
+  assert.ok(args.at(-3).startsWith('loom-house-art:'));
+  assert.deepEqual(args.slice(-2), ['claude', '-p']);
+  // Nothing of the box's: no secret values in argv, no box env, no home.
+  assert.ok(!s.includes('secret:') && !s.includes('loom_house_token') && !s.includes('never-in-a-house') && !s.includes(`${env.HOME}:`));
+  // After: its podman secrets, clone and dirs are gone; its token is revoked.
+  assert.deepEqual(readdirSync(join(fake, 'secrets')), []);
+  assert.deepEqual(readdirSync(join(env.LOOM_BOX_DATA, 'houses', h.id)), ['log']);
   assert.deepEqual(revoked, ['art · house h-1 on one']);
-  assert.equal(house(h.id).exit, 0);
 });
 
-test('a house that fails says so, with the tail of its log', async () => {
-  agentRepo(repo, '#!/bin/sh\necho "no gpu here" >&2\nexit 3\n');
-  ok(api(env, fx, { caller: owner, path: 'set-agent', body: { agent: 'art', repo } }));
-  const h = ok(api(env, fx, { caller: owner, path: 'up', body: { agent: 'art', task: 'x' } }));
-  await r.tick();
-  const done = await until(() => (house(h.id).state === 'failed' ? house(h.id) : null));
-  assert.equal(done.exit, 3);
-  assert.match(done.log, /no gpu here/);
-});
-
-test('a repo without the house command fails the house without running anything', async () => {
-  agentRepo(repo, '#!/bin/sh\nexit 0\n');
-  ok(api(env, fx, { caller: owner, path: 'set-agent', body: { agent: 'art', repo, houseCmd: 'house/missing' } }));
-  const h = ok(api(env, fx, { caller: owner, path: 'up', body: { agent: 'art', task: 'x' } }));
+test('nested containers only when the owner allows them', async () => {
+  agentRepo(repo);
+  setAgent({ nested: false });
+  const h = up();
   await r.tick();
   assert.equal(house(h.id).state, 'failed');
-  assert.match(house(h.id).log, /no house\/missing/);
+  assert.match(house(h.id).log, /hasn't allowed that/);
+  assert.equal(existsSync(join(fake, 'runs', `loom-house-${h.id}.json`)), false);
+  assert.deepEqual(readdirSync(join(fake, 'secrets')), []);
+  // A house that doesn't ask gets none of the capabilities.
+  const plain = { ...HOUSE, nested: false };
+  const repo2 = join(env.HOME, 'plain');
+  agentRepo(repo2, plain);
+  setAgent({ repo: repo2, nested: false });
+  const h2 = up();
+  await r.tick();
+  await until(() => house(h2.id).state === 'done');
+  assert.ok(!ran(h2.id).args.some((a) => a.startsWith('--cap-add') || a === '/dev/net/tun'));
+});
+
+test('a house file that wants a secret its agent\'s houses don\'t get is refused', async () => {
+  agentRepo(repo);
+  setAgent({ secrets: { 'github-token': 'gh-art' } });
+  const h = up();
+  await r.tick();
+  assert.equal(house(h.id).state, 'failed');
+  assert.match(house(h.id).log, /wants claude-oauth/);
   assert.deepEqual(revoked, ['art · house h-1 on one']);
 });
 
-test('stop ends a running house and everything it started', async () => {
-  const pidfile = join(env.HOME, 'child.pid');
-  agentRepo(repo, `#!/bin/sh\nsleep 300 &\necho $! > ${pidfile}\nwait\n`);
-  ok(api(env, fx, { caller: owner, path: 'set-agent', body: { agent: 'art', repo } }));
-  const h = ok(api(env, fx, { caller: owner, path: 'up', body: { agent: 'art', task: 'wait' } }));
+test('a house file is checked: no host paths, no reserved env, nothing unknown', async () => {
+  for (const [bad, why] of [
+    [{ ...HOUSE, mounts: { home: '/home/art' } }, /only state, nested and mirror/],
+    [{ ...HOUSE, mounts: { state: '/run/secrets' } }, /isn't a usable path/],
+    [{ ...HOUSE, env: { LD_PRELOAD: '/x.so' } }, /LD_PRELOAD isn't allowed/],
+    [{ ...HOUSE, privileged: true }, /unknown key: privileged/],
+    [{ ...HOUSE, build: { containerfile: '../Containerfile', context: 'house' } }, /path inside the repo/],
+  ]) {
+    const dir = mkdtempSync(join(env.HOME, 'bad-'));
+    agentRepo(dir, bad);
+    setAgent({ repo: dir });
+    const h = up();
+    await r.tick();
+    assert.equal(house(h.id).state, 'failed');
+    assert.match(house(h.id).log, why);
+  }
+});
+
+test('a Containerfile that\'s a symlink out of the repo is refused', async () => {
+  const outside = join(env.HOME, 'Evilfile');
+  writeFileSync(outside, 'FROM scratch\n');
+  agentRepo(repo, { ...HOUSE, build: { containerfile: 'house/Linked', context: 'house' } }, (d) => symlinkSync(outside, join(d, 'house', 'Linked')));
+  setAgent();
+  const h = up();
   await r.tick();
-  await until(() => existsSync(pidfile) && readFileSync(pidfile, 'utf-8').trim());
-  const child = Number(readFileSync(pidfile, 'utf-8'));
+  assert.equal(house(h.id).state, 'failed');
+  assert.match(house(h.id).log, /points outside the repo/);
+});
+
+test('the image is built once per build context, and a failed build fails the house', async () => {
+  agentRepo(repo);
+  setAgent();
+  const a = up('one');
+  await r.tick();
+  await until(() => house(a.id).state === 'done');
+  const b = up('two');
+  await r.tick();
+  await until(() => house(b.id).state === 'done');
+  assert.equal(readFileSync(join(fake, 'builds'), 'utf-8').trim().split('\n').length, 1);
+  podmanCfg({ build: 1 });
+  writeFileSync(join(repo, 'house', 'Containerfile'), 'FROM scratch\nRUN true\n');
+  spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qam', 'change'], { cwd: repo });
+  const c = up('three');
+  await r.tick();
+  assert.equal(house(c.id).state, 'failed');
+  assert.match(house(c.id).log, /build broke/);
+});
+
+test('stop ends a running house through podman', async () => {
+  agentRepo(repo);
+  setAgent();
+  podmanCfg({ run: 'sleep' });
+  const h = up('wait');
+  await r.tick();
+  await until(() => existsSync(join(fake, 'runs', `loom-house-${h.id}.pid`)));
   assert.equal(house(h.id).state, 'running');
   ok(api(env, fx, { caller: owner, path: 'down', body: { id: h.id } }));
   await r.tick();
   await until(() => house(h.id).state === 'stopped');
-  await until(() => { try { process.kill(child, 0); return false; } catch { return true; } });
+  assert.ok(existsSync(join(fake, 'runs', `loom-house-${h.id}.stop`)));
+  assert.deepEqual(readdirSync(join(fake, 'secrets')), []);
 });
 
-test('a box that restarted under its houses reports them gone', async () => {
-  agentRepo(repo, '#!/bin/sh\nsleep 300\n');
-  ok(api(env, fx, { caller: owner, path: 'set-agent', body: { agent: 'art', repo } }));
-  const h = ok(api(env, fx, { caller: owner, path: 'up', body: { agent: 'art', task: 'x' } }));
+test('a box that restarted under a house removes what\'s left of it and says so', async () => {
+  agentRepo(repo);
+  setAgent();
+  podmanCfg({ run: 'sleep' });
+  const h = up('x');
   await r.tick();
   await until(() => house(h.id).state === 'running');
   const pid = r.houses.get(h.id).child.pid;
-  // A new runner: the box's process restarted and knows nothing.
   const fresh = runner(env, client, { loomUrl: 'http://loom.test/mcp', log: () => {} });
   await fresh.tick();
   assert.equal(house(h.id).state, 'failed');
   assert.match(house(h.id).log, /no longer has this house/);
+  assert.ok(existsSync(join(fake, 'runs', `loom-house-${h.id}.rm`)));
+  assert.deepEqual(readdirSync(join(fake, 'secrets')), []);
   process.kill(-pid, 'SIGKILL');
 });
 

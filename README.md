@@ -14,9 +14,9 @@ On loom's own machine, which is the control plane and the first box:
 
 ```bash
 ln -s ~/Code/loom-box/src/cli.mjs ~/.local/bin/loom-box
-# How an agent's house is made: its repo, the command in it, which secrets it gets.
-loom box agent art --repo https://github.com/sleepunit-agents/art.git --house-cmd house/up \
-  --repo-secret github-art-e-fish-token --secret github-token=github-art-e-fish-token --secret claude-oauth=claude-oauth-token
+# How an agent's house is made: its repo (whose house file describes the container), which secrets it gets.
+loom box agent art --repo https://github.com/sleepunit-agents/art.git \
+  --repo-secret github-art-e-fish-token --secret github-token=github-art-e-fish-token --secret claude-oauth=claude-oauth-token --nested
 loom box run --local          # as a user service: runs houses here
 ```
 
@@ -47,18 +47,35 @@ As the owner on loom's machine, add `--agent <name>`. From a body anywhere, with
 
 **Needs** match a box's facts by key and part of the value. `gpu:5090` matches `gpu:nvidia-geforce-rtx-5090`, and a bare need like `jonathan-rig` matches a label the owner gave the box. A box reports its own facts (os, arch, cpus, mem, container runtime, GPUs via `nvidia-smi`) every time it polls.
 
-## The house command
+## The house file
 
-A house is the agent's repo, cloned fresh, with its house command (default `house/up`) run in its own process group. It gets:
+**A house is a container, and only a container.** The box checks out the agent's repo, reads its house file (default `house/house.json`), builds the image, and runs it with podman itself. No agent code runs on the box outside a container.
 
-| | |
-|---|---|
-| `HOUSE_TASK` | what to do |
-| `HOUSE_ID`, `HOUSE_AGENT` | which house, whose |
-| `HOUSE_SECRETS_DIR` | a 0700 dir: `loom-token` (an `agent:<agent>` token for this house only) and the agent's house secrets, a file each, 0600 |
-| `LOOM_URL` | loom's MCP endpoint |
+```json
+{
+  "build": { "containerfile": "house/Containerfile", "context": "house" },
+  "command": ["claude", "-p"],
+  "task": "stdin",
+  "secrets": {
+    "loom-token":   { "file": "loom-token" },
+    "github-token": { "file": "github-token" },
+    "claude-oauth": { "env": "CLAUDE_CODE_OAUTH_TOKEN" }
+  },
+  "env": { "ART_REPO": "https://github.com/sleepunit-agents/art.git" },
+  "mounts": { "state": "/home/art/.local/state", "nested": "/var/lib/containers", "mirror": "/garage/git/art.git" },
+  "nested": true,
+  "hostname": "art-house"
+}
+```
 
-What the container is, and how it's run, is the repo's business: Art's `house/up` runs its tank. When the command exits, the box deletes the secrets dir and the clone, tells the control plane `done`, `failed` (with the exit code and the end of the log) or `stopped`, and the house's token is revoked.
+- **The image** is built from the repo's Containerfile and cached by the git tree of its build context, so an unchanged house reuses it.
+- **Secrets** become the house's own podman secrets: a file under `/run/secrets/`, or an env var. `loom-token` is always there: an `agent:<agent>` token for this house only. The rest are the ones the control plane gives this agent's houses. The house file only says where each one lands; it can't ask for more.
+- **Mounts** are only the box's own per-house dirs: `state` (thrown away after), `nested` (the house's own nested-container storage) and `mirror` (the box's mirror of the repo, read-only). There are no host paths, and nothing of the box's environment or home goes in.
+- **Env** gets `LOOM_URL`, `HOUSE_ID` and `HOUSE_AGENT`, plus the house file's own plain values. The task arrives on stdin, or as `HOUSE_TASK`.
+- **Nested containers** (`"nested": true`: the extra capabilities Art's tank needs, still rootless) run only if the owner allows them for that agent (`loom box agent <agent> --nested`, or the agents page). The house file can only ask.
+- **Anything else in the house file is refused,** not ignored: unknown keys, paths outside the repo (a symlinked Containerfile included), reserved env names.
+
+When the container exits, the box removes its podman secrets and its dirs, then tells the control plane `done`, `failed` (with the exit code and the end of the log) or `stopped`, and the house's token is revoked.
 
 ## How it talks
 
@@ -77,7 +94,7 @@ A box never reads loom's stores, and loom never reaches into a box. The box poll
 - **A box holds what it's given, while it's given it.** It only gets secrets for a house assigned to it, once, at claim time, and only the ones named in that agent's house config. That config lives on the control plane, so a box can't widen it. The secrets sit in the house's 0600 files until the house ends.
 - **A compromised box** gets the agents it may host, for the houses it's given, with the secrets those houses get. It can't read memory, read knowledge, use the page or touch other boxes. Revoking it (on the page, or with `loom box revoke`) revokes its credential and every live house token it holds.
 - **A body can't fetch secrets.** A house's token is an ordinary `agent:<name>` token. It reaches MCP and the CLI as that agent, and the secrets piece won't hand a value to a body. Only the box fetched them, for the house.
-- **The house command is the agent's own code, and it runs as the box's user.** That's the known gap in this version. The house command can read whatever that user can: on a box, its box credential (so it could act as the box); on loom's own machine, the whole household, including the secrets store and its key. Today the boundary is the container the house command starts (Art's tank is rootless podman, with its keys as podman secrets and no host home mounted), plus who's allowed to set an agent's house config: only the owner, per agent. So set an agent's house only if you'd let that repo run as that user, on every box that may host it. Running each house under its own user, so the box's files are out of reach, is the next step.
+- **A box only runs containers.** The agent's code runs inside its container, which is rootless podman with no host home, no box env and only its own dirs and secrets. The agent's Containerfile builds under podman too. So a house can't read the box's credential, the box's files, or (on loom's own machine) the household. Nested containers widen what the container may do inside its own user namespace, which is why the owner has to allow them per agent.
 - **Revocation doesn't fail open.** A revoke that fails (loom's token file busy) is queued and retried on every box poll until it goes, and a revoked box's name can't be reused until its old credential is gone.
 - State on the control plane: `~/.config/loom-box/state.json` (0600, in a 0700 dir; `LOOM_BOX_HOME` moves it). On a box: `box.json` and `credential` (0600) in the same dir, and repo mirrors and house dirs under `~/.local/share/loom-box` (`LOOM_BOX_DATA`).
 

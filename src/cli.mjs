@@ -9,8 +9,8 @@
 // On loom's own machine (the control plane, and its first box):
 //   loom box add <name> [--may-host a,b] [--labels x,y]   enroll a box; prints its credential once
 //   loom box revoke <name>                                 revoke a box and its houses' tokens
-//   loom box agent <agent> --repo <url> [--house-cmd house/up] [--branch b]
-//                  [--repo-secret <store-name>] [--secret as=from]...   how its house is made
+//   loom box agent <agent> --repo <url> [--house-file house/house.json] [--nested]
+//                  [--branch b] [--repo-secret <store-name>] [--secret as=from]...   how its house is made
 //   loom box primary <agent> [<box>]                       an agent's primary (default: this machine)
 //   loom box run --local                                   run houses here (a user service)
 // Anywhere (here as the owner; elsewhere with LOOM_URL + LOOM_TOKEN_FILE, as that token):
@@ -125,7 +125,7 @@ async function main(argv, env) {
     case 'agent': {
       const [agent] = positional(rest);
       const secrets = Object.fromEntries(flags(rest, '--secret').map((p) => { const [k, v] = p.split('='); return [k, v ?? k]; }));
-      out(setAgent(env, realEffects(env), { agent, repo: flag(rest, '--repo'), houseCmd: flag(rest, '--house-cmd'), branch: flag(rest, '--branch'), repoSecret: flag(rest, '--repo-secret'), secrets }));
+      out(setAgent(env, realEffects(env), { agent, repo: flag(rest, '--repo'), houseFile: flag(rest, '--house-file'), nested: rest.includes('--nested'), branch: flag(rest, '--branch'), repoSecret: flag(rest, '--repo-secret'), secrets }));
       return;
     }
     case 'primary': { const [agent, box] = positional(rest); out(setPrimary(env, realEffects(env), { agent, box })); return; }

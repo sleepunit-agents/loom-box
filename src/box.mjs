@@ -3,18 +3,19 @@
 // loom never reaches into it (runtime.md, "Boxes" 5): it polls, so a box
 // behind NAT or on hotel wifi works the same.
 //
-// A house: the agent's repo checked out fresh, its house command run with
-//   HOUSE_ID, HOUSE_AGENT, HOUSE_TASK  what to do
-//   HOUSE_SECRETS_DIR                  loom-token (agent:<agent>, this house's
-//                                      only) and the agent's house secrets, a
-//                                      file each, 0600; removed when it ends
-//   LOOM_URL                           where loom is (MCP)
-// and its own process group, so stopping it takes everything it started.
+// A house is a container, and only a container (house.mjs): the box checks
+// out the agent's repo, reads its house file, builds the image (cached by the
+// build context's git tree), and runs it with podman, with the house's own
+// podman secrets (its agent:<agent> token and the secrets the control plane
+// gave it), its own state and nested-container dirs, and the repo mirror
+// read-only. No agent code runs on the box itself. When it ends, its secrets,
+// clone and dirs go.
 import { spawn, spawnSync } from 'node:child_process';
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { arch, cpus, homedir, platform, totalmem } from 'node:os';
 import { join as pathJoin } from 'node:path';
 import { BOX_NAME, stateDir } from './state.mjs';
+import { containerName, missingSecrets, parseHouseFile, podmanSecret, runArgs } from './house.mjs';
 
 export const POLL_MS = 15_000;
 const STOP_GRACE_MS = 30_000;
@@ -24,6 +25,7 @@ export class BoxError extends Error {}
 
 const configPath = (env) => pathJoin(stateDir(env), 'box.json');
 const credPath = (env) => pathJoin(stateDir(env), 'credential');
+const podman = (env) => env.LOOM_BOX_PODMAN || 'podman';
 const dataDir = (env) => env.LOOM_BOX_DATA || pathJoin(env.HOME || homedir(), '.local', 'share', 'loom-box');
 
 function writePrivate(path, text) {
@@ -142,12 +144,47 @@ function checkout(env, house, workdir, repoAuth) {
   } finally {
     if (askpass) { rmSync(askpass, { force: true }); rmSync(pathJoin(workdir, '.repo-auth'), { force: true }); }
   }
-  const repo = realpathSync(pathJoin(workdir, 'repo'));
-  const cmd = pathJoin(repo, house.houseCmd);
-  if (!existsSync(cmd)) throw new BoxError(`${house.agent}'s repo has no ${house.houseCmd}`);
-  const real = realpathSync(cmd);
-  if (!real.startsWith(repo + '/')) throw new BoxError(`${house.houseCmd} points outside the repo`);
-  return { repo, cmd: real };
+  return { repo: realpathSync(pathJoin(workdir, 'repo')), mirror };
+}
+
+/** A path inside the clone, or an error: a symlink can't point a build outside it. */
+function inside(repo, rel, what) {
+  const p = pathJoin(repo, rel);
+  if (!existsSync(p)) throw new BoxError(`the repo has no ${rel} (${what})`);
+  const real = realpathSync(p);
+  if (real !== repo && !real.startsWith(repo + '/')) throw new BoxError(`${rel} points outside the repo`);
+  return real;
+}
+
+function pod(env, args, opts = {}) {
+  const r = spawnSync(podman(env), args, { env: { PATH: env.PATH, HOME: env.HOME, ...(env.XDG_RUNTIME_DIR ? { XDG_RUNTIME_DIR: env.XDG_RUNTIME_DIR } : {}) }, encoding: 'utf-8', timeout: 3_600_000, ...opts });
+  if (r.error) throw new BoxError(`podman: ${r.error.message}`);
+  return r;
+}
+
+/**
+ * The house's image: built from its Containerfile, tagged by the git tree of
+ * its build context and the Containerfile's blob, so an unchanged house file
+ * reuses the image and any change builds a new one.
+ */
+function image(env, h, house, repo, logFd) {
+  const ctx = inside(repo, house.build.context, 'build context');
+  const cf = inside(repo, house.build.containerfile, 'Containerfile');
+  const rev = (spec) => {
+    const r = spawnSync('git', ['-C', repo, 'rev-parse', spec], { encoding: 'utf-8' });
+    if (r.status !== 0) throw new BoxError(`git rev-parse ${spec}: ${(r.stderr || '').trim()}`);
+    return r.stdout.trim();
+  };
+  const tag = `loom-house-${h.agent}:${rev(`HEAD:${house.build.context}`).slice(0, 12)}${rev(`HEAD:${house.build.containerfile}`).slice(0, 8)}`;
+  if (pod(env, ['image', 'exists', tag]).status === 0) return tag;
+  const b = pod(env, ['build', '-t', tag, '-f', cf, ctx], { stdio: ['ignore', logFd, logFd] });
+  if (b.status !== 0) throw new BoxError(`the image didn't build (exit ${b.status}); see the house log`);
+  return tag;
+}
+
+function rootless(env) {
+  const r = pod(env, ['info', '--format', '{{.Host.Security.Rootless}}']);
+  return r.status === 0 && r.stdout.trim() === 'true';
 }
 
 /**
@@ -158,11 +195,21 @@ function checkout(env, house, workdir, repoAuth) {
 export function runner(env, client, { loomUrl, labels = [], log = (m) => process.stderr.write(`loom-box: ${m}\n`) }) {
   const houses = new Map(); // id -> { child, dir, stopAt? }
 
+  /** Everything a house leaves behind but its log. */
+  function clean(h, dir, secretNames) {
+    if (secretNames.length) pod(env, ['secret', 'rm', ...secretNames.map((n) => podmanSecret(h.id, n))]);
+    for (const d of ['repo', 'state', 'nested']) {
+      const p = pathJoin(dir, d);
+      if (!existsSync(p)) continue;
+      // Nested storage holds files owned by the container's subordinate ids.
+      if (pod(env, ['unshare', 'rm', '-rf', p]).status !== 0) rmSync(p, { recursive: true, force: true });
+    }
+  }
+
   async function start(h) {
     const dir = pathJoin(dataDir(env), 'houses', h.id);
     rmSync(dir, { recursive: true, force: true });
     mkdirSync(dir, { recursive: true, mode: 0o700 });
-    const secretsDir = pathJoin(dir, 'secrets');
     let claimed;
     try {
       claimed = await client.call('claim', { id: h.id });
@@ -171,39 +218,54 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
       rmSync(dir, { recursive: true, force: true });
       return;
     }
+    let made = [];
     try {
-      mkdirSync(secretsDir, { mode: 0o700 });
-      writePrivate(pathJoin(secretsDir, 'loom-token'), claimed.token + '\n');
-      for (const [name, value] of Object.entries(claimed.secrets || {})) writePrivate(pathJoin(secretsDir, name), value);
-      const { repo, cmd } = checkout(env, h, dir, claimed.repoAuth);
-      const out = openSync(pathJoin(dir, 'log'), 'a', 0o600);
-      const child = spawn(cmd, [], {
-        cwd: repo,
+      const logFd = openSync(pathJoin(dir, 'log'), 'a', 0o600);
+      const { repo, mirror } = checkout(env, h, dir, claimed.repoAuth);
+      const house = parseHouseFile(readFileSync(inside(repo, h.houseFile || 'house/house.json', 'house file'), 'utf-8'));
+      // Every house gets its own loom token; the rest are what the control plane chose.
+      const given = { ...(claimed.secrets || {}), 'loom-token': claimed.token };
+      const missing = missingSecrets(house, given);
+      if (missing.length) throw new BoxError(`the house file wants ${missing.join(', ')}, which ${h.agent}'s houses don't get`);
+      if (house.nested && !rootless(env)) throw new BoxError('nested containers need rootless podman on the box');
+      const tag = image(env, h, house, repo, logFd);
+      const dirs = { mirror };
+      for (const d of ['state', 'nested']) { dirs[d] = pathJoin(dir, d); mkdirSync(dirs[d], { mode: 0o700 }); }
+      const args = runArgs(house, { id: h.id, agent: h.agent, loomUrl, task: h.task, image: tag, dirs, allowNested: !!claimed.nested });
+      // The house's own podman secrets, each value on stdin (never argv).
+      for (const name of Object.keys(house.secrets)) {
+        const r = pod(env, ['secret', 'create', '--replace', podmanSecret(h.id, name), '-'], { input: given[name] });
+        if (r.status !== 0) throw new BoxError(`couldn't make the house's ${name} secret`);
+        made.push(name);
+      }
+      // The repo was only needed to build: the house clones what it wants itself.
+      rmSync(pathJoin(dir, 'repo'), { recursive: true, force: true });
+      const child = spawn(podman(env), args, {
         detached: true,
-        stdio: ['ignore', out, out],
-        env: {
-          PATH: env.PATH, HOME: env.HOME, LANG: env.LANG || 'C.UTF-8',
-          ...(env.XDG_RUNTIME_DIR ? { XDG_RUNTIME_DIR: env.XDG_RUNTIME_DIR } : {}),
-          HOUSE_ID: h.id, HOUSE_AGENT: h.agent, HOUSE_TASK: h.task, HOUSE_SECRETS_DIR: secretsDir, LOOM_URL: loomUrl,
-        },
+        stdio: [house.task === 'stdin' ? 'pipe' : 'ignore', logFd, logFd],
+        env: { PATH: env.PATH, HOME: env.HOME, ...(env.XDG_RUNTIME_DIR ? { XDG_RUNTIME_DIR: env.XDG_RUNTIME_DIR } : {}) },
       });
-      closeSync(out);
+      closeSync(logFd);
+      if (house.task === 'stdin') { child.stdin.on('error', () => {}); child.stdin.end(h.task); }
+      const secretNames = made;
+      made = [];
       houses.set(h.id, { child, dir });
       log(`started ${h.id} (${h.agent})`);
       await client.call('report', { id: h.id, state: 'running' }).catch((e) => log(`report ${h.id}: ${e.message}`));
       child.on('exit', (code, signal) => {
         const entry = houses.get(h.id);
         houses.delete(h.id);
-        rmSync(secretsDir, { recursive: true, force: true });
-        rmSync(pathJoin(dir, 'repo'), { recursive: true, force: true });
+        clean(h, dir, secretNames);
         const state = entry?.stopAt ? 'stopped' : code === 0 ? 'done' : 'failed';
         log(`${h.id} ${state} (${signal ?? `exit ${code}`})`);
         client.call('report', { id: h.id, state, exit: code ?? -1, log: tail(pathJoin(dir, 'log')) }).catch((e) => log(`report ${h.id}: ${e.message}`));
       });
     } catch (err) {
-      rmSync(secretsDir, { recursive: true, force: true });
+      clean(h, dir, made);
       log(`${h.id} failed to start: ${err.message}`);
-      await client.call('report', { id: h.id, state: 'failed', log: `the box couldn't start it: ${err.message}` }).catch(() => {});
+      // The build's own output is in the house log: send its end along with why.
+      const out = tail(pathJoin(dir, 'log'));
+      await client.call('report', { id: h.id, state: 'failed', log: `the box couldn't start it: ${err.message}${out ? `\n${out}` : ''}` }).catch(() => {});
     }
   }
 
@@ -211,6 +273,8 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
     const e = houses.get(id);
     if (!e || e.stopAt) return;
     e.stopAt = Date.now();
+    // podman stop reaches the container itself; the signal, the podman client.
+    spawn(podman(env), ['stop', '-t', '25', containerName(id)], { stdio: 'ignore', env: { PATH: env.PATH, HOME: env.HOME, ...(env.XDG_RUNTIME_DIR ? { XDG_RUNTIME_DIR: env.XDG_RUNTIME_DIR } : {}) } }).on('error', () => {});
     try { process.kill(-e.child.pid, 'SIGTERM'); } catch { /* gone */ }
     setTimeout(() => { try { process.kill(-e.child.pid, 'SIGKILL'); } catch { /* gone */ } }, STOP_GRACE_MS).unref();
   }
@@ -221,6 +285,11 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
     // it restarted under them. Say so rather than leave them "running" forever.
     for (const id of want.active || []) {
       if (houses.has(id)) continue;
+      // Whatever of it is still here goes: its container, its secrets.
+      pod(env, ['rm', '-f', containerName(id)]);
+      const ls = pod(env, ['secret', 'ls', '--format', '{{.Name}}']);
+      const mine = (ls.stdout || '').split('\n').filter((n) => n.startsWith(`loom-${id}-`));
+      if (mine.length) pod(env, ['secret', 'rm', ...mine]);
       const state = (want.stop || []).includes(id) ? 'stopped' : 'failed';
       await client.call('report', { id, state, log: 'the box no longer has this house (it restarted while the house was up)' })
         .catch((e) => log(`report ${id}: ${e.message}`));
