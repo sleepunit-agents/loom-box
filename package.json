@@ -1,0 +1,17 @@
+{
+  "name": "loom-box",
+  "version": "0.1.0",
+  "private": true,
+  "description": "loom's runtime piece: boxes (machines that call home) and houses (an agent's container on a box, started on request)",
+  "type": "module",
+  "bin": {
+    "loom-box": "src/cli.mjs"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "AGPL-3.0-or-later"
+}
