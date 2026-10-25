@@ -478,6 +478,11 @@ export function saveState(env, effects, caller, { id, state }) {
     boxOf(s, caller);
     const h = s.houses[id];
     if (!h || h.box !== caller.subject || !h.service) fail(`no service house ${id} for this box`, 404);
+    // Only the service's current house, while it's up, speaks for its state: not
+    // one written off by a forced move, not an old one ending late.
+    if (s.services?.[serviceKey(h.agent, h.service)]?.house !== id || !['starting', 'running', 'stopping'].includes(h.state)) {
+      fail(`${id} isn't ${h.service}'s live house any more; its state isn't kept`, 409);
+    }
     if (typeof state !== 'string' || state.length > MAX_STATE_BYTES || !/^[A-Za-z0-9+/=]*$/.test(state)) fail(`a service's state is base64, ${MAX_STATE_BYTES} bytes at most`, 413);
     s.serviceState ??= {};
     s.serviceState[serviceKey(h.agent, h.service)] = { from: id, box: caller.subject, at: now(effects), data: state };
@@ -485,10 +490,33 @@ export function saveState(env, effects, caller, { id, state }) {
   });
 }
 
+/** The owner hands a service its starting state (moving a bridge that ran outside the runtime in). */
+export function seedState(env, effects, { agent, name, state }) {
+  if (!AGENT_NAME.test(agent ?? '') || !SERVICE_NAME.test(name ?? '')) fail('seed-state takes an agent and a service name');
+  if (typeof state !== 'string' || state.length > MAX_STATE_BYTES || !/^[A-Za-z0-9+/=]*$/.test(state)) fail(`a service's state is base64, ${MAX_STATE_BYTES} bytes at most`, 413);
+  return update(env, (s) => {
+    const key = serviceKey(agent, name);
+    const h = s.houses[s.services?.[key]?.house];
+    if (h && LIVE.has(h.state)) fail(`${key} is up: its own state wins; take it down first`, 409);
+    s.serviceState ??= {};
+    s.serviceState[key] = { from: 'seed', box: null, at: now(effects), data: state };
+    return { service: key, saved: state.length };
+  });
+}
+
+/** The owner reads a service's saved state back (moving a bridge out of the runtime). */
+export function savedState(env, { agent, name }) {
+  const s = load(env);
+  const v = s.serviceState?.[serviceKey(agent, name)];
+  if (!v) fail(`no saved state for ${agent}/${name}`, 404);
+  return { service: serviceKey(agent, name), at: v.at, from: v.from, state: v.data };
+}
+
 // ---------------------------------------------------------------- the API
 
 const OWNER_ONLY = {
   'add-box': addBox, 'revoke-box': revokeBox, 'may-host': setMayHost, 'set-primary': setPrimary, 'set-agent': setAgent,
+  'seed-state': seedState, 'saved-state': (env, _fx, b) => savedState(env, b),
 };
 const BOX_ONLY = { hello, poll, claim, report, 'save-state': saveState };
 

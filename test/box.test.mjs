@@ -253,6 +253,21 @@ test('a service moves between boxes by hand-off, and its state goes with it', as
   } finally { sweep(); }
 });
 
+test('a saved state that would unpack too big is refused before it touches the disk', async () => {
+  agentRepo(repo, { ...HOUSE, services: { discord: { command: ['x'], mounts: { state: '/s' } } } });
+  setAgent();
+  const big = join(env.HOME, 'big');
+  mkdirSync(big);
+  spawnSync('sh', ['-c', `head -c 70000000 /dev/zero > ${big}/zeros`]);
+  const packed = spawnSync('tar', ['-C', big, '-czf', '-', '.'], { maxBuffer: 1 << 26 }).stdout.toString('base64');
+  assert.ok(packed.length < 700_000);
+  ok(api(env, fx, { caller: owner, path: 'seed-state', body: { agent: 'art', name: 'discord', state: packed } }));
+  const s = ok(api(env, fx, { caller: { kind: 'agent', agent: 'art' }, path: 'service-up', body: { name: 'discord' } }));
+  await r.tick();
+  assert.equal(house(s.house).state, 'failed');
+  assert.match(house(s.house).log, /too big to unpack/);
+});
+
 test('join keeps the credential 0600 and refuses one that names another box', async () => {
   const fakeFetch = (name) => async (url, init) => {
     assert.equal(url, 'https://loom.test/api/box/hello');

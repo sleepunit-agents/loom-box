@@ -19,6 +19,8 @@
 //   loom box service up <name> [--agent a] [--box b]       a long-lived house (a bridge), kept up
 //   loom box service move <name> <box> [--force]           hand it off: stopped there, then started here
 //   loom box service down <name>
+//   loom box service seed <name> --from <dir>             its starting state (a bridge moving in)
+//   loom box service state <name> --to <dir>              its saved state, unpacked (a bridge moving out)
 // On a box:
 //   loom box join <loom-url> --name <name> [--labels x,y]  the credential on stdin, or prompted
 //   loom box run                                           poll and run houses (a user service)
@@ -26,6 +28,7 @@
 //   loom box ui --json | ui page --json | ui act --json | api --json
 //   loom box bundle export | bundle import [--force]       its part of loom's bundle
 import { readFileSync, realpathSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
 import { addBox, api, down, list, revokeBox, setAgent, setPrimary, up } from './control.mjs';
@@ -150,6 +153,20 @@ async function main(argv, env) {
       if (sub === 'up') return out(await call('service-up', { agent, name, box: flag(rest, '--box') }));
       if (sub === 'down') return out(await call('service-down', { agent, name }));
       if (sub === 'move') return out(await call('service-move', { agent, name, box, force: rest.includes('--force') }));
+      if (sub === 'seed') {
+        const from = flag(rest, '--from');
+        const t = spawnSync('tar', ['-C', from, '-czf', '-', '.'], { maxBuffer: 64 * 1024 * 1024 });
+        if (t.status !== 0) throw new Fail(`couldn't pack ${from}`);
+        return out(await call('seed-state', { agent, name, state: t.stdout.toString('base64') }));
+      }
+      if (sub === 'state') {
+        const to = flag(rest, '--to');
+        const r = await call('saved-state', { agent, name });
+        const t = spawnSync('tar', ['-C', to, '--no-same-owner', '-xzf', '-'], { input: Buffer.from(r.state, 'base64') });
+        if (t.status !== 0) throw new Fail(`couldn't unpack into ${to}`);
+        process.stdout.write(`unpacked ${r.service}'s state from ${r.at} (${r.from}) into ${to}\n`);
+        return;
+      }
       throw new Fail('usage: loom box service up|move|down <name> …', 2);
     }
     case 'down': { out(await ownerOrRemote(env)('down', { id: positional(rest)[0] })); return; }

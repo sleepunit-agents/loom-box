@@ -119,4 +119,7 @@ test('state is saved only by the house\'s own box, within loom\'s body cap', () 
   assert.equal(call(box('one'), 'save-state', { id: h.id, state: 'A'.repeat(800_000) }).status, 413);
   assert.equal(call(box('one'), 'save-state', { id: h.id, state: 'not base64!' }).status, 413);
   ok(call(box('one'), 'save-state', { id: h.id, state: 'AAAA' }));
+  // Once it's written off (a forced move), it can't overwrite the state the next house gets.
+  ok(call(owner, 'service-move', { agent: 'art', name: 'discord', box: 'laptop', force: true }));
+  assert.equal(call(box('one'), 'save-state', { id: h.id, state: 'BBBB' }).status, 409);
 });
