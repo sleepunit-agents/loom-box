@@ -193,31 +193,63 @@ const MAX_STATE_ENTRIES = 10_000;
 
 export function restoreState(dir, b64) {
   if (!b64) return;
-  // Decompressed here with a hard cap (a small tarball can't unpack to a full
-  // disk), then every header checked: plain files and directories only, no
-  // links, no absolute or ".." names. Only then does tar see the bytes.
-  let tarball;
+  // Unpacked here, not by tar: decompressed with a hard cap (a small tarball
+  // can't fill the disk), every header checked (ustar magic and checksum,
+  // octal sizes, plain files and directories only, no absolute or ".." names,
+  // nothing after the end), and only what passed is written, by this code, as
+  // files and directories it creates itself. No links can come out of it.
+  let tar;
   try {
-    tarball = gunzipSync(Buffer.from(b64, 'base64'), { maxOutputLength: MAX_STATE_UNPACKED });
+    tar = gunzipSync(Buffer.from(b64, 'base64'), { maxOutputLength: MAX_STATE_UNPACKED });
   } catch {
     throw new BoxError('the service\'s saved state is too big to unpack, or isn\'t a gzipped tarball');
   }
-  let entries = 0;
-  for (let off = 0; off + 512 <= tarball.length;) {
-    const hdr = tarball.subarray(off, off + 512);
-    if (hdr.every((b) => b === 0)) break; // the end
-    if (++entries > MAX_STATE_ENTRIES) throw new BoxError('the service\'s saved state has too many entries');
-    const field = (a, n) => hdr.subarray(a, a + n).toString('latin1').replace(/\0.*$/s, '');
-    const name = field(345, 155) ? `${field(345, 155)}/${field(0, 100)}` : field(0, 100);
+  const bad = (why) => { throw new BoxError(`the service's saved state was refused: ${why}`); };
+  const root = realpathSync(dir);
+  const entries = [];
+  let off = 0;
+  for (;;) {
+    if (off + 512 > tar.length) bad('it ends mid-header');
+    const hdr = tar.subarray(off, off + 512);
+    if (hdr.every((b) => b === 0)) {
+      // The end: two zero blocks, then nothing but zeros.
+      if (tar.subarray(off).some((b) => b !== 0)) bad('there is data after its end');
+      break;
+    }
+    if (entries.length >= MAX_STATE_ENTRIES) bad('too many entries');
+    const text = (a, n) => hdr.subarray(a, a + n).toString('latin1');
+    const field = (a, n) => text(a, n).replace(/\0[\s\S]*$/, '');
+    if (text(257, 6) !== 'ustar\0' && text(257, 6) !== 'ustar ') bad('a header isn\'t ustar');
+    const octal = (a, n, what) => {
+      const v = field(a, n).trim();
+      if (!/^[0-7]+$/.test(v)) bad(`a header's ${what} isn't octal`);
+      return parseInt(v, 8);
+    };
+    let sum = 0;
+    for (let i = 0; i < 512; i++) sum += i >= 148 && i < 156 ? 32 : hdr[i];
+    if (octal(148, 8, 'checksum') !== sum) bad('a header\'s checksum is wrong');
     const type = String.fromCharCode(hdr[156] || 48);
-    const size = parseInt(field(124, 12).trim() || '0', 8);
-    if (!['0', '5'].includes(type)) throw new BoxError('the service\'s saved state holds something other than plain files and directories');
-    if (!Number.isFinite(size) || size < 0) throw new BoxError('the service\'s saved state has a bad header');
-    if (name.startsWith('/') || name.split('/').includes('..')) throw new BoxError('the service\'s saved state names a path outside its dir');
+    const size = octal(124, 12, 'size');
+    const prefix = field(345, 155);
+    const name = (prefix ? `${prefix}/` : '') + field(0, 100);
+    if (type !== '0' && type !== '5') bad('it holds something other than plain files and directories');
+    if (type === '5' && size !== 0) bad('a directory has a size');
+    const parts = name.split('/').filter((p) => p !== '' && p !== '.');
+    if (name.startsWith('/') || parts.includes('..') || parts.some((p) => /[\0]/.test(p))) bad(`${name} is outside its dir`);
+    const dataEnd = off + 512 + size;
+    if (dataEnd > tar.length) bad('a file runs past its end');
+    entries.push({ type, parts, data: tar.subarray(off + 512, dataEnd) });
     off += 512 + Math.ceil(size / 512) * 512;
   }
-  const r = spawnSync('tar', ['-C', dir, '--no-same-owner', '--no-same-permissions', '-xf', '-'], { input: tarball, timeout: 60_000 });
-  if (r.status !== 0) throw new BoxError(`the service's saved state didn't unpack: ${(r.stderr || '').toString().trim().split('\n').pop()}`);
+  for (const e of entries) {
+    if (!e.parts.length) continue; // "./" itself
+    const target = pathJoin(root, ...e.parts);
+    if (!target.startsWith(root + '/')) bad('a path escapes its dir');
+    if (e.type === '5') { mkdirSync(target, { recursive: true, mode: 0o700 }); continue; }
+    mkdirSync(pathJoin(target, '..'), { recursive: true, mode: 0o700 });
+    // wx: never through, or over, something already there.
+    writeFileSync(target, e.data, { mode: 0o600, flag: 'wx' });
+  }
 }
 
 function packState(dir) {
