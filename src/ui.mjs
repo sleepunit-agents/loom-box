@@ -77,7 +77,7 @@ function boxesPage(env, nowMs) {
   if (agents.length) {
     sections.push({ id: 'up', title: 'Start a house', blocks: [{ type: 'form', action: 'up', submit: 'Start it', fields: [
       { name: 'agent', label: 'Agent', kind: 'choice', required: true, options: agents.map((a) => ({ value: a, label: a, detail: `primary: ${primaryOf(s, a, env)}` })) },
-      { name: 'box', label: 'Box', kind: 'choice', options: [{ value: '', label: 'Its primary, or the one box that has what it needs' },
+      { name: 'box', label: 'Box', kind: 'choice', value: '', options: [{ value: '', label: 'Its primary, or the one box that has what it needs' },
         ...live_boxes.map((b) => ({ value: b.name, label: b.name }))] },
       { name: 'needs', label: 'Needs', kind: 'text', hint: 'Optional, e.g. gpu:5090. A box that has it, and may host the agent.' },
       { name: 'task', label: 'Task', kind: 'textarea', required: true },
