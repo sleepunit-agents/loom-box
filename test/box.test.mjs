@@ -18,7 +18,9 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSyn
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { api } from '../src/control.mjs';
+import { MAX_STATE_BYTES, api } from '../src/control.mjs';
+import { PART_RAW, partsOf } from '../src/blobs.mjs';
+import { randomBytes } from 'node:crypto';
 import { joinLoom, runner } from '../src/box.mjs';
 import { NESTED_ARGS } from '../src/house.mjs';
 
@@ -232,11 +234,22 @@ test('a service moves between boxes by hand-off, and its state goes with it', as
   const lap = runner(lapEnv, lapClient, { loomUrl: 'http://loom.test/mcp', log: () => {} });
   const sweep = () => { for (const x of [r, lap]) for (const e of x.houses.values()) { try { process.kill(-e.child.pid, 'SIGKILL'); } catch { /* gone */ } } };
   try {
+  // A bridge moving in with more history than one part holds: seeded in parts.
+  const seed = join(env.HOME, 'seed');
+  mkdirSync(seed);
+  writeFileSync(join(seed, 'cursor'), 'seeded;');
+  writeFileSync(join(seed, 'archive.jsonl'), randomBytes(900 * 1024));
+  const packed = spawnSync('tar', ['--format=ustar', '-C', seed, '-czf', '-', '.'], { maxBuffer: 1 << 26 }).stdout;
+  const parts = partsOf(packed.length);
+  assert.ok(parts >= 3);
+  for (let part = 0; part < parts; part++) {
+    ok(api(env, fx, { caller: owner, path: 'seed-state', body: { agent: 'art', name: 'discord', part, parts, state: packed.subarray(part * PART_RAW, (part + 1) * PART_RAW).toString('base64') } }));
+  }
   const up1 = ok(api(env, fx, { caller: { kind: 'agent', agent: 'art' }, path: 'service-up', body: { name: 'discord' } }));
   await r.tick();
   await until(() => existsSync(join(fake, 'runs', `loom-house-${up1.house}.json`)));
   const first = ran(up1.house);
-  assert.equal(first.stateBefore, null);
+  assert.equal(first.stateBefore, 'seeded;', 'the first house started from the seed, put back together from its parts');
   assert.ok(first.args.includes('HOUSE_SERVICE=discord') && first.args.includes('--stop-timeout'));
   assert.ok(!first.args.includes('-i'), 'a service has no task on stdin');
   ok(api(env, fx, { caller: owner, path: 'service-move', body: { agent: 'art', name: 'discord', box: 'laptop' } }));
@@ -248,7 +261,9 @@ test('a service moves between boxes by hand-off, and its state goes with it', as
   await lap.tick();
   const second = list().services[0].house;
   await until(() => existsSync(join(fake, 'runs', `loom-house-${second}.json`)));
-  assert.equal(ran(second).stateBefore, `loom-house-${up1.house};`, 'the laptop picked up where the first box left off');
+  assert.equal(ran(second).stateBefore, `seeded;loom-house-${up1.house};`, 'the laptop picked up where the first box left off');
+  const saved = ok(api(env, fx, { caller: owner, path: 'saved-state', body: { agent: 'art', name: 'discord' } }));
+  assert.ok(saved.parts >= 3 && saved.from === up1.house, 'the old box sent all of it back, in parts');
   assert.equal(house(up1.house).state, 'stopped');
   } finally { sweep(); }
 });
@@ -260,7 +275,7 @@ test('a saved state that would unpack too big is refused before it touches the d
   mkdirSync(big);
   spawnSync('sh', ['-c', `head -c 70000000 /dev/zero > ${big}/zeros`]);
   const packed = spawnSync('tar', ['-C', big, '-czf', '-', '.'], { maxBuffer: 1 << 26 }).stdout.toString('base64');
-  assert.ok(packed.length < 700_000);
+  assert.ok(packed.length < MAX_STATE_BYTES, 'small packed: one part');
   ok(api(env, fx, { caller: owner, path: 'seed-state', body: { agent: 'art', name: 'discord', state: packed } }));
   const s = ok(api(env, fx, { caller: { kind: 'agent', agent: 'art' }, path: 'service-up', body: { name: 'discord' } }));
   await r.tick();

@@ -17,6 +17,7 @@ import { arch, cpus, homedir, platform, totalmem } from 'node:os';
 import { join as pathJoin } from 'node:path';
 import { BOX_NAME, stateDir } from './state.mjs';
 import { containerName, missingSecrets, parseHouseFile, podmanSecret, runArgs, specFor } from './house.mjs';
+import { PART_RAW, joinParts, partsOf } from './blobs.mjs';
 
 export const POLL_MS = 15_000;
 const STOP_GRACE_MS = 30_000;
@@ -191,8 +192,8 @@ function image(env, h, house, repo, logFd) {
 const MAX_STATE_UNPACKED = 64 * 1024 * 1024;
 const MAX_STATE_ENTRIES = 10_000;
 
-export function restoreState(dir, b64) {
-  if (!b64) return;
+export function restoreState(dir, packed) {
+  if (!packed) return;
   // Unpacked here, not by tar: decompressed with a hard cap (a small tarball
   // can't fill the disk), every header checked (ustar magic and checksum,
   // octal sizes, plain files and directories only, no absolute or ".." names,
@@ -200,7 +201,7 @@ export function restoreState(dir, b64) {
   // files and directories it creates itself. No links can come out of it.
   let tar;
   try {
-    tar = gunzipSync(Buffer.from(b64, 'base64'), { maxOutputLength: MAX_STATE_UNPACKED });
+    tar = gunzipSync(Buffer.isBuffer(packed) ? packed : Buffer.from(packed, 'base64'), { maxOutputLength: MAX_STATE_UNPACKED });
   } catch {
     throw new BoxError('the service\'s saved state is too big to unpack, or isn\'t a gzipped tarball');
   }
@@ -256,7 +257,27 @@ function packState(dir) {
   // ustar: plain headers only, the kind restoreState accepts.
   const r = spawnSync('tar', ['--format=ustar', '-C', dir, '-czf', '-', '.'], { maxBuffer: 64 * 1024 * 1024, timeout: 60_000 });
   if (r.status !== 0) return null;
-  return r.stdout.toString('base64');
+  return r.stdout;
+}
+
+/** A service's saved state, fetched a part at a time after its claim, and checked whole. */
+async function fetchState(client, id, shape) {
+  if (!shape) return null;
+  const chunks = [];
+  for (let part = 0; part < shape.parts; part++) {
+    const r = await client.call('state-part', { id, part });
+    chunks.push(Buffer.from(r.data, 'base64'));
+  }
+  return joinParts(chunks, shape);
+}
+
+/** A service's state back to loom, a part at a time; the last part makes it the one the next house gets. */
+async function sendState(client, id, packed) {
+  const parts = partsOf(packed.length);
+  for (let part = 0; part < parts; part++) {
+    const state = packed.subarray(part * PART_RAW, (part + 1) * PART_RAW).toString('base64');
+    await client.call('save-state', { id, part, parts, state });
+  }
 }
 
 function rootless(env) {
@@ -308,7 +329,7 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
       const tag = image(env, h, house, repo, logFd);
       const dirs = { mirror };
       for (const d of ['state', 'nested']) { dirs[d] = pathJoin(dir, d); mkdirSync(dirs[d], { mode: 0o700 }); }
-      if (h.service) restoreState(dirs.state, claimed.state);
+      if (h.service) restoreState(dirs.state, await fetchState(client, h.id, claimed.state));
       const args = runArgs(house, { id: h.id, agent: h.agent, loomUrl, task: h.task, service: h.service, image: tag, dirs, allowNested: !!claimed.nested });
       // The house's own podman secrets, each value on stdin (never argv).
       for (const name of Object.keys(house.secrets)) {
@@ -343,7 +364,7 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
         if (h.service) {
           const packed = packState(pathJoin(dir, 'state'));
           if (packed !== null) {
-            await client.call('save-state', { id: h.id, state: packed }).catch((e) => log(`couldn't save ${h.service}'s state: ${e.message}`));
+            await sendState(client, h.id, packed).catch((e) => log(`couldn't save ${h.service}'s state: ${e.message}`));
           }
         }
         clean(h, dir, secretNames);

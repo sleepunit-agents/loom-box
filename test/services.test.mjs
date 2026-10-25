@@ -11,6 +11,8 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { api } from '../src/control.mjs';
+import { MAX_PARTS, PART_RAW, joinParts, partsOf } from '../src/blobs.mjs';
+import { load, update } from '../src/state.mjs';
 
 let env, fx, revoked, clock;
 const owner = { kind: 'owner' };
@@ -54,9 +56,15 @@ test('a move is a hand-off: nothing on the new box until the old one says it sto
   // It saves its state and says it stopped.
   ok(call(box('one'), 'save-state', { id: h.id, state: Buffer.from('cursor=42').toString('base64') }));
   ok(call(box('one'), 'report', { id: h.id, state: 'stopped' }));
-  // Now, and only now, the laptop gets it, with that state.
-  const next = run('laptop');
-  assert.equal(Buffer.from(next.c.state, 'base64').toString(), 'cursor=42');
+  // Now, and only now, the laptop gets it, with that state (a part at a time, between claim and start).
+  const p = ok(call(box('laptop'), 'poll')).start[0];
+  const c2 = ok(call(box('laptop'), 'claim', { id: p.id }));
+  assert.deepEqual([c2.state.bytes, c2.state.parts], [9, 1]);
+  assert.equal(call(box('one'), 'state-part', { id: p.id, part: 0 }).status, 404, 'only the box that claimed it');
+  assert.equal(Buffer.from(ok(call(box('laptop'), 'state-part', { id: p.id, part: 0 })).data, 'base64').toString(), 'cursor=42');
+  ok(call(box('laptop'), 'report', { id: p.id, state: 'running' }));
+  assert.equal(call(box('laptop'), 'state-part', { id: p.id, part: 0 }).status, 409, 'once it runs, its starting state is no longer handed out');
+  const next = { h: p };
   assert.deepEqual([svc().box, svc().moveTo, live().length], ['laptop', null, 1]);
 });
 
@@ -110,6 +118,39 @@ test('a waiting service just moves; a forced move is the owner\'s and writes the
   assert.deepEqual(revoked, [`art · house ${h.id} on laptop`]);
   assert.equal(ok(call(owner, 'list')).houses.find((x) => x.id === h.id).state, 'lost');
   run('one');
+});
+
+test('a big state travels in parts, and only a complete one replaces the last', () => {
+  ok(call(art, 'service-up', { name: 'slack' }));
+  const { h } = run('one');
+  ok(call(box('one'), 'save-state', { id: h.id, state: Buffer.from('old').toString('base64') }));
+  // 1 MB of history, in parts that each fit loom's body cap.
+  const big = Buffer.alloc(1024 * 1024 + 7, 'x');
+  const parts = partsOf(big.length);
+  assert.ok(parts > 2);
+  for (let part = 0; part < parts; part++) {
+    const r = ok(call(box('one'), 'save-state', { id: h.id, part, parts, state: big.subarray(part * PART_RAW, (part + 1) * PART_RAW).toString('base64') }));
+    assert.equal(r.saved, part === parts - 1);
+    // Until the last part is in, the next house would still get the old one.
+    if (part < parts - 1) assert.equal(ok(call(owner, 'saved-state', { agent: 'art', name: 'slack' })).bytes, 3);
+  }
+  const back = ok(call(owner, 'saved-state', { agent: 'art', name: 'slack' }));
+  assert.deepEqual([back.bytes, back.parts], [big.length, parts]);
+  const chunks = [Buffer.from(back.state, 'base64')];
+  for (let part = 1; part < parts; part++) chunks.push(Buffer.from(ok(call(owner, 'saved-state', { agent: 'art', name: 'slack', part })).state, 'base64'));
+  assert.ok(joinParts(chunks, back).equals(big));
+  // It isn't in state.json, only its size and hash.
+  assert.ok(!JSON.stringify(load(env).serviceState).includes('xxxx'));
+  assert.equal(call(box('one'), 'save-state', { id: h.id, part: 0, parts: MAX_PARTS + 1, state: 'AAAA' }).status, 413);
+  assert.equal(call(box('one'), 'save-state', { id: h.id, part: 3, parts: 2, state: 'AAAA' }).status, 400);
+});
+
+test('an old inline state moves out of state.json the first time it\'s read', () => {
+  ok(call(art, 'service-up', { name: 'discord' }));
+  update(env, (s) => { s.serviceState = { 'art/discord': { from: 'h-0', box: 'one', at: 'x', data: Buffer.from('cursor=7').toString('base64') } }; });
+  const r = ok(call(owner, 'saved-state', { agent: 'art', name: 'discord' }));
+  assert.equal(Buffer.from(r.state, 'base64').toString(), 'cursor=7');
+  assert.equal(load(env).serviceState['art/discord'].data, undefined);
 });
 
 test('state is saved only by the house\'s own box, within loom\'s body cap', () => {

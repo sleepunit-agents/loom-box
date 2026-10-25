@@ -8,6 +8,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { load, localBoxName, stateDir, update } from './state.mjs';
+import { putFile, readWhole } from './blobs.mjs';
 
 const FORMAT = 'loom-box/1';
 const AGE_RECIPIENT = /^age1[0-9a-z]{20,}$/;
@@ -23,7 +24,11 @@ export function exportPart(env) {
   recipients.forEach((r, i) => {
     if (!AGE_RECIPIENT.test(r) && !SSH_RECIPIENT.test(r)) throw new BundleError(`recipient ${i + 1} isn't an age recipient (age1…) or an ssh public key`);
   });
-  const doc = JSON.stringify({ format: FORMAT, state: load(env) });
+  // Each service's saved state goes along, whole: it lives in its own file beside state.json.
+  const state = load(env);
+  const blobs = {};
+  for (const v of Object.values(state.serviceState ?? {})) if (v.file) blobs[v.file] = readWhole(env, v).toString('base64');
+  const doc = JSON.stringify({ format: FORMAT, state, blobs });
   const r = spawnSync(age(env), ['-e', '-a', ...recipients.flatMap((x) => ['-r', x])], { input: doc, env, encoding: 'utf-8' });
   if (r.error || r.status !== 0) throw new BundleError(`age: ${r.error?.message || (r.stderr || '').trim().split('\n').pop()}`);
   return r.stdout;
@@ -69,6 +74,13 @@ export function importPart(env, part, { force = false } = {}) {
     h.note = 'restored from a bundle; it was not over when the bundle was made';
     if (h.tokenLabel && !s.pendingRevokes.includes(h.tokenLabel)) s.pendingRevokes.push(h.tokenLabel);
   }
+  // The services' saved states first: state.json names their files.
+  const files = doc.blobs && typeof doc.blobs === 'object' ? doc.blobs : {};
+  for (const v of Object.values(s.serviceState ?? {})) {
+    if (!v.file) continue;
+    if (typeof files[v.file] !== 'string') throw new BundleError(`the part names ${v.file} for a service's state but doesn't carry it. Nothing was written.`);
+  }
+  for (const v of Object.values(s.serviceState ?? {})) if (v.file) putFile(env, v.file, Buffer.from(files[v.file], 'base64'));
   update(env, (cur) => {
     // A forced restore replaces what's here: whatever this machine still owed
     // a revoke (its own queue, its live houses' tokens, its boxes' credentials)

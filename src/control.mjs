@@ -7,6 +7,7 @@
 // permitted box that has what it needs, or to the agent's primary. If that
 // doesn't name exactly one box, it says why and starts nothing.
 import { AGENT_NAME, BOX_NAME, SECRET_NAME, StateError, load, localBoxName, nextHouseId, update } from './state.mjs';
+import { MAX_PARTS, PART_RAW, drop, partsOf, putPart, putWhole, readPart } from './blobs.mjs';
 
 const TERMINAL = new Set(['done', 'failed', 'stopped', 'lost']);
 const LIVE = new Set(['wanted', 'starting', 'running', 'stopping']);
@@ -319,8 +320,10 @@ export function claim(env, effects, caller, { id }) {
       for (const [as, from] of Object.entries(a.secrets || {})) secrets[as] = effects.secret(from);
       const repoAuth = a.repoSecret ? effects.secret(a.repoSecret) : null;
       h.state = 'starting'; h.tokenLabel = label; h.updated = now(effects);
-      const saved = h.service ? s.serviceState?.[serviceKey(h.agent, h.service)] : undefined;
-      return { id, agent: h.agent, token, secrets, repoAuth, nested: !!a.nested, ...(h.service ? { service: h.service, state: saved?.data ?? null } : {}) };
+      const saved = h.service ? stateMeta(env, s, serviceKey(h.agent, h.service)) : undefined;
+      // The state itself comes after, a part at a time (state-part): just its shape here.
+      const state = saved ? { bytes: saved.bytes, sha256: saved.sha256, parts: partsOf(saved.bytes) } : null;
+      return { id, agent: h.agent, token, secrets, repoAuth, nested: !!a.nested, ...(h.service ? { service: h.service, state } : {}) };
     } catch (err) {
       // The house stays waiting; the token it was about to get goes (or is queued to).
       revokeOrQueue(s, effects, label);
@@ -368,7 +371,42 @@ export function report(env, effects, caller, { id, state, exit, log }) {
 const SERVICE_NAME = /^[a-z][a-z0-9-]{0,39}$/;
 const RESTART_BASE_MS = 5_000;
 const RESTART_MAX_MS = 300_000;
-export const MAX_STATE_BYTES = 700_000; // base64 of the tarball, inside loom's 1 MB body cap
+/** One part of a saved state, as base64: inside loom's 1 MB body cap (src/blobs.mjs). */
+export const MAX_STATE_BYTES = Math.ceil(PART_RAW / 3) * 4;
+
+/**
+ * A service's saved state, in parts (src/blobs.mjs): a part checked and
+ * decoded, or the reason it can't be. Each part is base64 of up to PART_RAW
+ * bytes; `parts` is how many there are in all (at most MAX_PARTS).
+ */
+function checkPart({ state, part = 0, parts = 1 }) {
+  if (!Number.isInteger(parts) || parts < 1 || parts > MAX_PARTS) fail(`a service's state comes in 1 to ${MAX_PARTS} parts`, 413);
+  if (!Number.isInteger(part) || part < 0 || part >= parts) fail(`part ${part} isn't one of ${parts}`);
+  if (typeof state !== 'string' || state.length > MAX_STATE_BYTES || !/^[A-Za-z0-9+/=]*$/.test(state)) fail(`each part of a service's state is base64, ${MAX_STATE_BYTES} bytes at most`, 413);
+  return { buf: Buffer.from(state, 'base64'), part, parts };
+}
+
+/** A part in; once all of them are, the state the service starts from next time. */
+function keepPart(env, s, key, from, box, at, { buf, part, parts }) {
+  let whole;
+  try { whole = putPart(env, key, from, part, parts, buf); } catch (e) { if (e instanceof RangeError) fail("a service's state is 48 MB at most", 413); throw e; }
+  if (!whole) return { part, parts, saved: false };
+  s.serviceState ??= {};
+  const old = s.serviceState[key];
+  s.serviceState[key] = { from, box, at, ...whole };
+  if (old?.file && old.file !== whole.file) drop(env, old);
+  return { part, parts, saved: true, bytes: whole.bytes };
+}
+
+/** A service's saved state, moved out of state.json into its own file if it's still an old inline one. */
+function stateMeta(env, s, key) {
+  const v = s.serviceState?.[key];
+  if (v && typeof v.data === 'string') {
+    const { data, ...rest } = v;
+    s.serviceState[key] = { ...rest, ...putWhole(env, key, v.from ?? 'old', Buffer.from(data, 'base64')) };
+  }
+  return s.serviceState?.[key];
+}
 export const serviceKey = (agent, name) => `${agent}/${name}`;
 
 function serviceOf(s, caller, { agent, name }) {
@@ -472,10 +510,11 @@ function serviceHouseEnded(s, h, effects) {
   startService(s, svc, effects, Math.min(RESTART_BASE_MS * 2 ** (svc.restarts - 1), RESTART_MAX_MS));
 }
 
-/** A box saves a service's state when its house stops (base64 of a tarball). */
-export function saveState(env, effects, caller, { id, state }) {
+/** A box saves a service's state when its house stops: a gzipped tarball, in parts. */
+export function saveState(env, effects, caller, body) {
   return update(env, (s) => {
     boxOf(s, caller);
+    const { id } = body;
     const h = s.houses[id];
     if (!h || h.box !== caller.subject || !h.service) fail(`no service house ${id} for this box`, 404);
     // Only the service's current house, while it's up, speaks for its state: not
@@ -483,33 +522,47 @@ export function saveState(env, effects, caller, { id, state }) {
     if (s.services?.[serviceKey(h.agent, h.service)]?.house !== id || !['starting', 'running', 'stopping'].includes(h.state)) {
       fail(`${id} isn't ${h.service}'s live house any more; its state isn't kept`, 409);
     }
-    if (typeof state !== 'string' || state.length > MAX_STATE_BYTES || !/^[A-Za-z0-9+/=]*$/.test(state)) fail(`a service's state is base64, ${MAX_STATE_BYTES} bytes at most`, 413);
-    s.serviceState ??= {};
-    s.serviceState[serviceKey(h.agent, h.service)] = { from: id, box: caller.subject, at: now(effects), data: state };
-    return { saved: state.length };
+    return keepPart(env, s, serviceKey(h.agent, h.service), id, caller.subject, now(effects), checkPart(body));
   });
 }
 
-/** The owner hands a service its starting state (moving a bridge that ran outside the runtime in). */
-export function seedState(env, effects, { agent, name, state }) {
+/** A box reads part of the state a service house it just claimed starts from. */
+export function statePart(env, _effects, caller, { id, part }) {
+  return update(env, (s) => {
+    boxOf(s, caller);
+    const h = s.houses[id];
+    if (!h || h.box !== caller.subject || !h.service) fail(`no service house ${id} for this box`, 404);
+    // Between its claim and its start: the one moment the box needs it.
+    if (h.state !== 'starting') fail(`house ${id} is ${h.state}; its state was for starting it`, 409);
+    const meta = stateMeta(env, s, serviceKey(h.agent, h.service));
+    if (!meta) fail(`${h.service} has no saved state`, 404);
+    if (!Number.isInteger(part) || part < 0 || part >= partsOf(meta.bytes)) fail(`no part ${part}`, 404);
+    return { part, parts: partsOf(meta.bytes), data: readPart(env, meta, part).toString('base64') };
+  });
+}
+
+/** The owner hands a service its starting state (moving a bridge that ran outside the runtime in), in parts. */
+export function seedState(env, effects, body) {
+  const { agent, name } = body;
   if (!AGENT_NAME.test(agent ?? '') || !SERVICE_NAME.test(name ?? '')) fail('seed-state takes an agent and a service name');
-  if (typeof state !== 'string' || state.length > MAX_STATE_BYTES || !/^[A-Za-z0-9+/=]*$/.test(state)) fail(`a service's state is base64, ${MAX_STATE_BYTES} bytes at most`, 413);
+  const part = checkPart(body);
   return update(env, (s) => {
     const key = serviceKey(agent, name);
     const h = s.houses[s.services?.[key]?.house];
     if (h && LIVE.has(h.state)) fail(`${key} is up: its own state wins; take it down first`, 409);
-    s.serviceState ??= {};
-    s.serviceState[key] = { from: 'seed', box: null, at: now(effects), data: state };
-    return { service: key, saved: state.length };
+    return { service: key, ...keepPart(env, s, key, 'seed', null, now(effects), part) };
   });
 }
 
-/** The owner reads a service's saved state back (moving a bridge out of the runtime). */
-export function savedState(env, { agent, name }) {
-  const s = load(env);
-  const v = s.serviceState?.[serviceKey(agent, name)];
-  if (!v) fail(`no saved state for ${agent}/${name}`, 404);
-  return { service: serviceKey(agent, name), at: v.at, from: v.from, state: v.data };
+/** The owner reads a service's saved state back (moving a bridge out of the runtime), a part at a time. */
+export function savedState(env, { agent, name, part = 0 }) {
+  return update(env, (s) => {
+    const key = serviceKey(agent, name);
+    const v = stateMeta(env, s, key);
+    if (!v) fail(`no saved state for ${agent}/${name}`, 404);
+    if (!Number.isInteger(part) || part < 0 || part >= partsOf(v.bytes)) fail(`no part ${part}`, 404);
+    return { service: key, at: v.at, from: v.from, bytes: v.bytes, sha256: v.sha256, part, parts: partsOf(v.bytes), state: readPart(env, v, part).toString('base64') };
+  });
 }
 
 // ---------------------------------------------------------------- the API
@@ -518,7 +571,7 @@ const OWNER_ONLY = {
   'add-box': addBox, 'revoke-box': revokeBox, 'may-host': setMayHost, 'set-primary': setPrimary, 'set-agent': setAgent,
   'seed-state': seedState, 'saved-state': (env, _fx, b) => savedState(env, b),
 };
-const BOX_ONLY = { hello, poll, claim, report, 'save-state': saveState };
+const BOX_ONLY = { hello, poll, claim, report, 'save-state': saveState, 'state-part': statePart };
 
 /** One API call, as loom's piece API hands it over: {caller, path, body} → {status, body}. */
 export function api(env, effects, { caller, path, body }) {

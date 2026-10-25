@@ -38,6 +38,7 @@ import { act, manifest, page } from './ui.mjs';
 import { BoxError, joinLoom, loadConfig, POLL_MS, remoteClient, restoreState, runner } from './box.mjs';
 import { localBoxName, renameLocal, stateDir } from './state.mjs';
 import { exportPart, importPart } from './bundle.mjs';
+import { PART_RAW, joinParts, partsOf } from './blobs.mjs';
 
 const USAGE = readFileSync(fileURLToPath(import.meta.url), 'utf-8').split('\n').slice(1).filter((l) => l.startsWith('//')).map((l) => l.slice(3)).join('\n') + '\n';
 
@@ -159,15 +160,23 @@ async function main(argv, env) {
         const from = flag(rest, '--from');
         const t = spawnSync('tar', ['--format=ustar', '-C', from, '-czf', '-', '.'], { maxBuffer: 64 * 1024 * 1024 });
         if (t.status !== 0) throw new Fail(`couldn't pack ${from}`);
-        return out(await call('seed-state', { agent, name, state: t.stdout.toString('base64') }));
+        // In parts, each inside loom's body cap; the last one in makes it the service's state.
+        const parts = partsOf(t.stdout.length);
+        let r;
+        for (let part = 0; part < parts; part++) {
+          r = await call('seed-state', { agent, name, part, parts, state: t.stdout.subarray(part * PART_RAW, (part + 1) * PART_RAW).toString('base64') });
+        }
+        return out(r);
       }
       if (sub === 'state') {
         const to = flag(rest, '--to');
-        const r = await call('saved-state', { agent, name });
-        // Into a new, empty dir, with the box's own checks: sized first, plain files only.
         if (existsSync(to) && readdirSync(to).length) throw new Fail(`${to} isn't empty: unpack into a new directory, then move what you need`);
+        const r = await call('saved-state', { agent, name, part: 0 });
+        const chunks = [Buffer.from(r.state, 'base64')];
+        for (let part = 1; part < r.parts; part++) chunks.push(Buffer.from((await call('saved-state', { agent, name, part })).state, 'base64'));
+        // Into a new, empty dir, with the box's own checks: sized first, plain files only.
         mkdirSync(to, { recursive: true, mode: 0o700 });
-        restoreState(to, r.state);
+        restoreState(to, joinParts(chunks, r));
         process.stdout.write(`unpacked ${r.service}'s state from ${r.at} (${r.from}) into ${to}\n`);
         return;
       }
