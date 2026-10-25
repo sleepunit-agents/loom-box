@@ -41,6 +41,7 @@ loom box up --task "render the frames"                     # the agent's primary
 loom box up --needs gpu:5090 --task "train the thing"      # the one box with a 5090 that may host the agent
 loom box up --box laptop --task "…"                        # that box
 loom box list | loom box down h-12
+loom box up --slot tending --task -                        # with its slot: restored at start, saved at the end, one house at a time
 loom box session                                           # a house here with you in it, at this terminal; it goes when you leave
 loom box attach h-14                                       # back into a session house on this box
 ```

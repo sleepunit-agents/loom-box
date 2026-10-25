@@ -164,3 +164,30 @@ test('state is saved only by the house\'s own box, within loom\'s body cap', () 
   ok(call(owner, 'service-move', { agent: 'art', name: 'discord', box: 'laptop', force: true }));
   assert.equal(call(box('one'), 'save-state', { id: h.id, state: 'BBBB' }).status, 409);
 });
+
+test('a slot is held by one house at a time, and its state goes from one to the next', () => {
+  const a = ok(call(art, 'up', { task: 'tend', slot: 'tending' }));
+  assert.equal(a.slot, 'tending');
+  assert.equal(call(art, 'up', { task: 'tend again', slot: 'tending' }).status, 409, 'one holder');
+  ok(call(art, 'up', { task: 'something else', slot: 'groom' }));
+  const p = ok(call(box('one'), 'poll')).start.find((h) => h.id === a.id);
+  assert.equal(p.slot, 'tending');
+  const c = ok(call(box('one'), 'claim', { id: a.id }));
+  assert.equal(c.state, null, 'a new slot starts empty');
+  ok(call(box('one'), 'report', { id: a.id, state: 'running' }));
+  ok(call(box('one'), 'save-state', { id: a.id, state: Buffer.from('last-run=1').toString('base64') }));
+  ok(call(box('one'), 'report', { id: a.id, state: 'done', exit: 0 }));
+  // Over: a late save from it isn't kept, and the next holder gets what it left.
+  assert.equal(call(box('one'), 'save-state', { id: a.id, state: 'AAAA' }).status, 409);
+  const b = ok(call(art, 'up', { task: 'tend', slot: 'tending' }));
+  ok(call(box('one'), 'poll'));
+  const cb = ok(call(box('one'), 'claim', { id: b.id }));
+  assert.equal(cb.state.bytes, 10);
+  assert.equal(Buffer.from(ok(call(box('one'), 'state-part', { id: b.id, part: 0 })).data, 'base64').toString(), 'last-run=1');
+  // The owner can read and seed it, but not while it's held.
+  assert.equal(Buffer.from(ok(call(owner, 'saved-state', { agent: 'art', name: 'tending', slot: true })).state, 'base64').toString(), 'last-run=1');
+  assert.equal(call(owner, 'seed-state', { agent: 'art', name: 'tending', slot: true, state: 'AAAA' }).status, 409);
+  // A slot and a service of the same name don't share state.
+  assert.equal(call(owner, 'saved-state', { agent: 'art', name: 'tending' }).status, 404);
+  assert.equal(call(art, 'up', { task: 'x', slot: 'Bad Name' }).status, 400);
+});

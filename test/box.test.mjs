@@ -383,3 +383,19 @@ test('a session house is told it is one, and the box keeps what attaching runs',
   assert.deepEqual(a, { container: `loom-house-${h.id}`, command: ['/home/art/Art/house/attach'] });
   } finally { process.kill(-r.houses.get(h.id).child.pid, 'SIGKILL'); }
 });
+
+test('a task house with a slot starts from it and leaves its own behind', async () => {
+  agentRepo(repo);
+  setAgent();
+  const seed = join(env.HOME, 'slot-seed');
+  mkdirSync(seed);
+  writeFileSync(join(seed, 'cursor'), 'seeded;');
+  const packed = spawnSync('tar', ['--format=ustar', '-C', seed, '-czf', '-', '.']).stdout.toString('base64');
+  ok(api(env, fx, { caller: owner, path: 'seed-state', body: { agent: 'art', name: 'tending', slot: true, state: packed } }));
+  const h = ok(api(env, fx, { caller: { kind: 'agent', agent: 'art' }, path: 'up', body: { task: 'tend', slot: 'tending' } }));
+  await r.tick();
+  await until(() => house(h.id).state === 'done');
+  assert.equal(ran(h.id).stateBefore, 'seeded;');
+  const saved = ok(api(env, fx, { caller: owner, path: 'saved-state', body: { agent: 'art', name: 'tending', slot: true } }));
+  assert.equal(saved.from, h.id, 'the house that ran left its state for the next');
+});

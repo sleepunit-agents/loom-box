@@ -329,7 +329,7 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
       const tag = image(env, h, house, repo, logFd);
       const dirs = { mirror };
       for (const d of ['state', 'nested']) { dirs[d] = pathJoin(dir, d); mkdirSync(dirs[d], { mode: 0o700 }); }
-      if (h.service) restoreState(dirs.state, await fetchState(client, h.id, claimed.state));
+      if (h.service || h.slot) restoreState(dirs.state, await fetchState(client, h.id, claimed.state));
       // A session house: what attaching to it runs, for `loom box attach` on this box.
       if (h.session) writeFileSync(pathJoin(dir, 'attach.json'), JSON.stringify({ container: containerName(h.id), command: house.attach ?? ['sh'] }), { mode: 0o600 });
       const args = runArgs(house, { id: h.id, agent: h.agent, loomUrl, task: h.task, service: h.service, session: !!h.session, image: tag, dirs, allowNested: !!claimed.nested, allowPorts: claimed.ports ?? [] });
@@ -375,10 +375,10 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
     // A service's state goes back to loom before anything else knows it stopped,
     // so the next box (a move, or a restart) picks up where this one left off.
     // (An adopted house's kind isn't known here: loom keeps state only for a service's.)
-    if (h.service || entry?.adopted) {
+    if (h.service || h.slot || entry?.adopted) {
       const packed = existsSync(pathJoin(dir, 'state')) ? packState(pathJoin(dir, 'state')) : null;
       if (packed !== null) {
-        await sendState(client, h.id, packed).catch((e) => { if (h.service) log(`couldn't save ${h.service}'s state: ${e.message}`); });
+        await sendState(client, h.id, packed).catch((e) => { if (h.service || h.slot) log(`couldn't save ${h.service ?? h.slot}'s state: ${e.message}`); });
       }
     }
     if (entry?.adopted) pod(env, ['rm', '-f', containerName(h.id)]);

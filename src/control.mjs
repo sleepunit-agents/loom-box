@@ -207,7 +207,7 @@ export function setAgent(env, effects, { agent, repo, houseFile, nested, branch,
 
 // ------------------------------------------------------- owner and agents
 
-export function up(env, effects, caller, { agent, box, needs, task, session }) {
+export function up(env, effects, caller, { agent, box, needs, task, session, slot }) {
   let a;
   if (caller.kind === 'agent') {
     if (agent && agent !== caller.agent) fail(`this token is ${caller.agent}'s; it can only ask for its own house`, 403);
@@ -220,14 +220,20 @@ export function up(env, effects, caller, { agent, box, needs, task, session }) {
   const sess = session === true;
   const t = sess ? '(an interactive session)' : str(task, 'the task', MAX_TASK);
   const n = listOf(needs, 'needs', FACT);
+  // A slot: a lane's own bookkeeping, restored into the house and saved when it ends.
+  const sl = slot === undefined || slot === null || slot === '' ? null : str(slot, 'the slot', 40);
+  if (sl && !SERVICE_NAME.test(sl)) fail('a slot name is lowercase letters, digits and dashes, like tending');
   if (box !== undefined && box !== null && box !== '' && !BOX_NAME.test(box)) fail('no box by that name', 404);
   return update(env, (s) => {
     if (!s.agents[a]) fail(`${a} has no house yet: the owner sets its repo on the Boxes page`, 409);
+    // One house holds a slot at a time: two would each start from the same state and the later save would win.
+    const holder = sl && Object.values(s.houses).find((x) => x.agent === a && x.slot === sl && LIVE.has(x.state));
+    if (holder) fail(`${holder.id} holds ${a}'s ${sl} slot; one house at a time`, 409);
     const where = placeHouse(s, a, { box: box || undefined, needs: n }, env);
     const id = nextHouseId(s);
     const at = now(effects);
-    s.houses[id] = { id, agent: a, box: where, task: t, needs: n, state: 'wanted', created: at, updated: at, by: caller.kind === 'agent' ? caller.agent : 'owner', ...(sess ? { session: true } : {}) };
-    return { id, agent: a, box: where, state: 'wanted', ...(sess ? { session: true } : {}) };
+    s.houses[id] = { id, agent: a, box: where, task: t, needs: n, state: 'wanted', created: at, updated: at, by: caller.kind === 'agent' ? caller.agent : 'owner', ...(sess ? { session: true } : {}), ...(sl ? { slot: sl } : {}) };
+    return { id, agent: a, box: where, state: 'wanted', ...(sess ? { session: true } : {}), ...(sl ? { slot: sl } : {}) };
   });
 }
 
@@ -295,7 +301,7 @@ export function poll(env, effects, caller, { facts } = {}) {
     return {
       start: mine.filter((h) => h.state === 'wanted' && mayHost(b, h.agent) && !(h.notBefore && Date.parse(h.notBefore) > Date.parse(now(effects)))).map((h) => {
         const a = s.agents[h.agent] || {};
-        return { id: h.id, agent: h.agent, task: h.task, service: h.service ?? null, session: !!h.session, repo: a.repo, houseFile: a.houseFile || 'house/house.json', branch: a.branch ?? null };
+        return { id: h.id, agent: h.agent, task: h.task, service: h.service ?? null, slot: h.slot ?? null, session: !!h.session, repo: a.repo, houseFile: a.houseFile || 'house/house.json', branch: a.branch ?? null };
       }),
       stop: mine.filter((h) => h.state === 'stopping').map((h) => h.id),
       // Taken by this box and not over: one the box doesn't have (it restarted) is lost.
@@ -329,10 +335,11 @@ export function claim(env, effects, caller, { id }) {
       for (const [as, from] of Object.entries(a.secrets || {})) secrets[as] = effects.secret(from);
       const repoAuth = a.repoSecret ? effects.secret(a.repoSecret) : null;
       h.state = 'starting'; h.tokenLabel = label; h.updated = now(effects);
-      const saved = h.service ? stateMeta(env, s, serviceKey(h.agent, h.service)) : undefined;
+      const key = stateKeyOf(h);
+      const saved = key ? stateMeta(env, s, key) : undefined;
       // The state itself comes after, a part at a time (state-part): just its shape here.
       const state = saved ? { bytes: saved.bytes, sha256: saved.sha256, parts: partsOf(saved.bytes) } : null;
-      return { id, agent: h.agent, token, secrets, repoAuth, nested: !!a.nested, ports: (a.ports ?? []).map(parsePortGrant).filter(Boolean), ...(h.service ? { service: h.service, state } : {}) };
+      return { id, agent: h.agent, token, secrets, repoAuth, nested: !!a.nested, ports: (a.ports ?? []).map(parsePortGrant).filter(Boolean), ...(h.service ? { service: h.service } : {}), ...(h.slot ? { slot: h.slot } : {}), ...(key ? { state } : {}) };
     } catch (err) {
       // The house stays waiting; the token it was about to get goes (or is queued to).
       revokeOrQueue(s, effects, label);
@@ -417,6 +424,16 @@ function stateMeta(env, s, key) {
   return s.serviceState?.[key];
 }
 export const serviceKey = (agent, name) => `${agent}/${name}`;
+export const slotKey = (agent, slot) => `${agent}/slot:${slot}`;
+/** Where a house's state is kept: its service's, its slot's, or nowhere. */
+const stateKeyOf = (h) => (h.service ? serviceKey(h.agent, h.service) : h.slot ? slotKey(h.agent, h.slot) : null);
+
+/** Whether this house, now, speaks for that state: a service's current house, or the slot's live holder. */
+function speaksFor(s, h) {
+  if (!['starting', 'running', 'stopping'].includes(h.state)) return false;
+  if (h.service) return s.services?.[serviceKey(h.agent, h.service)]?.house === h.id;
+  return !!h.slot;
+}
 
 function serviceOf(s, caller, { agent, name }) {
   const a = caller.kind === 'agent' ? caller.agent : agent;
@@ -525,13 +542,11 @@ export function saveState(env, effects, caller, body) {
     boxOf(s, caller);
     const { id } = body;
     const h = s.houses[id];
-    if (!h || h.box !== caller.subject || !h.service) fail(`no service house ${id} for this box`, 404);
-    // Only the service's current house, while it's up, speaks for its state: not
-    // one written off by a forced move, not an old one ending late.
-    if (s.services?.[serviceKey(h.agent, h.service)]?.house !== id || !['starting', 'running', 'stopping'].includes(h.state)) {
-      fail(`${id} isn't ${h.service}'s live house any more; its state isn't kept`, 409);
-    }
-    return keepPart(env, s, serviceKey(h.agent, h.service), id, caller.subject, now(effects), checkPart(body));
+    if (!h || h.box !== caller.subject || !stateKeyOf(h)) fail(`no house ${id} with state for this box`, 404);
+    // Only the service's current house (or the slot's holder), while it's up,
+    // speaks for its state: not one written off by a forced move, not an old one ending late.
+    if (!speaksFor(s, h)) fail(`${id} isn't ${h.service ?? h.slot}'s live house any more; its state isn't kept`, 409);
+    return keepPart(env, s, stateKeyOf(h), id, caller.subject, now(effects), checkPart(body));
   });
 }
 
@@ -540,11 +555,11 @@ export function statePart(env, _effects, caller, { id, part }) {
   return update(env, (s) => {
     boxOf(s, caller);
     const h = s.houses[id];
-    if (!h || h.box !== caller.subject || !h.service) fail(`no service house ${id} for this box`, 404);
+    if (!h || h.box !== caller.subject || !stateKeyOf(h)) fail(`no house ${id} with state for this box`, 404);
     // Between its claim and its start: the one moment the box needs it.
     if (h.state !== 'starting') fail(`house ${id} is ${h.state}; its state was for starting it`, 409);
-    const meta = stateMeta(env, s, serviceKey(h.agent, h.service));
-    if (!meta) fail(`${h.service} has no saved state`, 404);
+    const meta = stateMeta(env, s, stateKeyOf(h));
+    if (!meta) fail(`${h.service ?? h.slot} has no saved state`, 404);
     if (!Number.isInteger(part) || part < 0 || part >= partsOf(meta.bytes)) fail(`no part ${part}`, 404);
     return { part, parts: partsOf(meta.bytes), data: readPart(env, meta, part).toString('base64') };
   });
@@ -552,21 +567,21 @@ export function statePart(env, _effects, caller, { id, part }) {
 
 /** The owner hands a service its starting state (moving a bridge that ran outside the runtime in), in parts. */
 export function seedState(env, effects, body) {
-  const { agent, name } = body;
-  if (!AGENT_NAME.test(agent ?? '') || !SERVICE_NAME.test(name ?? '')) fail('seed-state takes an agent and a service name');
+  const { agent, name, slot } = body;
+  if (!AGENT_NAME.test(agent ?? '') || !SERVICE_NAME.test(name ?? '')) fail('seed-state takes an agent and a service (or slot) name');
   const part = checkPart(body);
   return update(env, (s) => {
-    const key = serviceKey(agent, name);
-    const h = s.houses[s.services?.[key]?.house];
-    if (h && LIVE.has(h.state)) fail(`${key} is up: its own state wins; take it down first`, 409);
+    const key = slot ? slotKey(agent, name) : serviceKey(agent, name);
+    const h = slot ? Object.values(s.houses).find((x) => x.agent === agent && x.slot === name && LIVE.has(x.state)) : s.houses[s.services?.[key]?.house];
+    if (h && LIVE.has(h.state)) fail(`${key} is in use by ${h.id}: its own state wins; let it end first`, 409);
     return { service: key, ...keepPart(env, s, key, 'seed', null, now(effects), part) };
   });
 }
 
 /** The owner reads a service's saved state back (moving a bridge out of the runtime), a part at a time. */
-export function savedState(env, { agent, name, part = 0 }) {
+export function savedState(env, { agent, name, part = 0, slot }) {
   return update(env, (s) => {
-    const key = serviceKey(agent, name);
+    const key = slot ? slotKey(agent, name) : serviceKey(agent, name);
     const v = stateMeta(env, s, key);
     if (!v) fail(`no saved state for ${agent}/${name}`, 404);
     if (!Number.isInteger(part) || part < 0 || part >= partsOf(v.bytes)) fail(`no part ${part}`, 404);

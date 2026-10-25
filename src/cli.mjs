@@ -16,7 +16,9 @@
 //   loom box rename-local                                  after renaming this machine: its box takes the new name
 //   loom box run --local                                   run houses here (a user service)
 // Anywhere (here as the owner; elsewhere with LOOM_URL + LOOM_TOKEN_FILE, as that token):
-//   loom box up [--agent a] [--box b] [--needs gpu:5090] --task <text|->   ask for a house
+//   loom box up [--agent a] [--box b] [--needs gpu:5090] [--slot s] --task <text|->   ask for a house
+//                                                         (--slot: its bookkeeping, restored and saved; one house at a time)
+//   loom box slot seed <name> --from <dir> | slot state <name> --to <dir>   a slot's state (the owner's)
 //   loom box list [--json]   |   loom box down <house>
 //   loom box session [--agent a]                           a house with an interactive session, here, at this terminal
 //   loom box attach <house>                                into a session house on this box (again)
@@ -147,7 +149,7 @@ async function main(argv, env) {
       const call = ownerOrRemote(env);
       // On loom's own machine, a body asking for "a house" means its own: the household's default agent.
       const agent = flag(rest, '--agent') ?? (env.LOOM_URL && env.LOOM_TOKEN_FILE ? undefined : defaultAgent(env));
-      const r = await call('up', { agent, box: flag(rest, '--box'), needs: flag(rest, '--needs'), task });
+      const r = await call('up', { agent, box: flag(rest, '--box'), needs: flag(rest, '--needs'), task, slot: flag(rest, '--slot') });
       if (json) return out(r);
       process.stdout.write(`${r.id}: ${r.agent} on ${r.box} (${r.state})\n`);
       return;
@@ -159,31 +161,17 @@ async function main(argv, env) {
       if (sub === 'up') return out(await call('service-up', { agent, name, box: flag(rest, '--box') }));
       if (sub === 'down') return out(await call('service-down', { agent, name }));
       if (sub === 'move') return out(await call('service-move', { agent, name, box, force: rest.includes('--force') }));
-      if (sub === 'seed') {
-        const from = flag(rest, '--from');
-        const t = spawnSync('tar', ['--format=ustar', '-C', from, '-czf', '-', '.'], { maxBuffer: 64 * 1024 * 1024 });
-        if (t.status !== 0) throw new Fail(`couldn't pack ${from}`);
-        // In parts, each inside loom's body cap; the last one in makes it the service's state.
-        const parts = partsOf(t.stdout.length);
-        let r;
-        for (let part = 0; part < parts; part++) {
-          r = await call('seed-state', { agent, name, part, parts, state: t.stdout.subarray(part * PART_RAW, (part + 1) * PART_RAW).toString('base64') });
-        }
-        return out(r);
-      }
-      if (sub === 'state') {
-        const to = flag(rest, '--to');
-        if (existsSync(to) && readdirSync(to).length) throw new Fail(`${to} isn't empty: unpack into a new directory, then move what you need`);
-        const r = await call('saved-state', { agent, name, part: 0 });
-        const chunks = [Buffer.from(r.state, 'base64')];
-        for (let part = 1; part < r.parts; part++) chunks.push(Buffer.from((await call('saved-state', { agent, name, part })).state, 'base64'));
-        // Into a new, empty dir, with the box's own checks: sized first, plain files only.
-        mkdirSync(to, { recursive: true, mode: 0o700 });
-        restoreState(to, joinParts(chunks, r));
-        process.stdout.write(`unpacked ${r.service}'s state from ${r.at} (${r.from}) into ${to}\n`);
-        return;
-      }
+      if (sub === 'seed') return out(await seedFrom(call, { agent, name }, flag(rest, '--from')));
+      if (sub === 'state') return stateTo(call, { agent, name }, flag(rest, '--to'));
       throw new Fail('usage: loom box service up|move|down <name> …', 2);
+    }
+    case 'slot': {
+      const [sub, name] = positional(rest);
+      const call = ownerOrRemote(env);
+      const agent = flag(rest, '--agent') ?? defaultAgent(env);
+      if (sub === 'seed') return out(await seedFrom(call, { agent, name, slot: true }, flag(rest, '--from')));
+      if (sub === 'state') return stateTo(call, { agent, name, slot: true }, flag(rest, '--to'));
+      throw new Fail('usage: loom box slot seed|state <name> …', 2);
     }
     case 'session': {
       // A house on this box that waits instead of working a task; you're
@@ -255,6 +243,31 @@ async function main(argv, env) {
 }
 
 function out(v) { process.stdout.write(JSON.stringify(v) + '\n'); }
+
+/** A dir packed and handed over as a service's (or slot's) starting state, in parts inside loom's body cap. */
+async function seedFrom(call, who, from) {
+  if (!from) throw new Fail('--from <dir>', 2);
+  const t = spawnSync('tar', ['--format=ustar', '-C', from, '-czf', '-', '.'], { maxBuffer: 64 * 1024 * 1024 });
+  if (t.status !== 0) throw new Fail(`couldn't pack ${from}`);
+  const parts = partsOf(t.stdout.length);
+  let r;
+  for (let part = 0; part < parts; part++) {
+    r = await call('seed-state', { ...who, part, parts, state: t.stdout.subarray(part * PART_RAW, (part + 1) * PART_RAW).toString('base64') });
+  }
+  return r;
+}
+
+/** A saved state, fetched in parts and unpacked into a new, empty dir with the box's own checks. */
+async function stateTo(call, who, to) {
+  if (!to) throw new Fail('--to <dir>', 2);
+  if (existsSync(to) && readdirSync(to).length) throw new Fail(`${to} isn't empty: unpack into a new directory, then move what you need`);
+  const r = await call('saved-state', { ...who, part: 0 });
+  const chunks = [Buffer.from(r.state, 'base64')];
+  for (let part = 1; part < r.parts; part++) chunks.push(Buffer.from((await call('saved-state', { ...who, part })).state, 'base64'));
+  mkdirSync(to, { recursive: true, mode: 0o700 });
+  restoreState(to, joinParts(chunks, r));
+  process.stdout.write(`unpacked ${r.service}'s state from ${r.at} (${r.from}) into ${to}\n`);
+}
 
 /** Until a house is running (or over): its state then. */
 async function waitRunning(call, id, timeoutMs = 30 * 60_000) {
