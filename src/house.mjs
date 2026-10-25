@@ -21,7 +21,8 @@
 //                                                   only if the owner allows it for this agent
 //     "hostname": "art-house",
 //     "ports": ["7401", "127.0.0.1:4747"]          a port published on the box (same number
-//                                                   inside): only ones the owner allows this agent
+//                                                   inside): only ones the owner allows this agent,
+//                                                   bound where the owner's grant says
 //   }
 //
 // Files land under /run/secrets/<file> (podman secrets, 0400). LOOM_URL,
@@ -43,6 +44,19 @@ const PORT = /^(?:(\d{1,3}(?:\.\d{1,3}){3}):)?(\d{4,5})$/;
 export const NESTED_ARGS = ['--cap-add=SYS_ADMIN,NET_ADMIN,SYS_PTRACE', '--device', '/dev/net/tun', '--security-opt', 'unmask=/proc/sys'];
 
 const fail = (m) => { throw new HouseFileError(m); };
+
+/**
+ * The owner's grant of one port: "7401" binds loopback (127.0.0.1), and an
+ * address in front ("0.0.0.0:7401", "192.168.6.30:7401") binds there. Null if
+ * it isn't one.
+ */
+export function parsePortGrant(g) {
+  if (g && typeof g === 'object') g = `${g.ip}:${g.port}`;
+  const m = typeof g === 'string' || typeof g === 'number' ? PORT.exec(String(g)) : null;
+  const n = m ? Number(m[2]) : NaN;
+  if (!m || n < 1024 || n > 65535 || (m[1] && m[1].split('.').some((o) => Number(o) > 255))) return null;
+  return { ip: m[1] ?? '127.0.0.1', port: n };
+}
 const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const relOk = (p) => typeof p === 'string' && REL_PATH.test(p) && !p.split('/').some((s) => s === '.' || s === '..');
 const absOk = (p) => typeof p === 'string' && ABS_PATH.test(p) && !p.split('/').some((s) => s === '.' || s === '..');
@@ -176,9 +190,13 @@ export function runArgs(house, { id, agent, loomUrl, task, service, image, dirs,
     if (!allowNested) throw new HouseFileError(`${agent}'s house asks for nested containers, and the owner hasn't allowed that`);
     args.push(...NESTED_ARGS);
   }
+  // The owner's grant says where each port binds (loopback unless it names an
+  // address); the house file only asks for the port, or for exactly that address.
   for (const { ip, port } of house.ports ?? []) {
-    if (!allowPorts.includes(port)) throw new HouseFileError(`${agent}'s house asks to publish port ${port}, and the owner hasn't allowed that`);
-    args.push('-p', `${ip ? `${ip}:` : ''}${port}:${port}`);
+    const grant = allowPorts.find((g) => g.port === port);
+    if (!grant) throw new HouseFileError(`${agent}'s house asks to publish port ${port}, and the owner hasn't allowed that`);
+    if (ip && ip !== grant.ip) throw new HouseFileError(`${agent}'s house asks to publish port ${port} on ${ip}; the owner allowed it on ${grant.ip}`);
+    args.push('-p', `${grant.ip}:${port}:${port}`);
   }
   for (const [name, where] of Object.entries(house.secrets)) {
     const ps = podmanSecret(id, name);

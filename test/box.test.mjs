@@ -131,18 +131,23 @@ test('nested containers only when the owner allows them', async () => {
 
 test('a port is published only when the owner allows it for that agent', async () => {
   agentRepo(repo, { ...HOUSE, nested: false, ports: ['7401', '127.0.0.1:4747'] });
-  setAgent({ nested: false, ports: [7401] });
+  setAgent({ nested: false, ports: ['0.0.0.0:7401'] });
   const h = up();
   await r.tick();
   assert.equal(house(h.id).state, 'failed');
   assert.match(house(h.id).log, /publish port 4747, and the owner hasn't allowed that/);
   assert.equal(existsSync(join(fake, 'runs', `loom-house-${h.id}.json`)), false);
-  setAgent({ nested: false, ports: [7401, 4747] });
+  setAgent({ nested: false, ports: ['0.0.0.0:7401', '4747'] });
   const h2 = up();
   await r.tick();
   await until(() => house(h2.id).state === 'done');
   const a = ran(h2.id).args;
-  assert.deepEqual(a.flatMap((x, i) => (a[i - 1] === '-p' ? [x] : [])), ['7401:7401', '127.0.0.1:4747:4747']);
+  assert.deepEqual(a.flatMap((x, i) => (a[i - 1] === '-p' ? [x] : [])), ['0.0.0.0:7401:7401', '127.0.0.1:4747:4747']);
+  // A bare grant binds loopback: the house can't take it to every interface.
+  agentRepo(repo, { ...HOUSE, nested: false, ports: ['0.0.0.0:4747'] });
+  const h3 = up();
+  await r.tick();
+  assert.match(house(h3.id).log, /port 4747 on 0.0.0.0; the owner allowed it on 127.0.0.1/);
 });
 
 test('a house file\'s ports are checked', () => {

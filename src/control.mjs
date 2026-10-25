@@ -8,6 +8,7 @@
 // doesn't name exactly one box, it says why and starts nothing.
 import { AGENT_NAME, BOX_NAME, SECRET_NAME, StateError, load, localBoxName, nextHouseId, update } from './state.mjs';
 import { MAX_PARTS, PART_RAW, drop, partsOf, putPart, putWhole, readPart } from './blobs.mjs';
+import { parsePortGrant } from './house.mjs';
 
 const TERMINAL = new Set(['done', 'failed', 'stopped', 'lost']);
 const LIVE = new Set(['wanted', 'starting', 'running', 'stopping']);
@@ -194,11 +195,12 @@ export function setAgent(env, effects, { agent, repo, houseFile, nested, branch,
   }
   let pt = ports ?? [];
   if (typeof pt === 'string') pt = pt.split(/[\s,]+/).filter(Boolean);
-  if (!Array.isArray(pt) || pt.length > 8) fail('ports is a list of up to 8 port numbers');
-  pt = pt.map(Number);
-  if (!pt.every((n) => Number.isInteger(n) && n >= 1024 && n <= 65535)) fail('a port a house may publish is a number from 1024 to 65535');
+  if (!Array.isArray(pt) || pt.length > 8) fail('ports is a list of up to 8');
+  pt = pt.map(parsePortGrant);
+  if (pt.some((g) => !g)) fail('a port grant is a number from 1024 (bound on loopback), or an address and a port, like 0.0.0.0:7401');
+  if (new Set(pt.map((g) => g.port)).size !== pt.length) fail('each port is granted once');
   return update(env, (s) => {
-    s.agents[a] = { repo: r, houseFile: file, nested: nest, branch: br, repoSecret: rs, secrets: sec, ports: [...new Set(pt)] };
+    s.agents[a] = { repo: r, houseFile: file, nested: nest, branch: br, repoSecret: rs, secrets: sec, ports: pt };
     return { agent: a, ...s.agents[a] };
   });
 }
@@ -328,7 +330,7 @@ export function claim(env, effects, caller, { id }) {
       const saved = h.service ? stateMeta(env, s, serviceKey(h.agent, h.service)) : undefined;
       // The state itself comes after, a part at a time (state-part): just its shape here.
       const state = saved ? { bytes: saved.bytes, sha256: saved.sha256, parts: partsOf(saved.bytes) } : null;
-      return { id, agent: h.agent, token, secrets, repoAuth, nested: !!a.nested, ports: a.ports ?? [], ...(h.service ? { service: h.service, state } : {}) };
+      return { id, agent: h.agent, token, secrets, repoAuth, nested: !!a.nested, ports: (a.ports ?? []).map(parsePortGrant).filter(Boolean), ...(h.service ? { service: h.service, state } : {}) };
     } catch (err) {
       // The house stays waiting; the token it was about to get goes (or is queued to).
       revokeOrQueue(s, effects, label);
