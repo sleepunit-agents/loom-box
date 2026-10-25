@@ -334,15 +334,18 @@ export function claim(env, effects, caller, { id }) {
     const token = effects.mint(['--agent', h.agent], label);
     try {
       const secrets = {};
-      // A secret named `sub:<provider>` is whichever of the agent's subscriptions
-      // has room now (the subscriptions piece); the house records which, by name.
+      // A secret named `sub:<provider>` is what the subscriptions piece issues for
+      // the agent now (its first with room, house-safe); the house records which, by name.
       const runsOn = {};
       for (const [as, from] of Object.entries(a.secrets || {})) {
         const sub = SUB_SOURCE.exec(from);
-        const name = sub ? effects.pick(h.agent, sub[1]) : from;
-        if (sub && !SECRET_NAME.test(name)) throw new StateError(`the subscriptions piece picked something that isn't a secret's name for ${h.agent}`, 500);
-        if (sub) runsOn[as] = name;
-        secrets[as] = effects.secret(name);
+        if (!sub) { secrets[as] = effects.secret(from); continue; }
+        const got = effects.issue(h.agent, sub[1]);
+        if (!SECRET_NAME.test(got.name) || typeof got.value !== 'string' || !got.value) {
+          throw new StateError(`the subscriptions piece issued nothing usable for ${h.agent}'s ${sub[1]}`, 500);
+        }
+        runsOn[as] = got.name;
+        secrets[as] = got.value;
       }
       if (Object.keys(runsOn).length) h.runsOn = runsOn;
       const repoAuth = a.repoSecret ? effects.secret(a.repoSecret) : null;
