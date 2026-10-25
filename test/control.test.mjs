@@ -242,7 +242,8 @@ test('the runtime\'s part of the bundle comes back on another machine, as that m
   // thor is in both: its credential here is queued too (a forced restore re-adds what should stay).
   assert.ok(revoked.includes('box · thor'));
   // Ids keep counting from the higher of the two, so no label repeats.
-  assert.equal(ok(api(forced, fx, { caller: owner, path: 'up', body: { agent: 'art', task: 'y' } })).id, 'h-3');
+  // (both machines had used up to h-1)
+  assert.equal(ok(api(forced, fx, { caller: owner, path: 'up', body: { agent: 'art', task: 'y' } })).id, 'h-2');
   // A bundle with a remote box named like this machine is refused.
   assert.throws(() => importPart({ ...there, LOOM_BOX_HOME: join(env.HOME, 'clash'), LOOM_BOX_LOCAL_NAME: 'thor' }, part), /a box named thor, this machine's name/);
   assert.throws(() => importPart({ ...there, LOOM_BOX_HOME: join(env.HOME, 'x'), LOOM_IMPORT_IDENTITY: join(env.HOME, 'nokey') }, part), /doesn't decrypt/);
