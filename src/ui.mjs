@@ -23,6 +23,7 @@ export function manifest(env) {
   const boxes = Object.values(s.boxes).filter((b) => !b.revoked);
   const live = Object.values(s.houses).filter((h) => LIVE.has(h.state));
   return {
+    v: 2,
     tab: { label: 'Boxes' },
     tile: {
       label: 'Boxes',
@@ -60,7 +61,7 @@ function boxesPage(env, nowMs) {
       type: 'details', summary: b.name, meta: b.lastSeen ? `seen ${ago(b.lastSeen, nowMs)}` : 'waiting for `loom box join`',
       blocks: [
         { type: 'form', title: `Who ${b.name} may host`, action: 'may-host', submit: 'Save', hidden: { name: b.name },
-          fields: [{ name: 'mayHost', label: 'Agents', kind: 'text', value: mayHostText(b.mayHost), hint: '"anyone", or agent names separated by commas' }] },
+          fields: [{ name: 'may_host', label: 'Agents', kind: 'text', value: mayHostText(b.mayHost), hint: '"anyone", or agent names separated by commas' }] },
         { type: 'buttons', items: [{ action: 'revoke-box', label: `Revoke ${b.name}`, tone: 'danger', fields: { name: b.name } }] },
       ],
     })),
@@ -87,7 +88,7 @@ function boxesPage(env, nowMs) {
     { type: 'text', tone: 'muted', text: 'Name the machine, then run `loom box join` on it with the credential shown after you add it.' },
     { type: 'form', action: 'add-box', submit: 'Add', fields: [
       { name: 'name', label: 'Name', kind: 'text', required: true, hint: 'Lowercase, e.g. thor or jonathan-laptop' },
-      { name: 'mayHost', label: 'May host', kind: 'text', value: 'anyone', hint: '"anyone", or agent names' },
+      { name: 'may_host', label: 'May host', kind: 'text', value: 'anyone', hint: '"anyone", or agent names' },
       { name: 'labels', label: 'Labels', kind: 'text', hint: 'Optional, e.g. jonathan-rig' },
     ] },
   ] });
@@ -124,9 +125,9 @@ function agentForm(agent, c) {
   return { type: 'form', title: agent ? `Change ${agent}'s house` : undefined, action: 'set-agent', submit: 'Save', ...(agent ? { hidden: { agent } } : {}), fields: [
     ...(agent ? [] : [{ name: 'agent', label: 'Agent', kind: 'text', required: true }]),
     { name: 'repo', label: 'Repo', kind: 'text', required: true, value: c?.repo ?? '' },
-    { name: 'houseCmd', label: 'House command', kind: 'text', value: c?.houseCmd ?? 'house/up', hint: 'A path in the repo. It gets HOUSE_TASK and HOUSE_SECRETS_DIR.' },
+    { name: 'house_cmd', label: 'House command', kind: 'text', value: c?.houseCmd ?? 'house/up', hint: 'A path in the repo. It gets HOUSE_TASK and HOUSE_SECRETS_DIR.' },
     { name: 'branch', label: 'Branch', kind: 'text', value: c?.branch ?? '' },
-    { name: 'repoSecret', label: 'Repo secret', kind: 'text', value: c?.repoSecret ?? '', hint: 'A secrets-store name, for a private repo over https' },
+    { name: 'repo_secret', label: 'Repo secret', kind: 'text', value: c?.repoSecret ?? '', hint: 'A secrets-store name, for a private repo over https' },
     { name: 'secrets', label: 'Secrets', kind: 'text', value: Object.entries(c?.secrets || {}).map(([k, v]) => `${k}=${v}`).join(', '), hint: 'name-in-house=store-name, comma separated' },
   ].map((f) => (f.value === '' ? (({ value: _v, ...r }) => r)(f) : f)) };
 }
@@ -138,7 +139,12 @@ export function page(env, { path }, nowMs = Date.now()) {
 }
 
 /** The page's actions. The page is the owner's, so each runs as the owner. */
-export function act(env, effects, { action, fields = {} }, publicUrl) {
+export function act(env, effects, { action, fields: raw = {} }, publicUrl) {
+  // The page's field names are lowercase (loom's vocabulary); the runtime's are camelCase.
+  const fields = { ...raw };
+  for (const [from, to] of [['may_host', 'mayHost'], ['house_cmd', 'houseCmd'], ['repo_secret', 'repoSecret']]) {
+    if (from in fields) { fields[to] = fields[from]; delete fields[from]; }
+  }
   try {
     switch (action) {
       case 'add-box': {
