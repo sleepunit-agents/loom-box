@@ -107,14 +107,6 @@ export function update(env, f) {
   }
 }
 
-/** Lay down a whole state (a restore), under the lock. */
-export function replaceState(env, next) {
-  return update(env, (s) => {
-    for (const k of Object.keys(s)) delete s[k];
-    Object.assign(s, next);
-  });
-}
-
 /** A new house id: h-<n>, never reused. */
 export function nextHouseId(s) {
   s.seq += 1;

@@ -7,7 +7,7 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { load, localBoxName, replaceState, stateDir } from './state.mjs';
+import { load, localBoxName, stateDir, update } from './state.mjs';
 
 const FORMAT = 'loom-box/1';
 const AGE_RECIPIENT = /^age1[0-9a-z]{20,}$/;
@@ -48,6 +48,11 @@ export function importPart(env, part, { force = false } = {}) {
   }
   const s = doc.state;
   const here = localBoxName(env);
+  // A remote box with this machine's name would have its credential (restored
+  // with core's tokens) speak for loom's own box: refuse rather than merge them.
+  if (s.boxes[here] && !s.boxes[here].local) {
+    throw new BundleError(`the bundle has a box named ${here}, this machine's name; restore on a machine with another name (or set LOOM_BOX_LOCAL_NAME). Nothing was written.`);
+  }
   for (const [name, b] of Object.entries(s.boxes)) {
     if (!b.local || name === here) continue;
     delete s.boxes[name];
@@ -64,6 +69,22 @@ export function importPart(env, part, { force = false } = {}) {
     h.note = 'restored from a bundle; it was not over when the bundle was made';
     if (h.tokenLabel && !s.pendingRevokes.includes(h.tokenLabel)) s.pendingRevokes.push(h.tokenLabel);
   }
-  replaceState(env, s);
+  update(env, (cur) => {
+    // A forced restore replaces what's here: whatever this machine still owed
+    // a revoke (its own queue, its live houses' tokens, its boxes' credentials)
+    // is carried over, so nothing it handed out stays live.
+    if (force && existsSync(join(stateDir(env), 'state.json'))) {
+      for (const l of cur.pendingRevokes ?? []) if (!s.pendingRevokes.includes(l)) s.pendingRevokes.push(l);
+      for (const h of Object.values(cur.houses ?? {})) {
+        if (!['done', 'failed', 'stopped', 'lost'].includes(h.state) && h.tokenLabel && !s.pendingRevokes.includes(h.tokenLabel)) s.pendingRevokes.push(h.tokenLabel);
+      }
+      for (const [name, b] of Object.entries(cur.boxes ?? {})) {
+        const label = `box · ${name}`;
+        if (!b.local && !b.revoked && !(s.boxes[name] && !s.boxes[name].revoked) && !s.pendingRevokes.includes(label)) s.pendingRevokes.push(label);
+      }
+    }
+    for (const k of Object.keys(cur)) delete cur[k];
+    Object.assign(cur, s);
+  });
   return { boxes: Object.keys(s.boxes).length, houses: Object.keys(s.houses || {}).length };
 }
