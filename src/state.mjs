@@ -90,7 +90,12 @@ export function update(env, f) {
   try {
     writeSync(fd, String(process.pid));
     const s = load(env);
-    const out = f(s);
+    let out;
+    try { out = f(s); } catch (err) {
+      // A failure that still changed something worth keeping (a revoke to retry).
+      if (err?.saveState) save(env, s);
+      throw err;
+    }
     save(env, s);
     return out;
   } finally {

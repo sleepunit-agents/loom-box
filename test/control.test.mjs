@@ -128,6 +128,24 @@ test('a secret that can\'t be read fails the claim and revokes the token it mint
   assert.equal(ok(call(owner, 'list')).houses[0].state, 'wanted');
 });
 
+test('a revoke that fails is queued and retried until it goes; a box name waits for its old credential', () => {
+  ok(call(owner, 'add-box', { name: 'thor' }));
+  let down = true;
+  fx.revoke = (label) => { if (down) throw new Error('the token file is locked'); revoked.push(label); };
+  const h = ok(call(art, 'up', { box: 'thor', task: 'x' }));
+  ok(call(box('thor'), 'claim', { id: h.id }));
+  ok(call(box('thor'), 'report', { id: h.id, state: 'done', exit: 0 }));
+  assert.deepEqual(revoked, []);
+  ok(call(owner, 'revoke-box', { name: 'thor' }));
+  assert.equal(call(owner, 'add-box', { name: 'thor' }).status, 409);
+  down = false;
+  ok(call(box('one'), 'poll'));
+  assert.deepEqual(revoked.sort(), [`art · house ${h.id} on thor`, 'box · thor'].sort());
+  // "No live token" counts as gone.
+  fx.revoke = () => { throw new Error('no live token labeled "x"'); };
+  ok(call(owner, 'add-box', { name: 'thor' }));
+});
+
 test('a house ends: its token is revoked; reports go only forward', () => {
   const h = ok(call(art, 'up', { task: 'x' }));
   ok(call(box('one'), 'claim', { id: h.id }));

@@ -18,6 +18,25 @@ const fail = (message, status = 400) => { throw new StateError(message, status);
 const now = (effects) => (effects.now ? effects.now() : new Date()).toISOString();
 
 export const boxCredLabel = (name) => `box · ${name}`;
+
+/**
+ * Revoke a token, or remember to. A revoke that fails (loom's token file busy,
+ * say) must not leave a house's or a box's token live, so it's queued and
+ * retried on every later call until it goes. "No live token" means it's gone.
+ */
+function revokeOrQueue(s, effects, label) {
+  try { effects.revoke(label); } catch (err) {
+    if (/no live token/i.test(String(err?.message))) return;
+    s.pendingRevokes ??= [];
+    if (!s.pendingRevokes.includes(label)) s.pendingRevokes.push(label);
+  }
+}
+
+function retryRevokes(s, effects) {
+  const pending = s.pendingRevokes ?? [];
+  s.pendingRevokes = [];
+  for (const label of pending) revokeOrQueue(s, effects, label);
+}
 export const houseTokenLabel = (h) => `${h.agent} · house ${h.id} on ${h.box}`;
 
 /** "gpu:5090" is met by a fact "gpu:nvidia-geforce-rtx-5090"; a bare "jonathan-rig" by that exact label. */
@@ -100,6 +119,8 @@ export function addBox(env, effects, { name, mayHost: mh, labels }) {
   const may = mayHostValue(mh);
   return update(env, (s) => {
     if (s.boxes[n] && !s.boxes[n].revoked) fail(`there's already a box named ${n}`, 409);
+    retryRevokes(s, effects);
+    if ((s.pendingRevokes ?? []).includes(boxCredLabel(n))) fail(`${n}'s old credential isn't revoked yet; try again shortly`, 409);
     const token = effects.mint(['--piece', `box/${n}`], boxCredLabel(n));
     s.boxes[n] = { mayHost: may, facts: [], labels: listOf(labels, 'labels', FACT), created: now(effects), joined: null, lastSeen: null };
     return { box: n, token };
@@ -111,12 +132,12 @@ export function revokeBox(env, effects, { name }) {
     const b = s.boxes[name];
     if (!b || b.revoked) fail(`no box named ${name}`, 404);
     if (b.local) fail(`${name} is loom's own machine; it can't be revoked`, 409);
-    try { effects.revoke(boxCredLabel(name)); } catch { /* already gone: the box is revoked either way */ }
+    revokeOrQueue(s, effects, boxCredLabel(name));
     b.revoked = now(effects);
     // Its houses lose their tokens with it (runtime.md, "Credentials").
     for (const h of Object.values(s.houses)) {
       if (h.box !== name || TERMINAL.has(h.state)) continue;
-      if (h.tokenLabel) try { effects.revoke(h.tokenLabel); } catch { /* best effort */ }
+      if (h.tokenLabel) revokeOrQueue(s, effects, h.tokenLabel);
       h.state = 'lost'; h.updated = now(effects); h.note = 'its box was revoked';
     }
     for (const [agent, p] of Object.entries(s.primaries)) if (p === name) delete s.primaries[agent];
@@ -252,6 +273,8 @@ export function poll(env, effects, caller, { facts } = {}) {
     const b = boxOf(s, caller);
     if (f) b.facts = f;
     b.lastSeen = now(effects);
+    // Boxes poll every few seconds: the natural place to finish any revoke that failed.
+    retryRevokes(s, effects);
     const mine = Object.values(s.houses).filter((h) => h.box === caller.subject);
     return {
       start: mine.filter((h) => h.state === 'wanted' && mayHost(b, h.agent)).map((h) => {
@@ -289,8 +312,11 @@ export function claim(env, effects, caller, { id }) {
       h.state = 'starting'; h.tokenLabel = label; h.updated = now(effects);
       return { id, agent: h.agent, token, secrets, repoAuth };
     } catch (err) {
-      try { effects.revoke(label); } catch { /* best effort */ }
-      throw err;
+      // The house stays waiting; the token it was about to get goes (or is queued to).
+      revokeOrQueue(s, effects, label);
+      const e = err instanceof StateError ? err : new StateError(`couldn't get ${h.agent}'s house secrets: ${err.message}`, 500);
+      e.saveState = true;
+      throw e;
     }
   });
 }
@@ -313,9 +339,7 @@ export function report(env, effects, caller, { id, state, exit, log }) {
     h.updated = now(effects);
     if (Number.isInteger(exit)) h.exit = exit;
     if (typeof log === 'string') h.log = log.slice(-MAX_LOG);
-    if (TERMINAL.has(h.state) && h.tokenLabel) {
-      try { effects.revoke(h.tokenLabel); } catch { /* already gone */ }
-    }
+    if (TERMINAL.has(h.state) && h.tokenLabel) revokeOrQueue(s, effects, h.tokenLabel);
     return houseView(h);
   });
 }
