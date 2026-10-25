@@ -236,14 +236,41 @@ test('a box that restarted under a house removes what\'s left of it and says so'
   const h = up('x');
   await r.tick();
   await until(() => house(h.id).state === 'running');
+  // The box goes away (its watcher with it), and so does the container.
   const pid = r.houses.get(h.id).child.pid;
+  r.houses.get(h.id).child.removeAllListeners('exit');
+  process.kill(-pid, 'SIGKILL');
+  await until(() => { try { process.kill(pid, 0); return false; } catch { return true; } });
   const fresh = runner(env, client, { loomUrl: 'http://loom.test/mcp', log: () => {} });
   await fresh.tick();
   assert.equal(house(h.id).state, 'failed');
   assert.match(house(h.id).log, /no longer has this house/);
   assert.ok(existsSync(join(fake, 'runs', `loom-house-${h.id}.rm`)));
   assert.deepEqual(readdirSync(join(fake, 'secrets')), []);
-  process.kill(-pid, 'SIGKILL');
+});
+
+test('a box that restarts while a house is still running watches it again, not bounces it', async () => {
+  agentRepo(repo, { ...HOUSE, services: { discord: { command: ['x'], mounts: { state: '/s' }, secrets: { 'loom-token': { file: 'loom-token' } } } } });
+  setAgent();
+  podmanCfg({ run: 'sleep' });
+  const s = ok(api(env, fx, { caller: { kind: 'agent', agent: 'art' }, path: 'service-up', body: { name: 'discord' } }));
+  await r.tick();
+  await until(() => house(s.house).state === 'running');
+  // Only the box goes away; the container keeps running.
+  r.houses.get(s.house).child.removeAllListeners('exit');
+  const logs = [];
+  const fresh = runner(env, client, { loomUrl: 'http://loom.test/mcp', log: (m) => logs.push(m) });
+  await fresh.tick();
+  assert.ok(fresh.houses.get(s.house)?.adopted, 'adopted');
+  assert.equal(house(s.house).state, 'running');
+  assert.equal(existsSync(join(fake, 'runs', `loom-house-${s.house}.stop`)), false, 'not bounced');
+  assert.deepEqual(readdirSync(join(fake, 'secrets')), [`loom-${s.house}-loom-token`]);
+  // Later it's taken down: it ends like any house, its state saved, its secrets gone.
+  ok(api(env, fx, { caller: owner, path: 'service-down', body: { agent: 'art', name: 'discord' } }));
+  await fresh.tick();
+  await until(() => house(s.house).state === 'stopped');
+  assert.equal(ok(api(env, fx, { caller: owner, path: 'saved-state', body: { agent: 'art', name: 'discord' } })).from, s.house);
+  assert.deepEqual(readdirSync(join(fake, 'secrets')), []);
 });
 
 test('a box that restarts under a service\'s house sends its state back first', async () => {
@@ -254,13 +281,15 @@ test('a box that restarts under a service\'s house sends its state back first', 
   await r.tick();
   await until(() => house(s.house).state === 'running');
   const pid = r.houses.get(s.house).child.pid;
+  r.houses.get(s.house).child.removeAllListeners('exit');
+  process.kill(-pid, 'SIGKILL');
+  await until(() => { try { process.kill(pid, 0); return false; } catch { return true; } });
   const fresh = runner(env, client, { loomUrl: 'http://loom.test/mcp', log: () => {} });
   await fresh.tick();
   const saved = ok(api(env, fx, { caller: owner, path: 'saved-state', body: { agent: 'art', name: 'discord' } }));
   assert.equal(saved.from, s.house, 'the restarted box sent the house\'s state before removing it');
   assert.ok(existsSync(join(fake, 'runs', `loom-house-${s.house}.stop`)), 'stopped first, so it could finish writing');
-  assert.equal(existsSync(join(env.LOOM_BOX_DATA ?? join(env.HOME, '.local/share/loom-box'), 'houses', s.house)), false);
-  process.kill(-pid, 'SIGKILL');
+  assert.equal(existsSync(join(env.LOOM_BOX_DATA, 'houses', s.house)), false);
 });
 
 test('a service moves between boxes by hand-off, and its state goes with it', async () => {

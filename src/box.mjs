@@ -356,22 +356,7 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
       houses.set(h.id, { child, dir });
       log(`started ${h.id} (${h.agent})`);
       await client.call('report', { id: h.id, state: 'running' }).catch((e) => log(`report ${h.id}: ${e.message}`));
-      child.on('exit', async (code, signal) => {
-        const entry = houses.get(h.id);
-        houses.delete(h.id);
-        // A service's state goes back to loom before anything else knows it stopped,
-        // so the next box (a move, or a restart) picks up where this one left off.
-        if (h.service) {
-          const packed = packState(pathJoin(dir, 'state'));
-          if (packed !== null) {
-            await sendState(client, h.id, packed).catch((e) => log(`couldn't save ${h.service}'s state: ${e.message}`));
-          }
-        }
-        clean(h, dir, secretNames);
-        const state = entry?.stopAt ? 'stopped' : code === 0 ? 'done' : 'failed';
-        log(`${h.id} ${state} (${signal ?? `exit ${code}`})`);
-        client.call('report', { id: h.id, state, exit: code ?? -1, log: tail(pathJoin(dir, 'log')) }).catch((e) => log(`report ${h.id}: ${e.message}`));
-      });
+      child.on('exit', (code, signal) => ended(h, dir, secretNames, code, signal));
     } catch (err) {
       clean(h, dir, made);
       log(`${h.id} failed to start: ${err.message}`);
@@ -381,12 +366,57 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
     }
   }
 
+  /** A house is over: a service's state goes back first, then its secrets and dirs, then the report. */
+  async function ended(h, dir, secretNames, code, signal) {
+    const entry = houses.get(h.id);
+    houses.delete(h.id);
+    // A service's state goes back to loom before anything else knows it stopped,
+    // so the next box (a move, or a restart) picks up where this one left off.
+    // (An adopted house's kind isn't known here: loom keeps state only for a service's.)
+    if (h.service || entry?.adopted) {
+      const packed = existsSync(pathJoin(dir, 'state')) ? packState(pathJoin(dir, 'state')) : null;
+      if (packed !== null) {
+        await sendState(client, h.id, packed).catch((e) => { if (h.service) log(`couldn't save ${h.service}'s state: ${e.message}`); });
+      }
+    }
+    if (entry?.adopted) pod(env, ['rm', '-f', containerName(h.id)]);
+    clean(h, dir, secretNames);
+    const state = entry?.stopAt ? 'stopped' : code === 0 ? 'done' : 'failed';
+    log(`${h.id} ${state} (${signal ?? `exit ${code}`})`);
+    client.call('report', { id: h.id, state, exit: code ?? -1, log: tail(pathJoin(dir, 'log')) }).catch((e) => log(`report ${h.id}: ${e.message}`));
+  }
+
+  /**
+   * A house that's still running from before this box restarted (a deploy, the
+   * runner crashing): watched again, not bounced. `podman wait` says when it
+   * ends, and it ends the way any house does.
+   */
+  function adopt(id) {
+    const dir = pathJoin(dataDir(env), 'houses', id);
+    const ls = pod(env, ['secret', 'ls', '--format', '{{.Name}}']);
+    const secretNames = (ls.stdout || '').split('\n').filter((n) => n.startsWith(`loom-${id}-`)).map((n) => n.slice(`loom-${id}-`.length));
+    const child = spawn(podman(env), ['wait', containerName(id)], {
+      detached: true, stdio: ['ignore', 'pipe', 'ignore'],
+      env: { PATH: env.PATH, HOME: env.HOME, ...(env.XDG_RUNTIME_DIR ? { XDG_RUNTIME_DIR: env.XDG_RUNTIME_DIR } : {}) },
+    });
+    let out = '';
+    child.stdout.on('data', (d) => { out += d; });
+    houses.set(id, { child, dir, adopted: true });
+    child.on('exit', () => {
+      const code = /^-?\d+/.test(out.trim()) ? Number(out.trim().split('\n').pop()) : null;
+      ended({ id }, dir, secretNames, code, null);
+    });
+    log(`adopted ${id}: still running from before this box restarted`);
+  }
+
   function stop(id) {
     const e = houses.get(id);
     if (!e || e.stopAt) return;
     e.stopAt = Date.now();
     // podman stop reaches the container itself; the signal, the podman client.
     spawn(podman(env), ['stop', '-t', '25', containerName(id)], { stdio: 'ignore', env: { PATH: env.PATH, HOME: env.HOME, ...(env.XDG_RUNTIME_DIR ? { XDG_RUNTIME_DIR: env.XDG_RUNTIME_DIR } : {}) } }).on('error', () => {});
+    // An adopted house's child is only `podman wait`: it ends when the container does.
+    if (e.adopted) return;
     try { process.kill(-e.child.pid, 'SIGTERM'); } catch { /* gone */ }
     setTimeout(() => { try { process.kill(-e.child.pid, 'SIGKILL'); } catch { /* gone */ } }, STOP_GRACE_MS).unref();
   }
@@ -397,7 +427,10 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
     // it restarted under them. Say so rather than leave them "running" forever.
     for (const id of want.active || []) {
       if (houses.has(id)) continue;
-      // A service's house keeps what it had: stopped the way a move stops it
+      // Still running: watch it again rather than bounce it.
+      const running = pod(env, ['inspect', '--format', '{{.State.Running}}', containerName(id)]);
+      if (running.status === 0 && running.stdout.trim() === 'true') { adopt(id); continue; }
+      // Gone or dead. A service's house keeps what it had: stopped the way a move stops it
       // (so it can finish writing), and its state sent back before anything
       // of it goes. The control plane takes it only from a live service house.
       pod(env, ['stop', '-t', '25', containerName(id)]);

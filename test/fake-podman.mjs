@@ -14,6 +14,10 @@ const args = process.argv.slice(2);
 writeFileSync(join(D, 'log', `${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2)}`), JSON.stringify(args));
 const stdin = () => { try { return readFileSync(0, 'utf-8'); } catch { return ''; } };
 const safe = (s) => s.replace(/[/:]/g, '_');
+// A "container" is running while the process that ran it is.
+function alive(name) {
+  try { process.kill(Number(readFileSync(join(D, 'runs', `${name}.pid`), 'utf-8')), 0); return true; } catch { return false; }
+}
 
 switch (`${args[0]} ${args[1] ?? ''}`) {
   case 'image exists': process.exit(existsSync(join(D, 'images', safe(args[2]))) ? 0 : 1);
@@ -22,6 +26,7 @@ switch (`${args[0]} ${args[1] ?? ''}`) {
   case 'secret rm': { for (const n of args.slice(2)) rmSync(join(D, 'secrets', n), { force: true }); process.exit(0); }
   case 'secret ls': { console.log(readdirSync(join(D, 'secrets')).join('\n')); process.exit(0); }
   case 'unshare rm': { rmSync(args[3], { recursive: true, force: true }); process.exit(0); }
+  case 'inspect --format': { console.log(alive(args.at(-1)) ? 'true' : 'false'); process.exit(existsSync(join(D, 'runs', `${args.at(-1)}.pid`)) ? 0 : 125); }
   default: break;
 }
 if (args[0] === 'build') {
@@ -30,14 +35,16 @@ if (args[0] === 'build') {
   writeFileSync(join(D, 'builds'), `${(existsSync(join(D, 'builds')) ? readFileSync(join(D, 'builds'), 'utf-8') : '')}${args[2]}\n`);
   process.exit(0);
 }
-if (args[0] === 'rm' || args[0] === 'stop') {
+if (args[0] === 'wait') {
+  const name = args.at(-1);
+  const t = setInterval(() => { if (!alive(name)) { clearInterval(t); console.log('0'); process.exit(0); } }, 50);
+} else if (args[0] === 'rm' || args[0] === 'stop') {
   const name = args.at(-1);
   writeFileSync(join(D, 'runs', `${name}.${args[0]}`), '');
   const pidf = join(D, 'runs', `${name}.pid`);
   if (args[0] === 'stop' && existsSync(pidf)) { try { process.kill(Number(readFileSync(pidf, 'utf-8')), 'SIGTERM'); } catch { /* gone */ } }
   process.exit(0);
-}
-if (args[0] === 'run') {
+} else if (args[0] === 'run') {
   const name = args[args.indexOf('--name') + 1];
   // What the container would see: each secret's value, by where it lands.
   const seen = {};
