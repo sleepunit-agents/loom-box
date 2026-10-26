@@ -143,7 +143,8 @@ test('a tailnet socket goes in only when the owner grants it for that agent, fro
   const a = ran(h2.id).args;
   assert.ok(a.flatMap((x, i) => (a[i - 1] === '-v' ? [x] : [])).includes('/run/tailscale-fleet/tailscaled.sock:/run/tailscale-fleet.sock'));
   // A grant is a name and a socket path; anything else is refused when it's set.
-  for (const bad of ['fleet', 'fleet=relative.sock', 'fleet=/etc/passwd', 'Fleet=/run/x.sock']) {
+  for (const bad of ['fleet', 'fleet=relative.sock', 'fleet=/etc/passwd', 'Fleet=/run/tailscale/tailscaled.sock', 'fleet=/run/user/1000/podman/podman.sock',
+    'fleet=/run/tailscale-fleet/../user/1000/podman/podman.sock/tailscaled.sock', 'fleet=/run/./tailscale/tailscaled.sock']) {
     assert.throws(() => setAgent({ tailnets: [bad] }), /a tailnet grant is a name and a tailscaled socket/);
   }
 });

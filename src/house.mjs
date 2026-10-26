@@ -47,12 +47,14 @@ const TAILNET = /^[a-z][a-z0-9-]{0,39}$/;
 
 /**
  * The owner's grant of one tailnet: "fleet=/run/tailscale-fleet/tailscaled.sock",
- * a name and the box's tailscaled socket for it. Null if it isn't one.
+ * a name and the box's tailscaled socket for it. Null if it isn't one: the
+ * path is absolute, has no . or .. in it, and names a tailscaled.sock, so a
+ * slip can't hand a house some other daemon's socket (podman's, say).
  */
 export function parseTailnetGrant(g) {
   if (g && typeof g === 'object') g = `${g.name}=${g.socket}`;
   const m = typeof g === 'string' ? /^([^=]+)=(.+)$/.exec(g) : null;
-  return m && TAILNET.test(m[1]) && ABS_PATH.test(m[2]) && m[2].endsWith('.sock') ? { name: m[1], socket: m[2] } : null;
+  return m && TAILNET.test(m[1]) && absOk(m[2]) && m[2].endsWith('/tailscaled.sock') ? { name: m[1], socket: m[2] } : null;
 }
 
 /** The capabilities nested containers need, and nothing more (Art's tank, t-1473). */
