@@ -11,7 +11,9 @@
 //   loom box revoke <name>                                 revoke a box and its houses' tokens
 //   loom box agent <agent> --repo <url> [--house-file house/house.json] [--nested]
 //                  [--branch b] [--repo-secret <store-name>] [--secret as=from]... [--port n]...
-//                                                         how its house is made (--port: one it may publish)
+//                  [--tailnet name=/run/…/tailscaled.sock]...
+//                                                         how its house is made (--port: one it may publish;
+//                                                         --tailnet: a box tailscaled socket it may use, by name)
 //   loom box primary <agent> [<box>]                       an agent's primary (default: this machine)
 //   loom box rename-local                                  after renaming this machine: its box takes the new name
 //   loom box remote up <agent> [--box b] [--dir /path]     a box session: Claude's remote-control on the box itself,
@@ -141,7 +143,7 @@ async function main(argv, env) {
     case 'agent': {
       const [agent] = positional(rest);
       const secrets = Object.fromEntries(flags(rest, '--secret').map((p) => { const [k, v] = p.split('='); return [k, v ?? k]; }));
-      out(setAgent(env, realEffects(env), { agent, repo: flag(rest, '--repo'), houseFile: flag(rest, '--house-file'), nested: rest.includes('--nested'), branch: flag(rest, '--branch'), repoSecret: flag(rest, '--repo-secret'), secrets, ports: flags(rest, '--port') }));
+      out(setAgent(env, realEffects(env), { agent, repo: flag(rest, '--repo'), houseFile: flag(rest, '--house-file'), nested: rest.includes('--nested'), branch: flag(rest, '--branch'), repoSecret: flag(rest, '--repo-secret'), secrets, ports: flags(rest, '--port'), tailnets: flags(rest, '--tailnet') }));
       return;
     }
     case 'remote': {

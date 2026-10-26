@@ -129,6 +129,25 @@ test('nested containers only when the owner allows them', async () => {
   assert.ok(!ran(h2.id).args.some((a) => a.startsWith('--cap-add') || a === '/dev/net/tun'));
 });
 
+test('a tailnet socket goes in only when the owner grants it for that agent, from the socket the grant names', async () => {
+  agentRepo(repo, { ...HOUSE, nested: false, tailnets: { fleet: '/run/tailscale-fleet.sock' } });
+  setAgent({ nested: false });
+  const h = up();
+  await r.tick();
+  assert.equal(house(h.id).state, 'failed');
+  assert.match(house(h.id).log, /asks for the fleet tailnet, and the owner hasn't allowed that/);
+  setAgent({ nested: false, tailnets: ['fleet=/run/tailscale-fleet/tailscaled.sock'] });
+  const h2 = up();
+  await r.tick();
+  await until(() => house(h2.id).state === 'done');
+  const a = ran(h2.id).args;
+  assert.ok(a.flatMap((x, i) => (a[i - 1] === '-v' ? [x] : [])).includes('/run/tailscale-fleet/tailscaled.sock:/run/tailscale-fleet.sock'));
+  // A grant is a name and a socket path; anything else is refused when it's set.
+  for (const bad of ['fleet', 'fleet=relative.sock', 'fleet=/etc/passwd', 'Fleet=/run/x.sock']) {
+    assert.throws(() => setAgent({ tailnets: [bad] }), /a tailnet grant is a name and a tailscaled socket/);
+  }
+});
+
 test('a port is published only when the owner allows it for that agent', async () => {
   agentRepo(repo, { ...HOUSE, nested: false, ports: ['7401', '127.0.0.1:4747'] });
   setAgent({ nested: false, ports: ['0.0.0.0:7401'] });

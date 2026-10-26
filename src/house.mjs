@@ -21,9 +21,12 @@
 //                                                   only if the owner allows it for this agent
 //     "hostname": "art-house",
 //     "attach": ["/home/art/Art/house/attach"],    what `loom box attach` runs in a session house
-//     "ports": ["7401", "127.0.0.1:4747"]          a port published on the box (same number
+//     "ports": ["7401", "127.0.0.1:4747"],         a port published on the box (same number
 //                                                   inside): only ones the owner allows this agent,
 //                                                   bound where the owner's grant says
+//     "tailnets": { "fleet": "/run/tailscale-fleet.sock" }   a tailscaled's socket, by the name the
+//                                                   owner granted it under, at this path inside:
+//                                                   `tailscale --socket=<path> status|ping|nc`
 //   }
 //
 // Files land under /run/secrets/<file> (podman secrets, 0400). LOOM_URL,
@@ -40,6 +43,17 @@ const REL_PATH = /^[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*$/;
 const ABS_PATH = /^\/[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*$/;
 const HOSTNAME = /^[a-z0-9][a-z0-9-]{0,62}$/;
 const PORT = /^(?:(\d{1,3}(?:\.\d{1,3}){3}):)?(\d{4,5})$/;
+const TAILNET = /^[a-z][a-z0-9-]{0,39}$/;
+
+/**
+ * The owner's grant of one tailnet: "fleet=/run/tailscale-fleet/tailscaled.sock",
+ * a name and the box's tailscaled socket for it. Null if it isn't one.
+ */
+export function parseTailnetGrant(g) {
+  if (g && typeof g === 'object') g = `${g.name}=${g.socket}`;
+  const m = typeof g === 'string' ? /^([^=]+)=(.+)$/.exec(g) : null;
+  return m && TAILNET.test(m[1]) && ABS_PATH.test(m[2]) && m[2].endsWith('.sock') ? { name: m[1], socket: m[2] } : null;
+}
 
 /** The capabilities nested containers need, and nothing more (Art's tank, t-1473). */
 export const NESTED_ARGS = ['--cap-add=SYS_ADMIN,NET_ADMIN,SYS_PTRACE', '--device', '/dev/net/tun', '--security-opt', 'unmask=/proc/sys'];
@@ -123,11 +137,21 @@ function runSpec(h, where, { task: allowTask }) {
       ports.push({ ip: m[1] ?? null, port: n });
     }
   }
-  return { command, task, secrets, env, mounts, nested: !!h.nested, hostname: h.hostname ?? null, ports };
+  const tailnets = {};
+  if (h.tailnets !== undefined) {
+    if (!isObj(h.tailnets) || Object.keys(h.tailnets).length > 4) fail(`${where}tailnets is an object of up to 4`);
+    for (const [name, target] of Object.entries(h.tailnets)) {
+      if (!TAILNET.test(name)) fail(`${where}tailnet ${JSON.stringify(name)}: lowercase letters, digits and dashes`);
+      if (!absOk(target) || targets.has(target) || target === '/run/secrets' || target.startsWith('/run/secrets/')) fail(`${where}tailnet ${name}: ${target} isn't a usable path`);
+      targets.add(target);
+      tailnets[name] = target;
+    }
+  }
+  return { command, task, secrets, env, mounts, nested: !!h.nested, hostname: h.hostname ?? null, ports, tailnets };
 }
 
 const SERVICE_NAME = /^[a-z][a-z0-9-]{0,39}$/;
-const RUN_KEYS = ['command', 'secrets', 'env', 'mounts', 'nested', 'hostname', 'ports'];
+const RUN_KEYS = ['command', 'secrets', 'env', 'mounts', 'nested', 'hostname', 'ports', 'tailnets'];
 
 /**
  * Validate a house file. Anything unexpected is refused, not ignored. A house
@@ -188,7 +212,7 @@ export const containerName = (id) => `loom-house-${id}`;
  * named here: the house's own secrets, its own dirs, plain env. `allowNested`
  * is the owner's say; the house file only asks.
  */
-export function runArgs(house, { id, agent, loomUrl, task, service, session, image, dirs, allowNested, allowPorts = [] }) {
+export function runArgs(house, { id, agent, loomUrl, task, service, session, image, dirs, allowNested, allowPorts = [], allowTailnets = [] }) {
   // --init: a real PID 1 (catatonit) that reaps orphans. Without it the house's
   // own program is PID 1; every grandchild whose parent exits (claude's git
   // calls) is reparented to it and never reaped, until the pids limit is full
@@ -209,6 +233,12 @@ export function runArgs(house, { id, agent, loomUrl, task, service, session, ima
     if (!grant) throw new HouseFileError(`${agent}'s house asks to publish port ${port}, and the owner hasn't allowed that`);
     if (ip && ip !== grant.ip) throw new HouseFileError(`${agent}'s house asks to publish port ${port} on ${ip}; the owner allowed it on ${grant.ip}`);
     args.push('-p', `${grant.ip}:${port}:${port}`);
+  }
+  // A tailnet is the owner's grant too: the house names it, the grant says which socket on the box.
+  for (const [name, target] of Object.entries(house.tailnets ?? {})) {
+    const grant = allowTailnets.find((g) => g.name === name);
+    if (!grant) throw new HouseFileError(`${agent}'s house asks for the ${name} tailnet, and the owner hasn't allowed that`);
+    args.push('-v', `${grant.socket}:${target}`);
   }
   for (const [name, where] of Object.entries(house.secrets)) {
     const ps = podmanSecret(id, name);

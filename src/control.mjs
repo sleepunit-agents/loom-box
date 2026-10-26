@@ -8,7 +8,7 @@
 // doesn't name exactly one box, it says why and starts nothing.
 import { AGENT_NAME, BOX_NAME, SECRET_NAME, StateError, load, localBoxName, nextHouseId, update } from './state.mjs';
 import { MAX_PARTS, PART_RAW, drop, partsOf, putPart, putWhole, readPart } from './blobs.mjs';
-import { parsePortGrant } from './house.mjs';
+import { parsePortGrant, parseTailnetGrant } from './house.mjs';
 
 const TERMINAL = new Set(['done', 'failed', 'stopped', 'lost']);
 const LIVE = new Set(['wanted', 'starting', 'running', 'stopping']);
@@ -176,11 +176,11 @@ export function setPrimary(env, effects, { agent, box }) {
 /**
  * How an agent's house is made: its repo, the house file in it (house.mjs:
  * the image and where things land), whether its house may run nested
- * containers, which ports it may publish on a box, and which secrets a house of it gets, by the name the house file
+ * containers, which ports it may publish on a box, which tailnets (a box's tailscaled socket) it may use, and which secrets a house of it gets, by the name the house file
  * uses and the secrets-store name they come from. Kept here, not read from
  * the repo, so neither a box nor the repo can widen it.
  */
-export function setAgent(env, effects, { agent, repo, houseFile, nested, branch, repoSecret, secrets, ports }) {
+export function setAgent(env, effects, { agent, repo, houseFile, nested, branch, repoSecret, secrets, ports, tailnets }) {
   const a = str(agent, 'an agent', 40);
   if (!AGENT_NAME.test(a)) fail('an agent name is lowercase letters, digits and dashes');
   const r = str(repo, 'the repo', 400);
@@ -204,8 +204,14 @@ export function setAgent(env, effects, { agent, repo, houseFile, nested, branch,
   pt = pt.map(parsePortGrant);
   if (pt.some((g) => !g)) fail('a port grant is a number from 1024 (bound on loopback), or an address and a port, like 0.0.0.0:7401');
   if (new Set(pt.map((g) => g.port)).size !== pt.length) fail('each port is granted once');
+  let tn = tailnets ?? [];
+  if (typeof tn === 'string') tn = tn.split(/[\s,]+/).filter(Boolean);
+  if (!Array.isArray(tn) || tn.length > 4) fail('tailnets is a list of up to 4');
+  tn = tn.map(parseTailnetGrant);
+  if (tn.some((g) => !g)) fail('a tailnet grant is a name and a tailscaled socket on the box, like fleet=/run/tailscale-fleet/tailscaled.sock');
+  if (new Set(tn.map((g) => g.name)).size !== tn.length) fail('each tailnet is granted once');
   return update(env, (s) => {
-    s.agents[a] = { repo: r, houseFile: file, nested: nest, branch: br, repoSecret: rs, secrets: sec, ports: pt };
+    s.agents[a] = { repo: r, houseFile: file, nested: nest, branch: br, repoSecret: rs, secrets: sec, ports: pt, tailnets: tn };
     return { agent: a, ...s.agents[a] };
   });
 }
@@ -373,7 +379,7 @@ export function claim(env, effects, caller, { id }) {
       const saved = key ? stateMeta(env, s, key) : undefined;
       // The state itself comes after, a part at a time (state-part): just its shape here.
       const state = saved ? { bytes: saved.bytes, sha256: saved.sha256, parts: partsOf(saved.bytes) } : null;
-      return { id, agent: h.agent, token, secrets, ...(notIssued ? { notIssued } : {}), repoAuth, nested: !!a.nested, ports: (a.ports ?? []).map(parsePortGrant).filter(Boolean), ...(h.service ? { service: h.service } : {}), ...(h.slot ? { slot: h.slot } : {}), ...(key ? { state } : {}) };
+      return { id, agent: h.agent, token, secrets, ...(notIssued ? { notIssued } : {}), repoAuth, nested: !!a.nested, ports: (a.ports ?? []).map(parsePortGrant).filter(Boolean), tailnets: (a.tailnets ?? []).map(parseTailnetGrant).filter(Boolean), ...(h.service ? { service: h.service } : {}), ...(h.slot ? { slot: h.slot } : {}), ...(key ? { state } : {}) };
     } catch (err) {
       // The house stays waiting; the token it was about to get goes (or is queued to).
       revokeOrQueue(s, effects, label);
