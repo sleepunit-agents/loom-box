@@ -13,5 +13,33 @@
   "engines": {
     "node": ">=22"
   },
-  "license": "AGPL-3.0-or-later"
+  "license": "AGPL-3.0-or-later",
+  "loom": {
+    "role": "runtime",
+    "label": "Boxes",
+    "description": "The runtime: machines (boxes) and the containers (houses) an agent runs its work in.",
+    "settings": [
+      {
+        "name": "LOOM_BOX_LOOM_URL",
+        "label": "loom's MCP URL, as this machine reaches it",
+        "default": "http://127.0.0.1:8787/mcp"
+      },
+      {
+        "name": "LOOM_BOX_PUBLIC_URL",
+        "label": "loom's URL for other boxes",
+        "hint": "what a new box joins, e.g. https://loom.example.com"
+      }
+    ],
+    "services": [
+      {
+        "name": "run",
+        "argv": [
+          "loom-box",
+          "run",
+          "--local"
+        ],
+        "keepChildren": true
+      }
+    ]
+  }
 }
