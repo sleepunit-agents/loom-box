@@ -3,7 +3,7 @@
 // controls. Data only; loom renders it. Every action is the owner's (the page
 // is), and a box's credential is shown once, in the message after adding it.
 import { StateError, load, localBoxName } from './state.mjs';
-import { addBox, factsOf, list, primaryOf, revokeBox, serviceDown, serviceMove, serviceUp, setAgent, setMayHost, setPrimary, up, down, LIVE } from './control.mjs';
+import { addBox, factsOf, list, primaryOf, remoteDown, remoteUp, revokeBox, serviceDown, serviceMove, serviceUp, setAgent, setMayHost, setPrimary, up, down, LIVE } from './control.mjs';
 
 const OWNER = { kind: 'owner' };
 const ago = (iso, nowMs = Date.now()) => {
@@ -86,6 +86,14 @@ function boxesPage(env, nowMs) {
     ] });
   }
 
+  const upSessions = view.remotes.filter((r) => r.want === 'up');
+  if (upSessions.length) {
+    sections.push({ id: 'box-sessions', title: 'Box sessions', blocks: [
+      { type: 'text', tone: 'muted', text: 'Claude on a box itself, not in a house: the box\'s whole reach. Take it down when the work is done.' },
+      ...upSessions.flatMap(sessionBlocks),
+    ] });
+  }
+
   sections.push({ id: 'houses', title: 'Houses', blocks: view.houses.length ? [
     { type: 'table', columns: ['House', 'Agent', 'Box', 'State', 'Task', 'Updated'], rows: view.houses.slice(0, 25).map((h) => [
       h.id, h.agent, h.box, h.state + (h.exit !== undefined ? ` (exit ${h.exit})` : ''), short(h.task), ago(h.updated, nowMs),
@@ -124,6 +132,31 @@ function boxesPage(env, nowMs) {
   return { title: 'Boxes', intro: 'Machines that run houses: an agent\'s container, started for a task. Nothing picks a box by itself.', sections };
 }
 
+/** One box session: how it is, and its link once it has one. */
+function sessionBlocks(r) {
+  return [
+    { type: 'kv', items: [
+      { label: 'Session', value: r.name },
+      { label: 'State', value: r.state + (r.error ? ` (${r.error})` : '') },
+      { label: 'Folder', value: r.dir },
+    ] },
+    ...(r.url ? [{ type: 'link', text: `Open "${r.name}" in claude.ai/code`, href: r.url }] : []),
+  ];
+}
+
+function sessionControls(env, s, a, r) {
+  const boxes = Object.entries(s.boxes).filter(([, b]) => !b.revoked).map(([n]) => n);
+  if (r?.want === 'up') {
+    return [...sessionBlocks(r), { type: 'buttons', items: [{ action: 'remote-down', label: 'Take the box session down', tone: 'danger', fields: { agent: a } }] }];
+  }
+  return [{ type: 'form', title: 'Box session', action: 'remote-up', submit: 'Bring it up', hidden: { agent: a },
+    note: `Claude's remote-control on the box itself, not in a house, with permissions bypassed: for work that needs the machine. Named "${a} on <box> (box session)".`,
+    fields: [
+      { name: 'box', label: 'Box', kind: 'choice', value: r?.box ?? primaryOf(s, a, env), options: boxes.map((n) => ({ value: n, label: n })) },
+      { name: 'dir', label: 'Folder on the box', kind: 'text', required: true, ...(r?.dir ? { value: r.dir } : {}), hint: 'Where it works, e.g. /home/art/Art' },
+    ] }];
+}
+
 function agentsPage(env) {
   const s = load(env);
   const sections = Object.entries(s.agents).sort().slice(0, 8).map(([a, c]) => ({
@@ -135,6 +168,7 @@ function agentsPage(env) {
         { label: 'Branch', value: c.branch || 'default' }, { label: 'Repo secret', value: c.repoSecret || 'none' },
         { label: 'Secrets a house gets', value: Object.entries(c.secrets || {}).map(([k, v]) => (k === v ? k : `${k} (from ${v})`)).join(', ') || 'none' },
       ] },
+      ...sessionControls(env, s, a, s.remotes?.[a] && { agent: a, ...s.remotes[a] }),
       agentForm(a, c),
     ],
   }));
@@ -184,6 +218,11 @@ export function act(env, effects, { action, fields: raw = {} }, publicUrl) {
         return { ok: true, message: `${r.id}: ${r.agent} on ${r.box}, waiting for the box to start it.`, page: '' };
       }
       case 'down': { const r = down(env, effects, OWNER, fields); return { ok: true, message: `${r.id} is ${r.state}.`, page: '' }; }
+      case 'remote-up': {
+        const r = remoteUp(env, effects, { agent: fields.agent, box: fields.box, dir: fields.dir });
+        return { ok: true, message: `"${r.name}" is starting; its link shows here in a few seconds.`, page: 'agents' };
+      }
+      case 'remote-down': { const r = remoteDown(env, effects, fields); return { ok: true, message: `"${r.name}" is going down.`, page: 'agents' }; }
       case 'service-up': { const r = serviceUp(env, effects, OWNER, fields); return { ok: true, message: `${r.service} is coming up on ${r.box}.`, page: '' }; }
       case 'service-down': { const r = serviceDown(env, effects, OWNER, fields); return { ok: true, message: `${r.service} is going down.`, page: '' }; }
       case 'service-move': {
