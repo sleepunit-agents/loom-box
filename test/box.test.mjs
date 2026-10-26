@@ -94,7 +94,7 @@ test('a house is a container with exactly its own secrets, env and dirs, and not
     'mount:loom-token': 'loom_house_token_aaaaaaaaaaaaaaaa', 'mount:github-token': 'secret:gh-art', 'env:CLAUDE_CODE_OAUTH_TOKEN': 'secret:claude-oauth-token',
   });
   const s = args.join(' ');
-  for (const want of ['--rm', '--name loom-house-h-1', '--hostname art-house', '-i', ...NESTED_ARGS,
+  for (const want of ['--rm', '--init', '--name loom-house-h-1', '--hostname art-house', '-i', ...NESTED_ARGS,
     '-e ART_REPO=https://example.com/art.git', '-e LOOM_URL=http://loom.test/mcp', '-e HOUSE_ID=h-1', '-e HOUSE_AGENT=art']) assert.ok(s.includes(want), want);
   const vols = args.filter((_, i) => args[i - 1] === '-v');
   assert.deepEqual(vols.map((v) => v.split(':').slice(1).join(':')), ['/home/art/.local/state', '/var/lib/containers', '/garage/git/art.git:ro']);
