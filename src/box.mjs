@@ -337,7 +337,7 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
       if (h.service || h.slot) restoreState(dirs.state, await fetchState(client, h.id, claimed.state));
       // A session house: what attaching to it runs, for `loom box attach` on this box.
       if (h.session) writeFileSync(pathJoin(dir, 'attach.json'), JSON.stringify({ container: containerName(h.id), command: house.attach ?? ['sh'] }), { mode: 0o600 });
-      const args = runArgs(house, { id: h.id, agent: h.agent, loomUrl, task: h.task, service: h.service, session: !!h.session, image: tag, dirs, allowNested: !!claimed.nested, allowPorts: claimed.ports ?? [] });
+      const args = runArgs(house, { id: h.id, agent: h.agent, loomUrl, task: h.task, service: h.service, session: !!h.session, image: tag, dirs, allowNested: !!claimed.nested, allowPorts: claimed.ports ?? [], allowTailnets: claimed.tailnets ?? [] });
       // The house's own podman secrets, each value on stdin (never argv).
       for (const name of Object.keys(house.secrets)) {
         // podman reads `-` only from a real pipe (node hands a child a socket),
