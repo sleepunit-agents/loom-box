@@ -18,6 +18,7 @@ import { join as pathJoin } from 'node:path';
 import { BOX_NAME, stateDir } from './state.mjs';
 import { containerName, missingSecrets, parseHouseFile, podmanSecret, runArgs, specFor } from './house.mjs';
 import { PART_RAW, joinParts, partsOf } from './blobs.mjs';
+import { boxSessions } from './remote.mjs';
 
 export const POLL_MS = 15_000;
 const STOP_GRACE_MS = 30_000;
@@ -292,6 +293,7 @@ function rootless(env) {
  */
 export function runner(env, client, { loomUrl, labels = [], log = (m) => process.stderr.write(`loom-box: ${m}\n`) }) {
   const houses = new Map(); // id -> { child, dir, stopAt? }
+  const sessions = boxSessions(env, client, { dataDir: dataDir(env), log });
 
   /** Everything a house leaves behind but its log. */
   function clean(h, dir, secretNames) {
@@ -458,6 +460,7 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
     }
     for (const id of want.stop || []) stop(id);
     for (const h of want.start || []) if (!houses.has(h.id)) await start(h);
+    await sessions(want.remotes);
     return want;
   }
 

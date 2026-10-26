@@ -14,6 +14,9 @@
 //                                                         how its house is made (--port: one it may publish)
 //   loom box primary <agent> [<box>]                       an agent's primary (default: this machine)
 //   loom box rename-local                                  after renaming this machine: its box takes the new name
+//   loom box remote up <agent> [--box b] [--dir /path]     a box session: Claude's remote-control on the box itself,
+//                                                         in the agent's folder there (the box's whole reach; take it down after)
+//   loom box remote down <agent>
 //   loom box run --local                                   run houses here (a user service)
 // Anywhere (here as the owner; elsewhere with LOOM_URL + LOOM_TOKEN_FILE, as that token):
 //   loom box up [--agent a] [--box b] [--needs gpu:5090] [--slot s] --task <text|->   ask for a house
@@ -37,7 +40,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync } from '
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
-import { addBox, api, down, list, revokeBox, setAgent, setPrimary, up } from './control.mjs';
+import { addBox, api, down, list, remoteDown, remoteUp, revokeBox, setAgent, setPrimary, up } from './control.mjs';
 import { realEffects } from './effects.mjs';
 import { act, manifest, page } from './ui.mjs';
 import { BoxError, joinLoom, loadConfig, POLL_MS, remoteClient, restoreState, runner } from './box.mjs';
@@ -141,6 +144,12 @@ async function main(argv, env) {
       out(setAgent(env, realEffects(env), { agent, repo: flag(rest, '--repo'), houseFile: flag(rest, '--house-file'), nested: rest.includes('--nested'), branch: flag(rest, '--branch'), repoSecret: flag(rest, '--repo-secret'), secrets, ports: flags(rest, '--port') }));
       return;
     }
+    case 'remote': {
+      const [sub, agent] = positional(rest);
+      if (sub === 'up') return out(remoteUp(env, realEffects(env), { agent, box: flag(rest, '--box'), dir: flag(rest, '--dir') }));
+      if (sub === 'down') return out(remoteDown(env, realEffects(env), { agent }));
+      throw new Fail('usage: loom box remote up|down <agent> [--box b] [--dir /path]', 2);
+    }
     case 'rename-local': { out(renameLocal(env)); return; }
     case 'primary': { const [agent, box] = positional(rest); out(setPrimary(env, realEffects(env), { agent, box })); return; }
     case 'up': {
@@ -200,6 +209,7 @@ async function main(argv, env) {
       if (json) return out(r);
       for (const b of r.boxes) process.stdout.write(`box ${b.name}${b.local ? ' (loom\'s own)' : ''}${b.revoked ? ' REVOKED' : ''}: ${b.facts.join(', ')}\n`);
       for (const v of r.services ?? []) process.stdout.write(`service ${v.service} on ${v.box}${v.moveTo ? ` → ${v.moveTo}` : ''}: ${v.want}, house ${v.house} ${v.state ?? ''}\n`);
+      for (const v of r.remotes ?? []) if (v.want === 'up' || v.state !== 'stopped') process.stdout.write(`box session "${v.name}" in ${v.dir}: ${v.want}, ${v.state}${v.url ? ` ${v.url}` : ''}${v.error ? ` (${v.error})` : ''}\n`);
       for (const h of r.houses) process.stdout.write(`${h.id} ${h.agent} on ${h.box}: ${h.state}  ${h.task.slice(0, 60)}\n`);
       return;
     }

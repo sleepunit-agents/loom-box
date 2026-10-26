@@ -269,7 +269,9 @@ export function list(env, caller) {
   const services = Object.entries(s.services ?? {})
     .filter(([, v]) => caller.kind === 'owner' || (caller.kind === 'agent' && v.agent === caller.agent))
     .map(([key, v]) => ({ service: key, agent: v.agent, name: v.name, box: v.box, want: v.want, moveTo: v.moveTo ?? null, house: v.house, state: s.houses[v.house]?.state ?? null, restarts: v.restarts ?? 0, stateSaved: s.serviceState?.[key]?.at ?? null }));
-  return { boxes, houses, services, ...(primary ? { primary } : {}) };
+  const sessions = Object.entries(s.remotes ?? {}).filter(([a]) => caller.kind === 'owner' || (caller.kind === 'agent' && caller.agent === a))
+    .map(([a, r]) => remoteView(a, r));
+  return { boxes, houses, services, remotes: sessions, ...(primary ? { primary } : {}) };
 }
 
 // ------------------------------------------------------------------ boxes
@@ -311,6 +313,9 @@ export function poll(env, effects, caller, { facts } = {}) {
       stop: mine.filter((h) => h.state === 'stopping').map((h) => h.id),
       // Taken by this box and not over: one the box doesn't have (it restarted) is lost.
       active: mine.filter((h) => ['starting', 'running', 'stopping'].includes(h.state)).map((h) => h.id),
+      // Its box sessions: up or down, as the owner wants them.
+      remotes: Object.entries(s.remotes ?? {}).filter(([, r]) => r.box === caller.subject)
+        .map(([agent, r]) => ({ agent, dir: r.dir, name: r.name, want: r.want, state: r.state })),
     };
   });
 }
@@ -628,11 +633,67 @@ export function savedState(env, { agent, name, part = 0, slot }) {
 
 // ---------------------------------------------------------------- the API
 
+// ------------------------------------------------------------------ box sessions
+
+/**
+ * A box session: one Claude Code remote-control session for an agent, run on a
+ * box itself (not in a house) and driven from claude.ai/code, brought up when
+ * the work needs the machine and taken down after. The owner's alone: it has
+ * the box's whole reach. Its name says what it is: "<agent> on <box> (box session)".
+ */
+const REMOTE_STATES = new Set(['starting', 'running', 'stopped', 'failed']);
+const ABS_DIR = /^\/[A-Za-z0-9._\/-]{0,300}$/;
+export const remoteName = (agent, box) => `${agent} on ${box} (box session)`;
+const remoteView = (agent, r) => ({ agent, box: r.box, dir: r.dir, name: r.name, want: r.want, state: r.state, url: r.url ?? null, since: r.since, error: r.error ?? null });
+
+export function remoteUp(env, effects, { agent, box, dir }) {
+  return update(env, (s) => {
+    if (!AGENT_NAME.test(agent ?? '')) fail('an agent name is lowercase letters, digits and dashes');
+    if (!s.agents[agent]) fail(`${agent} has no house yet: the owner sets its repo on the Boxes page`, 409);
+    s.remotes ??= {};
+    const prev = s.remotes[agent];
+    const b = placeHouse(s, agent, { box: box || prev?.box || undefined }, env);
+    if (prev?.want === 'up' && prev.box !== b) fail(`${agent}'s box session is up on ${prev.box}: take it down first`, 409);
+    if (prev?.want === 'up') return remoteView(agent, prev);
+    const d = dir || (prev?.box === b ? prev.dir : undefined);
+    if (!d || !ABS_DIR.test(d) || d.split('/').some((x) => x === '..' || x === '.')) fail('a box session needs the folder it works in on that box: an absolute path');
+    s.remotes[agent] = { box: b, dir: d, name: remoteName(agent, b), want: 'up', state: 'starting', url: null, since: now(effects), error: null };
+    return remoteView(agent, s.remotes[agent]);
+  });
+}
+
+export function remoteDown(env, effects, { agent }) {
+  return update(env, (s) => {
+    const r = s.remotes?.[agent];
+    if (!r || r.want !== 'up') fail(`${agent} has no box session up`, 404);
+    r.want = 'down';
+    r.since = now(effects);
+    return remoteView(agent, r);
+  });
+}
+
+/** A box says how its session for an agent is: starting, running (with its link), stopped, failed (why). */
+export function remoteReport(env, effects, caller, { agent, state, url, error }) {
+  return update(env, (s) => {
+    boxOf(s, caller);
+    const r = s.remotes?.[agent];
+    if (!r || r.box !== caller.subject) fail(`no box session for ${agent} on this box`, 404);
+    if (!REMOTE_STATES.has(state)) fail('a box session is starting, running, stopped or failed');
+    if (url != null && !/^https:\/\/claude\.ai\/code\?environment=env_[A-Za-z0-9]{1,64}$/.test(url)) fail('not a remote-control link');
+    r.state = state;
+    if (url !== undefined) r.url = url;
+    r.error = state === 'failed' ? String(error ?? '').slice(0, 400) : null;
+    if (state === 'stopped' || state === 'failed') r.url = null;
+    return { ok: true };
+  });
+}
+
 const OWNER_ONLY = {
   'add-box': addBox, 'revoke-box': revokeBox, 'may-host': setMayHost, 'set-primary': setPrimary, 'set-agent': setAgent,
   'seed-state': seedState, 'saved-state': (env, _fx, b) => savedState(env, b),
+  'remote-up': remoteUp, 'remote-down': remoteDown,
 };
-const BOX_ONLY = { hello, poll, claim, report, 'save-state': saveState, 'state-part': statePart };
+const BOX_ONLY = { hello, poll, claim, report, 'save-state': saveState, 'state-part': statePart, 'remote-report': remoteReport };
 
 /** One API call, as loom's piece API hands it over: {caller, path, body} → {status, body}. */
 export function api(env, effects, { caller, path, body }) {
