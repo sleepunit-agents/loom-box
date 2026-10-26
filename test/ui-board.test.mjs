@@ -31,22 +31,24 @@ test('the agent form carries the tailnet grant, so saving it keeps it', () => {
   assert.deepEqual(load(env).agents.art.tailnets, [{ name: 'fleet', socket: '/run/tailscale-fleet/tailscaled.sock' }]);
 });
 
-test('Sessions come first: the house session with its link from the house log, one tap down; Restart stops the house', () => {
+test('the board\'s order: the box first (uptime, disk, houses), then services, then sessions with their links and one tap down at the row; Restart stops the house', () => {
   const { env, fx } = setup();
   assert.equal(act(env, fx, { action: 'service-up', fields: { agent: 'art', name: 'remote' } }).ok, true);
   const house = load(env).services['art/remote'].house;
   mkdirSync(join(env.LOOM_BOX_DATA, 'houses', house), { recursive: true });
   writeFileSync(join(env.LOOM_BOX_DATA, 'houses', house, 'log'), 'starting…\nhttps://claude.ai/code?environment=env_01ABCdef\n');
   const p = page(env, { path: '' });
-  assert.equal(p.sections[0].id, 'sessions');
-  const items = p.sections[0].blocks.find((b) => b.type === 'list').items;
-  assert.deepEqual(items.map((i) => [i.text, i.href, i.agent]), [["art's house: house session", 'https://claude.ai/code?environment=env_01ABCdef', 'art']]);
-  const buttons = p.sections[0].blocks.find((b) => b.type === 'buttons').items;
-  assert.deepEqual(buttons.map((b) => [b.action, b.tone]), [['service-down', 'danger']]);
+  const ids = p.sections.map((x) => x.id);
+  assert.ok(ids.indexOf('box-one') < ids.indexOf('services') && ids.indexOf('services') < ids.indexOf('sessions'), ids.join(','));
+  const sess = section(p, 'sessions');
+  const items = sess.blocks.find((b) => b.type === 'list').items;
+  assert.deepEqual(items.map((i) => [i.text, i.href, i.agent, i.act.action, i.act.tone]), [["art's house: house session", 'https://claude.ai/code?environment=env_01ABCdef', 'art', 'service-down', 'danger']]);
   // No box session yet: where it runs is a form, behind a details.
-  assert.ok(p.sections[0].blocks.some((b) => b.type === 'details' && /first box session/.test(b.summary)));
-  // A card for the box, its houses with their agent.
-  assert.ok(section(p, 'box-one'));
+  assert.ok(sess.blocks.some((b) => b.type === 'details' && /first box session/.test(b.summary)));
+  // A card for the box: its houses with their agent, and the machine's facts folded.
+  assert.ok(section(p, 'box-one').blocks.some((b) => b.type === 'details' && b.summary === 'Machine'));
+  // Each service up has Restart at its row.
+  assert.deepEqual(section(p, 'services').blocks[0].items.map((i) => i.act?.action), ['service-restart']);
   // Not running yet: already a fresh start.
   assert.match(act(env, fx, { action: 'service-restart', fields: { agent: 'art', name: 'remote' } }).message, /already starting fresh/);
   // Running: Restart stops it, and once the box says it stopped, a fresh house is wanted (no back-off).

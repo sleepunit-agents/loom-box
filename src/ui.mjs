@@ -2,7 +2,8 @@
 // boxes, what each has and may host, the houses asked for, and the owner's
 // controls. Data only; loom renders it. Every action is the owner's (the page
 // is), and a box's credential is shown once, in the message after adding it.
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, statfsSync } from 'node:fs';
+import { uptime } from 'node:os';
 import { join } from 'node:path';
 import { StateError, load, localBoxName } from './state.mjs';
 import { addBox, factsOf, list, primaryOf, remoteDown, remoteUp, revokeBox, serviceDown, serviceMove, serviceRestart, serviceUp, setAgent, setMayHost, setPrimary, up, down, LIVE } from './control.mjs';
@@ -42,24 +43,24 @@ function sessionsSection(env, s, view) {
   for (const a of agents) {
     const r = view.remotes.find((x) => x.agent === a);
     const items = [];
-    const buttons = [];
+    // Each session a row, its link on the row and one tap up or down at its right.
     if (r && r.want === 'up') {
-      items.push({ text: `${a} on ${r.box}: box session`, meta: `${r.state}${r.error ? ` (${r.error})` : ''} · ${r.dir}`, tone: r.state === 'running' ? 'ok' : 'warn', agent: a, ...(r.url ? { href: r.url } : {}) });
-      buttons.push({ action: 'remote-down', label: `Box session down`, tone: 'danger', confirm: 'The session ends; anything open in the Claude app on it stops.', fields: { agent: a } });
+      items.push({ text: `${a} on ${r.box}: box session`, meta: `${r.state}${r.error ? ` (${r.error})` : ''} · ${r.dir}`, tone: r.state === 'running' ? 'ok' : 'warn', agent: a, ...(r.url ? { href: r.url } : {}),
+        act: { action: 'remote-down', label: 'Down', tone: 'danger', confirm: 'The session ends; anything open in the Claude app on it stops.', fields: { agent: a } } });
     } else if (r?.dir) {
-      items.push({ text: `${a} on ${r.box}: box session`, meta: `down · ${r.dir}`, tone: 'muted', agent: a });
-      buttons.push({ action: 'remote-up', label: 'Box session up', tone: 'primary', fields: { agent: a, box: r.box, dir: r.dir } });
+      items.push({ text: `${a} on ${r.box}: box session`, meta: `down · ${r.dir}`, tone: 'muted', agent: a,
+        act: { action: 'remote-up', label: 'Up', tone: 'primary', fields: { agent: a, box: r.box, dir: r.dir } } });
     }
     const rs = view.services.find((v) => v.agent === a && v.name === 'remote');
     if (rs) {
       const link = rs.want === 'up' && rs.house ? remoteLink(env, rs.house) : null;
-      items.push({ text: `${a}'s house: house session`, meta: rs.want === 'up' ? `${rs.state ?? 'starting'} · ${rs.house} on ${rs.box}` : 'down', tone: rs.want !== 'up' ? 'muted' : rs.state === 'running' ? 'ok' : 'warn', agent: a, ...(link ? { href: link } : {}) });
-      buttons.push(rs.want === 'up'
-        ? { action: 'service-down', label: 'House session down', tone: 'danger', confirm: 'The house stops; anything open in the Claude app on it stops.', fields: { agent: a, name: 'remote' } }
-        : { action: 'service-up', label: 'House session up', tone: 'primary', fields: { agent: a, name: 'remote' } });
+      items.push({ text: `${a}'s house: house session`, meta: rs.want === 'up' ? `${rs.state ?? 'starting'} · ${rs.house} on ${rs.box}` : 'down', tone: rs.want !== 'up' ? 'muted' : rs.state === 'running' ? 'ok' : 'warn', agent: a, ...(link ? { href: link } : {}),
+        act: rs.want === 'up'
+          ? { action: 'service-down', label: 'Down', tone: 'danger', confirm: 'The house stops; anything open in the Claude app on it stops.', fields: { agent: a, name: 'remote' } }
+          : { action: 'service-up', label: 'Up', tone: 'primary', fields: { agent: a, name: 'remote' } } });
     }
     if (!items.length) continue;
-    blocks.push({ type: 'list', items }, { type: 'buttons', items: buttons });
+    blocks.push({ type: 'list', items });
     // No box session yet: where it would run is a choice, so it's a form, a tap away.
     if (!r?.dir) blocks.push({ type: 'details', summary: `Start ${a}'s first box session`, blocks: sessionControls(env, s, a, null) });
   }
@@ -83,6 +84,26 @@ export function manifest(env) {
   };
 }
 
+/** "12 days", "5 hours", "40 minutes": how long, for a box's uptime. */
+function span(ms) {
+  const m = Math.floor(ms / 60000);
+  if (m < 120) return `${m} minute${m === 1 ? '' : 's'}`;
+  const h = Math.floor(m / 60);
+  if (h < 48) return `${h} hours`;
+  return `${Math.floor(h / 24)} days`;
+}
+
+/** This box's disk (where houses live): the share used, and what's free. */
+function diskUse(env) {
+  try {
+    const st = statfsSync(existsSync(dataDir(env)) ? dataDir(env) : (env.HOME || '/'));
+    const total = st.blocks * st.bsize, free = st.bavail * st.bsize;
+    if (!total) return null;
+    const gb = free / 1e9;
+    return { used: Math.min(1, Math.max(0, 1 - free / total)), free: gb >= 100 ? `${Math.round(gb)} GB` : `${gb.toFixed(1)} GB` };
+  } catch { return null; }
+}
+
 function boxesPage(env, nowMs) {
   const s = load(env);
   const view = list(env, OWNER);
@@ -90,14 +111,6 @@ function boxesPage(env, nowMs) {
   const live = view.houses.filter((h) => LIVE.has(h.state));
   const sections = [];
   const waiting = live.some((h) => h.state === 'wanted');
-  sections.push({ id: 'summary', blocks: [{ type: 'stats', items: [
-    { label: 'Boxes', value: String(view.boxes.filter((b) => !b.revoked).length) },
-    { label: 'Houses up or waiting', value: String(live.length), ...(waiting ? { tone: 'warn' } : {}) },
-    { label: 'Agents with a house', value: String(agents.length), page: 'agents' },
-  ] }] });
-
-  const sess = sessionsSection(env, s, view);
-  if (sess) sections.unshift(sess);
   const live_boxes = view.boxes.filter((b) => !b.revoked);
   // The board: a card per box, what it is, and the houses on it now (a page holds ten sections, so past three boxes, one list).
   const svcOf = new Map(view.services.map((v) => [v.house, v.name]));
@@ -108,12 +121,19 @@ function boxesPage(env, nowMs) {
   }
   for (const b of live_boxes.length > 3 ? [] : live_boxes) {
     const here = live.filter((h) => h.box === b.name);
+    // The board's box card: how long it's been up, its disk, then the houses on it. The machine's facts a tap away.
+    const disk = b.local ? diskUse(env) : null;
     sections.push({ id: `box-${b.name}`, title: b.local ? `${b.name} · loom's own` : b.name, tone: b.local || b.lastSeen ? undefined : 'warn', blocks: [
-      { type: 'text', tone: 'muted', text: `${b.local ? 'here' : b.lastSeen ? `seen ${ago(b.lastSeen, nowMs)}` : 'not joined yet'}${b.facts.length ? ` · ${b.facts.join(', ')}` : ''} · may host ${mayHostText(b.mayHost)}` },
+      { type: 'text', tone: 'muted', text: b.local ? `Up ${span(uptime() * 1000)}` : b.lastSeen ? `Seen ${ago(b.lastSeen, nowMs)}` : 'Not joined yet' },
+      ...(disk ? [{ type: 'meter', items: [{ label: 'Disk', value: disk.used, detail: `${disk.free} free`, ...(disk.used >= 0.95 ? { tone: 'bad' } : disk.used >= 0.85 ? { tone: 'warn' } : {}) }] }] : []),
       here.length
-        ? { type: 'list', items: here.slice(0, 20).map((h) => ({ text: svcOf.has(h.id) ? `${h.agent}'s ${svcOf.get(h.id)}` : `${h.agent}'s house`, meta: `${h.id} · ${short(h.task, 60)}`, badge: h.state, tone: toneOf(h.state), agent: h.agent })) }
+        ? { type: 'list', items: here.slice(0, 20).map((h) => ({ text: svcOf.has(h.id) ? `${h.agent}'s ${svcOf.get(h.id)}` : `${h.agent}'s house`, meta: h.id, badge: h.state, tone: toneOf(h.state), agent: h.agent })) }
         : { type: 'text', tone: 'muted', text: 'No houses on it now.' },
-    ].filter(Boolean) });
+      { type: 'details', summary: 'Machine', meta: b.local ? 'here' : '', blocks: [{ type: 'kv', items: [
+        ...b.facts.map((f) => { const i = f.indexOf(':'); return i > 0 ? { label: f.slice(0, i), value: f.slice(i + 1) } : { label: f, value: 'yes' }; }),
+        { label: 'may host', value: mayHostText(b.mayHost) },
+      ] }] },
+    ] });
   }
   if (live_boxes.some((b) => !b.local)) sections.push({ id: 'boxes', title: 'Manage boxes', blocks: [
     ...live_boxes.filter((b) => !b.local).map((b) => ({
@@ -127,16 +147,14 @@ function boxesPage(env, nowMs) {
   ] });
 
   if (view.services.length) {
-    const up = view.services.filter((v) => v.want === 'up');
     sections.push({ id: 'services', title: 'Services', blocks: [
+      // Restart at each row's right: its house stops and the service brings up a fresh one (what fixes a stuck bridge).
       { type: 'list', items: view.services.map((v) => ({
         text: v.service, agent: v.agent,
         meta: v.want === 'up' ? `${v.moveTo ? `${v.box} → ${v.moveTo}` : v.box} · ${v.house} ${v.state ?? ''}${v.restarts ? ` · ${v.restarts} restart${v.restarts === 1 ? '' : 's'}` : ''}` : 'down',
         tone: v.want !== 'up' ? 'muted' : v.state === 'running' ? 'ok' : v.state === 'failed' || v.state === 'lost' ? 'bad' : 'warn',
+        ...(v.want === 'up' ? { act: { action: 'service-restart', label: 'Restart', ...(v.state === 'failed' || v.state === 'lost' ? { tone: 'primary' } : {}), fields: { agent: v.agent, name: v.name } } } : {}),
       })) },
-      // Restart: its house stops and the service brings up a fresh one (what fixes a stuck bridge).
-      ...(up.length ? [{ type: 'buttons', items: up.slice(0, 10).map((v) => ({ action: 'service-restart', label: `Restart ${v.name}`,
-        ...(v.state === 'failed' || v.state === 'lost' ? { tone: 'primary' } : {}), fields: { agent: v.agent, name: v.name } })) }] : []),
       ...view.services.slice(0, 8).map((v) => ({
         type: 'details', summary: v.service, meta: v.want === 'up' ? `on ${v.box}` : 'down',
         blocks: [
@@ -150,6 +168,9 @@ function boxesPage(env, nowMs) {
       })),
     ] });
   }
+
+  const sess = sessionsSection(env, s, view);
+  if (sess) sections.push(sess);
 
   sections.push({ id: 'houses', title: 'Houses', blocks: view.houses.length ? [
     { type: 'table', columns: ['House', 'Agent', 'Box', 'State', 'Task', 'Updated'], rows: view.houses.slice(0, 25).map((h) => [
@@ -179,6 +200,7 @@ function boxesPage(env, nowMs) {
 
   if (agents.length) {
     sections.push({ id: 'primaries', side: true, title: 'Primaries', blocks: [
+      { type: 'link', text: `Agents' houses (${agents.length})`, page: 'agents' },
       { type: 'kv', items: agents.map((a) => ({ label: a, value: primaryOf(s, a, env) })) },
       { type: 'form', action: 'set-primary', submit: 'Set', fields: [
         { name: 'agent', label: 'Agent', kind: 'choice', required: true, options: agents.map((a) => ({ value: a, label: a })) },
@@ -186,7 +208,7 @@ function boxesPage(env, nowMs) {
       ] },
     ] });
   }
-  return { title: 'Boxes', intro: 'Machines that run houses: an agent\'s container, started for a task. Nothing picks a box by itself.', sections };
+  return { title: 'Boxes', intro: `${live_boxes.length} box${live_boxes.length === 1 ? '' : 'es'}, ${live.length} house${live.length === 1 ? '' : 's'} up${waiting ? ' or waiting' : ''}. A house is an agent's container, started for a task.`, sections };
 }
 
 /** One box session: how it is, and its link once it has one. */
