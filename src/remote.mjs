@@ -7,7 +7,10 @@
 // box's own Claude login: never an env token (a box's user manager may carry
 // CLAUDE_CODE_OAUTH_TOKEN for its daemon; remote-control needs the session
 // login, and Claude Code prefers the env token), with permissions bypassed
-// (Jonathan, 2026-10-25: the work is continuous). Its output goes to a file
+// (Jonathan, 2026-10-25: the work is continuous), on the owner's login PATH:
+// a user unit starts on systemd's bare one, without ~/.local/bin, and the
+// work calls wake, taskstore and loom by name (seen 2026-10-25, the first
+// box session). Its output goes to a file
 // here, where the box finds the session's link and reports it.
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
@@ -23,6 +26,17 @@ export const unitOf = (agent) => `loom-remote-${agent}`;
 const systemctl = (env) => env.LOOM_BOX_SYSTEMCTL || 'systemctl';
 const systemdRun = (env) => env.LOOM_BOX_SYSTEMD_RUN || 'systemd-run';
 const claudeBin = (env) => env.LOOM_BOX_CLAUDE || (existsSync(pathJoin(env.HOME || homedir(), '.local', 'bin', 'claude')) ? pathJoin(env.HOME || homedir(), '.local', 'bin', 'claude') : 'claude');
+// The PATH a terminal would have: the login shell's, after a marker so
+// whatever the profile prints is skipped; else the box's own. ~/.local/bin is
+// on it either way.
+export function loginPath(env) {
+  const r = spawnSync(env.SHELL || '/bin/sh', ['-lc', 'printf "\\nLOOM_BOX_PATH=%s" "$PATH"'],
+    { encoding: 'utf-8', timeout: 10_000, env: { ...env }, stdio: ['ignore', 'pipe', 'ignore'] });
+  const out = r.status === 0 ? (r.stdout || '') : '';
+  const path = (out.includes('\nLOOM_BOX_PATH=') && out.split('\nLOOM_BOX_PATH=').pop().trim()) || env.PATH || '/usr/local/bin:/usr/bin:/bin';
+  const local = pathJoin(env.HOME || homedir(), '.local', 'bin');
+  return path.split(':').includes(local) ? path : `${local}:${path}`;
+}
 const logOf = (dir, agent) => pathJoin(dir, 'remotes', `${agent}.log`);
 
 /** What the box does about its sessions each tick: sync(remotes) from the poll. */
@@ -53,7 +67,7 @@ export function boxSessions(env, client, { dataDir, log }) {
     const out = logOf(dataDir, r.agent);
     const res = run(systemdRun(env), ['--user', `--unit=${unitOf(r.agent)}`, '--collect', '--quiet',
       `--property=WorkingDirectory=${r.dir}`, `--property=StandardOutput=truncate:${out}`, `--property=StandardError=append:${out}`,
-      '--', 'env', '-u', 'CLAUDE_CODE_OAUTH_TOKEN', '-u', 'ANTHROPIC_API_KEY',
+      `--setenv=PATH=${loginPath(env)}`, '--', 'env', '-u', 'CLAUDE_CODE_OAUTH_TOKEN', '-u', 'ANTHROPIC_API_KEY',
       claudeBin(env), 'remote-control', '--name', r.name, '--permission-mode', 'bypassPermissions']);
     if (res.status !== 0) return `systemd-run: ${(res.stderr || res.error?.message || '').trim().split('\n').pop()}`;
     return null;

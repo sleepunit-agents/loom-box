@@ -4,7 +4,7 @@
 //  - only the owner brings one up or down; an agent sees only its own;
 //  - one per agent, in a folder on the box (an absolute path), named for what it is;
 //  - the box runs it as a user unit, never with an env token, with
-//    permissions bypassed, and reports its link; down stops the unit;
+//    permissions bypassed, on the owner's login PATH, and reports its link; down stops the unit;
 //  - a session that ends is started again, at most once a minute; a missing folder fails, saying so.
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
@@ -12,7 +12,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileS
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { api } from '../src/control.mjs';
-import { boxSessions, unitOf } from '../src/remote.mjs';
+import { boxSessions, loginPath, unitOf } from '../src/remote.mjs';
 
 let env, fx, fake, folder;
 const owner = { kind: 'owner' };
@@ -95,6 +95,21 @@ test('the box runs it as a user unit without an env token, bypassing permissions
   assert.ok(runs().some((c) => c.cmd === 'systemctl' && c.args[1] === 'stop' && c.args[2] === unitOf('art')));
   const down = ok(call(owner, 'list')).remotes[0];
   assert.deepEqual([down.state, down.url], ['stopped', null]);
+});
+
+test("the session gets the owner's login PATH, as a terminal would, with ~/.local/bin on it", async () => {
+  // A user unit starts on systemd's bare PATH; the work calls wake, taskstore and loom by name.
+  const shell = join(fake, 'shell');
+  writeFileSync(shell, '#!/bin/sh\necho "a greeting the profile prints"\nprintf "\\nLOOM_BOX_PATH=%s" "/opt/tools/bin:/usr/bin"\n');
+  chmodSync(shell, 0o755);
+  ok(call(owner, 'remote-up', { agent: 'art', dir: folder }));
+  await boxSessions({ ...env, SHELL: shell }, client, { dataDir: env.LOOM_BOX_DATA, log: () => {} })(ok(call(box('one'), 'poll')).remotes);
+  const run = runs().filter((c) => c.cmd === 'systemd-run').pop();
+  assert.ok(run.args.includes(`--setenv=PATH=${join(env.HOME, '.local', 'bin')}:/opt/tools/bin:/usr/bin`), run.args.join(' '));
+  // A shell that fails: the box's own PATH, still with ~/.local/bin; one that has it already is left as it is.
+  const local = join(env.HOME, '.local', 'bin');
+  assert.equal(loginPath({ HOME: env.HOME, SHELL: join(fake, 'no-such-shell'), PATH: '/usr/bin' }), `${local}:/usr/bin`);
+  assert.equal(loginPath({ HOME: env.HOME, SHELL: join(fake, 'no-such-shell'), PATH: `/usr/bin:${local}` }), `/usr/bin:${local}`);
 });
 
 test('a session that ends is started again, at most once a minute, saying why; a missing folder fails', async () => {
