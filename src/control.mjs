@@ -568,6 +568,24 @@ export function serviceMove(env, effects, caller, body) {
   });
 }
 
+/**
+ * Restart a service: a hand-off to the box it's already on. Its house stops,
+ * and a fresh one starts once it has (never two at once), with no back-off:
+ * the owner asked for it. A house not running yet is already a fresh start.
+ */
+export function serviceRestart(env, effects, caller, body) {
+  return update(env, (s) => {
+    const { key } = serviceOf(s, caller, body);
+    const svc = s.services?.[key];
+    if (!svc || svc.want !== 'up') fail(`${key} isn't up`, 404);
+    const h = s.houses[svc.house];
+    if (!h || TERMINAL.has(h.state) || h.state === 'wanted') return { service: key, house: svc.house, restarting: false };
+    svc.moveTo = svc.box;
+    if (h.state !== 'stopping') { h.state = 'stopping'; h.updated = now(effects); }
+    return { service: key, house: h.id, restarting: true };
+  });
+}
+
 /** When a service's house ends: move it, restart it (backing off), or leave it down. */
 function serviceHouseEnded(s, h, effects) {
   const svc = s.services?.[serviceKey(h.agent, h.service)];
