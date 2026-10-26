@@ -12,7 +12,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileS
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { api } from '../src/control.mjs';
-import { boxSessions, unitOf } from '../src/remote.mjs';
+import { boxSessions, loginPath, unitOf } from '../src/remote.mjs';
 
 let env, fx, fake, folder;
 const owner = { kind: 'owner' };
@@ -104,15 +104,12 @@ test("the session gets the owner's login PATH, as a terminal would, with ~/.loca
   chmodSync(shell, 0o755);
   ok(call(owner, 'remote-up', { agent: 'art', dir: folder }));
   await boxSessions({ ...env, SHELL: shell }, client, { dataDir: env.LOOM_BOX_DATA, log: () => {} })(ok(call(box('one'), 'poll')).remotes);
-  let run = runs().filter((c) => c.cmd === 'systemd-run').pop();
+  const run = runs().filter((c) => c.cmd === 'systemd-run').pop();
   assert.ok(run.args.includes(`--setenv=PATH=${join(env.HOME, '.local', 'bin')}:/opt/tools/bin:/usr/bin`), run.args.join(' '));
-  // A shell that fails: the box's own PATH, still with ~/.local/bin.
-  ok(call(owner, 'remote-down', { agent: 'art' }));
-  await boxSessions(env, client, { dataDir: env.LOOM_BOX_DATA, log: () => {} })(ok(call(box('one'), 'poll')).remotes);
-  ok(call(owner, 'remote-up', { agent: 'art' }));
-  await boxSessions({ ...env, SHELL: join(fake, 'no-such-shell'), PATH: '/usr/bin' }, client, { dataDir: env.LOOM_BOX_DATA, log: () => {} })(ok(call(box('one'), 'poll')).remotes);
-  run = runs().filter((c) => c.cmd === 'systemd-run').pop();
-  assert.ok(run.args.includes(`--setenv=PATH=${join(env.HOME, '.local', 'bin')}:/usr/bin`), run.args.join(' '));
+  // A shell that fails: the box's own PATH, still with ~/.local/bin; one that has it already is left as it is.
+  const local = join(env.HOME, '.local', 'bin');
+  assert.equal(loginPath({ HOME: env.HOME, SHELL: join(fake, 'no-such-shell'), PATH: '/usr/bin' }), `${local}:/usr/bin`);
+  assert.equal(loginPath({ HOME: env.HOME, SHELL: join(fake, 'no-such-shell'), PATH: `/usr/bin:${local}` }), `/usr/bin:${local}`);
 });
 
 test('a session that ends is started again, at most once a minute, saying why; a missing folder fails', async () => {

@@ -29,7 +29,7 @@ const claudeBin = (env) => env.LOOM_BOX_CLAUDE || (existsSync(pathJoin(env.HOME 
 // The PATH a terminal would have: the login shell's, after a marker so
 // whatever the profile prints is skipped; else the box's own. ~/.local/bin is
 // on it either way.
-function loginPath(env) {
+export function loginPath(env) {
   const r = spawnSync(env.SHELL || '/bin/sh', ['-lc', 'printf "\\nLOOM_BOX_PATH=%s" "$PATH"'],
     { encoding: 'utf-8', timeout: 10_000, env: { ...env }, stdio: ['ignore', 'pipe', 'ignore'] });
   const out = r.status === 0 ? (r.stdout || '') : '';
