@@ -189,7 +189,12 @@ export const containerName = (id) => `loom-house-${id}`;
  * is the owner's say; the house file only asks.
  */
 export function runArgs(house, { id, agent, loomUrl, task, service, session, image, dirs, allowNested, allowPorts = [] }) {
-  const args = ['run', '--rm', '--name', containerName(id), '--hostname', house.hostname ?? `${agent}-house`];
+  // --init: a real PID 1 (catatonit) that reaps orphans. Without it the house's
+  // own program is PID 1; every grandchild whose parent exits (claude's git
+  // calls) is reparented to it and never reaped, until the pids limit is full
+  // and nothing in the house can fork. The Slack and Discord bridges jammed
+  // that way on 2026-10-26 (2033 zombie git), still "up" but answering no one.
+  const args = ['run', '--rm', '--init', '--name', containerName(id), '--hostname', house.hostname ?? `${agent}-house`];
   if (house.task === 'stdin') args.push('-i');
   // A service runs until it's stopped; podman stop gives it this long to finish.
   if (!house.task) args.push('--stop-timeout', '25');
