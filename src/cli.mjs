@@ -13,7 +13,7 @@
 //                  [--branch b] [--repo-secret <store-name>] [--secret as=from]... [--port n]...
 //                  [--tailnet name=/run/…/tailscaled.sock]...
 //                                                         how its house is made (--port: one it may publish;
-//                                                         --tailnet: a box tailscaled socket it may use, by name)
+//                                                         --tailnet: a box tailscaled.sock it may use, by name)
 //   loom box primary <agent> [<box>]                       an agent's primary (default: this machine)
 //   loom box rename-local                                  after renaming this machine: its box takes the new name
 //   loom box remote up <agent> [--box b] [--dir /path]     a box session: Claude's remote-control on the box itself,
