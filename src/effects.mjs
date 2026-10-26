@@ -26,11 +26,12 @@ export function realEffects(env = process.env) {
     /**
      * What an agent's next house runs on, for a provider: the subscriptions
      * piece's issue (its order, the first with room left, made safe for a
-     * house: an OpenAI login without its refresh token). {name, value}, the
+     * house: an OpenAI login without its refresh token; a kind, as
+     * 'session', picks a Claude session login's access-only view). {name, value}, the
      * value on a pipe; the name is which credential, from its stderr.
      */
-    issue(agent, provider) {
-      const r = spawnSync(loom, ['subscriptions', 'issue', agent, provider], { env, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 40_000 });
+    issue(agent, provider, kind) {
+      const r = spawnSync(loom, ['subscriptions', 'issue', agent, provider, ...(kind ? ['--kind', kind] : [])], { env, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 40_000 });
       if (r.error || r.status !== 0) throw new Error(`issuing ${agent}'s ${provider} credential: ${(r.stderr || r.error?.message || '').trim().split('\n').pop()}`);
       const m = /issued ([a-z0-9-]+)\/([A-Za-z0-9._-]+)/.exec(r.stderr || '');
       return { name: m ? m[2] : 'unknown', value: r.stdout };

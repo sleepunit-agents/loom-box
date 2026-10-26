@@ -324,7 +324,10 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
       // Every house gets its own loom token; the rest are what the control plane chose.
       const given = { ...(claimed.secrets || {}), 'loom-token': claimed.token };
       const missing = missingSecrets(house, given);
-      if (missing.length) throw new BoxError(`the house file wants ${missing.join(', ')}, which ${h.agent}'s houses don't get`);
+      if (missing.length) {
+        const why = missing.filter((n) => claimed.notIssued?.[n]).map((n) => `${n}: ${claimed.notIssued[n]}`);
+        throw new BoxError(why.length ? `the house file wants what couldn't be issued (${why.join('; ')})` : `the house file wants ${missing.join(', ')}, which ${h.agent}'s houses don't get`);
+      }
       if (house.nested && !rootless(env)) throw new BoxError('nested containers need rootless podman on the box');
       const tag = image(env, h, house, repo, logFd);
       const dirs = { mirror };

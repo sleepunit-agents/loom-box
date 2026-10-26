@@ -263,16 +263,25 @@ test('a session house needs no task, and its box is told it\'s one', () => {
 
 test('a secret from sub:<provider> is the agent\'s subscription with room left, picked at claim and recorded', () => {
   const picks = [];
-  fx.issue = (agent, provider) => { picks.push([agent, provider]); return { name: 'claude-spare', value: 'value-of-claude-spare' }; };
-  ok(call(owner, 'set-agent', { agent: 'art', repo: 'https://x/art.git', secrets: { 'claude-oauth': 'sub:anthropic', 'github-token': 'gh-art' } }));
+  fx.issue = (agent, provider, kind) => { picks.push([agent, provider, kind]); return { name: 'claude-spare', value: 'value-of-claude-spare' }; };
+  ok(call(owner, 'set-agent', { agent: 'art', repo: 'https://x/art.git', secrets: { 'claude-oauth': 'sub:anthropic', 'claude-credentials.json': 'sub:anthropic:session', 'github-token': 'gh-art' } }));
+  assert.equal(call(owner, 'set-agent', { agent: 'art', repo: 'https://x/art.git', secrets: { x: 'sub:anthropic:other' } }).status, 400);
   assert.equal(call(owner, 'set-agent', { agent: 'art', repo: 'https://x/art.git', secrets: { x: 'sub:nobody' } }).status, 400);
   const h = ok(call(art, 'up', { task: 't' }));
   ok(call(box(h.box), 'poll'));
   const c = ok(call(box(h.box), 'claim', { id: h.id }));
-  assert.deepEqual(picks, [['art', 'anthropic']]);
+  assert.deepEqual(picks, [['art', 'anthropic', undefined], ['art', 'anthropic', 'session']]);
   assert.equal(c.secrets['claude-oauth'], 'value-of-claude-spare');
   assert.equal(c.secrets['github-token'], 'value-of-gh-art');
-  assert.deepEqual(ok(call(owner, 'list')).houses.find((x) => x.id === h.id).runsOn, { 'claude-oauth': 'claude-spare' });
+  assert.deepEqual(ok(call(owner, 'list')).houses.find((x) => x.id === h.id).runsOn, { 'claude-oauth': 'claude-spare', 'claude-credentials.json': 'claude-spare' });
+  // A kind that can't be issued is left out, saying why; the rest still come.
+  fx.issue = (agent, provider, kind) => { if (kind) throw new Error('no anthropic session subscription for art'); return { name: 'claude-spare', value: 'v' }; };
+  const h3 = ok(call(art, 'up', { task: 't3' }));
+  ok(call(box(h3.box), 'poll'));
+  const c3 = ok(call(box(h3.box), 'claim', { id: h3.id }));
+  assert.equal(c3.secrets['claude-oauth'], 'v');
+  assert.equal('claude-credentials.json' in c3.secrets, false);
+  assert.match(c3.notIssued['claude-credentials.json'], /no anthropic session subscription/);
   // A pick that isn't a secret's name is refused, not passed on.
   fx.issue = () => ({ name: 'not a name!', value: 'x' });
   const h2 = ok(call(art, 'up', { task: 't2' }));

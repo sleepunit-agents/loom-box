@@ -15,7 +15,8 @@ const LIVE = new Set(['wanted', 'starting', 'running', 'stopping']);
 /** How many claims in a row may fail before the house does. */
 export const MAX_CLAIM_TRIES = 5;
 /** A house secret that comes from the agent's subscriptions, not a fixed name. */
-const SUB_SOURCE = /^sub:(anthropic|openai)$/;
+// sub:<provider>[:<kind>]: a kind picks one kind of credential (sub:anthropic:session, a session login's view).
+const SUB_SOURCE = /^sub:(anthropic|openai)(?::(session))?$/;
 const FACT = /^[a-z][a-z0-9-]{0,31}(:[A-Za-z0-9._ +-]{1,64})?$/;
 const MAX_TASK = 8000;
 const MAX_LOG = 4000;
@@ -339,12 +340,23 @@ export function claim(env, effects, caller, { id }) {
       // A secret named `sub:<provider>` is what the subscriptions piece issues for
       // the agent now (its first with room, house-safe); the house records which, by name.
       const runsOn = {};
+      let notIssued;
       for (const [as, from] of Object.entries(a.secrets || {})) {
         const sub = SUB_SOURCE.exec(from);
         if (!sub) { secrets[as] = effects.secret(from); continue; }
-        const got = effects.issue(h.agent, sub[1]);
-        if (!SECRET_NAME.test(got.name) || typeof got.value !== 'string' || !got.value) {
-          throw new StateError(`the subscriptions piece issued nothing usable for ${h.agent}'s ${sub[1]}`, 500);
+        let got;
+        try {
+          got = effects.issue(h.agent, sub[1], sub[2]);
+          if (!SECRET_NAME.test(got.name) || typeof got.value !== 'string' || !got.value) {
+            throw new StateError(`the subscriptions piece issued nothing usable for ${h.agent}'s ${sub[1]}${sub[2] ? ` ${sub[2]}` : ''}`, 500);
+          }
+        } catch (err) {
+          // A kind (sub:anthropic:session) is an extra only some of the agent's
+          // houses want, and the claim can't know which (the house file is read
+          // after it): left out, saying why, so only a house that wants it fails.
+          if (!sub[2]) throw err;
+          (notIssued ??= {})[as] = String(err.message).slice(0, 200);
+          continue;
         }
         runsOn[as] = got.name;
         secrets[as] = got.value;
@@ -356,7 +368,7 @@ export function claim(env, effects, caller, { id }) {
       const saved = key ? stateMeta(env, s, key) : undefined;
       // The state itself comes after, a part at a time (state-part): just its shape here.
       const state = saved ? { bytes: saved.bytes, sha256: saved.sha256, parts: partsOf(saved.bytes) } : null;
-      return { id, agent: h.agent, token, secrets, repoAuth, nested: !!a.nested, ports: (a.ports ?? []).map(parsePortGrant).filter(Boolean), ...(h.service ? { service: h.service } : {}), ...(h.slot ? { slot: h.slot } : {}), ...(key ? { state } : {}) };
+      return { id, agent: h.agent, token, secrets, ...(notIssued ? { notIssued } : {}), repoAuth, nested: !!a.nested, ports: (a.ports ?? []).map(parsePortGrant).filter(Boolean), ...(h.service ? { service: h.service } : {}), ...(h.slot ? { slot: h.slot } : {}), ...(key ? { state } : {}) };
     } catch (err) {
       // The house stays waiting; the token it was about to get goes (or is queued to).
       revokeOrQueue(s, effects, label);
