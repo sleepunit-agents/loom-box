@@ -104,7 +104,9 @@ function str(v, what, max = 200) {
 function listOf(v, what, re, max = 16) {
   if (v === undefined || v === null || v === '') return [];
   const a = typeof v === 'string' ? v.split(/[\s,]+/).filter(Boolean) : v;
-  if (!Array.isArray(a) || a.length > max || !a.every((x) => typeof x === 'string' && re.test(x))) fail(`${what}: up to ${max}, each like ${re}`);
+  if (!Array.isArray(a) || a.length > max || !a.every((x) => typeof x === 'string' && re.test(x))) {
+    fail(`${what}: up to ${max}, lowercase words like gpu or rig:5090, separated by commas`);
+  }
   return a;
 }
 
@@ -124,14 +126,23 @@ export function addBox(env, effects, { name, mayHost: mh, labels }) {
   const n = str(name, 'a box name', 64).toLowerCase();
   if (!BOX_NAME.test(n)) fail('a box name is lowercase letters, digits, dots, dashes and underscores');
   const may = mayHostValue(mh);
-  return update(env, (s) => {
-    if (s.boxes[n] && !s.boxes[n].revoked) fail(`there's already a box named ${n}`, 409);
-    retryRevokes(s, effects);
-    if ((s.pendingRevokes ?? []).includes(boxCredLabel(n))) fail(`${n}'s old credential isn't revoked yet; try again shortly`, 409);
-    const token = effects.mint(['--piece', `box/${n}`], boxCredLabel(n));
-    s.boxes[n] = { mayHost: may, facts: [], labels: listOf(labels, 'labels', FACT), created: now(effects), joined: null, lastSeen: null };
-    return { box: n, token };
-  });
+  // Everything checked before the credential is minted: a box that isn't added never leaves one live.
+  const ls = listOf(labels, 'labels', FACT);
+  let token;
+  try {
+    return update(env, (s) => {
+      if (s.boxes[n] && !s.boxes[n].revoked) fail(`there's already a box named ${n}`, 409);
+      retryRevokes(s, effects);
+      if ((s.pendingRevokes ?? []).includes(boxCredLabel(n))) fail(`${n}'s old credential isn't revoked yet; try again shortly`, 409);
+      token = effects.mint(['--piece', `box/${n}`], boxCredLabel(n));
+      s.boxes[n] = { mayHost: may, facts: [], labels: ls, created: now(effects), joined: null, lastSeen: null };
+      return { box: n, token };
+    });
+  } catch (err) {
+    // Minted, then failed (the save, a clock): the box wasn't added, so neither is its credential.
+    if (token) { try { effects.revoke(boxCredLabel(n)); } catch { /* listed by the token store; the owner can revoke it */ } }
+    throw err;
+  }
 }
 
 export function revokeBox(env, effects, { name }) {

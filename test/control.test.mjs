@@ -341,3 +341,29 @@ test('a restore comes up quiet: every service that was up is down, saying so, an
   ok(api(there, fx, { caller: owner, path: 'service-up', body: { agent: 'art', name: 'discord' } }));
   assert.equal(ok(api(there, fx, { caller: { kind: 'piece', subject: 'two' }, path: 'poll', body: {} })).start.length, 1);
 });
+
+test('adding a box that fails after the mint leaves no live credential behind (labels checked first; anything later revokes it)', () => {
+  revoked = [];
+  const before = minted.length;
+  assert.equal(call(owner, 'add-box', { name: 'jonbox', labels: 'Windows rtx' }).status, 400);
+  assert.equal(minted.length, before, 'bad labels are refused before a token is minted');
+  // A failure after the mint (here the save): the token it just made is revoked.
+  const saved = fx.now;
+  let n = 0;
+  fx.now = () => { if (++n === 1) throw new Error('disk full'); return saved(); };
+  assert.equal(call(owner, 'add-box', { name: 'jonbox' }).status, 500);
+  fx.now = saved;
+  assert.deepEqual(revoked, ['box · jonbox']);
+  assert.equal(ok(call(owner, 'list')).boxes.some((b) => b.name === 'jonbox'), false);
+});
+
+test('an unexpected failure on the page says what failed and where the full error is (loom keeps no piece stderr)', async () => {
+  const { act } = await import('../src/ui.mjs');
+  const { readFileSync } = await import('node:fs');
+  const boom = { ...fx, mint: () => { throw new Error('minting a token: loom printed something other than a token'); } };
+  const r = act(env, boom, { action: 'add-box', fields: { name: 'jonbox2', may_host: 'anyone' } });
+  assert.equal(r.ok, false);
+  assert.match(r.message, /minting a token/);
+  assert.match(r.message, /errors\.log/);
+  assert.match(readFileSync(join(env.LOOM_BOX_HOME || join(env.HOME, '.config', 'loom-box'), 'errors.log'), 'utf-8'), /add-box: Error: minting a token/);
+});
