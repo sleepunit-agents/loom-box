@@ -347,7 +347,8 @@ export function claim(env, effects, caller, { id }) {
     if ((s.pendingRevokes ?? []).includes(label)) fail(`an old token for ${id} isn't revoked yet; try again shortly`, 409);
     // A service house's token says so (agent:<a>/<service>): a piece can tell
     // the agent's bridge from its other bodies (t-1591, shuttle's relay-take).
-    const token = effects.mint(['--agent', h.agent, ...(h.service ? ['--service', h.service] : [])], label);
+    // ...and names its house, so a piece can grant this house alone (the secrets piece's requests).
+    const token = effects.mint(['--agent', h.agent, ...(h.service ? ['--service', h.service] : []), '--house', h.id], label);
     try {
       const secrets = {};
       // A secret named `sub:<provider>` is what the subscriptions piece issues for

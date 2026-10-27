@@ -199,5 +199,8 @@ test('a service house\'s token is minted as that service (agent:art/discord), so
   run('one');
   ok(call(art, 'up', { task: 'a one-off' }));
   run('one');
-  assert.deepEqual(minted, [['--agent', 'art', '--service', 'discord'], ['--agent', 'art']]);
+  // And every house's token names its house, so a piece can grant that house alone (secret requests).
+  assert.deepEqual(minted.map((r) => r.slice(0, -2)), [['--agent', 'art', '--service', 'discord'], ['--agent', 'art']]);
+  assert.deepEqual(minted.map((r) => r.slice(-2)[0]), ['--house', '--house']);
+  assert.ok(minted.every((r) => /^h-\d+$/.test(r.at(-1))));
 });
