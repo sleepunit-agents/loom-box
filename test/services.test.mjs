@@ -191,3 +191,13 @@ test('a slot is held by one house at a time, and its state goes from one to the 
   assert.equal(call(owner, 'saved-state', { agent: 'art', name: 'tending' }).status, 404);
   assert.equal(call(art, 'up', { task: 'x', slot: 'Bad Name' }).status, 400);
 });
+
+test('a service house\'s token is minted as that service (agent:art/discord), so a piece can tell it from art\'s other bodies (t-1591)', () => {
+  const minted = [];
+  fx.mint = (role, label) => { minted.push(role); return 'loom_' + 'x'.repeat(30); };
+  ok(call(art, 'service-up', { name: 'discord' }));
+  run('one');
+  ok(call(art, 'up', { task: 'a one-off' }));
+  run('one');
+  assert.deepEqual(minted, [['--agent', 'art', '--service', 'discord'], ['--agent', 'art']]);
+});

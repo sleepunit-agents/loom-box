@@ -345,7 +345,9 @@ export function claim(env, effects, caller, { id }) {
     // Never mint under a label that's still waiting to be revoked: the revoke would take the new token.
     retryRevokes(s, effects);
     if ((s.pendingRevokes ?? []).includes(label)) fail(`an old token for ${id} isn't revoked yet; try again shortly`, 409);
-    const token = effects.mint(['--agent', h.agent], label);
+    // A service house's token says so (agent:<a>/<service>): a piece can tell
+    // the agent's bridge from its other bodies (t-1591, shuttle's relay-take).
+    const token = effects.mint(['--agent', h.agent, ...(h.service ? ['--service', h.service] : [])], label);
     try {
       const secrets = {};
       // A secret named `sub:<provider>` is what the subscriptions piece issues for
