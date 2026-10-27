@@ -107,27 +107,37 @@ House tokens and secrets travel over it:
 Check it: `curl -s -o /dev/null -w '%{http_code}\n' -X POST <url>/api/box/list -H content-type:application/json -d '{}'`
 should print `401` (loom answering, without a token yet), not a timeout.
 
-### 4. Enroll it
-
-**On loom:** open **Boxes** on loom's page, then **Add a box**. Give it a name
-and the agents it may host. It shows the box's credential once. Or, on loom's
-machine: `loom box add <name> --may-host art,mark`.
-
-The credential is the box's whole identity. Copy it straight into the join
-prompt below. Don't paste it into chat, a note or a file, and if it leaks,
-revoke the box (Boxes page, or `loom box revoke <name>`) and add it again.
+### 4. Join
 
 On the new box:
 
 ```bash
-loom box join <url> --name <name>        # paste the credential when it asks
+loom box join <url> --name <name>
+```
+
+It asks loom to let it in, prints a code like `4DX-9CH`, and waits. On loom's
+page, a card on Home says **A box asks to join: \<name>**, with where it's
+from, what it has, and the same code. If the code matches the one on the
+box's terminal, tap **Let it in**. The box picks up its credential by itself
+and joins. Nobody copies a key. If the name is taken, loom gives it the next
+free one (`one` becomes `one-2`) and the terminal says so. A request nobody
+answers expires in 15 minutes. **Block** if it isn't yours.
+
+Then:
+
+```bash
 systemctl --user restart loom-piece-box-run
 systemctl --user is-enabled loom-piece-box-run      # enabled: it comes back after a reboot
 journalctl --user -u loom-piece-box-run -n 5        # no errors
 ```
 
 The Boxes page now lists the box with its facts (CPUs, memory, podman) and
-when it was last seen.
+when it was last seen. It may host any agent; open it there to narrow that.
+
+**The other way, with a credential:** Boxes, then **Add a box**, shows a
+credential once. Run `loom box join <url> --name <name> --credential` and
+paste it at the prompt, never into chat or a file. If it leaks, revoke the
+box and add it again.
 
 ### 5. Try it
 

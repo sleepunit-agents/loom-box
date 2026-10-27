@@ -7,6 +7,7 @@
 // permitted box that has what it needs, or to the agent's primary. If that
 // doesn't name exactly one box, it says why and starts nothing.
 import { AGENT_NAME, BOX_NAME, SECRET_NAME, StateError, load, localBoxName, nextHouseId, update } from './state.mjs';
+import { joinPoll, joinRequest } from './enroll.mjs';
 import { MAX_PARTS, PART_RAW, drop, partsOf, putPart, putWhole, readPart } from './blobs.mjs';
 import { parsePortGrant, parseTailnetGrant } from './house.mjs';
 
@@ -131,7 +132,11 @@ export function addBox(env, effects, { name, mayHost: mh, labels }) {
   let token;
   try {
     return update(env, (s) => {
-      if (s.boxes[n] && !s.boxes[n].revoked) fail(`there's already a box named ${n}`, 409);
+      if (s.boxes[n] && !s.boxes[n].revoked) {
+        let i = 2;
+        while (s.boxes[`${n}-${i}`] && !s.boxes[`${n}-${i}`].revoked) i++;
+        fail(`there's already a box named ${n}; ${n}-${i} is free`, 409);
+      }
       retryRevokes(s, effects);
       if ((s.pendingRevokes ?? []).includes(boxCredLabel(n))) fail(`${n}'s old credential isn't revoked yet; try again shortly`, 409);
       token = effects.mint(['--piece', `box/${n}`], boxCredLabel(n));
@@ -738,6 +743,12 @@ export function api(env, effects, { caller, path, body }) {
   const b = body && typeof body === 'object' && !Array.isArray(body) ? body : {};
   try {
     if (!caller || typeof caller.kind !== 'string') fail('no caller', 401);
+    // A box with no credential yet, asking to join (loom passes no-token calls only on these paths).
+    if (caller.kind === 'stranger') {
+      if (path === 'join-request') return { status: 200, body: joinRequest(env, effects, caller, b) };
+      if (path === 'join-poll') return { status: 200, body: joinPoll(env, effects, caller, b) };
+      fail('a box with no credential can only ask to join', 403);
+    }
     if (BOX_ONLY[path]) {
       if (caller.kind !== 'piece' || !BOX_NAME.test(caller.subject ?? '')) fail(`${path} is for boxes`, 403);
       return { status: 200, body: BOX_ONLY[path](env, effects, caller, b) };

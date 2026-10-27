@@ -25,7 +25,8 @@ export function exportPart(env) {
     if (!AGE_RECIPIENT.test(r) && !SSH_RECIPIENT.test(r)) throw new BundleError(`recipient ${i + 1} isn't an age recipient (age1…) or an ssh public key`);
   });
   // Each service's saved state goes along, whole: it lives in its own file beside state.json.
-  const state = load(env);
+  // Join requests stay behind: short-lived, and an allowed one holds a credential until its box collects it.
+  const { joins: _joins, ...state } = load(env);
   const blobs = {};
   for (const v of Object.values(state.serviceState ?? {})) if (v.file) blobs[v.file] = readWhole(env, v).toString('base64');
   const doc = JSON.stringify({ format: FORMAT, state, blobs });
