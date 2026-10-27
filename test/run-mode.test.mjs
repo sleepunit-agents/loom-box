@@ -31,3 +31,30 @@ test('run --local on a machine that is neither loom nor joined waits to be joine
   assert.equal(runMode(env, true), 'joined');
   assert.equal(runMode(env, false), 'joined');
 });
+
+test('join with no terminal still asks loom (an agent runs it with none); only --credential reads one', async () => {
+  const { createServer } = await import('node:http');
+  const { spawn } = await import('node:child_process');
+  const asked = [];
+  const srv = createServer((req, res) => {
+    asked.push(req.url);
+    res.writeHead(429, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ error: 'too many boxes are asking to join right now; try again later' }));
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const home = mkdtempSync(join(tmpdir(), 'loom-box-join-'));
+  const cli = join(import.meta.dirname, '..', 'src', 'cli.mjs');
+  const run = (args) => new Promise((resolve) => {
+    const p = spawn(process.execPath, [cli, 'join', `http://127.0.0.1:${srv.address().port}`, '--name', 'one', ...args],
+      { env: { ...process.env, HOME: home, LOOM_BOX_HOME: join(home, 'state') }, stdio: ['pipe', 'pipe', 'pipe'] });
+    let err = '';
+    p.stderr.on('data', (d) => { err += d; });
+    p.stdin.end('');
+    p.on('close', () => resolve(err));
+  });
+  try {
+    assert.match(await run([]), /too many boxes are asking/);
+    assert.deepEqual(asked, ['/api/box/join-request']);
+    assert.match(await run(['--credential']), /isn't a loom credential/);
+  } finally { srv.close(); }
+});
