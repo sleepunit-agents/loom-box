@@ -45,7 +45,7 @@ import { createInterface } from 'node:readline';
 import { addBox, api, down, list, remoteDown, remoteUp, revokeBox, setAgent, setPrimary, up } from './control.mjs';
 import { realEffects } from './effects.mjs';
 import { act, manifest, page } from './ui.mjs';
-import { BoxError, joinLoom, loadConfig, POLL_MS, remoteClient, restoreState, runner } from './box.mjs';
+import { BoxError, joinLoom, loadConfig, packState, POLL_MS, remoteClient, restoreState, runner } from './box.mjs';
 import { localBoxName, renameLocal, stateDir } from './state.mjs';
 import { exportPart, importPart } from './bundle.mjs';
 import { PART_RAW, joinParts, partsOf } from './blobs.mjs';
@@ -259,12 +259,12 @@ function out(v) { process.stdout.write(JSON.stringify(v) + '\n'); }
 /** A dir packed and handed over as a service's (or slot's) starting state, in parts inside loom's body cap. */
 async function seedFrom(call, who, from) {
   if (!from) throw new Fail('--from <dir>', 2);
-  const t = spawnSync('tar', ['--format=ustar', '-C', from, '-czf', '-', '.'], { maxBuffer: 64 * 1024 * 1024 });
-  if (t.status !== 0) throw new Fail(`couldn't pack ${from}`);
-  const parts = partsOf(t.stdout.length);
+  const t = packState(from);
+  if (!t) throw new Fail(`couldn't pack ${from}`);
+  const parts = partsOf(t.length);
   let r;
   for (let part = 0; part < parts; part++) {
-    r = await call('seed-state', { ...who, part, parts, state: t.stdout.subarray(part * PART_RAW, (part + 1) * PART_RAW).toString('base64') });
+    r = await call('seed-state', { ...who, part, parts, state: t.subarray(part * PART_RAW, (part + 1) * PART_RAW).toString('base64') });
   }
   return r;
 }
