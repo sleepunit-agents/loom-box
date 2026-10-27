@@ -68,3 +68,24 @@ test('a state that would unpack too big is refused, without unpacking it', () =>
   const big = Buffer.alloc(70 * 1024 * 1024);
   reject(gzipSync(big), /too big/);
 });
+
+test('a lock left empty by a holder that died before writing its pid is cleared once it is stale; a fresh one is waited for', async () => {
+  const { EMPTY_LOCK_STALE_MS, update } = await import('../src/state.mjs');
+  const { mkdtempSync, mkdirSync, writeFileSync, utimesSync, existsSync, readdirSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const home = mkdtempSync(join(tmpdir(), 'loom-box-lock-'));
+  const env = { HOME: home, LOOM_BOX_HOME: join(home, 'state'), LOOM_BOX_LOCAL_NAME: 'one' };
+  mkdirSync(env.LOOM_BOX_HOME, { recursive: true });
+  const lock = join(env.LOOM_BOX_HOME, 'state.lock');
+  writeFileSync(lock, '');
+  const old = (Date.now() - EMPTY_LOCK_STALE_MS - 1000) / 1000;
+  utimesSync(lock, old, old);
+  assert.equal(update(env, () => 'ran'), 'ran');
+  assert.equal(existsSync(lock), false, 'and released');
+  assert.deepEqual(readdirSync(env.LOOM_BOX_HOME).filter((n) => n.startsWith('state.lock')), [], 'nothing left aside');
+  writeFileSync(lock, '');
+  const t0 = Date.now();
+  assert.throws(() => update(env, () => 'ran'), /locked by a running process/);
+  assert.ok(Date.now() - t0 >= 4500, 'a fresh empty lock is waited for, not broken');
+});

@@ -3,7 +3,7 @@
 // agent's house is made, and every house asked for. One JSON file, 0600, in a
 // 0700 directory; every change is read-modify-write under a lock and lands by
 // rename, so a reader never sees half a file.
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, writeSync, chmodSync } from 'node:fs';
+import { closeSync, existsSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, writeSync, chmodSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
 import { join } from 'node:path';
 
@@ -100,29 +100,39 @@ function alive(pid) {
   try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
 }
 
+/** An empty lock this old was left by a holder that died before writing its pid (the old way of taking it). */
+export const EMPTY_LOCK_STALE_MS = 10_000;
+
 /**
  * Run f(state) under the lock and save what it leaves. The lock is a file
- * holding the holder's pid; a holder that's gone is cleared, a live one is
- * waited for (5s), never broken.
+ * holding the holder's pid, put in place whole (written aside, then linked),
+ * so it never exists empty; a holder that's gone is cleared, a live one is
+ * waited for (5s), never broken. (2026-10-27: an empty lock, its writer killed
+ * between creating it and writing its pid, held every update off for 90 minutes.)
  */
 export function update(env, f, { renaming = false } = {}) {
   const dir = stateDir(env);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const lock = join(dir, 'state.lock');
+  const mine = join(dir, `state.lock.${process.pid}`);
+  writeFileSync(mine, String(process.pid), { mode: 0o600 });
   const deadline = Date.now() + 5000;
-  let fd;
-  for (;;) {
-    try { fd = openSync(lock, 'wx', 0o600); break; } catch (e) {
-      if (e.code !== 'EEXIST') throw e;
-      let pid = 0;
-      try { pid = Number(readFileSync(lock, 'utf-8')); } catch { /* raced with its removal */ }
-      if (pid && !alive(pid)) { rmSync(lock, { force: true }); continue; }
-      if (Date.now() > deadline) throw new StateError('the runtime state is locked by a running process; try again', 503);
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+  try {
+    for (;;) {
+      try { linkSync(mine, lock); break; } catch (e) {
+        if (e.code !== 'EEXIST') throw e;
+        let pid = 0;
+        let age = 0;
+        try { pid = Number(readFileSync(lock, 'utf-8')); age = Date.now() - statSync(lock).mtimeMs; } catch { /* raced with its removal */ }
+        if ((pid && !alive(pid)) || (!pid && age > EMPTY_LOCK_STALE_MS)) { rmSync(lock, { force: true }); continue; }
+        if (Date.now() > deadline) throw new StateError('the runtime state is locked by a running process; try again', 503);
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+      }
     }
+  } finally {
+    rmSync(mine, { force: true });
   }
   try {
-    writeSync(fd, String(process.pid));
     const s = load(env, { renaming });
     let out;
     try { out = f(s); } catch (err) {
@@ -133,7 +143,6 @@ export function update(env, f, { renaming = false } = {}) {
     save(env, s);
     return out;
   } finally {
-    closeSync(fd);
     rmSync(lock, { force: true });
   }
 }
