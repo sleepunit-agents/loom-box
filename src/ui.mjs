@@ -6,7 +6,7 @@ import { appendFileSync, existsSync, readFileSync, statfsSync } from 'node:fs';
 import { uptime } from 'node:os';
 import { join } from 'node:path';
 import { StateError, load, localBoxName, stateDir } from './state.mjs';
-import { allowJoin, blockJoin, pendingJoins } from './enroll.mjs';
+import { allowJoin, blockAllJoins, blockJoin, pendingJoins } from './enroll.mjs';
 import { addBox, factsOf, list, primaryOf, remoteDown, remoteUp, revokeBox, serviceDown, serviceMove, serviceRestart, serviceUp, setAgent, setMayHost, setPrimary, up, down, LIVE } from './control.mjs';
 
 const OWNER = { kind: 'owner' };
@@ -199,6 +199,15 @@ function boxesPage(env, nowMs) {
     ] }] });
   }
 
+  // Every box waiting to be let in (Home shows the newest few as cards), and a way to clear a flood.
+  const asking = pendingJoins(s);
+  if (asking.length) {
+    sections.push({ id: 'joins', title: `Asking to join (${asking.length})`, blocks: [
+      { type: 'list', items: asking.map((j) => ({ text: j.name, meta: `from ${j.address}, code ${j.code}`, tone: 'warn',
+        act: { action: 'allow-join', label: 'Let it in', tone: 'primary', fields: { id: j.id }, confirm: `Let ${j.name} in only if its terminal shows code ${j.code}.` } })) },
+      { type: 'buttons', items: [{ action: 'block-all-joins', label: 'Block all waiting', tone: 'danger', confirm: `Block all ${asking.length}?` }] },
+    ] });
+  }
   sections.push({ id: 'add', side: true, title: 'Add a box', blocks: [
     { type: 'text', tone: 'muted', text: 'Name the machine, then run `loom box join` on it with the credential shown after you add it.' },
     { type: 'form', action: 'add-box', submit: 'Add', fields: [
@@ -312,6 +321,7 @@ export function act(env, effects, { action, fields: raw = {} }, publicUrl) {
       }
       case 'allow-join': { const r = allowJoin(env, effects, fields); return { ok: true, message: `Let ${r.box} in (code ${r.code}). It picks up its credential by itself within a few seconds.`, page: '' }; }
       case 'block-join': { const r = blockJoin(env, effects, fields); return { ok: true, message: `Blocked ${r.name}'s request.`, page: '' }; }
+      case 'block-all-joins': { const r = blockAllJoins(env, effects); return { ok: true, message: `Blocked ${r.blocked} waiting request${r.blocked === 1 ? '' : 's'}.`, page: '' }; }
       case 'revoke-box': revokeBox(env, effects, fields); return { ok: true, message: `Revoked ${fields.name}. Its houses lost their tokens.`, page: '' };
       case 'may-host': setMayHost(env, effects, fields); return { ok: true, message: `Saved who ${fields.name} may host.`, page: '' };
       case 'set-primary': { const r = setPrimary(env, effects, fields); return { ok: true, message: `${r.agent}'s primary is ${r.primary}.`, page: '' }; }

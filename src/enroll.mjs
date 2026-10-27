@@ -14,12 +14,12 @@
 // front of them. Requests are capped (a few, per address and in all) and
 // expire, so a stranger can't fill the page.
 import { createHash, randomBytes } from 'node:crypto';
-import { BOX_NAME, StateError, update } from './state.mjs';
+import { BOX_NAME, StateError, load, update } from './state.mjs';
 import { addBox } from './control.mjs';
 
 const TTL_MS = 15 * 60_000;
-const MAX_PENDING = 5;
-const MAX_PER_ADDRESS = 2;
+const MAX_PENDING = 20;         // in all: generous, so a few addresses can't fill it
+const MAX_PER_NET = 2;          // per /24 (IPv4) or /64 (IPv6)
 const HASH = /^[0-9a-f]{64}$/;
 const ID = /^j-[0-9a-f]{8}$/;
 const FACT = /^[a-z][a-z0-9-]{0,31}(:[A-Za-z0-9._ +-]{1,64})?$/;
@@ -51,8 +51,28 @@ function sweep(s, now) {
 
 const stranger = (caller) => {
   if (caller?.kind !== 'stranger') fail('a join request comes from a box that has no credential yet', 403);
-  return String(caller.address ?? 'unknown').slice(0, 64);
+  const a = String(caller.address ?? '').replace(/^::ffff:/, '');
+  if (!a || a === 'unknown') fail('a join request needs an address to come from', 400);
+  return a.slice(0, 64);
 };
+
+/** The network an address is in, for the per-network limit: a /24 for IPv4, a /64 for IPv6. */
+export function netOf(address) {
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(address)) return address.split('.').slice(0, 3).join('.') + '.0/24';
+  const parts = address.split(':');
+  return parts.slice(0, 4).join(':') + '::/64';
+}
+
+/** The name a box gets: the one it asked for, or the next free one (only boxes hold names). */
+function freeName(s, name) {
+  const taken = (n) => s.boxes[n] && !s.boxes[n].revoked;
+  let given = name;
+  for (let i = 2; taken(given); i++) {
+    if (i > 99) fail(`${name} and its next 98 are all taken; pick another name`, 409);
+    given = `${name.slice(0, 60)}-${i}`;
+  }
+  return given;
+}
 
 export function joinRequest(env, effects, caller, b) {
   const address = stranger(caller);
@@ -65,16 +85,11 @@ export function joinRequest(env, effects, caller, b) {
   return update(env, (s) => {
     sweep(s, now);
     const pending = Object.values(s.joins).filter((j) => j.state === 'pending');
-    // A name that's taken (a box, or a box already asking) gets the first free one after it:
-    // one, then one-2 (Jonathan, 2026-10-27), and the box is told which.
-    const taken = (n) => (s.boxes[n] && !s.boxes[n].revoked) || pending.some((j) => j.name === n);
-    let given = name;
-    for (let i = 2; taken(given); i++) {
-      if (i > 99) fail(`${name} and its next 98 are all taken; pick another name`, 409);
-      given = `${name.slice(0, 60)}-${i}`;
-    }
+    // A name that's taken gets the first free one after it (one, then one-2: Jonathan,
+    // 2026-10-27), and the box is told which. Asking doesn't hold a name: only a box does.
+    const given = freeName(s, name);
     if (pending.length >= MAX_PENDING) fail('too many boxes are asking to join right now; try again later', 429);
-    if (pending.filter((j) => j.address === address).length >= MAX_PER_ADDRESS) fail('this address is already asking; wait for the owner', 429);
+    if (pending.filter((j) => netOf(j.address) === netOf(address)).length >= MAX_PER_NET) fail('this network is already asking; wait for the owner', 429);
     const id = 'j-' + randomBytes(4).toString('hex');
     const at = new Date(now).toISOString();
     s.joins[id] = { id, name: given, labels, facts, address, proofHash: b.proof_hash, code: codeOf(b.proof_hash), at, state: 'pending' };
@@ -116,10 +131,11 @@ export function allowJoin(env, effects, { id }) {
     j = s.joins[id];
     if (!j || j.state !== 'pending') fail('that request is gone (it expired, or was answered)', 404);
   });
-  const { box, token } = addBox(env, effects, { name: j.name, mayHost: 'anyone', labels: j.labels });
+  // The name again, now: one taken since it asked gets the next free one; the box hears which from its poll.
+  const { box, token } = addBox(env, effects, { name: freeName(load(env), j.name), mayHost: 'anyone', labels: j.labels });
   update(env, (s) => {
     const k = s.joins?.[id];
-    if (k) { k.state = 'allowed'; k.credential = token; k.answered = new Date(now).toISOString(); }
+    if (k) { k.state = 'allowed'; k.name = box; k.credential = token; k.answered = new Date(now).toISOString(); }
   });
   return { box, code: j.code };
 }
@@ -132,5 +148,15 @@ export function blockJoin(env, effects, { id }) {
     if (!j || j.state !== 'pending') fail('that request is gone (it expired, or was answered)', 404);
     j.state = 'blocked';
     return { name: j.name };
+  });
+}
+
+/** The owner clears every waiting request at once (a flood of strangers). */
+export function blockAllJoins(env, effects) {
+  return update(env, (s) => {
+    sweep(s, effects.now().getTime());
+    let n = 0;
+    for (const j of Object.values(s.joins)) if (j.state === 'pending') { j.state = 'blocked'; n++; }
+    return { blocked: n };
   });
 }

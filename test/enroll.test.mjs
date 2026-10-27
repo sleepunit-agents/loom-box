@@ -47,23 +47,24 @@ test('a box asks, the owner lets it in on the page, and only the box with the pr
   assert.deepEqual(manifest(env).asks, []);
 });
 
-test('blocked, expired, capped, and strangers reach only these two calls', () => {
-  const ask = (name, address, p = name) => call(stranger(address), 'join-request', { name, proof_hash: sha(p) });
-  const a = ask('evil', '10.0.0.9');
+test('blocked, expired, capped per network, no address refused, block all, and strangers reach only these two calls', () => {
+  const ask = (name, address, p = name + address) => call(stranger(address), 'join-request', { name, proof_hash: sha(p) });
+  const a = ask('evil', '10.0.9.9');
   act(env, fx, { action: 'block-join', fields: { id: a.body.id } });
-  assert.equal(call(stranger(), 'join-poll', { id: a.body.id, proof: 'evil' }).body.state, 'blocked');
-  // Two from one address at most, five in all; the same name only once at a time.
+  assert.equal(call(stranger(), 'join-poll', { id: a.body.id, proof: 'evil10.0.9.9' }).body.state, 'blocked');
+  // Two per network (/24 here), not per address; asking doesn't hold a name (only a box does).
   assert.equal(ask('x1', '10.0.0.1').status, 200);
-  // A taken name gets the next free one, and the box is told.
-  const twin = ask('x1', '10.0.0.2');
-  assert.equal(twin.body.name, 'x1-2');
-  assert.equal(ask('x2', '10.0.0.1').status, 200);
-  assert.equal(ask('x3', '10.0.0.1').status, 429);
-  for (const n of ['x4', 'x5']) ask(n, `10.0.1.${n}`);
-  assert.equal(ask('x7', '10.0.2.1').status, 429);
-  // Fifteen minutes on, they're gone.
+  assert.equal(ask('x1', '10.0.0.2').body.name, 'x1');
+  assert.equal(ask('x2', '10.0.0.3').status, 429, 'that /24 is full');
+  assert.equal(ask('x2', '10.0.1.3').status, 200, 'another network is not');
+  assert.equal(call({ kind: 'stranger' }, 'join-request', { name: 'n', proof_hash: sha('n') }).status, 400, 'no address, no request');
+  // A flood is cleared in one go.
+  assert.equal(act(env, fx, { action: 'block-all-joins', fields: {} }).message, 'Blocked 3 waiting requests.');
+  assert.deepEqual(manifest(env).asks, []);
+  // Fifteen minutes on, the old ones no longer count.
+  ask('y1', '10.0.5.1'); ask('y2', '10.0.5.2');
   clock += 16 * 60_000;
-  assert.equal(ask('x8', '10.0.0.1').status, 200, 'the expired ones no longer count against the address or the cap');
+  assert.equal(ask('y3', '10.0.5.3').status, 200);
   for (const path of ['list', 'up', 'hello', 'add-box']) assert.equal(call(stranger(), path).status, 403, path);
   assert.equal(call({ kind: 'agent', agent: 'art' }, 'join-request', { name: 'y', proof_hash: sha('y') }).status, 404, 'with a token, there is no such call');
 });
