@@ -29,7 +29,9 @@ export function exportPart(env) {
   const blobs = {};
   for (const v of Object.values(state.serviceState ?? {})) if (v.file) blobs[v.file] = readWhole(env, v).toString('base64');
   const doc = JSON.stringify({ format: FORMAT, state, blobs });
-  const r = spawnSync(age(env), ['-e', '-a', ...recipients.flatMap((x) => ['-r', x])], { input: doc, env, encoding: 'utf-8' });
+  // The saved states make the part megabytes: past spawnSync's default 1 MB, age's output
+  // was cut off (ENOBUFS) and the bundle had no runtime part at all (2026-10-26, 27).
+  const r = spawnSync(age(env), ['-e', '-a', ...recipients.flatMap((x) => ['-r', x])], { input: doc, env, encoding: 'utf-8', maxBuffer: 512 * 1024 * 1024 });
   if (r.error || r.status !== 0) throw new BundleError(`age: ${r.error?.message || (r.stderr || '').trim().split('\n').pop()}`);
   return r.stdout;
 }
@@ -44,7 +46,7 @@ export function importPart(env, part, { force = false } = {}) {
   if (existsSync(join(stateDir(env), 'state.json')) && !force) {
     throw new BundleError('this machine already has runtime state; restore into a fresh one, or pass --force');
   }
-  const r = spawnSync(age(env), ['-d', '-i', identity], { input: part, env, encoding: 'utf-8', maxBuffer: 64 * 1024 * 1024 });
+  const r = spawnSync(age(env), ['-d', '-i', identity], { input: part, env, encoding: 'utf-8', maxBuffer: 512 * 1024 * 1024 });
   if (r.error || r.status !== 0) throw new BundleError('the part doesn\'t decrypt with LOOM_IMPORT_IDENTITY. Nothing was written.');
   let doc;
   try { doc = JSON.parse(r.stdout); } catch { doc = null; }
