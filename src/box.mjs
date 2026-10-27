@@ -45,6 +45,19 @@ export function runsLocal(env, wantLocal) {
   return !!wantLocal && !existsSync(configPath(env));
 }
 
+/**
+ * How `run` runs here: 'joined' (box.json: this machine joined a loom), 'local'
+ * (--local on loom's own machine: it has a household), or 'unjoined' (--local on
+ * a machine that's neither: the piece's service was installed before `loom box
+ * join`, and it waits rather than becoming a second control plane).
+ */
+export function runMode(env, wantLocal) {
+  if (existsSync(configPath(env))) return 'joined';
+  if (!wantLocal) return 'joined';
+  const home = env.LOOM_HOME || pathJoin(env.HOME || homedir(), '.config', 'loom');
+  return existsSync(pathJoin(home, 'household.json')) ? 'local' : 'unjoined';
+}
+
 export function loadConfig(env) {
   const p = configPath(env);
   if (!existsSync(p)) throw new BoxError('this machine hasn\'t joined a loom: run `loom box join <url> --name <name>`');
