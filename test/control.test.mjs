@@ -112,7 +112,7 @@ test('secrets for a house go once, to its box, and the house token is the agent\
   const c = ok(call(box('thor'), 'claim', { id: h.id }));
   assert.deepEqual(c.secrets, { 'github-token': 'value-of-gh-art' });
   assert.equal(c.repoAuth, 'value-of-gh-art');
-  assert.deepEqual(minted.at(-1), { role: ['--agent', 'art'], label: `art · house ${h.id} on thor` });
+  assert.deepEqual(minted.at(-1), { role: ['--agent', 'art', '--house', h.id], label: `art · house ${h.id} on thor` });
   assert.equal(call(box('thor'), 'claim', { id: h.id }).status, 409);
   // The token's label never shows up in what anyone reads back.
   assert.equal(JSON.stringify(ok(call(owner, 'list'))).includes('tokenLabel'), false);
