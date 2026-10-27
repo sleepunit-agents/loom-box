@@ -219,12 +219,13 @@ async function main(argv, env) {
     case 'join': {
       const [url] = positional(rest);
       const labels = (flag(rest, '--labels') || '').split(',').filter(Boolean);
-      // At a terminal with no credential: ask loom, and the owner lets it in on the page.
-      // --credential (or one piped in) is the old way: one the owner copied from Add a box.
-      const hi = !rest.includes('--credential') && process.stdin.isTTY
+      // Ask loom, and the owner lets it in on the page: with or without a terminal (an agent
+      // running the join has none, and a quiet switch to reading a credential failed it).
+      // --credential is the old way: one the owner copied from Add a box, typed or piped in.
+      const hi = !rest.includes('--credential')
         ? await askToJoin(env, { url, name: flag(rest, '--name'), labels })
         : await joinLoom(env, { url, name: flag(rest, '--name'), labels, credential: await prompt('Box credential (from the Boxes page): ') });
-      process.stdout.write(`Joined as ${hi.box}. Run \`loom box run\` (or its user service) to start taking houses.\n`);
+      process.stdout.write(`Joined as ${hi.name ?? hi.box} (${hi.box}). Run \`loom box run\` (or its user service) to start taking houses.\n`);
       return;
     }
     case 'run': {

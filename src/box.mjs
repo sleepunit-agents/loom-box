@@ -119,9 +119,12 @@ export async function askToJoin(env, { url, name, labels = [] }, { fetchImpl = f
   if (!BOX_NAME.test(name ?? '')) throw new BoxError('--name is the box\'s name: lowercase letters, digits, dots, dashes and underscores');
   const base = url.replace(/\/mcp\/?$/, '').replace(/\/+$/, '');
   const post = async (path, body) => {
-    const r = await fetchImpl(`${base}/api/box/${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    let r;
+    try {
+      r = await fetchImpl(`${base}/api/box/${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    } catch (err) { throw Object.assign(new BoxError(`can't reach ${base}: ${err.message}`), { transient: true }); }
     const out = await r.json().catch(() => ({}));
-    if (!r.ok) throw new BoxError(out.error ?? `${r.status} ${r.statusText}`);
+    if (!r.ok) throw Object.assign(new BoxError(out.error ?? `${r.status} ${r.statusText}`), { transient: r.status >= 500 });
     return out;
   };
   const { proof, proofHash } = newProof();
@@ -130,7 +133,13 @@ export async function askToJoin(env, { url, name, labels = [] }, { fetchImpl = f
   const end = Date.now() + until;
   for (;;) {
     await new Promise((r) => setTimeout(r, every));
-    const p = await post('join-poll', { id: asked.id, proof });
+    // loom restarting or unreachable for a moment isn't an answer: keep asking until the request expires.
+    let p;
+    try { p = await post('join-poll', { id: asked.id, proof }); } catch (err) {
+      if (!err.transient) throw err;
+      if (Date.now() > end) throw new BoxError(`loom stopped answering (${err.message}); ask again`);
+      continue;
+    }
     if (p.state === 'allowed') return joinLoom(env, { url: base, name: p.name, labels, credential: p.credential }, fetchImpl);
     if (p.state === 'blocked') throw new BoxError('the owner blocked this box');
     if (p.state === 'gone') throw new BoxError('the request expired or was answered elsewhere; ask again');

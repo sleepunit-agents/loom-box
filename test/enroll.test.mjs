@@ -20,7 +20,7 @@ const sha = (s) => createHash('sha256').update(s).digest('hex');
 beforeEach(() => {
   env = { HOME: mkdtempSync(join(tmpdir(), 'loom-box-enroll-')), LOOM_BOX_LOCAL_NAME: 'loom' };
   env.LOOM_BOX_HOME = join(env.HOME, 'state');
-  clock = Date.parse('2026-10-27T18:00:00Z');
+  clock = Date.now(); // the page reads the wall clock for what's still waiting, so the test's clock starts there
   minted = [];
   fx = { now: () => new Date(clock), mint: (role, label) => { minted.push(label); return 'loom_' + 'c'.repeat(40); }, revoke: () => {}, secret: () => '' };
   call(owner, 'list');
@@ -122,4 +122,26 @@ test('the network an address is in is the same however the address is written', 
   assert.equal(netOf('2001:db8::1:2'), '2001:db8:0:0::/64');
   assert.equal(netOf('::ffff:192.168.6.77'), '192.168.6.0/24');
   assert.equal(netOf('192.168.6.77'), '192.168.6.0/24');
+});
+
+test('a box waiting to be let in rides out loom restarting (a 5xx or no answer), and still joins', async () => {
+  let asked, polls = 0;
+  const fetchImpl = async (url, init) => {
+    const path = url.split('/api/box/')[1];
+    const body = JSON.parse(init.body);
+    if (path === 'hello') return new Response(JSON.stringify(call({ kind: 'piece', subject: allowed }, 'hello', body).body), { status: 200 });
+    if (path === 'join-poll' && ++polls === 1) return new Response('{"error":"piece api failed"}', { status: 502 });
+    if (path === 'join-poll' && polls === 2) throw new TypeError('fetch failed');
+    const r = call(stranger(), path, body);
+    if (path === 'join-request') asked = r.body;
+    if (path === 'join-poll' && r.body.state === 'pending') act(env, fx, { action: 'allow-join', fields: { id: asked.id } });
+    if (path === 'join-poll' && r.body.state === 'allowed') allowed = r.body.box;
+    return new Response(JSON.stringify(r.body), { status: r.status });
+  };
+  let allowed;
+  const there = { HOME: mkdtempSync(join(tmpdir(), 'loom-box-joiner-')) };
+  there.LOOM_BOX_HOME = join(there.HOME, 'state');
+  const hi = await askToJoin(there, { url: 'http://loom.test:8787', name: 'one' }, { fetchImpl, say: () => {}, every: 1 });
+  assert.equal(hi.name, 'one');
+  assert.ok(polls >= 3, 'it kept asking past the 502 and the dropped connection');
 });
