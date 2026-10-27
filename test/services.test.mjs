@@ -17,7 +17,12 @@ import { load, update } from '../src/state.mjs';
 let env, fx, revoked, clock;
 const owner = { kind: 'owner' };
 const art = { kind: 'agent', agent: 'art' };
-const box = (subject) => ({ kind: 'piece', subject });
+// A box is called by its name here; loom knows it by its id (a live one first, else the revoked one).
+const idOf = (name) => {
+  const all = Object.entries(load(env).boxes).filter(([id, b]) => (b.name ?? id) === name);
+  return (all.find(([, b]) => !b.revoked) ?? all[0])?.[0] ?? name;
+};
+const box = (name) => ({ kind: 'piece', subject: idOf(name) });
 const call = (caller, path, body = {}) => api(env, fx, { caller, path, body });
 const ok = (r) => { assert.equal(r.status, 200, JSON.stringify(r.body)); return r.body; };
 const live = () => ok(call(owner, 'list')).houses.filter((h) => ['wanted', 'starting', 'running', 'stopping'].includes(h.state));
@@ -48,7 +53,7 @@ test('a move is a hand-off: nothing on the new box until the old one says it sto
   assert.equal(h.service, 'discord');
   assert.equal(c.state, null);
   const m = ok(call(owner, 'service-move', { agent: 'art', name: 'discord', box: 'laptop' }));
-  assert.deepEqual([m.moving, m.moveTo], [true, 'laptop']);
+  assert.deepEqual([m.moving, m.moveTo], [true, idOf('laptop')]);
   // The old box is told to stop it; the new box has nothing yet.
   assert.deepEqual(ok(call(box('one'), 'poll')).stop, [h.id]);
   assert.deepEqual(ok(call(box('laptop'), 'poll')).start, []);
@@ -65,7 +70,7 @@ test('a move is a hand-off: nothing on the new box until the old one says it sto
   ok(call(box('laptop'), 'report', { id: p.id, state: 'running' }));
   assert.equal(call(box('laptop'), 'state-part', { id: p.id, part: 0 }).status, 409, 'once it runs, its starting state is no longer handed out');
   const next = { h: p };
-  assert.deepEqual([svc().box, svc().moveTo, live().length], ['laptop', null, 1]);
+  assert.deepEqual([svc().box, svc().moveTo, live().length], [idOf('laptop'), null, 1]);
 });
 
 test('a crash restarts it on the same box, slower each time; down stays down', () => {

@@ -126,7 +126,6 @@ export async function askToJoin(env, { url, name, labels = [] }, { fetchImpl = f
   };
   const { proof, proofHash } = newProof();
   const asked = await post('join-request', { name, labels, facts: detectFacts(env, labels), proof_hash: proofHash });
-  if (asked.name !== name) say(`${name} is taken on this loom, so it'll be ${asked.name}.`);
   say(`Asked ${base} to let ${asked.name} in. On loom's page (Home), a card shows code ${asked.code}: let it in only if it matches this one. Waiting…`);
   const end = Date.now() + until;
   for (;;) {
@@ -146,12 +145,13 @@ export async function joinLoom(env, { url, name, labels = [], credential }, fetc
   if (!/^loom_[A-Za-z0-9_-]{20,}$/.test(cred)) throw new BoxError('that isn\'t a loom credential (it starts with loom_)');
   const client = remoteClient(url, cred, fetchImpl);
   const hi = await client.call('hello', { facts: detectFacts(env, labels) });
-  if (hi.box !== name) throw new BoxError(`that credential is ${hi.box}'s, not ${name}'s`);
+  // The box's name is only what it's called; loom knows it by its id (an old box: the name is the id).
+  if (hi.box !== name && hi.name !== name) throw new BoxError(`that credential is ${hi.name ?? hi.box}'s, not ${name}'s`);
   const dir = stateDir(env);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   chmodSync(dir, 0o700);
   writePrivate(credPath(env), cred + '\n');
-  writePrivate(configPath(env), JSON.stringify({ url, name, labels }, null, 2) + '\n');
+  writePrivate(configPath(env), JSON.stringify({ url, name, id: hi.box, labels }, null, 2) + '\n');
   return hi;
 }
 

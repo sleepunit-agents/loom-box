@@ -320,10 +320,10 @@ test('a service moves between boxes by hand-off, and its state goes with it', as
   } } };
   agentRepo(repo, withService);
   setAgent();
-  ok(api(env, fx, { caller: owner, path: 'add-box', body: { name: 'laptop' } }));
+  const laptop = ok(api(env, fx, { caller: owner, path: 'add-box', body: { name: 'laptop' } })).box;
   podmanCfg({ run: 'sleep' });
   const lapEnv = { ...env, LOOM_BOX_DATA: join(env.HOME, 'laptop-data') };
-  const lapClient = { async call(path, body) { const x = api(env, fx, { caller: { kind: 'piece', subject: 'laptop' }, path, body }); if (x.status !== 200) throw new Error(x.body.error); return x.body; } };
+  const lapClient = { async call(path, body) { const x = api(env, fx, { caller: { kind: 'piece', subject: laptop }, path, body }); if (x.status !== 200) throw new Error(x.body.error); return x.body; } };
   const lap = runner(lapEnv, lapClient, { loomUrl: 'http://loom.test/mcp', log: () => {} });
   const sweep = () => { for (const x of [r, lap]) for (const e of x.houses.values()) { try { process.kill(-e.child.pid, 'SIGKILL'); } catch { /* gone */ } } };
   try {
@@ -350,7 +350,7 @@ test('a service moves between boxes by hand-off, and its state goes with it', as
   assert.equal(lap.houses.size, 0, 'the laptop waits for the hand-off');
   await r.tick(); // the old box stops it, saves its state, reports
   const list = () => ok(api(env, fx, { caller: owner, path: 'list', body: {} }));
-  await until(() => list().services[0].box === 'laptop');
+  await until(() => list().services[0].box === laptop);
   await lap.tick();
   const second = list().services[0].house;
   await until(() => existsSync(join(fake, 'runs', `loom-house-${second}.json`)));

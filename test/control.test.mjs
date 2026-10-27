@@ -11,11 +11,17 @@ import { mkdtempSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MAX_CLAIM_TRIES, api, meets } from '../src/control.mjs';
+import { load } from '../src/state.mjs';
 
 let env, fx, minted, revoked;
 const owner = { kind: 'owner' };
 const art = { kind: 'agent', agent: 'art' };
-const box = (subject) => ({ kind: 'piece', subject });
+// A box is called by its name here; loom knows it by its id (a live one first, else the revoked one).
+const idOf = (name) => {
+  const all = Object.entries(load(env).boxes).filter(([id, b]) => (b.name ?? id) === name);
+  return (all.find(([, b]) => !b.revoked) ?? all[0])?.[0] ?? name;
+};
+const box = (name) => ({ kind: 'piece', subject: idOf(name) });
 const call = (caller, path, body = {}) => api(env, fx, { caller, path, body });
 const ok = (r) => { assert.equal(r.status, 200, JSON.stringify(r.body)); return r.body; };
 
@@ -40,13 +46,33 @@ test('with nothing enrolled, every agent\'s primary is loom\'s own machine, and 
   assert.equal(ok(call(art, 'list')).primary, 'one');
 });
 
-test('adding a box mints its credential (piece:box/<name>) and its state file is private', () => {
+test('adding a box gives it an id of loom\'s and mints its credential (piece:box/<id>); its state file is private', () => {
   const r = ok(call(owner, 'add-box', { name: 'thor', mayHost: 'art' }));
   assert.match(r.token, /^loom_/);
-  assert.deepEqual(minted[0], { role: ['--piece', 'box/thor'], label: 'box · thor' });
+  assert.match(r.box, /^[0-9a-f]{6}(-[0-9a-f]{6}){3}$/);
+  assert.equal(r.name, 'thor');
+  assert.deepEqual(minted[0], { role: ['--piece', `box/${r.box}`], label: `box · thor (${r.box})` });
   assert.equal(statSync(join(env.LOOM_BOX_HOME, 'state.json')).mode & 0o777, 0o600);
-  assert.equal(call(owner, 'add-box', { name: 'thor' }).status, 409);
   assert.equal(call(owner, 'add-box', { name: 'Thor!' }).status, 400);
+  const hi = ok(call({ kind: 'piece', subject: r.box }, 'hello', {}));
+  assert.deepEqual([hi.box, hi.name], [r.box, 'thor']);
+});
+
+test('a name is only what a box is called: two may share it, and then the id says which', () => {
+  const a = ok(call(owner, 'add-box', { name: 'thor', mayHost: 'art' }));
+  const b = ok(call(owner, 'add-box', { name: 'thor', mayHost: 'art' }));
+  assert.notEqual(a.box, b.box);
+  const r = call(owner, 'up', { agent: 'art', box: 'thor', task: 'x' });
+  assert.equal(r.status, 409);
+  assert.match(r.body.error, /2 boxes are named thor/);
+  assert.equal(ok(call(owner, 'up', { agent: 'art', box: b.box, task: 'x' })).box, b.box);
+  ok(call(owner, 'revoke-box', { name: a.box }));
+  assert.equal(ok(call(owner, 'up', { agent: 'art', box: 'thor', task: 'y' })).box, b.box, 'one live thor: the name is enough again');
+  assert.equal(call(owner, 'revoke-box', { name: a.box }).status, 404, 'a revoked box is gone');
+  // loom's own machine is keyed by its name from before ids: a new box may be called that too.
+  const one = ok(call(owner, 'add-box', { name: 'one' })).box;
+  assert.equal(call(owner, 'up', { agent: 'art', box: 'one', task: 'z' }).status, 409);
+  assert.equal(ok(call(owner, 'up', { agent: 'art', box: one, task: 'z' })).box, one);
 });
 
 test('a box refuses a house for an agent it may not host', () => {
@@ -64,20 +90,20 @@ test('a box refuses a house for an agent it may not host', () => {
 
 test('a need no permitted box has fails and names the need; nothing else picks a box', () => {
   ok(call(owner, 'add-box', { name: 'thor' }));
-  ok(call(owner, 'add-box', { name: 'rig' }));
+  const rig = ok(call(owner, 'add-box', { name: 'rig' })).box;
   ok(call(box('thor'), 'hello', { facts: ['gpu:nvidia-thor', 'arch:arm64'] }));
   ok(call(box('rig'), 'hello', { facts: ['gpu:nvidia-geforce-rtx-5090', 'arch:x86_64'] }));
   const none = call(art, 'up', { needs: ['gpu:h100'], task: 'x' });
   assert.equal(none.status, 409);
   assert.match(none.body.error, /no box that may host art has gpu:h100/);
-  assert.equal(ok(call(art, 'up', { needs: 'gpu:5090', task: 'x' })).box, 'rig');
+  assert.equal(ok(call(art, 'up', { needs: 'gpu:5090', task: 'x' })).box, rig);
   // Two fit: it won't choose between them...
   const two = call(art, 'up', { needs: ['gpu:nvidia'], task: 'x' });
   assert.equal(two.status, 409);
   assert.match(two.body.error, /several boxes .*rig, thor|several boxes .*thor, rig/);
   // ...unless one of them is the agent's primary.
   ok(call(owner, 'set-primary', { agent: 'art', box: 'thor' }));
-  assert.equal(ok(call(art, 'up', { needs: ['gpu:nvidia'], task: 'x' })).box, 'thor');
+  assert.equal(ok(call(art, 'up', { needs: ['gpu:nvidia'], task: 'x' })).box, idOf('thor'));
   // Naming a box that lacks the need says what's missing.
   assert.match(call(art, 'up', { box: 'thor', needs: ['gpu:5090'], task: 'x' }).body.error, /thor doesn't have gpu:5090/);
 });
@@ -128,8 +154,8 @@ test('a secret that can\'t be read fails the claim and revokes the token it mint
   assert.equal(ok(call(owner, 'list')).houses[0].state, 'wanted');
 });
 
-test('a revoke that fails is queued and retried until it goes; a box name waits for its old credential', () => {
-  ok(call(owner, 'add-box', { name: 'thor' }));
+test('a revoke that fails is queued and retried until it goes; a new box of the same name is its own', () => {
+  const thor = ok(call(owner, 'add-box', { name: 'thor' })).box;
   let down = true;
   fx.revoke = (label) => { if (down) throw new Error('the token file is locked'); revoked.push(label); };
   const h = ok(call(art, 'up', { box: 'thor', task: 'x' }));
@@ -137,10 +163,12 @@ test('a revoke that fails is queued and retried until it goes; a box name waits 
   ok(call(box('thor'), 'report', { id: h.id, state: 'done', exit: 0 }));
   assert.deepEqual(revoked, []);
   ok(call(owner, 'revoke-box', { name: 'thor' }));
-  assert.equal(call(owner, 'add-box', { name: 'thor' }).status, 409);
+  // Another thor is another box: its own id and credential, nothing of the old one's.
+  const again = ok(call(owner, 'add-box', { name: 'thor' })).box;
+  assert.notEqual(again, thor);
   down = false;
   ok(call(box('one'), 'poll'));
-  assert.deepEqual(revoked.sort(), [`art · house ${h.id} on thor`, 'box · thor'].sort());
+  assert.deepEqual(revoked.sort(), [`art · house ${h.id} on thor`, `box · thor (${thor})`].sort());
   // "No live token" counts as gone.
   fx.revoke = () => { throw new Error('no live token labeled "x"'); };
   ok(call(owner, 'add-box', { name: 'thor' }));
@@ -173,13 +201,13 @@ test('stopping: a waiting house just stops; a running one is handed to its box t
 });
 
 test('revoking a box: its credential and its houses\' tokens go, its houses are lost, and it gets nothing more', () => {
-  ok(call(owner, 'add-box', { name: 'thor' }));
+  const thor = ok(call(owner, 'add-box', { name: 'thor' })).box;
   ok(call(owner, 'set-primary', { agent: 'art', box: 'thor' }));
   const h = ok(call(art, 'up', { task: 'x' }));
-  assert.equal(h.box, 'thor');
+  assert.equal(h.box, thor);
   ok(call(box('thor'), 'claim', { id: h.id }));
   ok(call(owner, 'revoke-box', { name: 'thor' }));
-  assert.deepEqual(revoked.sort(), ['art · house h-1 on thor', 'box · thor'].sort());
+  assert.deepEqual(revoked.sort(), ['art · house h-1 on thor', `box · thor (${thor})`].sort());
   assert.equal(ok(call(owner, 'list')).houses[0].state, 'lost');
   assert.equal(call(box('thor'), 'poll').status, 403);
   // art's primary falls back to loom's own machine.
@@ -353,7 +381,8 @@ test('adding a box that fails after the mint leaves no live credential behind (l
   fx.now = () => { if (++n === 1) throw new Error('disk full'); return saved(); };
   assert.equal(call(owner, 'add-box', { name: 'jonbox' }).status, 500);
   fx.now = saved;
-  assert.deepEqual(revoked, ['box · jonbox']);
+  assert.equal(revoked.length, 1);
+  assert.match(revoked[0], /^box · jonbox \([0-9a-f-]{27}\)$/);
   assert.equal(ok(call(owner, 'list')).boxes.some((b) => b.name === 'jonbox'), false);
 });
 

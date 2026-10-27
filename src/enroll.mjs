@@ -14,7 +14,7 @@
 // front of them. Requests are capped (a few, per address and in all) and
 // expire, so a stranger can't fill the page.
 import { createHash, randomBytes } from 'node:crypto';
-import { BOX_NAME, StateError, load, update } from './state.mjs';
+import { BOX_NAME, StateError, update } from './state.mjs';
 import { addBox } from './control.mjs';
 
 const TTL_MS = 15 * 60_000;
@@ -70,17 +70,6 @@ export function netOf(address) {
   return groups.slice(0, 4).map((g) => parseInt(g, 16).toString(16)).join(':') + '::/64';
 }
 
-/** The name a box gets: the one it asked for, or the next free one (only boxes hold names). */
-function freeName(s, name) {
-  const taken = (n) => s.boxes[n] && !s.boxes[n].revoked;
-  let given = name;
-  for (let i = 2; taken(given); i++) {
-    if (i > 99) fail(`${name} and its next 98 are all taken; pick another name`, 409);
-    given = `${name.slice(0, 60)}-${i}`;
-  }
-  return given;
-}
-
 export function joinRequest(env, effects, caller, b) {
   const address = stranger(caller);
   const name = String(b.name ?? '').toLowerCase();
@@ -92,9 +81,9 @@ export function joinRequest(env, effects, caller, b) {
   return update(env, (s) => {
     sweep(s, now);
     const pending = Object.values(s.joins).filter((j) => j.state === 'pending');
-    // A name that's taken gets the first free one after it (one, then one-2: Jonathan,
-    // 2026-10-27), and the box is told which. Asking doesn't hold a name: only a box does.
-    const given = freeName(s, name);
+    // A name is only what it's called: loom gives the box its own id when it's let in, so
+    // two boxes may both be one (Jonathan, 2026-10-27).
+    const given = name;
     if (pending.length >= MAX_PENDING) fail('too many boxes are asking to join right now; try again later', 429);
     if (pending.filter((j) => netOf(j.address) === netOf(address)).length >= MAX_PER_NET) fail('this network is already asking; wait for the owner', 429);
     const id = 'j-' + randomBytes(4).toString('hex');
@@ -119,7 +108,7 @@ export function joinPoll(env, effects, caller, b) {
     const credential = j.credential;
     j.state = 'delivered';
     delete j.credential;
-    return { state: 'allowed', name: j.name, credential };
+    return { state: 'allowed', box: j.box, name: j.name, credential };
   });
 }
 
@@ -138,13 +127,12 @@ export function allowJoin(env, effects, { id }) {
     j = s.joins[id];
     if (!j || j.state !== 'pending') fail('that request is gone (it expired, or was answered)', 404);
   });
-  // The name again, now: one taken since it asked gets the next free one; the box hears which from its poll.
-  const { box, token } = addBox(env, effects, { name: freeName(load(env), j.name), mayHost: 'anyone', labels: j.labels });
+  const { box, name, token } = addBox(env, effects, { name: j.name, mayHost: 'anyone', labels: j.labels });
   update(env, (s) => {
     const k = s.joins?.[id];
-    if (k) { k.state = 'allowed'; k.name = box; k.credential = token; k.answered = new Date(now).toISOString(); }
+    if (k) { k.state = 'allowed'; k.box = box; k.credential = token; k.answered = new Date(now).toISOString(); }
   });
-  return { box, code: j.code };
+  return { box, name, code: j.code };
 }
 
 export function blockJoin(env, effects, { id }) {

@@ -3,7 +3,7 @@
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { api } from '../src/control.mjs';
@@ -41,7 +41,8 @@ test('a box asks, the owner lets it in on the page, and only the box with the pr
   assert.equal(act(env, fx, { action: 'allow-join', fields: ask.actions[0].fields }).ok, true);
   assert.equal(call(stranger(), 'join-poll', { id: r.body.id, proof: 'q'.repeat(64) }).status, 403, 'not without the proof');
   const got = call(stranger(), 'join-poll', { id: r.body.id, proof });
-  assert.deepEqual(got.body, { state: 'allowed', name: 'one-loom', credential: 'loom_' + 'c'.repeat(40) });
+  assert.match(got.body.box, /^[0-9a-f]{6}(-[0-9a-f]{6}){3}$/, 'loom\'s own id for it');
+  assert.deepEqual(got.body, { state: 'allowed', box: got.body.box, name: 'one-loom', credential: 'loom_' + 'c'.repeat(40) });
   assert.equal(call(stranger(), 'join-poll', { id: r.body.id, proof }).body.state, 'gone', 'once');
   assert.ok(call(owner, 'list').body.boxes.some((b) => b.name === 'one-loom'));
   assert.deepEqual(manifest(env).asks, []);
@@ -69,24 +70,30 @@ test('blocked, expired, capped per network, no address refused, block all, and s
   assert.equal(call({ kind: 'agent', agent: 'art' }, 'join-request', { name: 'y', proof_hash: sha('y') }).status, 404, 'with a token, there is no such call');
 });
 
-test('a name a box already has comes back as the next free one, and the box joins under it', async () => {
-  call(owner, 'add-box', { name: 'one' });
+test('a name another box has is fine: the new box is its own, by id, and joins as that name', async () => {
+  const first = call(owner, 'add-box', { name: 'one' }).body.box;
   let asked;
   const fetchImpl = async (url, init) => {
     const path = url.split('/api/box/')[1];
     const body = JSON.parse(init.body);
-    if (path === 'hello') return new Response(JSON.stringify({ box: 'one-2' }), { status: 200 });
+    // hello as the box the credential is: the one just let in, not the first one.
+    if (path === 'hello') return new Response(JSON.stringify(call({ kind: 'piece', subject: allowed }, 'hello', body).body), { status: 200 });
     const r = call(stranger(), path, body);
     if (path === 'join-request') asked = r.body;
     if (path === 'join-poll' && r.body.state === 'pending') act(env, fx, { action: 'allow-join', fields: { id: asked.id } });
+    if (path === 'join-poll' && r.body.state === 'allowed') allowed = r.body.box;
     return new Response(JSON.stringify(r.body), { status: r.status });
   };
-  const said = [];
+  let allowed;
   const there = { HOME: mkdtempSync(join(tmpdir(), 'loom-box-joiner-')) };
   there.LOOM_BOX_HOME = join(there.HOME, 'state');
-  const hi = await askToJoin(there, { url: 'http://loom.test:8787', name: 'one' }, { fetchImpl, say: (m) => said.push(m), every: 1 });
-  assert.equal(hi.box, 'one-2');
-  assert.match(said[0], /one is taken on this loom, so it'll be one-2/);
+  const hi = await askToJoin(there, { url: 'http://loom.test:8787', name: 'one' }, { fetchImpl, say: () => {}, every: 1 });
+  assert.equal(asked.name, 'one', 'asked as one, and stays one');
+  assert.notEqual(hi.box, first);
+  assert.equal(hi.name, 'one');
+  const cfg = JSON.parse(readFileSync(join(there.LOOM_BOX_HOME, 'box.json'), 'utf-8'));
+  assert.deepEqual([cfg.name, cfg.id], ['one', hi.box]);
+  assert.equal(call(owner, 'list').body.boxes.filter((b) => b.name === 'one').length, 2);
 });
 
 test('loom box join at a terminal asks, waits for the owner, and joins with what it was given', async () => {

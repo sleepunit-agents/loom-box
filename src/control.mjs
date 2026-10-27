@@ -6,6 +6,7 @@
 // It is not a scheduler. A house goes where it's told (a box), or to the one
 // permitted box that has what it needs, or to the agent's primary. If that
 // doesn't name exactly one box, it says why and starts nothing.
+import { randomBytes } from 'node:crypto';
 import { AGENT_NAME, BOX_NAME, SECRET_NAME, StateError, load, localBoxName, nextHouseId, update } from './state.mjs';
 import { joinPoll, joinRequest } from './enroll.mjs';
 import { MAX_PARTS, PART_RAW, drop, partsOf, putPart, putWhole, readPart } from './blobs.mjs';
@@ -26,6 +27,40 @@ const fail = (message, status = 400) => { throw new StateError(message, status);
 const now = (effects) => (effects.now ? effects.now() : new Date()).toISOString();
 
 export const boxCredLabel = (name) => `box · ${name}`;
+/** A box's credential label: its own (new boxes: `box · <name> (<id>)`), else the old `box · <id>`. */
+const credLabelOf = (s, id) => s.boxes[id]?.credLabel ?? boxCredLabel(id);
+
+/**
+ * A box's id: loom's own, four groups of six hex digits (Jonathan, 2026-10-27: "to loom
+ * it's something that looks like 4 hex colors put together"). Its name is only what it's
+ * called: any name, even one another box has. A box from before ids keeps its name as its id.
+ */
+export function newBoxId() {
+  return Array.from({ length: 4 }, () => randomBytes(3).toString('hex')).join('-');
+}
+
+/** What a box is called (its name, or its id for one from before names). */
+export const boxNameOf = (s, id) => s.boxes[id]?.name ?? id;
+
+/** Its name, and when another live box has that name too, the start of its id to tell them apart. */
+export function boxLabelOf(s, id) {
+  const n = boxNameOf(s, id);
+  const twin = Object.entries(s.boxes).some(([o, b]) => o !== id && !b.revoked && (b.name ?? o) === n);
+  return twin ? `${n} (${id.slice(0, 6)})` : n;
+}
+
+/**
+ * The box someone means: its id, or a name only one live box has. Two live boxes with that
+ * name: say so, with their ids, rather than pick one.
+ */
+export function resolveBox(s, ref) {
+  if (typeof ref !== 'string' || !ref) fail('which box: its name or its id');
+  // A box from before ids is keyed by its name, so a key and a new box's name can be the same word.
+  const named = Object.entries(s.boxes).filter(([id, b]) => !b.revoked && (id === ref || b.name === ref)).map(([id]) => id);
+  if (named.length === 1) return named[0];
+  if (named.length > 1) fail(`${named.length} boxes are named ${ref}: say which by id (${named.join(', ')})`, 409);
+  fail(`no box named ${ref}`, 404);
+}
 
 /**
  * Revoke a token, or remember to. A revoke that fails (loom's token file busy,
@@ -45,7 +80,7 @@ function retryRevokes(s, effects) {
   s.pendingRevokes = [];
   for (const label of pending) revokeOrQueue(s, effects, label);
 }
-export const houseTokenLabel = (h) => `${h.agent} · house ${h.id} on ${h.box}`;
+export const houseTokenLabel = (h, boxName = h.box) => `${h.agent} · house ${h.id} on ${boxName}`;
 
 /** "gpu:5090" is met by a fact "gpu:nvidia-geforce-rtx-5090"; a bare "jonathan-rig" by that exact label. */
 export function meets(facts, need) {
@@ -75,11 +110,11 @@ export function primaryOf(s, agent, env) {
 export function placeHouse(s, agent, { box, needs = [] }, env) {
   const permitted = Object.entries(s.boxes).filter(([, b]) => mayHost(b, agent)).map(([n]) => n);
   if (box) {
-    if (!s.boxes[box]) fail(`no box named ${box}`, 404);
-    if (!mayHost(s.boxes[box], agent)) fail(`${box} may not host ${agent}`, 403);
-    const missing = needs.filter((n) => !meets(factsOf(s.boxes[box]), n));
-    if (missing.length) fail(`${box} doesn't have ${missing.join(', ')}`, 409);
-    return box;
+    const id = resolveBox(s, box);
+    if (!mayHost(s.boxes[id], agent)) fail(`${boxNameOf(s, id)} may not host ${agent}`, 403);
+    const missing = needs.filter((n) => !meets(factsOf(s.boxes[id]), n));
+    if (missing.length) fail(`${boxNameOf(s, id)} doesn't have ${missing.join(', ')}`, 409);
+    return id;
   }
   if (needs.length) {
     const fits = permitted.filter((n) => needs.every((need) => meets(factsOf(s.boxes[n]), need)));
@@ -91,7 +126,7 @@ export function placeHouse(s, agent, { box, needs = [] }, env) {
     }
     const primary = primaryOf(s, agent, env);
     if (fits.includes(primary)) return primary;
-    if (fits.length > 1) fail(`several boxes have ${needs.join(', ')}: ${fits.join(', ')}. Name one`, 409);
+    if (fits.length > 1) fail(`several boxes have ${needs.join(', ')}: ${fits.map((id) => boxLabelOf(s, id)).join(', ')}. Name one`, 409);
     return fits[0];
   }
   return primaryOf(s, agent, env);
@@ -129,52 +164,50 @@ export function addBox(env, effects, { name, mayHost: mh, labels }) {
   const may = mayHostValue(mh);
   // Everything checked before the credential is minted: a box that isn't added never leaves one live.
   const ls = listOf(labels, 'labels', FACT);
-  let token;
+  let token, minted;
   try {
     return update(env, (s) => {
-      if (s.boxes[n] && !s.boxes[n].revoked) {
-        let i = 2;
-        while (s.boxes[`${n}-${i}`] && !s.boxes[`${n}-${i}`].revoked) i++;
-        fail(`there's already a box named ${n}; ${n}-${i} is free`, 409);
-      }
+      // Its id is loom's; its name is only what it's called (another box may have it too).
       retryRevokes(s, effects);
-      if ((s.pendingRevokes ?? []).includes(boxCredLabel(n))) fail(`${n}'s old credential isn't revoked yet; try again shortly`, 409);
-      token = effects.mint(['--piece', `box/${n}`], boxCredLabel(n));
-      s.boxes[n] = { mayHost: may, facts: [], labels: ls, created: now(effects), joined: null, lastSeen: null };
-      return { box: n, token };
+      let id;
+      do id = newBoxId(); while (s.boxes[id]);
+      const label = `box · ${n} (${id})`;
+      token = effects.mint(['--piece', `box/${id}`], label);
+      minted = label;
+      s.boxes[id] = { name: n, credLabel: label, mayHost: may, facts: [], labels: ls, created: now(effects), joined: null, lastSeen: null };
+      return { box: id, name: n, token };
     });
   } catch (err) {
     // Minted, then failed (the save, a clock): the box wasn't added, so neither is its credential.
-    if (token) { try { effects.revoke(boxCredLabel(n)); } catch { /* listed by the token store; the owner can revoke it */ } }
+    if (token && minted) { try { effects.revoke(minted); } catch { /* listed by the token store; the owner can revoke it */ } }
     throw err;
   }
 }
 
 export function revokeBox(env, effects, { name }) {
   return update(env, (s) => {
-    const b = s.boxes[name];
-    if (!b || b.revoked) fail(`no box named ${name}`, 404);
-    if (b.local) fail(`${name} is loom's own machine; it can't be revoked`, 409);
-    revokeOrQueue(s, effects, boxCredLabel(name));
+    const id = resolveBox(s, name);
+    const b = s.boxes[id];
+    if (b.local) fail(`${boxNameOf(s, id)} is loom's own machine; it can't be revoked`, 409);
+    revokeOrQueue(s, effects, credLabelOf(s, id));
     b.revoked = now(effects);
     // Its houses lose their tokens with it (runtime.md, "Credentials").
     for (const h of Object.values(s.houses)) {
-      if (h.box !== name || TERMINAL.has(h.state)) continue;
+      if (h.box !== id || TERMINAL.has(h.state)) continue;
       if (h.tokenLabel) revokeOrQueue(s, effects, h.tokenLabel);
       h.state = 'lost'; h.updated = now(effects); h.note = 'its box was revoked';
     }
-    for (const [agent, p] of Object.entries(s.primaries)) if (p === name) delete s.primaries[agent];
-    return { box: name, revoked: true };
+    for (const [agent, p] of Object.entries(s.primaries)) if (p === id) delete s.primaries[agent];
+    return { box: id, name: boxNameOf(s, id), revoked: true };
   });
 }
 
 export function setMayHost(env, effects, { name, mayHost: mh }) {
   const may = mayHostValue(mh);
   return update(env, (s) => {
-    const b = s.boxes[name];
-    if (!b || b.revoked) fail(`no box named ${name}`, 404);
-    b.mayHost = may;
-    return { box: name, mayHost: may };
+    const id = resolveBox(s, name);
+    s.boxes[id].mayHost = may;
+    return { box: id, name: boxNameOf(s, id), mayHost: may };
   });
 }
 
@@ -183,9 +216,11 @@ export function setPrimary(env, effects, { agent, box }) {
   if (!AGENT_NAME.test(a)) fail('an agent name is lowercase letters, digits and dashes');
   return update(env, (s) => {
     if (!box || box === localBoxName(env)) { delete s.primaries[a]; return { agent: a, primary: localBoxName(env) }; }
-    if (!s.boxes[box] || !mayHost(s.boxes[box], a)) fail(`${box} isn't a box that may host ${a}`, 409);
-    s.primaries[a] = box;
-    return { agent: a, primary: box };
+    const id = resolveBox(s, box);
+    if (s.boxes[id].local) { delete s.primaries[a]; return { agent: a, primary: id }; }
+    if (!mayHost(s.boxes[id], a)) fail(`${boxNameOf(s, id)} isn't a box that may host ${a}`, 409);
+    s.primaries[a] = id;
+    return { agent: a, primary: id };
   });
 }
 
@@ -286,7 +321,7 @@ export function list(env, caller) {
     .map(houseView);
   const boxes = Object.entries(s.boxes)
     .filter(([, b]) => caller.kind === 'owner' || (!b.revoked && caller.kind === 'agent' && mayHost(b, caller.agent)))
-    .map(([name, b]) => ({ name, local: !!b.local, facts: factsOf(b), lastSeen: b.lastSeen, ...(caller.kind === 'owner' ? { mayHost: b.mayHost, revoked: b.revoked ?? null, created: b.created } : {}) }));
+    .map(([id, b]) => ({ id, name: b.name ?? id, local: !!b.local, facts: factsOf(b), lastSeen: b.lastSeen, ...(caller.kind === 'owner' ? { mayHost: b.mayHost, revoked: b.revoked ?? null, created: b.created } : {}) }));
   const primary = caller.kind === 'agent' ? primaryOf(s, caller.agent, env) : undefined;
   const services = Object.entries(s.services ?? {})
     .filter(([, v]) => caller.kind === 'owner' || (caller.kind === 'agent' && v.agent === caller.agent))
@@ -313,7 +348,7 @@ export function hello(env, effects, caller, { facts }) {
     b.facts = f;
     b.lastSeen = now(effects);
     b.joined ??= b.lastSeen;
-    return { box: caller.subject, mayHost: b.mayHost };
+    return { box: caller.subject, name: b.name ?? caller.subject, mayHost: b.mayHost };
   });
 }
 
@@ -357,7 +392,7 @@ export function claim(env, effects, caller, { id }) {
     if (!mayHost(s.boxes[caller.subject], h.agent)) fail(`this box may not host ${h.agent}`, 403);
     const a = s.agents[h.agent];
     if (!a) fail(`${h.agent} has no house config`, 409);
-    const label = houseTokenLabel(h);
+    const label = houseTokenLabel(h, boxNameOf(s, h.box));
     // Never mint under a label that's still waiting to be revoked: the revoke would take the new token.
     retryRevokes(s, effects);
     if ((s.pendingRevokes ?? []).includes(label)) fail(`an old token for ${id} isn't revoked yet; try again shortly`, 409);
@@ -700,7 +735,7 @@ export function remoteUp(env, effects, { agent, box, dir }) {
     if (prev?.want === 'up') return remoteView(agent, prev);
     const d = dir || (prev?.box === b ? prev.dir : undefined);
     if (!d || !ABS_DIR.test(d) || d.split('/').some((x) => x === '..' || x === '.')) fail('a box session needs the folder it works in on that box: an absolute path');
-    s.remotes[agent] = { box: b, dir: d, name: remoteName(agent, b), want: 'up', state: 'starting', url: null, since: now(effects), error: null };
+    s.remotes[agent] = { box: b, dir: d, name: remoteName(agent, boxNameOf(s, b)), want: 'up', state: 'starting', url: null, since: now(effects), error: null };
     return remoteView(agent, s.remotes[agent]);
   });
 }
