@@ -36,6 +36,15 @@ function writePrivate(path, text) {
   chmodSync(path, 0o600);
 }
 
+/**
+ * Whether `run --local` runs the control plane's own box here. The box piece's
+ * service runs `run --local` wherever the piece is installed; on a machine that
+ * joined a loom (box.json) that's the join, not a second, empty control plane.
+ */
+export function runsLocal(env, wantLocal) {
+  return !!wantLocal && !existsSync(configPath(env));
+}
+
 export function loadConfig(env) {
   const p = configPath(env);
   if (!existsSync(p)) throw new BoxError('this machine hasn\'t joined a loom: run `loom box join <url> --name <name>`');

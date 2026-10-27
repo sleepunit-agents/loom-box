@@ -45,7 +45,7 @@ import { createInterface } from 'node:readline';
 import { addBox, api, down, list, remoteDown, remoteUp, revokeBox, setAgent, setPrimary, up } from './control.mjs';
 import { realEffects } from './effects.mjs';
 import { act, manifest, page } from './ui.mjs';
-import { BoxError, joinLoom, loadConfig, packState, POLL_MS, remoteClient, restoreState, runner } from './box.mjs';
+import { BoxError, joinLoom, loadConfig, packState, POLL_MS, remoteClient, restoreState, runner, runsLocal } from './box.mjs';
 import { localBoxName, renameLocal, stateDir } from './state.mjs';
 import { exportPart, importPart } from './bundle.mjs';
 import { PART_RAW, joinParts, partsOf } from './blobs.mjs';
@@ -224,7 +224,8 @@ async function main(argv, env) {
       return;
     }
     case 'run': {
-      const local = rest.includes('--local');
+      const local = runsLocal(env, rest.includes('--local'));
+      if (rest.includes('--local') && !local) process.stderr.write('loom-box: this machine joined a loom (box.json): running as that box, not a local control plane\n');
       let client, loomUrl, labels = [];
       if (local) {
         // loom's own machine: the control plane in-process, as its own box.
