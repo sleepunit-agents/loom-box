@@ -119,9 +119,11 @@ It asks loom to let it in, prints a code like `4DX-9CH`, and waits. On loom's
 page, a card on Home says **A box asks to join: \<name>**, with where it's
 from, what it has, and the same code. If the code matches the one on the
 box's terminal, tap **Let it in**. The box picks up its credential by itself
-and joins. Nobody copies a key. If the name is taken, loom gives it the next
-free one (`one` becomes `one-2`) and the terminal says so. A request nobody
-answers expires in 15 minutes. **Block** if it isn't yours.
+and joins. Nobody copies a key. The name is only what you call the box, so it
+can match its hostname, and two boxes can have the same name. Loom keeps its
+own id for each box (like `9f3a2b-c41d0e-77a1f2-0b5e9c`). Where a name is
+shared, the page shows the start of the id, and commands take the id. A
+request nobody answers expires in 15 minutes. **Block** if it isn't yours.
 
 Then:
 
@@ -267,7 +269,7 @@ When the container exits, the box removes its podman secrets and its dirs, then 
 
 ## How it talks
 
-A box never reads loom's stores, and loom never reaches into a box. The box polls `POST /api/box/<call>` (loom's piece API, docs/extensions.md "The API") with its **box credential**, a loom token with the role `piece:box/<name>`. That credential reaches this piece's API and nothing else in loom: no MCP, no CLI, no page.
+A box never reads loom's stores, and loom never reaches into a box. The box polls `POST /api/box/<call>` (loom's piece API, docs/extensions.md "The API") with its **box credential**, a loom token with the role `piece:box/<id>` (the box's id is loom's; its name is only a label). That credential reaches this piece's API and nothing else in loom: no MCP, no CLI, no page.
 
 | Call | Who | |
 |---|---|---|

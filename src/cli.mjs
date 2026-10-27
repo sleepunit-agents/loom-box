@@ -136,7 +136,7 @@ async function main(argv, env) {
     case 'add': {
       const [name] = positional(rest);
       const { box, token } = addBox(env, realEffects(env), { name, mayHost: flag(rest, '--may-host'), labels: flag(rest, '--labels') });
-      process.stderr.write(`Added ${box}. On ${box}: loom box join ${env.LOOM_BOX_PUBLIC_URL || '<loom-url>'} --name ${box}, and paste this when it asks. It won't be shown again.\n`);
+      process.stderr.write(`Added ${name} (${box}). On ${name}: loom box join ${env.LOOM_BOX_PUBLIC_URL || '<loom-url>'} --name ${name} --credential, and paste this when it asks. It won't be shown again.\n`);
       process.stdout.write(`${token}\n`);
       return;
     }
@@ -210,7 +210,7 @@ async function main(argv, env) {
     case 'list': {
       const r = await ownerOrRemote(env)('list', {});
       if (json) return out(r);
-      for (const b of r.boxes) process.stdout.write(`box ${b.name}${b.local ? ' (loom\'s own)' : ''}${b.revoked ? ' REVOKED' : ''}: ${b.facts.join(', ')}\n`);
+      for (const b of r.boxes) process.stdout.write(`box ${b.name}${b.id !== b.name ? ` [${b.id}]` : ''}${b.local ? ' (loom\'s own)' : ''}${b.revoked ? ' REVOKED' : ''}: ${b.facts.join(', ')}\n`);
       for (const v of r.services ?? []) process.stdout.write(`service ${v.service} on ${v.box}${v.moveTo ? ` → ${v.moveTo}` : ''}: ${v.want}, house ${v.house} ${v.state ?? ''}\n`);
       for (const v of r.remotes ?? []) if (v.want === 'up' || v.state !== 'stopped') process.stdout.write(`box session "${v.name}" in ${v.dir}: ${v.want}, ${v.state}${v.url ? ` ${v.url}` : ''}${v.error ? ` (${v.error})` : ''}\n`);
       for (const h of r.houses) process.stdout.write(`${h.id} ${h.agent} on ${h.box}: ${h.state}  ${h.task.slice(0, 60)}\n`);

@@ -7,7 +7,7 @@ import { uptime } from 'node:os';
 import { join } from 'node:path';
 import { StateError, load, localBoxName, stateDir } from './state.mjs';
 import { allowJoin, blockAllJoins, blockJoin, pendingJoins } from './enroll.mjs';
-import { addBox, factsOf, list, primaryOf, remoteDown, remoteUp, revokeBox, serviceDown, serviceMove, serviceRestart, serviceUp, setAgent, setMayHost, setPrimary, up, down, LIVE } from './control.mjs';
+import { addBox, boxLabelOf, factsOf, list, primaryOf, remoteDown, remoteUp, revokeBox, serviceDown, serviceMove, serviceRestart, serviceUp, setAgent, setMayHost, setPrimary, up, down, LIVE } from './control.mjs';
 
 const OWNER = { kind: 'owner' };
 const ago = (iso, nowMs = Date.now()) => {
@@ -46,16 +46,16 @@ function sessionsSection(env, s, view) {
     const items = [];
     // Each session a row, its link on the row and one tap up or down at its right.
     if (r && r.want === 'up') {
-      items.push({ text: `${a} on ${r.box}: box session`, meta: `${r.state}${r.error ? ` (${r.error})` : ''} · ${r.dir}`, tone: r.state === 'running' ? 'ok' : 'warn', agent: a, ...(r.url ? { href: r.url } : {}),
+      items.push({ text: `${a} on ${boxLabelOf(s, r.box)}: box session`, meta: `${r.state}${r.error ? ` (${r.error})` : ''} · ${r.dir}`, tone: r.state === 'running' ? 'ok' : 'warn', agent: a, ...(r.url ? { href: r.url } : {}),
         act: { action: 'remote-down', label: 'Down', tone: 'danger', confirm: 'The session ends; anything open in the Claude app on it stops.', fields: { agent: a } } });
     } else if (r?.dir) {
-      items.push({ text: `${a} on ${r.box}: box session`, meta: `down · ${r.dir}`, tone: 'muted', agent: a,
+      items.push({ text: `${a} on ${boxLabelOf(s, r.box)}: box session`, meta: `down · ${r.dir}`, tone: 'muted', agent: a,
         act: { action: 'remote-up', label: 'Up', tone: 'primary', fields: { agent: a, box: r.box, dir: r.dir } } });
     }
     const rs = view.services.find((v) => v.agent === a && v.name === 'remote');
     if (rs) {
       const link = rs.want === 'up' && rs.house ? remoteLink(env, rs.house) : null;
-      items.push({ text: `${a}'s house: house session`, meta: rs.want === 'up' ? `${rs.state ?? 'starting'} · ${rs.house} on ${rs.box}` : 'down', tone: rs.want !== 'up' ? 'muted' : rs.state === 'running' ? 'ok' : 'warn', agent: a, ...(link ? { href: link } : {}),
+      items.push({ text: `${a}'s house: house session`, meta: rs.want === 'up' ? `${rs.state ?? 'starting'} · ${rs.house} on ${boxLabelOf(s, rs.box)}` : 'down', tone: rs.want !== 'up' ? 'muted' : rs.state === 'running' ? 'ok' : 'warn', agent: a, ...(link ? { href: link } : {}),
         act: rs.want === 'up'
           ? { action: 'service-down', label: 'Down', tone: 'danger', confirm: 'The house stops; anything open in the Claude app on it stops.', fields: { agent: a, name: 'remote' } }
           : { action: 'service-up', label: 'Up', tone: 'primary', fields: { agent: a, name: 'remote' } } });
@@ -121,19 +121,20 @@ function boxesPage(env, nowMs) {
   const live = view.houses.filter((h) => LIVE.has(h.state));
   const sections = [];
   const waiting = live.some((h) => h.state === 'wanted');
-  const live_boxes = view.boxes.filter((b) => !b.revoked);
+  const live_boxes = view.boxes.filter((b) => !b.revoked).map((b) => ({ ...b, label: boxLabelOf(s, b.id) }));
+  const nameOf = (id) => boxLabelOf(s, id);
   // The board: a card per box, what it is, and the houses on it now (a page holds ten sections, so past three boxes, one list).
   const svcOf = new Map(view.services.map((v) => [v.house, v.name]));
   if (live_boxes.length > 3) {
     sections.push({ id: 'all-boxes', title: 'Boxes', blocks: [{ type: 'list', items: live_boxes.map((b) => ({
-      text: b.local ? `${b.name} · loom's own` : b.name, meta: `${live.filter((h) => h.box === b.name).length} houses · ${b.local ? 'here' : b.lastSeen ? `seen ${ago(b.lastSeen, nowMs)}` : 'not joined yet'}`,
+      text: b.local ? `${b.label} · loom's own` : b.label, meta: `${live.filter((h) => h.box === b.id).length} houses · ${b.local ? 'here' : b.lastSeen ? `seen ${ago(b.lastSeen, nowMs)}` : 'not joined yet'}`,
     })) }] });
   }
   for (const b of live_boxes.length > 3 ? [] : live_boxes) {
-    const here = live.filter((h) => h.box === b.name);
+    const here = live.filter((h) => h.box === b.id);
     // The board's box card: how long it's been up, its disk, then the houses on it. The machine's facts a tap away.
     const disk = b.local ? diskUse(env) : null;
-    sections.push({ id: `box-${b.name}`, title: b.local ? `${b.name} · loom's own` : b.name, tone: b.local || b.lastSeen ? undefined : 'warn', blocks: [
+    sections.push({ id: `box-${b.id}`, title: b.local ? `${b.label} · loom's own` : b.label, tone: b.local || b.lastSeen ? undefined : 'warn', blocks: [
       { type: 'text', tone: 'muted', text: b.local ? `Up ${span(uptime() * 1000)}` : b.lastSeen ? `Seen ${ago(b.lastSeen, nowMs)}` : 'Not joined yet' },
       ...(disk ? [{ type: 'meter', items: [{ label: 'Disk', value: disk.used, detail: `${disk.free} free`, ...(disk.used >= 0.95 ? { tone: 'bad' } : disk.used >= 0.85 ? { tone: 'warn' } : {}) }] }] : []),
       here.length
@@ -147,11 +148,11 @@ function boxesPage(env, nowMs) {
   }
   if (live_boxes.some((b) => !b.local)) sections.push({ id: 'boxes', title: 'Manage boxes', blocks: [
     ...live_boxes.filter((b) => !b.local).map((b) => ({
-      type: 'details', summary: b.name, meta: b.lastSeen ? `seen ${ago(b.lastSeen, nowMs)}` : 'waiting for `loom box join`',
+      type: 'details', summary: b.label, meta: b.lastSeen ? `seen ${ago(b.lastSeen, nowMs)}` : 'waiting for `loom box join`',
       blocks: [
-        { type: 'form', title: `Who ${b.name} may host`, action: 'may-host', submit: 'Save', hidden: { name: b.name },
+        { type: 'form', title: `Who ${b.label} may host`, action: 'may-host', submit: 'Save', hidden: { name: b.id },
           fields: [{ name: 'may_host', label: 'Agents', kind: 'text', value: mayHostText(b.mayHost), hint: '"anyone", or agent names separated by commas' }] },
-        { type: 'buttons', items: [{ action: 'revoke-box', label: `Revoke ${b.name}`, tone: 'danger', fields: { name: b.name } }] },
+        { type: 'buttons', items: [{ action: 'revoke-box', label: `Revoke ${b.label}`, tone: 'danger', fields: { name: b.id } }] },
       ],
     })),
   ] });
@@ -161,16 +162,16 @@ function boxesPage(env, nowMs) {
       // Restart at each row's right: its house stops and the service brings up a fresh one (what fixes a stuck bridge).
       { type: 'list', items: view.services.map((v) => ({
         text: v.service, agent: v.agent,
-        meta: v.want === 'up' ? `${v.moveTo ? `${v.box} → ${v.moveTo}` : v.box} · ${v.house} ${v.state ?? ''}${v.restarts ? ` · ${v.restarts} restart${v.restarts === 1 ? '' : 's'}` : ''}` : 'down',
+        meta: v.want === 'up' ? `${v.moveTo ? `${nameOf(v.box)} → ${nameOf(v.moveTo)}` : nameOf(v.box)} · ${v.house} ${v.state ?? ''}${v.restarts ? ` · ${v.restarts} restart${v.restarts === 1 ? '' : 's'}` : ''}` : 'down',
         tone: v.want !== 'up' ? 'muted' : v.state === 'running' ? 'ok' : v.state === 'failed' || v.state === 'lost' ? 'bad' : 'warn',
         ...(v.want === 'up' ? { act: { action: 'service-restart', label: 'Restart', ...(v.state === 'failed' || v.state === 'lost' ? { tone: 'primary' } : {}), fields: { agent: v.agent, name: v.name } } } : {}),
       })) },
       ...view.services.slice(0, 8).map((v) => ({
-        type: 'details', summary: v.service, meta: v.want === 'up' ? `on ${v.box}` : 'down',
+        type: 'details', summary: v.service, meta: v.want === 'up' ? `on ${nameOf(v.box)}` : 'down',
         blocks: [
           ...(v.want === 'up' ? [{ type: 'form', title: `Move ${v.service}`, action: 'service-move', submit: 'Hand it off', hidden: { agent: v.agent, name: v.name },
             note: 'Stopped where it is, then started there: never two at once.',
-            fields: [{ name: 'box', label: 'To', kind: 'choice', required: true, options: live_boxes.filter((b) => b.name !== v.box).map((b) => ({ value: b.name, label: b.name })) }] }] : []),
+            fields: [{ name: 'box', label: 'To', kind: 'choice', required: true, options: live_boxes.filter((b) => b.id !== v.box).map((b) => ({ value: b.id, label: b.label })) }] }] : []),
           { type: 'buttons', items: [v.want === 'up'
             ? { action: 'service-down', label: `Take ${v.name} down`, tone: 'danger', fields: { agent: v.agent, name: v.name } }
             : { action: 'service-up', label: `Bring ${v.name} up`, tone: 'primary', fields: { agent: v.agent, name: v.name } }] },
@@ -184,7 +185,7 @@ function boxesPage(env, nowMs) {
 
   sections.push({ id: 'houses', title: 'Houses', blocks: view.houses.length ? [
     { type: 'table', columns: ['House', 'Agent', 'Box', 'State', 'Task', 'Updated'], rows: view.houses.slice(0, 25).map((h) => [
-      h.id, h.agent, h.box, h.state + (h.exit !== undefined ? ` (exit ${h.exit})` : ''), short(h.task), ago(h.updated, nowMs),
+      h.id, h.agent, nameOf(h.box), h.state + (h.exit !== undefined ? ` (exit ${h.exit})` : ''), short(h.task), ago(h.updated, nowMs),
     ]) },
     ...(live.length ? [{ type: 'buttons', items: live.slice(0, 10).map((h) => ({ action: 'down', label: `Stop ${h.id}`, fields: { id: h.id } })) }] : []),
   ] : [{ type: 'text', tone: 'muted', text: 'No houses yet.' }] });
@@ -193,7 +194,7 @@ function boxesPage(env, nowMs) {
     sections.push({ id: 'up', title: 'Start a house', blocks: [{ type: 'form', action: 'up', submit: 'Start it', fields: [
       { name: 'agent', label: 'Agent', kind: 'choice', required: true, options: agents.map((a) => ({ value: a, label: a, detail: `primary: ${primaryOf(s, a, env)}` })) },
       { name: 'box', label: 'Box', kind: 'choice', value: '', options: [{ value: '', label: 'Its primary, or the one box that has what it needs' },
-        ...live_boxes.map((b) => ({ value: b.name, label: b.name }))] },
+        ...live_boxes.map((b) => ({ value: b.id, label: b.label }))] },
       { name: 'needs', label: 'Needs', kind: 'text', hint: 'Optional, e.g. gpu:5090. A box that has it, and may host the agent.' },
       { name: 'task', label: 'Task', kind: 'textarea', required: true },
     ] }] });
@@ -223,7 +224,7 @@ function boxesPage(env, nowMs) {
       { type: 'kv', items: agents.map((a) => ({ label: a, value: primaryOf(s, a, env) })) },
       { type: 'form', action: 'set-primary', submit: 'Set', fields: [
         { name: 'agent', label: 'Agent', kind: 'choice', required: true, options: agents.map((a) => ({ value: a, label: a })) },
-        { name: 'box', label: 'Primary', kind: 'choice', options: live_boxes.map((b) => ({ value: b.name, label: b.name })) },
+        { name: 'box', label: 'Primary', kind: 'choice', options: live_boxes.map((b) => ({ value: b.id, label: b.label })) },
       ] },
     ] });
   }
@@ -250,7 +251,7 @@ function sessionControls(env, s, a, r) {
   return [{ type: 'form', title: 'Box session', action: 'remote-up', submit: 'Bring it up', hidden: { agent: a },
     note: `Claude's remote-control on the box itself, not in a house, with permissions bypassed: for work that needs the machine. Named "${a} on <box> (box session)".`,
     fields: [
-      { name: 'box', label: 'Box', kind: 'choice', value: r?.box ?? primaryOf(s, a, env), options: boxes.map((n) => ({ value: n, label: n })) },
+      { name: 'box', label: 'Box', kind: 'choice', value: r?.box ?? primaryOf(s, a, env), options: boxes.map((n) => ({ value: n, label: boxLabelOf(s, n) })) },
       { name: 'dir', label: 'Folder on the box', kind: 'text', required: true, ...(r?.dir ? { value: r.dir } : {}), hint: 'Where it works, e.g. /home/art/Art' },
     ] }];
 }
@@ -312,23 +313,24 @@ export function act(env, effects, { action, fields: raw = {} }, publicUrl) {
   for (const [from, to] of [['may_host', 'mayHost'], ['house_file', 'houseFile'], ['repo_secret', 'repoSecret']]) {
     if (from in fields) { fields[to] = fields[from]; delete fields[from]; }
   }
+  const label = (id) => boxLabelOf(load(env), id);
   try {
     switch (action) {
       case 'add-box': {
-        const { box, token } = addBox(env, effects, fields);
+        const { name, token } = addBox(env, effects, fields);
         const url = publicUrl || '<this loom\'s URL>';
-        return { ok: true, keep: true, message: `Added ${box}. On ${box}, run \`loom box join ${url} --name ${box} --credential\` and paste this credential when it asks (shown this once): ${token}`, page: '' };
+        return { ok: true, keep: true, message: `Added ${name}. On ${name}, run \`loom box join ${url} --name ${name} --credential\` and paste this credential when it asks (shown this once): ${token}`, page: '' };
       }
-      case 'allow-join': { const r = allowJoin(env, effects, fields); return { ok: true, message: `Let ${r.box} in (code ${r.code}). It picks up its credential by itself within a few seconds.`, page: '' }; }
+      case 'allow-join': { const r = allowJoin(env, effects, fields); return { ok: true, message: `Let ${r.name} in (code ${r.code}). It picks up its credential by itself within a few seconds.`, page: '' }; }
       case 'block-join': { const r = blockJoin(env, effects, fields); return { ok: true, message: `Blocked ${r.name}'s request.`, page: '' }; }
       case 'block-all-joins': { const r = blockAllJoins(env, effects); return { ok: true, message: `Blocked ${r.blocked} waiting request${r.blocked === 1 ? '' : 's'}.`, page: '' }; }
-      case 'revoke-box': revokeBox(env, effects, fields); return { ok: true, message: `Revoked ${fields.name}. Its houses lost their tokens.`, page: '' };
-      case 'may-host': setMayHost(env, effects, fields); return { ok: true, message: `Saved who ${fields.name} may host.`, page: '' };
-      case 'set-primary': { const r = setPrimary(env, effects, fields); return { ok: true, message: `${r.agent}'s primary is ${r.primary}.`, page: '' }; }
+      case 'revoke-box': { const r = revokeBox(env, effects, fields); return { ok: true, message: `Revoked ${r.name}. Its houses lost their tokens.`, page: '' }; }
+      case 'may-host': { const r = setMayHost(env, effects, fields); return { ok: true, message: `Saved who ${r.name} may host.`, page: '' }; }
+      case 'set-primary': { const r = setPrimary(env, effects, fields); return { ok: true, message: `${r.agent}'s primary is ${label(r.primary)}.`, page: '' }; }
       case 'set-agent': { const r = setAgent(env, effects, fields); return { ok: true, message: `Saved ${r.agent}'s house.`, page: 'agents' }; }
       case 'up': {
         const r = up(env, effects, OWNER, { agent: fields.agent, box: fields.box, needs: fields.needs, task: fields.task });
-        return { ok: true, message: `${r.id}: ${r.agent} on ${r.box}, waiting for the box to start it.`, page: '' };
+        return { ok: true, message: `${r.id}: ${r.agent} on ${label(r.box)}, waiting for the box to start it.`, page: '' };
       }
       case 'down': { const r = down(env, effects, OWNER, fields); return { ok: true, message: `${r.id} is ${r.state}.`, page: '' }; }
       case 'remote-up': {
@@ -336,7 +338,7 @@ export function act(env, effects, { action, fields: raw = {} }, publicUrl) {
         return { ok: true, message: `"${r.name}" is starting; its link shows here in a few seconds.`, page: 'agents' };
       }
       case 'remote-down': { const r = remoteDown(env, effects, fields); return { ok: true, message: `"${r.name}" is going down.`, page: 'agents' }; }
-      case 'service-up': { const r = serviceUp(env, effects, OWNER, fields); return { ok: true, message: `${r.service} is coming up on ${r.box}.`, page: '' }; }
+      case 'service-up': { const r = serviceUp(env, effects, OWNER, fields); return { ok: true, message: `${r.service} is coming up on ${label(r.box)}.`, page: '' }; }
       case 'service-down': { const r = serviceDown(env, effects, OWNER, fields); return { ok: true, message: `${r.service} is going down.`, page: '' }; }
       case 'service-restart': {
         const r = serviceRestart(env, effects, OWNER, fields);
@@ -344,7 +346,7 @@ export function act(env, effects, { action, fields: raw = {} }, publicUrl) {
       }
       case 'service-move': {
         const r = serviceMove(env, effects, OWNER, fields);
-        return { ok: true, message: r.moving ? `${r.service}: stopping on ${r.box}; it starts on ${r.moveTo} once that's confirmed.` : `${r.service} is on ${r.box}.`, page: '' };
+        return { ok: true, message: r.moving ? `${r.service}: stopping on ${label(r.box)}; it starts on ${label(r.moveTo)} once that's confirmed.` : `${r.service} is on ${label(r.box)}.`, page: '' };
       }
       default: return { ok: false, message: `No action ${action}.` };
     }
