@@ -6,14 +6,14 @@ loom's **runtime piece**: boxes and houses ([loom docs/specs/runtime.md](https:/
 - A **house** is one agent's container on a box, built fresh from the agent's repo for one task, then thrown away.
 - **It's not a scheduler.** A house goes to the box you name, or to the one permitted box that has what it needs, or to the agent's primary. If that doesn't come down to exactly one box, it says why and starts nothing.
 
-`loom box …` reaches it through loom's piece dispatch (put `src/cli.mjs` on PATH as `loom-box`). Node 22 or later, no dependencies.
+`loom box …` reaches it through loom's piece dispatch: `loom pieces install box` installs it (or, working on it, put this repo's `src/cli.mjs` on PATH as `loom-box`). Node 22 or later, no dependencies.
 
 ## Setting it up
 
 On loom's own machine, which is the control plane and the first box:
 
 ```bash
-ln -s ~/Code/loom-box/src/cli.mjs ~/.local/bin/loom-box
+loom pieces install box        # the box piece, from loom's catalog
 # How an agent's house is made: its repo (whose house file describes the container), which secrets it gets.
 loom box agent art --repo https://github.com/sleepunit-agents/art.git \
   --repo-secret github-art-e-fish-token --secret github-token=github-art-e-fish-token --secret claude-oauth=claude-oauth-token --nested
@@ -29,20 +29,20 @@ The Boxes page lists the boxes and what each one has, starts and stops houses, s
 ## Adding a box
 
 A second machine that runs houses for loom: a desktop, a laptop, a GPU box, a
-VM, an LXC. These steps assume a fresh Debian or Ubuntu machine, a user that
-isn't root, and loom already running somewhere this machine can reach.
+VM, an LXC. These steps assume a fresh Debian or Ubuntu machine (x86_64 or
+arm64), and loom already running somewhere this machine can reach. Commands
+marked **on loom** run on loom's own machine (or its page); everything else
+runs on the new box, logged in as the user that will run its houses.
 
-### 1. The machine
+### 0. A user, and if it's an LXC, the container
 
-```bash
-sudo apt install podman uidmap passt fuse-overlayfs git curl build-essential python3
-sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 "$USER"   # if `grep $USER /etc/subuid` is empty
-sudo loginctl enable-linger "$USER"     # so its houses keep running after you log out
-podman run --rm docker.io/library/debian:trixie true && echo podman ok
-```
+The houses run as an ordinary user, never root. Log in as that user over ssh
+or a real console: `systemctl --user` needs a login session, so `su` or
+`sudo -i` won't do. Make one if needed: `sudo adduser loom`, then log in as
+`loom`.
 
-**In an LXC** (Proxmox), the container needs `nesting=1,keyctl=1`, and
-rootless podman's network needs `/dev/net/tun`. On the Proxmox host:
+**In an LXC** (Proxmox), do this first, on the Proxmox host. The container
+needs `nesting=1,keyctl=1`, and rootless podman's network needs `/dev/net/tun`:
 
 ```bash
 pct set <id> --features nesting=1,keyctl=1
@@ -51,45 +51,78 @@ pct reboot <id>
 ```
 
 Without it, a house's image build fails with `Failed to open() /dev/net/tun`.
-An unprivileged LXC maps only 65536 uids, so give the user a range inside it
-(for example `user:20000:40000` in `/etc/subuid` and `/etc/subgid`).
+
+### 1. Podman, rootless
+
+```bash
+sudo apt update
+sudo apt install podman uidmap passt fuse-overlayfs git curl build-essential python3
+grep "^$USER:" /etc/subuid /etc/subgid       # adduser normally gave you a range in each
+```
+
+If either is missing, give this user a range nobody else has. Look at what's
+taken first (`cat /etc/subuid`) and pick the next free one. In an
+unprivileged LXC, only uids below 65536 exist inside, so use something like
+`20000-59999`:
+
+```bash
+sudo usermod --add-subuids 20000-59999 --add-subgids 20000-59999 "$USER" && podman system migrate
+```
+
+Then:
+
+```bash
+sudo loginctl enable-linger "$USER"     # its houses keep running after you log out
+podman run --rm docker.io/library/debian:trixie true && echo podman ok
+```
 
 ### 2. Node and the loom CLI
 
 ```bash
 mkdir -p ~/.local/share/node ~/.local/bin ~/Code
-curl -fsSL https://nodejs.org/dist/v24.18.1/node-v24.18.1-linux-x64.tar.xz | tar -xJ -C ~/.local/share/node --strip-components=1
+case "$(uname -m)" in x86_64) A=x64 ;; aarch64) A=arm64 ;; esac
+V=v24.18.1 N=node-$V-linux-$A.tar.xz
+curl -fsSLO https://nodejs.org/dist/$V/$N && curl -fsSL https://nodejs.org/dist/$V/SHASUMS256.txt | grep " $N\$" | sha256sum -c -
+tar -xJf $N -C ~/.local/share/node --strip-components=1 && rm $N
 echo 'export PATH=$HOME/.local/bin:$HOME/.local/share/node/bin:$PATH' >> ~/.profile && . ~/.profile
 git clone https://github.com/sleepunit-agents/loom.git ~/Code/loom
 cd ~/Code/loom && npm ci && npm run build && chmod +x dist/index.js && ln -sf ~/Code/loom/dist/index.js ~/.local/bin/loom
 loom --version
-loom pieces install box       # this piece; its service waits until the box has joined
+loom pieces install box       # downloads this piece; its service starts, and waits until the box has joined
 ```
 
 ### 3. Which URL
 
-The box and its houses talk to loom over HTTP, so pick a URL that this
-machine can open:
+The box and its houses talk to loom over HTTP. Ask whoever runs loom which
+address it listens on for boxes. That's where `loom serve --http --host
+<address>` runs, and loom's machine may run several listeners. Pick the one
+this machine can open, and that the network between them can be trusted with.
+House tokens and secrets travel over it:
 
-- **On the same LAN** as loom's machine: its LAN listener, like `http://192.168.6.30:8787`.
-- **On loom's tailnet:** its tailnet address, like `http://100.79.56.125:8787`.
-- **Anywhere else:** loom's public URL, if it has one.
+- **loom's tailnet address**, like `http://100.79.56.125:8787`: encrypted by the tailnet. Best when the box can join it.
+- **loom's public `https://` URL**, if it has one: encrypted by TLS.
+- **a LAN address**, like `http://192.168.6.30:8787`: plain HTTP. Only on a network you trust.
 
 Check it: `curl -s -o /dev/null -w '%{http_code}\n' -X POST <url>/api/box/list -H content-type:application/json -d '{}'`
 should print `401` (loom answering, without a token yet), not a timeout.
 
 ### 4. Enroll it
 
-On loom's page, open **Boxes**, then **Add a box**. Give it a name and the
-agents it may host. It shows the box's credential once. Or, on loom's machine:
-`loom box add <name> --may-host art,mark`.
+**On loom:** open **Boxes** on loom's page, then **Add a box**. Give it a name
+and the agents it may host. It shows the box's credential once. Or, on loom's
+machine: `loom box add <name> --may-host art,mark`.
+
+The credential is the box's whole identity. Copy it straight into the join
+prompt below. Don't paste it into chat, a note or a file, and if it leaks,
+revoke the box (Boxes page, or `loom box revoke <name>`) and add it again.
 
 On the new box:
 
 ```bash
 loom box join <url> --name <name>        # paste the credential when it asks
 systemctl --user restart loom-piece-box-run
-journalctl --user -u loom-piece-box-run -n 5    # "poll" lines, no errors
+systemctl --user is-enabled loom-piece-box-run      # enabled: it comes back after a reboot
+journalctl --user -u loom-piece-box-run -n 5        # no errors
 ```
 
 The Boxes page now lists the box with its facts (CPUs, memory, podman) and
@@ -97,7 +130,9 @@ when it was last seen.
 
 ### 5. Try it
 
-- **A house:** from the Boxes page, or `loom box up --agent <agent> --box <name> --task "…"`.
+**On loom** (its page, or loom's machine):
+
+- **A house:** the Boxes page, or `loom box up --agent <agent> --box <name> --task "…"`.
   The first one builds the agent's image from its repo, so give it 10 to 15
   minutes. Later ones reuse the image.
 - **Moving a bridge** (a long-lived service house), and back:
@@ -109,11 +144,14 @@ when it was last seen.
 
 | What you see | What it is |
 |---|---|
-| `Failed to open() /dev/net/tun` while a house builds | an LXC without `/dev/net/tun` (step 1) |
+| `Unable to locate package` | run `sudo apt update` first |
+| `Failed to connect to bus` from `systemctl --user` | not a login session: log in as the user over ssh, not `su` |
+| `Failed to open() /dev/net/tun` while a house builds | an LXC without `/dev/net/tun` (step 0) |
+| podman: `insufficient UIDs or GIDs` | no subuid range for this user, or one outside the LXC's 65536 (step 1) |
 | `E: Sub-process http returned an error code (112)` in a bare `podman run` | apt's sandbox in a rootless container. House images set `APT::Sandbox::User "root"` themselves, so it isn't the network |
 | `loom-box: this machine hasn't joined a loom yet` | the service started before `loom box join`; join, then restart it |
 | the box never shows as seen | the URL from step 3 isn't reachable from this machine |
-| `this box may not host <agent>` | Add it again, or edit it on the Boxes page, with that agent allowed |
+| `this box may not host <agent>` | on the Boxes page, open the box and set who it may host |
 
 ## Asking for a house
 
