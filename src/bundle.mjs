@@ -65,6 +65,8 @@ export function importPart(env, part, { force = false } = {}) {
     delete s.boxes[name];
     s.boxes[here] = { ...b, local: true };
     for (const [a, p] of Object.entries(s.primaries || {})) if (p === name) s.primaries[a] = here;
+    // A service placed on the old machine's own box is placed on this one's.
+    for (const svc of Object.values(s.services || {})) if (svc.box === name) svc.box = here;
   }
   // Nothing that was up (or waiting) on the old machines runs again by itself:
   // those houses are lost, and their tokens (restored with core's part) are
@@ -76,6 +78,16 @@ export function importPart(env, part, { force = false } = {}) {
     h.note = 'restored from a bundle; it was not over when the bundle was made';
     if (h.tokenLabel && !s.pendingRevokes.includes(h.tokenLabel)) s.pendingRevokes.push(h.tokenLabel);
   }
+  // And it comes up quiet: a bridge that was up on the old machine (which may still be
+  // up) would answer every message twice. Each waits, saying so, for the owner's
+  // `loom box service up <name>`; their saved states are kept for it. Box sessions too.
+  for (const svc of Object.values(s.services || {})) {
+    if (svc.want !== 'up') continue;
+    svc.want = 'down';
+    delete svc.moveTo;
+    svc.note = 'restored from a bundle: it was up; `loom box service up` brings it back here';
+  }
+  for (const r of Object.values(s.remotes || {})) if (r.want === 'up') { r.want = 'down'; r.note = 'restored from a bundle: it was up'; }
   // The services' saved states first: state.json names their files.
   const files = doc.blobs && typeof doc.blobs === 'object' ? doc.blobs : {};
   for (const v of Object.values(s.serviceState ?? {})) {
