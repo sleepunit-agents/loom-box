@@ -7,7 +7,7 @@
 //  - with nothing enrolled, every agent's primary is loom's own machine.
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, statSync } from 'node:fs';
+import { mkdtempSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MAX_CLAIM_TRIES, api, meets } from '../src/control.mjs';
@@ -320,4 +320,24 @@ test('a part bigger than a pipe\'s default buffer exports (the saved states made
   importPart(there, part);
   const back = ok(api(there, fx, { caller: owner, path: 'saved-state', body: { agent: 'art', name: 'discord', part: 0 } }));
   assert.equal(back.bytes, state.length);
+});
+
+test('a restore comes up quiet: every service that was up is down, saying so, and nothing starts until the owner brings it up', { skip: !process.env.PATH.split(':').some((d) => { try { return statSync(join(d, 'age')).isFile(); } catch { return false; } }) && 'no age' }, async () => {
+  const { exportPart, importPart } = await import('../src/bundle.mjs');
+  const { spawnSync } = await import('node:child_process');
+  const key = join(env.HOME, 'owner.key');
+  spawnSync('age-keygen', ['-o', key]);
+  const recipient = spawnSync('age-keygen', ['-y', key], { encoding: 'utf-8' }).stdout.trim();
+  ok(call(art, 'service-up', { name: 'discord' }));
+  const part = exportPart({ ...env, LOOM_EXPORT_RECIPIENTS: recipient, PATH: process.env.PATH });
+  // Another machine: the bridge must not answer from both (the old one may still be up).
+  const there = { HOME: env.HOME, LOOM_BOX_HOME: join(env.HOME, 'quiet'), LOOM_BOX_LOCAL_NAME: 'two', PATH: process.env.PATH, LOOM_IMPORT_IDENTITY: key };
+  importPart(there, part);
+  const l = ok(api(there, fx, { caller: owner, path: 'list', body: {} }));
+  assert.equal(l.services[0].want, 'down');
+  assert.deepEqual(ok(api(there, fx, { caller: { kind: 'piece', subject: 'two' }, path: 'poll', body: {} })).start, []);
+  const raw = JSON.parse(readFileSync(join(env.HOME, 'quiet', 'state.json'), 'utf-8'));
+  assert.match(raw.services['art/discord'].note, /restored/);
+  ok(api(there, fx, { caller: owner, path: 'service-up', body: { agent: 'art', name: 'discord' } }));
+  assert.equal(ok(api(there, fx, { caller: { kind: 'piece', subject: 'two' }, path: 'poll', body: {} })).start.length, 1);
 });
