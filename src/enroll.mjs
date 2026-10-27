@@ -58,9 +58,16 @@ const stranger = (caller) => {
 
 /** The network an address is in, for the per-network limit: a /24 for IPv4, a /64 for IPv6. */
 export function netOf(address) {
-  if (/^\d+\.\d+\.\d+\.\d+$/.test(address)) return address.split('.').slice(0, 3).join('.') + '.0/24';
-  const parts = address.split(':');
-  return parts.slice(0, 4).join(':') + '::/64';
+  const a = String(address).toLowerCase().replace(/^\[|\]$/g, '').replace(/%.*$/, '').replace(/^::ffff:(?=\d+\.)/, '');
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(a)) return a.split('.').slice(0, 3).join('.') + '.0/24';
+  // The whole address first: '::' stands for however many zero groups, so the first four
+  // groups of the compressed form aren't the /64's.
+  let [head, tail] = a.includes('::') ? a.split('::') : [a, undefined];
+  const h = head ? head.split(':') : [];
+  const t = tail === undefined ? [] : (tail ? tail.split(':') : []);
+  const groups = tail === undefined ? h : [...h, ...Array(Math.max(0, 8 - h.length - t.length)).fill('0'), ...t];
+  if (groups.length !== 8 || !groups.every((g) => /^[0-9a-f]{1,4}$/.test(g))) return `other:${a}`;
+  return groups.slice(0, 4).map((g) => parseInt(g, 16).toString(16)).join(':') + '::/64';
 }
 
 /** The name a box gets: the one it asked for, or the next free one (only boxes hold names). */
