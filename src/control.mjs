@@ -35,6 +35,7 @@ const credLabelOf = (s, id) => s.boxes[id]?.credLabel ?? boxCredLabel(id);
  * it's something that looks like 4 hex colors put together"). Its name is only what it's
  * called: any name, even one another box has. A box from before ids keeps its name as its id.
  */
+export const BOX_ID = /^[0-9a-f]{6}(-[0-9a-f]{6}){3}$/;
 export function newBoxId() {
   return Array.from({ length: 4 }, () => randomBytes(3).toString('hex')).join('-');
 }
@@ -55,8 +56,9 @@ export function boxLabelOf(s, id) {
  */
 export function resolveBox(s, ref) {
   if (typeof ref !== 'string' || !ref) fail('which box: its name or its id');
-  // A box from before ids is keyed by its name, so a key and a new box's name can be the same word.
-  const named = Object.entries(s.boxes).filter(([id, b]) => !b.revoked && (id === ref || b.name === ref)).map(([id]) => id);
+  // An id (or a box from before ids, keyed by its name) is exact and wins: no name can make it ambiguous.
+  if (s.boxes[ref] && !s.boxes[ref].revoked) return ref;
+  const named = Object.entries(s.boxes).filter(([, b]) => !b.revoked && b.name === ref).map(([id]) => id);
   if (named.length === 1) return named[0];
   if (named.length > 1) fail(`${named.length} boxes are named ${ref}: say which by id (${named.join(', ')})`, 409);
   fail(`no box named ${ref}`, 404);
@@ -161,6 +163,7 @@ function houseView(h) {
 export function addBox(env, effects, { name, mayHost: mh, labels }) {
   const n = str(name, 'a box name', 64).toLowerCase();
   if (!BOX_NAME.test(n)) fail('a box name is lowercase letters, digits, dots, dashes and underscores');
+  if (BOX_ID.test(n)) fail('that looks like a box id; a name is what you call it');
   const may = mayHostValue(mh);
   // Everything checked before the credential is minted: a box that isn't added never leaves one live.
   const ls = listOf(labels, 'labels', FACT);
