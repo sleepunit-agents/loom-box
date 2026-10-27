@@ -6,6 +6,7 @@ import { appendFileSync, existsSync, readFileSync, statfsSync } from 'node:fs';
 import { uptime } from 'node:os';
 import { join } from 'node:path';
 import { StateError, load, localBoxName, stateDir } from './state.mjs';
+import { sessionsBusy } from './busy.mjs';
 import { allowJoin, blockAllJoins, blockJoin, pendingJoins } from './enroll.mjs';
 import { addBox, boxLabelOf, factsOf, list, primaryOf, remoteDown, remoteUp, revokeBox, serviceDown, serviceMove, serviceRestart, serviceUp, setAgent, setMayHost, setPrimary, up, down, LIVE } from './control.mjs';
 
@@ -91,7 +92,7 @@ export function manifest(env) {
         { action: 'block-join', label: 'Block', tone: 'danger', fields: { id: j.id } },
       ],
     })),
-    agents: agentReports(s),
+    agents: agentReports(s, Date.now(), sessionsBusy(join(stateDir(env), 'session-cpu.json'))),
   };
 }
 
@@ -121,7 +122,7 @@ export function taskLine(task) {
  * task house runs; unavailable while a service it wants up is down; broken when one keeps failing. Readings: its
  * bridges, its remote sessions, and how many tasks are running. It says nothing about an agent with nothing here.
  */
-export function agentReports(s, nowMs = Date.now()) {
+export function agentReports(s, nowMs = Date.now(), busy = {}) {
   const out = {};
   const services = Object.values(s.services ?? {});
   const agents = new Set([...Object.keys(s.agents ?? {}), ...services.map((v) => v.agent), ...Object.keys(s.remotes ?? {})]);
@@ -141,16 +142,28 @@ export function agentReports(s, nowMs = Date.now()) {
       const bad = bridges.some((v) => !up(v) && late(v));
       readings.push({ label: 'Bridges', value: bridges.map((v) => `${v.name} ${up(v) ? '✓' : '✗'}`).join('  '), tone: bad ? 'bad' : 'ok' });
     }
+    // Each remote session, and whether it's mid-turn (busy.mjs: only sessions on this machine are seen).
     const remote = [];
+    const working = [];
+    const word = (k) => (busy[k] === true ? ' · working' : busy[k] === false ? ' · idle' : '');
     const r = s.remotes?.[a];
-    if (r && r.want === 'up') remote.push(`box session on ${boxLabelOf(s, r.box)}${r.state === 'running' ? '' : ` (${r.error ? 'error' : r.state})`}`);
+    if (r && r.want === 'up') {
+      const k = `box:${r.name}`;
+      remote.push(`box session on ${boxLabelOf(s, r.box)}${r.state === 'running' ? word(k) : ` (${r.error ? 'error' : r.state})`}`);
+      if (busy[k]) working.push(`box session on ${boxLabelOf(s, r.box)}`);
+    }
     const rs = mine.find((v) => v.name === 'remote');
-    if (rs) remote.push(`house session${up(rs) ? '' : ' (down)'}`);
+    if (rs) {
+      const k = `house:${rs.house}`;
+      remote.push(`house session${up(rs) ? word(k) : ' (down)'}`);
+      if (busy[k] && up(rs)) working.push(`house session (${rs.house})`);
+    }
     if (remote.length) readings.push({ label: 'Remote', value: remote.join(' · '), tone: (r && r.want === 'up' && r.error) ? 'warn' : undefined });
     if (tasks.length) readings.push({ label: 'Tasks', value: `${tasks.length} running`, detail: tasks.map((h) => `${h.id} on ${boxLabelOf(s, h.box)}`).slice(0, 3).join(', ') });
     const report = { readings: readings.map((x) => Object.fromEntries(Object.entries(x).filter(([, v]) => v !== undefined))).slice(0, 4) };
     if (failing.length) Object.assign(report, { state: 'broken', reason: `${failing.map((v) => v.name).join(' and ')} keep${failing.length === 1 ? 's' : ''} failing (${failing[0].restarts} restarts)` });
     else if (down.length) Object.assign(report, { state: 'unavailable', reason: `${down.map((v) => v.name).join(' and ')} ${down.length === 1 ? 'is' : 'are'} down` });
+    else if (!tasks.length && working.length) Object.assign(report, { state: 'working', reason: `in a remote session: ${working.join(', ')}` });
     else if (tasks.length) {
       const h = tasks[0];
       Object.assign(report, { state: 'working', reason: `${taskLine(h.task)} · ${h.id} on ${boxLabelOf(s, h.box)}${h.started ? ` · ${shortAge(h.started, nowMs)}` : ` · ${h.state}`}` });
