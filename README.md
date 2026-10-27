@@ -30,7 +30,8 @@ The Boxes page lists the boxes and what each one has, starts and stops houses, s
 
 A second machine that runs houses for loom: a desktop, a laptop, a GPU box, a
 VM, an LXC. These steps assume a fresh Debian or Ubuntu machine (x86_64 or
-arm64), and loom already running somewhere this machine can reach. Commands
+arm64), and loom already running somewhere this machine can reach. On
+Windows, the machine is a Linux in WSL2: first [On Windows: WSL2](#on-windows-wsl2). Commands
 marked **on loom** run on loom's own machine (or its page); everything else
 runs on the new box, logged in as the user that will run its houses.
 
@@ -139,6 +140,60 @@ when it was last seen.
   `loom box service move <service> <name> --agent <agent>`. It hands off:
   the bridge stops on the old box, its state moves to the new one, and it
   starts there. Expect a short gap without the bridge.
+
+### On Windows: WSL2
+
+loom-box runs on Linux: rootless podman, systemd user services, Unix
+sockets and file modes. On Windows, the box is a Linux in WSL2, and steps 1
+to 5 run inside it unchanged. These are the Windows-side steps. They haven't
+been tried on a loom box yet, so note what differs and fix this section.
+
+**1. The distro.** In PowerShell, as admin:
+
+```powershell
+wsl --install -d Debian          # reboot if it asks; then open "Debian" and make your user
+```
+
+**2. systemd** (loom-box's service is a systemd user unit). Inside Debian:
+
+```bash
+printf '[boot]\nsystemd=true\n[user]\ndefault=%s\n' "$USER" | sudo tee /etc/wsl.conf
+```
+
+Then in PowerShell, `wsl --shutdown`, and open Debian again.
+`systemctl --user status` should answer now.
+
+**3. The network.** Windows 11 can give WSL the same network as Windows, so
+it reaches your LAN and, if Windows runs Tailscale, the tailnet. In
+`%UserProfile%\.wslconfig` (create it if needed):
+
+```ini
+[wsl2]
+networkingMode=mirrored
+```
+
+`wsl --shutdown` again. If step 3 of the guide (the `curl` check) still times
+out, install Tailscale inside Debian too, and use loom's tailnet address.
+
+**4. Keep it running.** Windows stops WSL when nothing is using it, and the
+box's houses stop with it. Keep it up from Task Scheduler: a task that runs
+at log on (and is allowed to keep running), with action `wsl.exe` and
+arguments `-d Debian --exec sleep infinity`. The box then runs whenever
+you're logged in. If it has to run while nobody is, that needs more (a
+Windows service around WSL), and that isn't worked out yet.
+
+**5. Disks.** Keep everything in Debian's own filesystem (`~`), never under
+`/mnt/c`. Windows drives don't keep Unix permissions, which the box's
+credential and its houses' secrets rely on, and they're slow for this.
+
+**A GPU** (an NVIDIA card in Windows). Install only the Windows NVIDIA
+driver: WSL gets the GPU through it, and `nvidia-smi` works in Debian.
+Never install a Linux NVIDIA driver inside WSL. The box reports the card
+(`gpu:nvidia-…` among its facts), so a house that needs a GPU goes to it.
+Getting the GPU into the house's container takes the NVIDIA Container Toolkit
+in Debian (`sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml`).
+loom-box doesn't pass the GPU into a house yet, so for now GPU houses work
+only in the house you build by hand.
 
 ### When it doesn't work
 
