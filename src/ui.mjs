@@ -91,7 +91,73 @@ export function manifest(env) {
         { action: 'block-join', label: 'Block', tone: 'danger', fields: { id: j.id } },
       ],
     })),
+    agents: agentReports(s),
   };
+}
+
+/** The chat bridges among an agent's services (shuttle's adapters): what "Bridges" on its card means. */
+const BRIDGE = /^(discord|slack|teams|telegram|matrix|signal|irc|email)$/;
+/** A service that hasn't come back in this long is down, not starting. */
+const STARTING_GRACE_MS = 5 * 60_000;
+/** This many restarts without staying up is broken, not just down. */
+const BROKEN_RESTARTS = 3;
+
+const shortAge = (iso, nowMs) => {
+  const m = Math.max(0, Math.round((nowMs - Date.parse(iso)) / 60_000));
+  return Number.isNaN(m) ? '' : m < 60 ? `${m}m` : m < 2880 ? `${Math.round(m / 60)}h` : `${Math.round(m / 1440)}d`;
+};
+
+/** What a task house is doing, in a line: a wake's note (the clock puts it in the prompt), else the task's start. */
+export function taskLine(task) {
+  let t = String(task ?? '');
+  try { const j = JSON.parse(t); if (j && typeof j.prompt === 'string') t = j.prompt; } catch { /* plain text */ }
+  const note = /\(wake id (w-[0-9a-f]+)[^)]*?note: ([^\n]*?)\)\.\s/.exec(t);
+  if (note) return `${note[1]}: ${note[2]}`.slice(0, 120);
+  return t.replace(/\s+/g, ' ').trim().slice(0, 120) || 'a task';
+}
+
+/**
+ * Each agent as the box runtime sees it, for its card on loom's Home (docs/extensions.md, "agents"): working while a
+ * task house runs; unavailable while a service it wants up is down; broken when one keeps failing. Readings: its
+ * bridges, its remote sessions, and how many tasks are running. It says nothing about an agent with nothing here.
+ */
+export function agentReports(s, nowMs = Date.now()) {
+  const out = {};
+  const services = Object.values(s.services ?? {});
+  const agents = new Set([...Object.keys(s.agents ?? {}), ...services.map((v) => v.agent), ...Object.keys(s.remotes ?? {})]);
+  for (const a of agents) {
+    if (!/^[a-z][a-z0-9-]{0,39}$/.test(a)) continue;
+    const mine = services.filter((v) => v.agent === a && v.want === 'up');
+    const up = (v) => s.houses[v.house]?.state === 'running';
+    const late = (v) => { const h = s.houses[v.house]; return !h || !LIVE.has(h.state) || (h.state !== 'running' && nowMs - Date.parse(h.updated ?? h.created) > STARTING_GRACE_MS); };
+    const down = mine.filter((v) => !up(v) && late(v));
+    const failing = down.filter((v) => (v.restarts ?? 0) >= BROKEN_RESTARTS);
+    const tasks = Object.values(s.houses).filter((h) => h.agent === a && !h.service && (h.state === 'running' || h.state === 'starting'))
+      // Running first (it's what the agent is doing), then the newest.
+      .sort((x, y) => (y.state === 'running') - (x.state === 'running') || Date.parse(y.created) - Date.parse(x.created));
+    const readings = [];
+    const bridges = mine.filter((v) => BRIDGE.test(v.name));
+    if (bridges.length) {
+      const bad = bridges.some((v) => !up(v) && late(v));
+      readings.push({ label: 'Bridges', value: bridges.map((v) => `${v.name} ${up(v) ? '✓' : '✗'}`).join('  '), tone: bad ? 'bad' : 'ok' });
+    }
+    const remote = [];
+    const r = s.remotes?.[a];
+    if (r && r.want === 'up') remote.push(`box session on ${boxLabelOf(s, r.box)}${r.state === 'running' ? '' : ` (${r.error ? 'error' : r.state})`}`);
+    const rs = mine.find((v) => v.name === 'remote');
+    if (rs) remote.push(`house session${up(rs) ? '' : ' (down)'}`);
+    if (remote.length) readings.push({ label: 'Remote', value: remote.join(' · '), tone: (r && r.want === 'up' && r.error) ? 'warn' : undefined });
+    if (tasks.length) readings.push({ label: 'Tasks', value: `${tasks.length} running`, detail: tasks.map((h) => `${h.id} on ${boxLabelOf(s, h.box)}`).slice(0, 3).join(', ') });
+    const report = { readings: readings.map((x) => Object.fromEntries(Object.entries(x).filter(([, v]) => v !== undefined))).slice(0, 4) };
+    if (failing.length) Object.assign(report, { state: 'broken', reason: `${failing.map((v) => v.name).join(' and ')} keep${failing.length === 1 ? 's' : ''} failing (${failing[0].restarts} restarts)` });
+    else if (down.length) Object.assign(report, { state: 'unavailable', reason: `${down.map((v) => v.name).join(' and ')} ${down.length === 1 ? 'is' : 'are'} down` });
+    else if (tasks.length) {
+      const h = tasks[0];
+      Object.assign(report, { state: 'working', reason: `${taskLine(h.task)} · ${h.id} on ${boxLabelOf(s, h.box)}${h.started ? ` · ${shortAge(h.started, nowMs)}` : ` · ${h.state}`}` });
+    }
+    if (report.state || report.readings.length) out[a] = report;
+  }
+  return out;
 }
 
 /** "12 days", "5 hours", "40 minutes": how long, for a box's uptime. */
