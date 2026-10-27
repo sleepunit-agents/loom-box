@@ -15,7 +15,7 @@
 // expire, so a stranger can't fill the page.
 import { createHash, randomBytes } from 'node:crypto';
 import { BOX_NAME, StateError, update } from './state.mjs';
-import { addBox } from './control.mjs';
+import { BOX_ID, addBox } from './control.mjs';
 
 const TTL_MS = 15 * 60_000;
 const MAX_PENDING = 20;         // in all: generous, so a few addresses can't fill it
@@ -74,6 +74,7 @@ export function joinRequest(env, effects, caller, b) {
   const address = stranger(caller);
   const name = String(b.name ?? '').toLowerCase();
   if (!BOX_NAME.test(name)) fail('a box name is lowercase letters, digits, dots, dashes and underscores');
+  if (BOX_ID.test(name)) fail('that looks like a box id; a name is what you call it');
   if (!HASH.test(b.proof_hash ?? '')) fail('proof_hash is the sha256 of a secret the box keeps');
   const facts = Array.isArray(b.facts) ? b.facts.filter((f) => typeof f === 'string' && FACT.test(f)).slice(0, 32) : [];
   const labels = Array.isArray(b.labels) ? b.labels.filter((f) => typeof f === 'string' && FACT.test(f)).slice(0, 16) : [];

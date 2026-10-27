@@ -69,10 +69,12 @@ test('a name is only what a box is called: two may share it, and then the id say
   ok(call(owner, 'revoke-box', { name: a.box }));
   assert.equal(ok(call(owner, 'up', { agent: 'art', box: 'thor', task: 'y' })).box, b.box, 'one live thor: the name is enough again');
   assert.equal(call(owner, 'revoke-box', { name: a.box }).status, 404, 'a revoked box is gone');
-  // loom's own machine is keyed by its name from before ids: a new box may be called that too.
+  // An id is exact: a box may be called what loom's own machine is keyed by, and that still means loom's own...
   const one = ok(call(owner, 'add-box', { name: 'one' })).box;
-  assert.equal(call(owner, 'up', { agent: 'art', box: 'one', task: 'z' }).status, 409);
+  assert.equal(ok(call(owner, 'up', { agent: 'art', box: 'one', task: 'z' })).box, 'one');
   assert.equal(ok(call(owner, 'up', { agent: 'art', box: one, task: 'z' })).box, one);
+  // ...and no name may look like an id.
+  assert.equal(call(owner, 'add-box', { name: b.box }).status, 400);
 });
 
 test('a box refuses a house for an agent it may not host', () => {
