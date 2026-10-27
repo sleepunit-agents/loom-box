@@ -254,9 +254,14 @@ export function restoreState(dir, packed) {
   }
 }
 
-function packState(dir) {
-  // ustar: plain headers only, the kind restoreState accepts.
-  const r = spawnSync('tar', ['--format=ustar', '-C', dir, '-czf', '-', '.'], { maxBuffer: 64 * 1024 * 1024, timeout: 60_000 });
+export function packState(dir) {
+  // ustar, and only plain files and directories: what restoreState accepts. A
+  // link a tool leaves in the mount (mise's tracked-configs) is left out, not
+  // saved into a state the next house would refuse.
+  const names = spawnSync('find', ['.', '(', '-type', 'f', '-o', '-type', 'd', ')', '-print0'], { cwd: dir, maxBuffer: 64 * 1024 * 1024, timeout: 60_000 });
+  if (names.status !== 0) return null;
+  const r = spawnSync('tar', ['--format=ustar', '-C', dir, '--null', '--no-recursion', '-T', '-', '-czf', '-'],
+    { input: names.stdout, maxBuffer: 64 * 1024 * 1024, timeout: 60_000 });
   if (r.status !== 0) return null;
   return r.stdout;
 }

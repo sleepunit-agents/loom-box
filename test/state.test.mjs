@@ -7,7 +7,7 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { gzipSync, gunzipSync } from 'node:zlib';
-import { restoreState } from '../src/box.mjs';
+import { packState, restoreState } from '../src/box.mjs';
 
 function packed(fill) {
   const src = mkdtempSync(join(tmpdir(), 'st-src-'));
@@ -38,6 +38,20 @@ test('a plain state comes back, files 0600', () => {
   restoreState(out, packed((d) => { mkdirSync(join(d, 'sub')); writeFileSync(join(d, 'sub', 'f'), 'hi'); writeFileSync(join(d, 'state.json'), '{}'); }).toString('base64'));
   assert.equal(readFileSync(join(out, 'sub', 'f'), 'utf-8'), 'hi');
   assert.equal(statSync(join(out, 'state.json')).mode & 0o777, 0o600);
+});
+
+test('a state saved with a link in it (mise\'s tracked-configs) packs to one the next house can restore: the link left out', () => {
+  // Mark's lanes slot, 2026-10-27: mise in the house wrote ~/.local/state/mise/tracked-configs/<id> -> config.toml
+  // into the mount, and the save that followed couldn't be restored, which would fail every later house.
+  const src = mkdtempSync(join(tmpdir(), 'st-src-'));
+  mkdirSync(join(src, 'mise', 'tracked-configs'), { recursive: true });
+  symlinkSync('/home/mark/.config/mise/config.toml', join(src, 'mise', 'tracked-configs', 'e2c327c0d4b77be9'));
+  mkdirSync(join(src, 'lanes', 'planning'), { recursive: true });
+  writeFileSync(join(src, 'lanes', 'planning', '2026-10-26.retro.claimed'), 'queued');
+  const out = fresh();
+  restoreState(out, packState(src).toString('base64'));
+  assert.equal(readFileSync(join(out, 'lanes', 'planning', '2026-10-26.retro.claimed'), 'utf-8'), 'queued');
+  assert.deepEqual(readdirSync(join(out, 'mise', 'tracked-configs')), []);
 });
 
 test('links, bad checksums, odd sizes, .. names and trailing data are refused before anything is written', () => {
