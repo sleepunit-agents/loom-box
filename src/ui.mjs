@@ -2,10 +2,10 @@
 // boxes, what each has and may host, the houses asked for, and the owner's
 // controls. Data only; loom renders it. Every action is the owner's (the page
 // is), and a box's credential is shown once, in the message after adding it.
-import { existsSync, readFileSync, statfsSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, statfsSync } from 'node:fs';
 import { uptime } from 'node:os';
 import { join } from 'node:path';
-import { StateError, load, localBoxName } from './state.mjs';
+import { StateError, load, localBoxName, stateDir } from './state.mjs';
 import { addBox, factsOf, list, primaryOf, remoteDown, remoteUp, revokeBox, serviceDown, serviceMove, serviceRestart, serviceUp, setAgent, setMayHost, setPrimary, up, down, LIVE } from './control.mjs';
 
 const OWNER = { kind: 'owner' };
@@ -277,6 +277,15 @@ export function page(env, { path }, nowMs = Date.now()) {
   return { title: 'Not found', sections: [] };
 }
 
+/** An unexpected failure, kept beside the runtime's state (errors.log): its trace, never a value. */
+function logError(env, action, err) {
+  const p = join(stateDir(env), 'errors.log');
+  try {
+    appendFileSync(p, `${new Date().toISOString()} ${action}: ${err.stack || err}\n`, { mode: 0o600 });
+  } catch { return 'loom-box\'s stderr'; }
+  return p;
+}
+
 /** The page's actions. The page is the owner's, so each runs as the owner. */
 export function act(env, effects, { action, fields: raw = {} }, publicUrl) {
   // The page's field names are lowercase (loom's vocabulary); the runtime's are camelCase.
@@ -319,8 +328,10 @@ export function act(env, effects, { action, fields: raw = {} }, publicUrl) {
     }
   } catch (err) {
     if (err instanceof StateError) return { ok: false, message: err.message };
+    // loom doesn't keep a piece's stderr from the page, so the trace goes where it can be found.
+    const where = logError(env, action, err);
     process.stderr.write(`loom-box: ${err.stack || err}\n`);
-    return { ok: false, message: 'The runtime failed; see the daemon log.' };
+    return { ok: false, message: `The runtime failed (${String(err.message || err).slice(0, 160)}). The full error is in ${where}.` };
   }
 }
 
