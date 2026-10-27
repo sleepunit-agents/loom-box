@@ -300,3 +300,24 @@ test('a house that can\'t be claimed fails after a few tries, saying why, instea
   assert.equal(after.state, 'failed');
   assert.match(after.log, /couldn't claim it 5 times: .*secrets store is down/);
 });
+
+test('a part bigger than a pipe\'s default buffer exports (the saved states made it 1 MB+: ENOBUFS, and the bundle had no runtime part)', { skip: !process.env.PATH.split(':').some((d) => { try { return statSync(join(d, 'age')).isFile(); } catch { return false; } }) && 'no age' }, async () => {
+  const { exportPart, importPart } = await import('../src/bundle.mjs');
+  const { PART_RAW, partsOf } = await import('../src/blobs.mjs');
+  const { spawnSync } = await import('node:child_process');
+  const { randomBytes } = await import('node:crypto');
+  const key = join(env.HOME, 'owner.key');
+  spawnSync('age-keygen', ['-o', key]);
+  const recipient = spawnSync('age-keygen', ['-y', key], { encoding: 'utf-8' }).stdout.trim();
+  const state = randomBytes(3 * 1024 * 1024);
+  const parts = partsOf(state.length);
+  for (let part = 0; part < parts; part++) {
+    ok(call(owner, 'seed-state', { agent: 'art', name: 'discord', part, parts, state: state.subarray(part * PART_RAW, (part + 1) * PART_RAW).toString('base64') }));
+  }
+  const part = exportPart({ ...env, LOOM_EXPORT_RECIPIENTS: recipient, PATH: process.env.PATH });
+  assert.ok(part.length > 4 * 1024 * 1024);
+  const there = { HOME: env.HOME, LOOM_BOX_HOME: join(env.HOME, 'big'), LOOM_BOX_LOCAL_NAME: 'two', PATH: process.env.PATH, LOOM_IMPORT_IDENTITY: key };
+  importPart(there, part);
+  const back = ok(api(there, fx, { caller: owner, path: 'saved-state', body: { agent: 'art', name: 'discord', part: 0 } }));
+  assert.equal(back.bytes, state.length);
+});
