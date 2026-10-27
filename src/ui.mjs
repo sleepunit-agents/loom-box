@@ -6,6 +6,7 @@ import { appendFileSync, existsSync, readFileSync, statfsSync } from 'node:fs';
 import { uptime } from 'node:os';
 import { join } from 'node:path';
 import { StateError, load, localBoxName, stateDir } from './state.mjs';
+import { allowJoin, blockJoin, pendingJoins } from './enroll.mjs';
 import { addBox, factsOf, list, primaryOf, remoteDown, remoteUp, revokeBox, serviceDown, serviceMove, serviceRestart, serviceUp, setAgent, setMayHost, setPrimary, up, down, LIVE } from './control.mjs';
 
 const OWNER = { kind: 'owner' };
@@ -80,7 +81,16 @@ export function manifest(env) {
       detail: live.length ? `${live.length} house${live.length === 1 ? '' : 's'} up or waiting` : 'no houses up',
       page: '',
     },
-    asks: [],
+    // A box asking to join is the owner's call: the code is the one on the box's own terminal.
+    asks: pendingJoins(s).slice(0, 5).map((j) => ({
+      text: `A box asks to join: ${j.name}`,
+      meta: `from ${j.address}, code ${j.code}${j.facts.length ? ` · ${j.facts.filter((f) => !f.startsWith('runtime:')).slice(0, 4).join(', ')}` : ''}`,
+      tone: 'warn', at: j.at, page: '',
+      actions: [
+        { action: 'allow-join', label: 'Let it in', tone: 'primary', fields: { id: j.id }, confirm: `Let ${j.name} in only if its terminal shows code ${j.code}.` },
+        { action: 'block-join', label: 'Block', tone: 'danger', fields: { id: j.id } },
+      ],
+    })),
   };
 }
 
@@ -298,8 +308,10 @@ export function act(env, effects, { action, fields: raw = {} }, publicUrl) {
       case 'add-box': {
         const { box, token } = addBox(env, effects, fields);
         const url = publicUrl || '<this loom\'s URL>';
-        return { ok: true, message: `Added ${box}. On ${box}, run \`loom box join ${url} --name ${box}\` and paste this credential when it asks (shown this once): ${token}`, page: '' };
+        return { ok: true, keep: true, message: `Added ${box}. On ${box}, run \`loom box join ${url} --name ${box} --credential\` and paste this credential when it asks (shown this once): ${token}`, page: '' };
       }
+      case 'allow-join': { const r = allowJoin(env, effects, fields); return { ok: true, message: `Let ${r.box} in (code ${r.code}). It picks up its credential by itself within a few seconds.`, page: '' }; }
+      case 'block-join': { const r = blockJoin(env, effects, fields); return { ok: true, message: `Blocked ${r.name}'s request.`, page: '' }; }
       case 'revoke-box': revokeBox(env, effects, fields); return { ok: true, message: `Revoked ${fields.name}. Its houses lost their tokens.`, page: '' };
       case 'may-host': setMayHost(env, effects, fields); return { ok: true, message: `Saved who ${fields.name} may host.`, page: '' };
       case 'set-primary': { const r = setPrimary(env, effects, fields); return { ok: true, message: `${r.agent}'s primary is ${r.primary}.`, page: '' }; }

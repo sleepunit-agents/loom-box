@@ -40,6 +40,10 @@
         ],
         "keepChildren": true
       }
+    ],
+    "strangers": [
+      "join-request",
+      "join-poll"
     ]
   }
 }

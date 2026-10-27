@@ -33,7 +33,8 @@
 //   loom box service seed <name> --from <dir>             its starting state (a bridge moving in)
 //   loom box service state <name> --to <dir>              its saved state, unpacked (a bridge moving out)
 // On a box:
-//   loom box join <loom-url> --name <name> [--labels x,y]  the credential on stdin, or prompted
+//   loom box join <loom-url> --name <name> [--labels x,y]  asks loom; the owner lets it in on the page
+//                                       [--credential]     or: a credential from Add a box, on stdin or prompted
 //   loom box run                                           poll and run houses (a user service)
 // For loom (the piece contract):
 //   loom box ui --json | ui page --json | ui act --json | api --json
@@ -45,7 +46,7 @@ import { createInterface } from 'node:readline';
 import { addBox, api, down, list, remoteDown, remoteUp, revokeBox, setAgent, setPrimary, up } from './control.mjs';
 import { realEffects } from './effects.mjs';
 import { act, manifest, page } from './ui.mjs';
-import { BoxError, joinLoom, loadConfig, packState, POLL_MS, remoteClient, restoreState, runner, runMode } from './box.mjs';
+import { askToJoin, BoxError, joinLoom, loadConfig, packState, POLL_MS, remoteClient, restoreState, runner, runMode } from './box.mjs';
 import { localBoxName, renameLocal, stateDir } from './state.mjs';
 import { exportPart, importPart } from './bundle.mjs';
 import { PART_RAW, joinParts, partsOf } from './blobs.mjs';
@@ -217,9 +218,12 @@ async function main(argv, env) {
     }
     case 'join': {
       const [url] = positional(rest);
-      const credential = await prompt('Box credential (from the Boxes page): ');
       const labels = (flag(rest, '--labels') || '').split(',').filter(Boolean);
-      const hi = await joinLoom(env, { url, name: flag(rest, '--name'), labels, credential });
+      // At a terminal with no credential: ask loom, and the owner lets it in on the page.
+      // --credential (or one piped in) is the old way: one the owner copied from Add a box.
+      const hi = !rest.includes('--credential') && process.stdin.isTTY
+        ? await askToJoin(env, { url, name: flag(rest, '--name'), labels })
+        : await joinLoom(env, { url, name: flag(rest, '--name'), labels, credential: await prompt('Box credential (from the Boxes page): ') });
       process.stdout.write(`Joined as ${hi.box}. Run \`loom box run\` (or its user service) to start taking houses.\n`);
       return;
     }

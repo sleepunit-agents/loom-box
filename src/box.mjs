@@ -15,6 +15,7 @@ import { gunzipSync } from 'node:zlib';
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { arch, cpus, homedir, platform, totalmem } from 'node:os';
 import { join as pathJoin } from 'node:path';
+import { newProof } from './enroll.mjs';
 import { BOX_NAME, stateDir } from './state.mjs';
 import { containerName, missingSecrets, parseHouseFile, podmanSecret, runArgs, specFor } from './house.mjs';
 import { PART_RAW, joinParts, partsOf } from './blobs.mjs';
@@ -108,6 +109,36 @@ export function remoteClient(url, credential, fetchImpl = fetch) {
 }
 
 /** `loom box join <url> --name <name>`: keep the credential (0600) and say hello. */
+/**
+ * Join by asking (t-1617): no credential to carry. The box asks loom (a stranger's call,
+ * no token), shows the code the owner's card shows, and waits for Let it in or Block;
+ * let in, it picks up its credential (only with the proof it kept) and joins.
+ */
+export async function askToJoin(env, { url, name, labels = [] }, { fetchImpl = fetch, say = (m) => process.stderr.write(m + '\n'), every = 5000, until = 15 * 60_000 } = {}) {
+  if (!/^https?:\/\/[^\s]+$/.test(url ?? '')) throw new BoxError('join takes the URL of a loom, like https://loom.example.com');
+  if (!BOX_NAME.test(name ?? '')) throw new BoxError('--name is the box\'s name: lowercase letters, digits, dots, dashes and underscores');
+  const base = url.replace(/\/mcp\/?$/, '').replace(/\/+$/, '');
+  const post = async (path, body) => {
+    const r = await fetchImpl(`${base}/api/box/${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    const out = await r.json().catch(() => ({}));
+    if (!r.ok) throw new BoxError(out.error ?? `${r.status} ${r.statusText}`);
+    return out;
+  };
+  const { proof, proofHash } = newProof();
+  const asked = await post('join-request', { name, labels, facts: detectFacts(env, labels), proof_hash: proofHash });
+  if (asked.name !== name) say(`${name} is taken on this loom, so it'll be ${asked.name}.`);
+  say(`Asked ${base} to let ${asked.name} in. On loom's page (Home), a card shows code ${asked.code}: let it in only if it matches this one. Waiting…`);
+  const end = Date.now() + until;
+  for (;;) {
+    await new Promise((r) => setTimeout(r, every));
+    const p = await post('join-poll', { id: asked.id, proof });
+    if (p.state === 'allowed') return joinLoom(env, { url: base, name: p.name, labels, credential: p.credential }, fetchImpl);
+    if (p.state === 'blocked') throw new BoxError('the owner blocked this box');
+    if (p.state === 'gone') throw new BoxError('the request expired or was answered elsewhere; ask again');
+    if (Date.now() > end) throw new BoxError('nobody answered within 15 minutes; ask again');
+  }
+}
+
 export async function joinLoom(env, { url, name, labels = [], credential }, fetchImpl = fetch) {
   if (!/^https?:\/\/[^\s]+$/.test(url ?? '')) throw new BoxError('join takes the URL of a loom, like https://loom.example.com');
   if (!BOX_NAME.test(name ?? '')) throw new BoxError('--name is the box\'s name, as the owner added it');
