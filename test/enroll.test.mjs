@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { api } from '../src/control.mjs';
 import { act, manifest } from '../src/ui.mjs';
-import { codeOf } from '../src/enroll.mjs';
+import { codeOf, netOf } from '../src/enroll.mjs';
 import { askToJoin } from '../src/box.mjs';
 
 let env, fx, clock, minted;
@@ -107,4 +107,12 @@ test('loom box join at a terminal asks, waits for the owner, and joins with what
   const hi = await askToJoin(there, { url: 'http://loom.test:8787', name: 'one-loom' }, { fetchImpl, say: (m) => said.push(m), every: 1 });
   assert.equal(hi.box, 'one-loom');
   assert.match(said[0], new RegExp(`code ${asked.code}`));
+});
+
+test('the network an address is in is the same however the address is written', () => {
+  const nets = ['2001:db8:1:2::1', '2001:db8:1:2:a:b:c:d', '2001:0db8:0001:0002::9', '[2001:DB8:1:2::1]', 'fe80::1%eth0'.replace('fe80::1', '2001:db8:1:2::1')].map(netOf);
+  assert.ok(nets.every((n) => n === '2001:db8:1:2::/64'), JSON.stringify(nets));
+  assert.equal(netOf('2001:db8::1:2'), '2001:db8:0:0::/64');
+  assert.equal(netOf('::ffff:192.168.6.77'), '192.168.6.0/24');
+  assert.equal(netOf('192.168.6.77'), '192.168.6.0/24');
 });
