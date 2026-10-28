@@ -214,7 +214,7 @@ export const containerName = (id) => `loom-house-${id}`;
  * named here: the house's own secrets, its own dirs, plain env. `allowNested`
  * is the owner's say; the house file only asks.
  */
-export function runArgs(house, { id, agent, loomUrl, task, service, session, image, dirs, allowNested, allowPorts = [], allowTailnets = [], hasSocket = () => true, skipped = () => {} }) {
+export function runArgs(house, { id, agent, loomUrl, task, service, session, image, dirs, allowNested, allowPorts = [], allowTailnets = [], hasSocket = () => true, skipped = () => {}, gpu = false }) {
   // --init: a real PID 1 (catatonit) that reaps orphans. Without it the house's
   // own program is PID 1; every grandchild whose parent exits (claude's git
   // calls) is reparented to it and never reaped, until the pids limit is full
@@ -236,6 +236,8 @@ export function runArgs(house, { id, agent, loomUrl, task, service, session, ima
     if (ip && ip !== grant.ip) throw new HouseFileError(`${agent}'s house asks to publish port ${port} on ${ip}; the owner allowed it on ${grant.ip}`);
     args.push('-p', `${grant.ip}:${port}:${port}`);
   }
+  // The box's GPU, through NVIDIA's CDI spec (t-1616): only for a house asked for with a GPU need.
+  if (gpu) args.push('--device', 'nvidia.com/gpu=all');
   // A tailnet is the owner's grant too: the house names it, the grant says which socket on the box.
   for (const [name, target] of Object.entries(house.tailnets ?? {})) {
     const grant = allowTailnets.find((g) => g.name === name);

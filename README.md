@@ -202,10 +202,18 @@ credential and its houses' secrets rely on, and they're slow for this.
 driver: WSL gets the GPU through it, and `nvidia-smi` works in Debian.
 Never install a Linux NVIDIA driver inside WSL. The box reports the card
 (`gpu:nvidia-…` among its facts), so a house that needs a GPU goes to it.
-Getting the GPU into the house's container takes the NVIDIA Container Toolkit
-in Debian (`sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml`).
-loom-box doesn't pass the GPU into a house yet, so for now GPU houses work
-only in the house you build by hand.
+Getting the GPU into a house's container takes the NVIDIA Container Toolkit
+in Debian, then a CDI spec, once:
+
+```bash
+sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
+```
+
+The box then reports `cdi:nvidia`. A GPU in a house is the owner's grant, per
+agent (`loom box agent <agent> … --gpu`, or GPU on the agent's page). With it, a
+house asked for with a GPU need (`loom box up --needs gpu …`) gets the card
+(`--device nvidia.com/gpu=all`).
+Without the spec, the house fails, and its log names that command.
 
 ### When it doesn't work
 

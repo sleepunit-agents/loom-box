@@ -76,6 +76,8 @@ function readCredential(env) {
 }
 
 /** What this box has, as facts: "arch:x86_64", "gpu:nvidia-geforce-rtx-5090", "runtime:podman". */
+export const CDI_SPECS = ['/etc/cdi/nvidia.yaml', '/var/run/cdi/nvidia.yaml', '/etc/cdi/nvidia.json', '/var/run/cdi/nvidia.json'];
+
 export function detectFacts(env = process.env, labels = []) {
   const facts = new Set([`os:${platform()}`, `arch:${arch() === 'x64' ? 'x86_64' : arch()}`, `cpus:${cpus().length}`, `mem:${Math.round(totalmem() / 2 ** 30)}g`]);
   for (const rt of ['podman', 'docker']) {
@@ -87,6 +89,8 @@ export function detectFacts(env = process.env, labels = []) {
       facts.add(`gpu:${line.toLowerCase().replace(/[^a-z0-9.+-]+/g, '-').replace(/^-|-$/g, '').slice(0, 64)}`);
     }
   }
+  // NVIDIA's CDI spec (nvidia-ctk cdi generate): what lets podman hand a house the GPU (t-1616).
+  if (CDI_SPECS.some((p) => existsSync(p))) facts.add('cdi:nvidia');
   for (const l of labels) facts.add(l);
   return [...facts].filter((f) => /^[a-z][a-z0-9-]{0,31}(:[A-Za-z0-9._ +-]{1,64})?$/.test(f)).slice(0, 32);
 }
@@ -359,7 +363,7 @@ function rootless(env) {
  * house went. `client` is the control plane (remote over HTTP, or in-process
  * on loom's own machine); `loomUrl` is what a house is told loom is.
  */
-export function runner(env, client, { loomUrl, labels = [], log = (m) => process.stderr.write(`loom-box: ${m}\n`), hasSocket = (p) => existsSync(p) }) {
+export function runner(env, client, { loomUrl, labels = [], log = (m) => process.stderr.write(`loom-box: ${m}\n`), hasSocket = (p) => existsSync(p), hasCdi = () => CDI_SPECS.some((p) => existsSync(p)) }) {
   const houses = new Map(); // id -> { child, dir, stopAt? }
   const sessions = boxSessions(env, client, { dataDir: dataDir(env), log });
 
@@ -399,6 +403,8 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
         throw new BoxError(why.length ? `the house file wants what couldn't be issued (${why.join('; ')})` : `the house file wants ${missing.join(', ')}, which ${h.agent}'s houses don't get`);
       }
       if (house.nested && !rootless(env)) throw new BoxError('nested containers need rootless podman on the box');
+      if (h.gpu && !claimed.gpu) throw new BoxError(`the house needs the GPU, and the owner hasn't allowed ${h.agent}'s houses a GPU (loom box agent ${h.agent} … --gpu, or the agent's page)`);
+      if (h.gpu && !hasCdi()) throw new BoxError('the house needs the GPU, and this box has no NVIDIA CDI spec: run `sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml` (nvidia-container-toolkit) once, then try again');
       const tag = image(env, h, house, repo, logFd);
       const dirs = { mirror };
       for (const d of ['state', 'nested']) { dirs[d] = pathJoin(dir, d); mkdirSync(dirs[d], { mode: 0o700 }); }
@@ -406,7 +412,7 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
       // A session house: what attaching to it runs, for `loom box attach` on this box.
       if (h.session) writeFileSync(pathJoin(dir, 'attach.json'), JSON.stringify({ container: containerName(h.id), command: house.attach ?? ['sh'] }), { mode: 0o600 });
       const args = runArgs(house, { id: h.id, agent: h.agent, loomUrl, task: h.task, service: h.service, session: !!h.session, image: tag, dirs, allowNested: !!claimed.nested, allowPorts: claimed.ports ?? [], allowTailnets: claimed.tailnets ?? [],
-        hasSocket,
+        hasSocket, gpu: !!h.gpu && !!claimed.gpu,
         skipped: (name, socket) => { writeSync(logFd, `loom-box: this box has no ${name} tailnet (${socket}); the house starts without it\n`); log(`${h.id}: no ${name} tailnet on this box; starting without it`); } });
       // The house's own podman secrets, each value on stdin (never argv).
       for (const name of Object.keys(house.secrets)) {
