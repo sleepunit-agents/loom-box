@@ -12,7 +12,7 @@
 // clone and dirs go.
 import { spawn, spawnSync } from 'node:child_process';
 import { gunzipSync } from 'node:zlib';
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, rmSync, statSync, writeFileSync, writeSync } from 'node:fs';
 import { arch, cpus, homedir, platform, totalmem } from 'node:os';
 import { join as pathJoin } from 'node:path';
 import { newProof } from './enroll.mjs';
@@ -359,7 +359,7 @@ function rootless(env) {
  * house went. `client` is the control plane (remote over HTTP, or in-process
  * on loom's own machine); `loomUrl` is what a house is told loom is.
  */
-export function runner(env, client, { loomUrl, labels = [], log = (m) => process.stderr.write(`loom-box: ${m}\n`) }) {
+export function runner(env, client, { loomUrl, labels = [], log = (m) => process.stderr.write(`loom-box: ${m}\n`), hasSocket = (p) => existsSync(p) }) {
   const houses = new Map(); // id -> { child, dir, stopAt? }
   const sessions = boxSessions(env, client, { dataDir: dataDir(env), log });
 
@@ -405,7 +405,9 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
       if (h.service || h.slot) restoreState(dirs.state, await fetchState(client, h.id, claimed.state));
       // A session house: what attaching to it runs, for `loom box attach` on this box.
       if (h.session) writeFileSync(pathJoin(dir, 'attach.json'), JSON.stringify({ container: containerName(h.id), command: house.attach ?? ['sh'] }), { mode: 0o600 });
-      const args = runArgs(house, { id: h.id, agent: h.agent, loomUrl, task: h.task, service: h.service, session: !!h.session, image: tag, dirs, allowNested: !!claimed.nested, allowPorts: claimed.ports ?? [], allowTailnets: claimed.tailnets ?? [] });
+      const args = runArgs(house, { id: h.id, agent: h.agent, loomUrl, task: h.task, service: h.service, session: !!h.session, image: tag, dirs, allowNested: !!claimed.nested, allowPorts: claimed.ports ?? [], allowTailnets: claimed.tailnets ?? [],
+        hasSocket,
+        skipped: (name, socket) => { writeSync(logFd, `loom-box: this box has no ${name} tailnet (${socket}); the house starts without it\n`); log(`${h.id}: no ${name} tailnet on this box; starting without it`); } });
       // The house's own podman secrets, each value on stdin (never argv).
       for (const name of Object.keys(house.secrets)) {
         // podman reads `-` only from a real pipe (node hands a child a socket),

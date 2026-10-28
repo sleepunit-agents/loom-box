@@ -79,7 +79,8 @@ beforeEach(() => {
   // This test's own state, captured: a house from an earlier test that ends late must not report into this one.
   const myEnv = env, myFx = fx;
   client = { async call(path, body) { const x = api(myEnv, myFx, { caller, path, body }); if (x.status !== 200) throw new Error(x.body.error); return x.body; } };
-  r = runner(env, client, { loomUrl: 'http://loom.test/mcp', log: () => {} });
+  // A tailnet socket "exists" on this test box unless its path says it's missing.
+  r = runner(env, client, { loomUrl: 'http://loom.test/mcp', log: () => {}, hasSocket: (p) => !p.includes('missing') });
 });
 
 test('a house is a container with exactly its own secrets, env and dirs, and nothing of the box\'s', async () => {
@@ -142,6 +143,14 @@ test('a tailnet socket goes in only when the owner grants it for that agent, fro
   await until(() => house(h2.id).state === 'done');
   const a = ran(h2.id).args;
   assert.ok(a.flatMap((x, i) => (a[i - 1] === '-v' ? [x] : [])).includes('/run/tailscale-fleet/tailscaled.sock:/run/tailscale-fleet.sock'));
+  // A box without that socket (it's another box's tailnet) starts the house without it, and says so in its log.
+  setAgent({ nested: false, tailnets: ['fleet=/run/tailscale-missing/tailscaled.sock'] });
+  const h3 = up();
+  await r.tick();
+  await until(() => house(h3.id).state === 'done');
+  const a3 = ran(h3.id).args;
+  assert.ok(!a3.some((x) => x.includes('tailscale-missing')));
+  assert.match(house(h3.id).log, /this box has no fleet tailnet \(\/run\/tailscale-missing\/tailscaled.sock\); the house starts without it/);
   // A grant is a name and a socket path; anything else is refused when it's set.
   for (const bad of ['fleet', 'fleet=relative.sock', 'fleet=/etc/passwd', 'Fleet=/run/tailscale/tailscaled.sock', 'fleet=/run/user/1000/podman/podman.sock',
     'fleet=/run/tailscale-fleet/../user/1000/podman/podman.sock/tailscaled.sock', 'fleet=/run/./tailscale/tailscaled.sock']) {
