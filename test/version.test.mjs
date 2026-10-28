@@ -46,14 +46,15 @@ test('a commit the box can\'t vet isn\'t installed: off main, or behind what it 
 
 test('vetting asks git: on main, and not behind', () => {
   const calls = [];
-  const run = (cmd, args) => { calls.push(args.slice(2).join(' ')); const verb = args[2];
-    if (verb === 'merge-base' && args[5] === 'FETCH_HEAD') return { status: 0 };
-    if (verb === 'merge-base') return { status: 1 };   // not an ancestor of mine: forward
-    return { status: 0 }; };
-  assert.equal(vetCommit('o/r', B, A, run), null);
+  const run = (cmd, args) => { calls.push(args.slice(2).join(' ')); return { status: 0 }; };
+  assert.equal(vetCommit('o/r', B, A, run), null, 'on main, and mine comes before it');
   assert.deepEqual(calls.map((c) => c.split(' ')[0]), ['init', 'fetch', 'merge-base', 'merge-base']);
+  assert.equal(calls[3], `merge-base --is-ancestor ${A} ${B}`);
   const offMain = (cmd, args) => ({ status: args[2] === 'merge-base' && args[5] === 'FETCH_HEAD' ? 1 : 0 });
   assert.match(vetCommit('o/r', B, A, offMain), /isn't on o\/r's main/);
-  const back = (cmd, args) => ({ status: 0 });
-  assert.match(vetCommit('o/r', B, A, back), /rollback is done by hand/);
+  // Behind (1), or git can't place mine (128): either way, not installed.
+  for (const code of [1, 128]) {
+    const notForward = (cmd, args) => ({ status: args[2] === 'merge-base' && args[4] === A ? code : 0 });
+    assert.match(vetCommit('o/r', B, A, notForward), /rollback is done by hand/, String(code));
+  }
 });
