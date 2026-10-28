@@ -276,6 +276,9 @@ test('a box that restarts while a house is still running watches it again, not b
   const s = ok(api(env, fx, { caller: { kind: 'agent', agent: 'art' }, path: 'service-up', body: { name: 'discord' } }));
   await r.tick();
   await until(() => house(s.house).state === 'running');
+  // The runner says running once podman is started; the (fake) container is up a moment later (t-1521: the
+  // fresh runner sometimes looked in between, found none, and the test flaked).
+  await until(() => existsSync(join(fake, 'runs', `loom-house-${s.house}.pid`)));
   // Only the box goes away; the container keeps running.
   r.houses.get(s.house).child.removeAllListeners('exit');
   const logs = [];
