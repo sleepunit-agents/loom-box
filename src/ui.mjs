@@ -75,6 +75,8 @@ export function manifest(env) {
   const live = Object.values(s.houses).filter((h) => LIVE.has(h.state));
   return {
     v: 2,
+    // An agent owner sees their agents' houses and services here (loom docs/specs/owners.md).
+    owners: 2,
     tab: { label: 'Boxes' },
     tile: {
       label: 'Boxes',
@@ -406,7 +408,38 @@ function agentForm(agent, c) {
   ].map((f) => (f.value === '' ? (({ value: _v, ...r }) => r)(f) : f)) };
 }
 
-export function page(env, { path }, nowMs = Date.now()) {
+/**
+ * Who's on the page (loom's caller, docs/specs/owners.md in loom): the owner, as before, unless
+ * loom names an agent owner, who gets their agents' houses and services and nothing of the household's.
+ */
+function pageCaller(caller) {
+  if (caller && caller.kind === 'owner' && Array.isArray(caller.agents)) {
+    return { kind: 'owner', who: typeof caller.who === 'string' ? caller.who : undefined, agents: caller.agents.filter((a) => typeof a === 'string') };
+  }
+  return caller && caller.kind === 'owner' && typeof caller.who === 'string' ? { ...OWNER, who: caller.who } : OWNER;
+}
+
+/** An agent owner's page: their agents' houses and services, each with what they may do to it. */
+function agentOwnerPage(env, caller, nowMs) {
+  const view = list(env, caller);
+  const live = view.houses.filter((h) => LIVE.has(h.state));
+  const sections = [{ id: 'houses', title: 'Houses', blocks: [live.length
+    ? { type: 'list', items: live.slice(0, 30).map((h) => ({ text: `${h.agent}'s house`, meta: `${h.id} · ${h.state}`, badge: h.state, tone: toneOf(h.state), agent: h.agent,
+      ...(h.state === 'wanted' || h.state === 'running' || h.state === 'starting' ? { act: { action: 'down', label: 'Stop', tone: 'danger', fields: { id: h.id }, confirm: `${h.id} stops.` } } : {}) })) }
+    : { type: 'text', tone: 'muted', text: `No houses for ${caller.agents.join(', ')} now.` }] }];
+  if (view.services.length) {
+    sections.push({ id: 'services', title: 'Services', blocks: [{ type: 'list', items: view.services.slice(0, 20).map((v) => ({
+      text: `${v.agent}'s ${v.name}`, meta: `${v.want} · ${v.state ?? 'no house'}`, agent: v.agent,
+      act: { action: 'service-restart', label: 'Restart', fields: { agent: v.agent, name: v.name } } })) }] });
+  }
+  sections.push({ id: 'theirs', blocks: [{ type: 'text', tone: 'muted', text: 'Boxes, and how each agent\'s house is made, are the household owner\'s.' }] });
+  void nowMs;
+  return { title: 'Houses', sections };
+}
+
+export function page(env, { path, caller: c }, nowMs = Date.now()) {
+  const caller = pageCaller(c);
+  if (Array.isArray(caller.agents)) return path === '' || path === undefined ? agentOwnerPage(env, caller, nowMs) : { title: 'Not found', sections: [] };
   if (path === '' || path === undefined) return boxesPage(env, nowMs);
   if (path === 'agents') return agentsPage(env);
   return { title: 'Not found', sections: [] };
@@ -421,8 +454,12 @@ function logError(env, action, err) {
   return p;
 }
 
-/** The page's actions. The page is the owner's, so each runs as the owner. */
-export function act(env, effects, { action, fields: raw = {} }, publicUrl) {
+/** The page's actions, as loom's caller: the household owner's all of them; an agent owner's, their agents' houses and services. */
+export function act(env, effects, { action, fields: raw = {}, caller: c }, publicUrl) {
+  const OWNER = pageCaller(c);
+  if (Array.isArray(OWNER.agents) && !['up', 'down', 'service-up', 'service-down', 'service-restart'].includes(action)) {
+    return { ok: false, message: 'That\'s the household owner\'s to do.' };
+  }
   // The page's field names are lowercase (loom's vocabulary); the runtime's are camelCase.
   const fields = { ...raw };
   for (const [from, to] of [['may_host', 'mayHost'], ['house_file', 'houseFile'], ['repo_secret', 'repoSecret']]) {

@@ -65,3 +65,23 @@ test('the board\'s order: the box first (uptime, disk, houses), then services, t
   assert.equal(svc.restarts, 0);
   assert.equal(act(env, fx, { action: 'service-restart', fields: { agent: 'art', name: 'nope' } }).ok, false);
 });
+
+test("an agent owner's page is their agents' houses and services; the household's actions are refused (loom docs/specs/owners.md)", () => {
+  const { env, fx } = setup();
+  assert.equal(act(env, fx, { action: 'set-agent', fields: { agent: 'mark', repo: 'https://x/mark.git' } }).ok, true);
+  api(env, fx, { caller: { kind: 'agent', agent: 'art' }, path: 'up', body: { task: 'art work' } });
+  api(env, fx, { caller: { kind: 'agent', agent: 'mark' }, path: 'up', body: { task: 'mark work' } });
+  const loren = { kind: 'owner', who: 'loren', agents: ['mark'] };
+  const p = page(env, { path: '', caller: loren });
+  assert.equal(p.title, 'Houses');
+  const rows = section(p, 'houses').blocks[0].items;
+  assert.deepEqual(rows.map((r) => r.agent), ['mark']);
+  assert.equal(page(env, { path: 'agents', caller: loren }).title, 'Not found');
+  assert.match(act(env, fx, { action: 'set-agent', fields: { agent: 'mark', repo: 'https://evil.example/x.git' }, caller: loren }).message, /household owner/);
+  assert.equal(load(env).agents.mark.repo, 'https://x/mark.git');
+  const artHouse = Object.values(load(env).houses).find((h) => h.agent === 'art').id;
+  assert.equal(act(env, fx, { action: 'down', fields: { id: artHouse }, caller: loren }).ok, false);
+  assert.equal(act(env, fx, { action: 'down', fields: { id: rows[0].act.fields.id }, caller: loren }).ok, true);
+  // The household owner's board, as before.
+  assert.notEqual(page(env, { path: '', caller: { kind: 'owner', who: 'jonathan-barket', agents: '*' } }).title, 'Houses');
+});

@@ -398,3 +398,24 @@ test('an unexpected failure on the page says what failed and where the full erro
   assert.match(r.message, /errors\.log/);
   assert.match(readFileSync(join(env.LOOM_BOX_HOME || join(env.HOME, '.config', 'loom-box'), 'errors.log'), 'utf-8'), /add-box: Error: minting a token/);
 });
+
+test("an agent owner (loom docs/specs/owners.md) sees and runs only their agents' houses; boxes and settings stay the household owner's", () => {
+  const loren = { kind: 'owner', who: 'loren', agents: ['mark'] };
+  const jonathan = { kind: 'owner', who: 'jonathan-barket', agents: '*' };
+  const artHouse = ok(call(art, 'up', { task: 'art work' }));
+  const markHouse = ok(call(loren, 'up', { agent: 'mark', task: 'mark work' }));
+  assert.equal(load(env).houses[markHouse.id].by, 'loren');
+  assert.equal(call(loren, 'up', { agent: 'art', task: 'x' }).status, 403);
+  // Her list is mark's alone, and no box's grants.
+  const mine = ok(call(loren, 'list'));
+  assert.deepEqual(mine.houses.map((h) => h.agent), ['mark']);
+  assert.ok(mine.boxes.every((b) => b.mayHost === undefined));
+  assert.equal(call(loren, 'down', { id: artHouse.id }).status, 404);
+  assert.equal(ok(call(loren, 'down', { id: markHouse.id })).state, 'stopped');
+  // The household's calls are refused to her; a household owner (agents '*') still has them.
+  assert.equal(call(loren, 'add-box', { name: 'sneak' }).status, 403);
+  assert.equal(call(loren, 'set-agent', { agent: 'mark', repo: 'https://evil.example/x.git' }).status, 403);
+  assert.equal(call(loren, 'service-up', { agent: 'art', name: 'discord' }).status, 403);
+  ok(call(jonathan, 'add-box', { name: 'thor' }));
+  assert.equal(ok(call(jonathan, 'list')).houses.length, 2);
+});
