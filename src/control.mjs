@@ -6,6 +6,7 @@
 // It is not a scheduler. A house goes where it's told (a box), or to the one
 // permitted box that has what it needs, or to the agent's primary. If that
 // doesn't name exactly one box, it says why and starts nothing.
+import { ownCommit } from './version.mjs';
 import { randomBytes } from 'node:crypto';
 import { AGENT_NAME, BOX_NAME, SECRET_NAME, StateError, load, localBoxName, nextHouseId, update } from './state.mjs';
 import { joinPoll, joinRequest } from './enroll.mjs';
@@ -410,6 +411,8 @@ export function poll(env, effects, caller, { facts, sessions } = {}) {
       // Its box sessions: up or down, as the owner wants them.
       remotes: Object.entries(s.remotes ?? {}).filter(([, r]) => r.box === caller.subject)
         .map(([agent, r]) => ({ agent, dir: r.dir, name: r.name, want: r.want, state: r.state })),
+      // The loom-box loom runs (version.mjs): a box on another one installs this one.
+      ...(ownCommit() ? { version: ownCommit() } : {}),
     };
   });
 }
