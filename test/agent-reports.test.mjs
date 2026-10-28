@@ -61,3 +61,16 @@ test('a task line falls back to the task itself, and loom\'s manifest carries th
   const m = manifest({ HOME: home, LOOM_BOX_HOME: join(home, 'state'), LOOM_BOX_LOCAL_NAME: 'loom' });
   assert.deepEqual(m.agents, {});
 });
+
+test('FYI for loom\'s Inbox: a box that joined this week, a task house that failed today (with its last line)', async () => {
+  const { boxNotices } = await import('../src/ui.mjs');
+  const s = state();
+  s.boxes['7f9310-ae6ddf-977603-b257bf'].joined = ago(60);
+  s.boxes['7f9310-ae6ddf-977603-b257bf'].facts = ['cpus:64', 'runtime:podman', 'gpu:nvidia-geforce-rtx-5090'];
+  s.houses['h-121'] = { ...s.houses['h-121'], state: 'failed', updated: ago(5), log: 'working…\nFailed to authenticate: OAuth token revoked.\n' };
+  s.houses['h-90'] = { id: 'h-90', agent: 'art', box: 'loom', state: 'failed', updated: ago(3 * 24 * 60), task: 'old' };
+  const n = boxNotices(s, now);
+  assert.deepEqual(n.map((x) => x.text), ['art\'s house h-121 failed: w-7ffa48: t-1486: pond rollup (part a)', 'one joined loom']);
+  assert.equal(n[0].meta, 'Failed to authenticate: OAuth token revoked.');
+  assert.equal(n[1].meta, 'cpus:64, gpu:nvidia-geforce-rtx-5090');
+});
