@@ -25,7 +25,7 @@ export function ownCommit(url = import.meta.url) {
 /**
  * Whether the box itself trusts a commit it's told to install, without trusting who told it:
  * it must be on the canonical repo's main (not a fork's commit GitHub would also serve under
- * that name), and not behind the one the box runs (going back is a rollback, done by hand).
+ * that name), and after the one the box runs (going back is a rollback, done by hand).
  * Returns null when it's fine, else why not.
  */
 export function vetCommit(repo, want, mine, run = spawnSync) {
@@ -35,7 +35,9 @@ export function vetCommit(repo, want, mine, run = spawnSync) {
     if (git('init', '-q') !== 0) return 'git is missing';
     if (git('fetch', '-q', '--filter=blob:none', `https://github.com/${repo}.git`, 'main') !== 0) return `couldn't read ${repo}'s main`;
     if (git('merge-base', '--is-ancestor', want, 'FETCH_HEAD') !== 0) return `${want.slice(0, 7)} isn't on ${repo}'s main`;
-    if (mine && git('merge-base', '--is-ancestor', want, mine) === 0) return `${want.slice(0, 7)} is behind this box's ${mine.slice(0, 7)}; a rollback is done by hand`;
+    // Forward only: what this box runs must come before it. Anything else (behind, beside, or git can't
+    // place this box's commit) isn't installed; a rollback is done by hand.
+    if (git('merge-base', '--is-ancestor', mine, want) !== 0) return `${want.slice(0, 7)} doesn't follow this box's ${mine.slice(0, 7)} on ${repo}'s main; a rollback is done by hand`;
     return null;
   } finally {
     rmSync(dir, { recursive: true, force: true });
