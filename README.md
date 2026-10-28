@@ -209,8 +209,10 @@ in Debian, then a CDI spec, once:
 sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
 ```
 
-The box then reports `cdi:nvidia`, and a house asked for with a GPU need
-(`loom box up --needs gpu …`) gets the card (`--device nvidia.com/gpu=all`).
+The box then reports `cdi:nvidia`. A GPU in a house is the owner's grant, per
+agent (`loom box agent <agent> … --gpu`, or GPU on the agent's page). With it, a
+house asked for with a GPU need (`loom box up --needs gpu …`) gets the card
+(`--device nvidia.com/gpu=all`).
 Without the spec, the house fails, and its log names that command.
 
 ### When it doesn't work

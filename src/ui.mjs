@@ -376,6 +376,7 @@ function agentsPage(env) {
       { type: 'kv', items: [
         { label: 'Repo', value: c.repo }, { label: 'House file', value: c.houseFile || 'house/house.json' },
         { label: 'Nested containers', value: c.nested ? 'allowed' : 'not allowed' },
+        { label: 'GPU', value: c.gpu ? 'allowed' : 'not allowed' },
         { label: 'Ports it may publish', value: (c.ports ?? []).map((g) => `${g.ip}:${g.port}`).join(', ') || 'none' },
         { label: 'Tailnets', value: (c.tailnets ?? []).map((g) => g.name).join(', ') || 'none' },
         { label: 'Branch', value: c.branch || 'default' }, { label: 'Repo secret', value: c.repoSecret || 'none' },
@@ -395,6 +396,7 @@ function agentForm(agent, c) {
     { name: 'repo', label: 'Repo', kind: 'text', required: true, value: c?.repo ?? '' },
     { name: 'house_file', label: 'House file', kind: 'text', value: c?.houseFile ?? 'house/house.json', hint: 'A path in the repo: the image, and where each secret lands' },
     { name: 'nested', label: 'Nested containers', kind: 'choice', value: c?.nested ? 'yes' : 'no', options: [{ value: 'no', label: 'Not allowed' }, { value: 'yes', label: 'Allowed', detail: 'The house may run containers of its own (more capabilities, still rootless)' }] },
+    { name: 'gpu', label: 'GPU', kind: 'choice', value: c?.gpu ? 'yes' : 'no', options: [{ value: 'no', label: 'Not allowed' }, { value: 'yes', label: 'Allowed', detail: 'A house asked for with a GPU need gets the box\'s GPU (NVIDIA, through CDI)' }] },
     { name: 'ports', label: 'Ports', kind: 'text', value: (c?.ports ?? []).map((g) => `${g.ip}:${g.port}`).join(', '), hint: 'Ports a house may publish on its box: 7401 binds loopback, 0.0.0.0:7401 every interface' },
     // Saving replaces the whole record, so every grant is on the form (a missing one would be dropped).
     { name: 'tailnets', label: 'Tailnets', kind: 'text', value: (c?.tailnets ?? []).map((g) => `${g.name}=${g.socket}`).join(', '), hint: 'name=/run/…/tailscaled.sock, comma separated: a box tailscaled the house may use' },

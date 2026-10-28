@@ -9,7 +9,7 @@
 // On loom's own machine (the control plane, and its first box):
 //   loom box add <name> [--may-host a,b] [--labels x,y]   enroll a box; prints its credential once
 //   loom box revoke <name>                                 revoke a box and its houses' tokens
-//   loom box agent <agent> --repo <url> [--house-file house/house.json] [--nested]
+//   loom box agent <agent> --repo <url> [--house-file house/house.json] [--nested] [--gpu]
 //                  [--branch b] [--repo-secret <store-name>] [--secret as=from]... [--port n]...
 //                  [--tailnet name=/run/…/tailscaled.sock]...
 //                                                         how its house is made (--port: one it may publish;
@@ -144,7 +144,7 @@ async function main(argv, env) {
     case 'agent': {
       const [agent] = positional(rest);
       const secrets = Object.fromEntries(flags(rest, '--secret').map((p) => { const [k, v] = p.split('='); return [k, v ?? k]; }));
-      out(setAgent(env, realEffects(env), { agent, repo: flag(rest, '--repo'), houseFile: flag(rest, '--house-file'), nested: rest.includes('--nested'), branch: flag(rest, '--branch'), repoSecret: flag(rest, '--repo-secret'), secrets, ports: flags(rest, '--port'), tailnets: flags(rest, '--tailnet') }));
+      out(setAgent(env, realEffects(env), { agent, repo: flag(rest, '--repo'), houseFile: flag(rest, '--house-file'), nested: rest.includes('--nested'), gpu: rest.includes('--gpu'), branch: flag(rest, '--branch'), repoSecret: flag(rest, '--repo-secret'), secrets, ports: flags(rest, '--port'), tailnets: flags(rest, '--tailnet') }));
       return;
     }
     case 'remote': {

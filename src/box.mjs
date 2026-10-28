@@ -403,6 +403,7 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
         throw new BoxError(why.length ? `the house file wants what couldn't be issued (${why.join('; ')})` : `the house file wants ${missing.join(', ')}, which ${h.agent}'s houses don't get`);
       }
       if (house.nested && !rootless(env)) throw new BoxError('nested containers need rootless podman on the box');
+      if (h.gpu && !claimed.gpu) throw new BoxError(`the house needs the GPU, and the owner hasn't allowed ${h.agent}'s houses a GPU (loom box agent ${h.agent} … --gpu, or the agent's page)`);
       if (h.gpu && !hasCdi()) throw new BoxError('the house needs the GPU, and this box has no NVIDIA CDI spec: run `sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml` (nvidia-container-toolkit) once, then try again');
       const tag = image(env, h, house, repo, logFd);
       const dirs = { mirror };
@@ -411,7 +412,7 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
       // A session house: what attaching to it runs, for `loom box attach` on this box.
       if (h.session) writeFileSync(pathJoin(dir, 'attach.json'), JSON.stringify({ container: containerName(h.id), command: house.attach ?? ['sh'] }), { mode: 0o600 });
       const args = runArgs(house, { id: h.id, agent: h.agent, loomUrl, task: h.task, service: h.service, session: !!h.session, image: tag, dirs, allowNested: !!claimed.nested, allowPorts: claimed.ports ?? [], allowTailnets: claimed.tailnets ?? [],
-        hasSocket, gpu: !!h.gpu,
+        hasSocket, gpu: !!h.gpu && !!claimed.gpu,
         skipped: (name, socket) => { writeSync(logFd, `loom-box: this box has no ${name} tailnet (${socket}); the house starts without it\n`); log(`${h.id}: no ${name} tailnet on this box; starting without it`); } });
       // The house's own podman secrets, each value on stdin (never argv).
       for (const name of Object.keys(house.secrets)) {

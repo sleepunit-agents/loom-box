@@ -234,7 +234,7 @@ export function setPrimary(env, effects, { agent, box }) {
  * uses and the secrets-store name they come from. Kept here, not read from
  * the repo, so neither a box nor the repo can widen it.
  */
-export function setAgent(env, effects, { agent, repo, houseFile, nested, branch, repoSecret, secrets, ports, tailnets }) {
+export function setAgent(env, effects, { agent, repo, houseFile, nested, gpu, branch, repoSecret, secrets, ports, tailnets }) {
   const a = str(agent, 'an agent', 40);
   if (!AGENT_NAME.test(a)) fail('an agent name is lowercase letters, digits and dashes');
   const r = str(repo, 'the repo', 400);
@@ -242,6 +242,8 @@ export function setAgent(env, effects, { agent, repo, houseFile, nested, branch,
   const file = str(houseFile || 'house/house.json', 'the house file', 200);
   if (file.startsWith('/') || file.split('/').some((p) => p === '..' || p === '.' || p === '') || !/^[A-Za-z0-9._/-]+$/.test(file)) fail('the house file is a path inside the repo, like house/house.json');
   const nest = nested === true || nested === 'true' || nested === 'yes';
+  // The box's GPU in its houses (t-1616): the owner's grant, like nested containers.
+  const gp = gpu === true || gpu === 'true' || gpu === 'yes';
   const br = branch ? str(branch, 'the branch', 100) : null;
   if (br && !/^[A-Za-z0-9._/-]+$/.test(br)) fail('the branch name has odd characters');
   const rs = repoSecret ? str(repoSecret, 'the repo secret', 64) : null;
@@ -265,7 +267,7 @@ export function setAgent(env, effects, { agent, repo, houseFile, nested, branch,
   if (tn.some((g) => !g)) fail('a tailnet grant is a name and a tailscaled socket on the box, like fleet=/run/tailscale-fleet/tailscaled.sock');
   if (new Set(tn.map((g) => g.name)).size !== tn.length) fail('each tailnet is granted once');
   return update(env, (s) => {
-    s.agents[a] = { repo: r, houseFile: file, nested: nest, branch: br, repoSecret: rs, secrets: sec, ports: pt, tailnets: tn };
+    s.agents[a] = { repo: r, houseFile: file, nested: nest, gpu: gp, branch: br, repoSecret: rs, secrets: sec, ports: pt, tailnets: tn };
     return { agent: a, ...s.agents[a] };
   });
 }
@@ -449,7 +451,7 @@ export function claim(env, effects, caller, { id }) {
       const saved = key ? stateMeta(env, s, key) : undefined;
       // The state itself comes after, a part at a time (state-part): just its shape here.
       const state = saved ? { bytes: saved.bytes, sha256: saved.sha256, parts: partsOf(saved.bytes) } : null;
-      return { id, agent: h.agent, token, secrets, ...(notIssued ? { notIssued } : {}), repoAuth, nested: !!a.nested, ports: (a.ports ?? []).map(parsePortGrant).filter(Boolean), tailnets: (a.tailnets ?? []).map(parseTailnetGrant).filter(Boolean), ...(h.service ? { service: h.service } : {}), ...(h.slot ? { slot: h.slot } : {}), ...(key ? { state } : {}) };
+      return { id, agent: h.agent, token, secrets, ...(notIssued ? { notIssued } : {}), repoAuth, nested: !!a.nested, gpu: !!a.gpu, ports: (a.ports ?? []).map(parsePortGrant).filter(Boolean), tailnets: (a.tailnets ?? []).map(parseTailnetGrant).filter(Boolean), ...(h.service ? { service: h.service } : {}), ...(h.slot ? { slot: h.slot } : {}), ...(key ? { state } : {}) };
     } catch (err) {
       // The house stays waiting; the token it was about to get goes (or is queued to).
       revokeOrQueue(s, effects, label);

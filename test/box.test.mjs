@@ -161,11 +161,18 @@ test('a tailnet socket goes in only when the owner grants it for that agent, fro
 test('a house asked for with a GPU need gets the GPU through CDI; a box without the CDI spec says how to make it', async () => {
   agentRepo(repo, { ...HOUSE, nested: false });
   setAgent({ nested: false });
-  let cdi = false;
+  let cdi = true;
   // This box has a GPU (its facts say so) and, until it's made, no CDI spec.
   const g = runner(env, client, { loomUrl: 'http://loom.test/mcp', log: () => {}, labels: ['gpu:nvidia-test'], hasCdi: () => cdi });
   await g.tick();
   const want = (needs) => ok(api(env, fx, { caller: { kind: 'agent', agent: 'art' }, path: 'up', body: { task: 'x', needs } }));
+  // The GPU is the owner's grant, per agent: not given, the house fails and says so.
+  const h0 = want(['gpu']);
+  await g.tick();
+  await until(() => house(h0.id).state === 'failed');
+  assert.match(house(h0.id).log, /the owner hasn't allowed art's houses a GPU/);
+  setAgent({ nested: false, gpu: true });
+  cdi = false;
   const h1 = want(['gpu']);
   await g.tick();
   await until(() => house(h1.id).state === 'failed');
