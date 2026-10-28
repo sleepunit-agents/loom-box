@@ -35,6 +35,10 @@ test('the manifest, both pages and every action result are valid page vocabulary
   check('full manifest', vocab.parseManifest(manifest(env)));
   check('full page', vocab.parsePage(page(env, { path: '' })));
   check('full agents page', vocab.parsePage(page(env, { path: 'agents' })));
+  check("art's Houses tab", vocab.parsePage(page({ ...env, LOOM_SCOPE: 'art' }, { path: '' })));
+  check("an agent owner's Houses tab", vocab.parsePage(page({ ...env, LOOM_SCOPE: 'art' }, { path: '', caller: { kind: 'owner', agents: ['art'] } })));
+  check("a tab for an agent with no house", vocab.parsePage(page({ ...env, LOOM_SCOPE: 'nobody' }, { path: '' })));
+  check('a scoped refusal', vocab.parseActResult(act({ ...env, LOOM_SCOPE: 'art' }, fx, { action: 'revoke-box', fields: { name: 'thor' } })));
   check('down', vocab.parseActResult(act(env, fx, { action: 'down', fields: { id: 'h-1' } })));
   check('revoke', vocab.parseActResult(act(env, fx, { action: 'revoke-box', fields: { name: 'thor' } })));
   check('not found', vocab.parsePage(page(env, { path: 'x' })));

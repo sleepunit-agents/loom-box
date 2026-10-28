@@ -39,8 +39,8 @@ function remoteLink(env, id) {
  * app): per agent, its box session (remote-control on the box) and its house
  * session (a service named "remote"), each with its link and one tap up or down.
  */
-function sessionsSection(env, s, view) {
-  const agents = Object.keys(s.agents).sort();
+function sessionsSection(env, s, view, only) {
+  const agents = Object.keys(s.agents).sort().filter((a) => !only || a === only);
   const blocks = [{ type: 'text', tone: 'muted', text: 'Each is a Claude remote-control session: open its link, or find it in the Claude app, and talk to the agent there.' }];
   for (const a of agents) {
     const r = view.remotes.find((x) => x.agent === a);
@@ -78,6 +78,8 @@ export function manifest(env) {
     // An agent owner sees their agents' houses and services here (loom docs/specs/owners.md).
     owners: 2,
     tab: { label: 'Boxes' },
+    // Each agent's houses, services, sessions and how its house is made: on its own Houses tab.
+    agentTab: { label: 'Houses' },
     tile: {
       label: 'Boxes',
       value: `${boxes.length} box${boxes.length === 1 ? '' : 'es'}`,
@@ -272,47 +274,13 @@ function boxesPage(env, nowMs) {
     })),
   ] });
 
-  if (view.services.length) {
-    sections.push({ id: 'services', title: 'Services', blocks: [
-      // Restart at each row's right: its house stops and the service brings up a fresh one (what fixes a stuck bridge).
-      { type: 'list', items: view.services.map((v) => ({
-        text: v.service, agent: v.agent,
-        meta: v.want === 'up' ? `${v.moveTo ? `${nameOf(v.box)} → ${nameOf(v.moveTo)}` : nameOf(v.box)} · ${v.house} ${v.state ?? ''}${v.restarts ? ` · ${v.restarts} restart${v.restarts === 1 ? '' : 's'}` : ''}` : 'down',
-        tone: v.want !== 'up' ? 'muted' : v.state === 'running' ? 'ok' : v.state === 'failed' || v.state === 'lost' ? 'bad' : 'warn',
-        ...(v.want === 'up' ? { act: { action: 'service-restart', label: 'Restart', ...(v.state === 'failed' || v.state === 'lost' ? { tone: 'primary' } : {}), fields: { agent: v.agent, name: v.name } } } : {}),
-      })) },
-      ...view.services.slice(0, 8).map((v) => ({
-        type: 'details', summary: v.service, meta: v.want === 'up' ? `on ${nameOf(v.box)}` : 'down',
-        blocks: [
-          ...(v.want === 'up' ? [{ type: 'form', title: `Move ${v.service}`, action: 'service-move', submit: 'Hand it off', hidden: { agent: v.agent, name: v.name },
-            note: 'Stopped where it is, then started there: never two at once.',
-            fields: [{ name: 'box', label: 'To', kind: 'choice', required: true, options: live_boxes.filter((b) => b.id !== v.box).map((b) => ({ value: b.id, label: b.label })) }] }] : []),
-          { type: 'buttons', items: [v.want === 'up'
-            ? { action: 'service-down', label: `Take ${v.name} down`, tone: 'danger', fields: { agent: v.agent, name: v.name } }
-            : { action: 'service-up', label: `Bring ${v.name} up`, tone: 'primary', fields: { agent: v.agent, name: v.name } }] },
-        ],
-      })),
-    ] });
-  }
-
-  const sess = sessionsSection(env, s, view);
-  if (sess) sections.push(sess);
-
-  sections.push({ id: 'houses', title: 'Houses', blocks: view.houses.length ? [
-    { type: 'table', columns: ['House', 'Agent', 'Box', 'State', 'Task', 'Updated'], rows: view.houses.slice(0, 25).map((h) => [
-      h.id, h.agent, nameOf(h.box), h.state + (h.exit !== undefined ? ` (exit ${h.exit})` : ''), short(h.task), ago(h.updated, nowMs),
-    ]) },
-    ...(live.length ? [{ type: 'buttons', items: live.slice(0, 10).map((h) => ({ action: 'down', label: `Stop ${h.id}`, fields: { id: h.id } })) }] : []),
-  ] : [{ type: 'text', tone: 'muted', text: 'No houses yet.' }] });
-
+  // Each agent's houses, services and sessions are its own (its Houses tab): here, a link each.
   if (agents.length) {
-    sections.push({ id: 'up', title: 'Start a house', blocks: [{ type: 'form', action: 'up', submit: 'Start it', fields: [
-      { name: 'agent', label: 'Agent', kind: 'choice', required: true, options: agents.map((a) => ({ value: a, label: a, detail: `primary: ${primaryOf(s, a, env)}` })) },
-      { name: 'box', label: 'Box', kind: 'choice', value: '', options: [{ value: '', label: 'Its primary, or the one box that has what it needs' },
-        ...live_boxes.map((b) => ({ value: b.id, label: b.label }))] },
-      { name: 'needs', label: 'Needs', kind: 'text', hint: 'Optional, e.g. gpu:5090. A box that has it, and may host the agent.' },
-      { name: 'task', label: 'Task', kind: 'textarea', required: true },
-    ] }] });
+    sections.push({ id: 'agents', title: 'Each agent\'s houses', blocks: [{ type: 'list', items: agents.map((a) => {
+      const up = live.filter((h) => h.agent === a).length;
+      const svc = view.services.filter((v) => v.agent === a && v.want === 'up').length;
+      return { text: a, agent: a, page: `agent:${a}`, meta: `${up} house${up === 1 ? '' : 's'} up · ${svc} service${svc === 1 ? '' : 's'} · primary ${primaryOf(s, a, env)}` };
+    }) }] });
   }
 
   // Every box waiting to be let in (Home shows the newest few as cards), and a way to clear a flood.
@@ -333,16 +301,8 @@ function boxesPage(env, nowMs) {
     ] },
   ] });
 
-  if (agents.length) {
-    sections.push({ id: 'primaries', side: true, title: 'Primaries', blocks: [
-      { type: 'link', text: `Agents' houses (${agents.length})`, page: 'agents' },
-      { type: 'kv', items: agents.map((a) => ({ label: a, value: primaryOf(s, a, env) })) },
-      { type: 'form', action: 'set-primary', submit: 'Set', fields: [
-        { name: 'agent', label: 'Agent', kind: 'choice', required: true, options: agents.map((a) => ({ value: a, label: a })) },
-        { name: 'box', label: 'Primary', kind: 'choice', options: live_boxes.map((b) => ({ value: b.id, label: b.label })) },
-      ] },
-    ] });
-  }
+  sections.push({ id: 'new-agent', side: true, title: '', blocks: [
+    { type: 'details', summary: 'Give an agent a house', blocks: [agentForm('', null)] }] });
   return { title: 'Boxes', intro: `${live_boxes.length} box${live_boxes.length === 1 ? '' : 'es'}, ${live.length} house${live.length === 1 ? '' : 's'} up${waiting ? ' or waiting' : ''}. A house is an agent's container, started for a task.`, sections };
 }
 
@@ -371,25 +331,91 @@ function sessionControls(env, s, a, r) {
     ] }];
 }
 
-function agentsPage(env) {
+/**
+ * One agent's Houses tab (loom docs/extensions.md, agentTab): its houses, its services, its sessions, a house
+ * to start; and, for a household owner, how its house is made and its primary box. An agent owner gets the
+ * houses and services of an agent of theirs, as on their own page.
+ */
+function agentTabPage(env, agent, caller, nowMs) {
   const s = load(env);
-  const sections = Object.entries(s.agents).sort().slice(0, 8).map(([a, c]) => ({
-    id: `agent-${a}`, title: a, blocks: [
-      { type: 'kv', items: [
-        { label: 'Repo', value: c.repo }, { label: 'House file', value: c.houseFile || 'house/house.json' },
-        { label: 'Nested containers', value: c.nested ? 'allowed' : 'not allowed' },
-        { label: 'GPU', value: c.gpu ? 'allowed' : 'not allowed' },
-        { label: 'Ports it may publish', value: (c.ports ?? []).map((g) => `${g.ip}:${g.port}`).join(', ') || 'none' },
-        { label: 'Tailnets', value: (c.tailnets ?? []).map((g) => g.name).join(', ') || 'none' },
-        { label: 'Branch', value: c.branch || 'default' }, { label: 'Repo secret', value: c.repoSecret || 'none' },
-        { label: 'Secrets a house gets', value: Object.entries(c.secrets || {}).map(([k, v]) => (k === v ? k : `${k} (from ${v})`)).join(', ') || 'none' },
-      ] },
-      ...sessionControls(env, s, a, s.remotes?.[a] && { agent: a, ...s.remotes[a] }),
-      agentForm(a, c),
-    ],
-  }));
-  sections.push({ id: 'new', title: 'Give an agent a house', blocks: [agentForm('', null)] });
-  return { title: 'Agents\' houses', intro: 'How each agent\'s house is made. A box gets only these secrets, and only for a house it was given.', sections };
+  const own = Array.isArray(caller.agents) ? caller.agents : null;
+  if (!s.agents[agent] || (own && !own.includes(agent))) return { title: 'Houses', sections: [{ id: 'none', blocks: [{ type: 'text', tone: 'muted', text: `${agent} has no house yet.${own ? '' : ' Give it one on the Boxes page.'}` }] }] };
+  const view = list(env, caller);
+  const houses = view.houses.filter((h) => h.agent === agent);
+  const live = houses.filter((h) => LIVE.has(h.state));
+  const nameOf = (id) => boxLabelOf(s, id);
+  const live_boxes = view.boxes.filter((b) => !b.revoked).map((b) => ({ ...b, label: boxLabelOf(s, b.id) }));
+  const sections = [{ id: 'houses', title: 'Houses', blocks: [
+    live.length
+      ? { type: 'list', items: live.slice(0, 30).map((h) => ({ text: h.id, meta: `${nameOf(h.box)} · ${short(h.task)}`, badge: h.state, tone: toneOf(h.state),
+        ...(h.state === 'wanted' || h.state === 'running' || h.state === 'starting' ? { act: { action: 'down', label: 'Stop', tone: 'danger', fields: { id: h.id }, confirm: `${h.id} stops.` } } : {}) })) }
+      : { type: 'text', tone: 'muted', text: 'No houses up now.' },
+    ...(houses.length > live.length ? [{ type: 'details', summary: 'Recent', blocks: [{ type: 'table', columns: ['House', 'Box', 'State', 'Task', 'Updated'],
+      rows: houses.filter((h) => !LIVE.has(h.state)).slice(0, 20).map((h) => [h.id, nameOf(h.box), h.state + (h.exit !== undefined ? ` (exit ${h.exit})` : ''), short(h.task), ago(h.updated, nowMs)]) }] }] : []),
+  ] }];
+  const svcs = view.services.filter((v) => v.agent === agent);
+  if (svcs.length) {
+    sections.push({ id: 'services', title: 'Services', blocks: [
+      { type: 'list', items: svcs.map((v) => ({
+        text: v.name,
+        meta: v.want === 'up' ? `${v.moveTo ? `${nameOf(v.box)} → ${nameOf(v.moveTo)}` : nameOf(v.box)} · ${v.house} ${v.state ?? ''}${v.restarts ? ` · ${v.restarts} restart${v.restarts === 1 ? '' : 's'}` : ''}` : 'down',
+        tone: v.want !== 'up' ? 'muted' : v.state === 'running' ? 'ok' : v.state === 'failed' || v.state === 'lost' ? 'bad' : 'warn',
+        act: v.want === 'up'
+          ? { action: 'service-restart', label: 'Restart', ...(v.state === 'failed' || v.state === 'lost' ? { tone: 'primary' } : {}), fields: { agent: v.agent, name: v.name } }
+          : { action: 'service-up', label: 'Up', tone: 'primary', fields: { agent: v.agent, name: v.name } },
+      })) },
+      ...svcs.filter((v) => v.want === 'up').slice(0, 8).map((v) => ({
+        type: 'details', summary: v.name, meta: `on ${nameOf(v.box)}`,
+        blocks: [
+          ...(own ? [] : [{ type: 'form', title: `Move ${v.name}`, action: 'service-move', submit: 'Hand it off', hidden: { agent: v.agent, name: v.name },
+            note: 'Stopped where it is, then started there: never two at once.',
+            fields: [{ name: 'box', label: 'To', kind: 'choice', required: true, options: live_boxes.filter((b) => b.id !== v.box).map((b) => ({ value: b.id, label: b.label })) }] }]),
+          { type: 'buttons', items: [{ action: 'service-down', label: `Take ${v.name} down`, tone: 'danger', fields: { agent: v.agent, name: v.name } }] },
+        ],
+      })),
+    ] });
+  }
+  if (!own) {
+    const sess = sessionsSection(env, s, view, agent);
+    if (sess) sections.push(sess);
+  }
+  sections.push({ id: 'up', title: 'Start a house', blocks: [{ type: 'form', action: 'up', submit: 'Start it', hidden: { agent }, fields: [
+    { name: 'box', label: 'Box', kind: 'choice', value: '', options: [{ value: '', label: `Its primary (${primaryOf(s, agent, env)}), or the one box that has what it needs` },
+      ...live_boxes.map((b) => ({ value: b.id, label: b.label }))] },
+    { name: 'needs', label: 'Needs', kind: 'text', hint: 'Optional, e.g. gpu:5090. A box that has it, and may host the agent.' },
+    { name: 'task', label: 'Task', kind: 'textarea', required: true },
+  ] }] });
+  if (!own) {
+    const c = s.agents[agent];
+    sections.push({ id: `agent-${agent}`, title: 'Its house', side: true, blocks: [
+      { type: 'kv', items: houseFacts(c) },
+      { type: 'form', title: 'Primary box', action: 'set-primary', submit: 'Set', hidden: { agent }, fields: [
+        { name: 'box', label: 'Primary', kind: 'choice', value: primaryOf(s, agent, env), options: live_boxes.map((b) => ({ value: b.id, label: b.label })) }] },
+      { type: 'details', summary: `Change ${agent}'s house`, blocks: [agentForm(agent, c)] },
+    ] });
+  }
+  return { title: 'Houses', intro: `${agent}'s houses: its containers, started for a task or kept up as a service.`, sections };
+}
+
+function houseFacts(c) {
+  return [
+    { label: 'Repo', value: c.repo }, { label: 'House file', value: c.houseFile || 'house/house.json' },
+    { label: 'Nested containers', value: c.nested ? 'allowed' : 'not allowed' },
+    { label: 'GPU', value: c.gpu ? 'allowed' : 'not allowed' },
+    { label: 'Ports it may publish', value: (c.ports ?? []).map((g) => `${g.ip}:${g.port}`).join(', ') || 'none' },
+    { label: 'Tailnets', value: (c.tailnets ?? []).map((g) => g.name).join(', ') || 'none' },
+    { label: 'Branch', value: c.branch || 'default' }, { label: 'Repo secret', value: c.repoSecret || 'none' },
+    { label: 'Secrets a house gets', value: Object.entries(c.secrets || {}).map(([k, v]) => (k === v ? k : `${k} (from ${v})`)).join(', ') || 'none' },
+  ];
+}
+
+function agentsPage(env) {
+  // Each agent's house is on its own Houses tab; here, a link each and a house for a new one.
+  const s = load(env);
+  const agents = Object.keys(s.agents).sort();
+  return { title: 'Agents\' houses', intro: 'How each agent\'s house is made is on its own Houses tab.', sections: [
+    ...(agents.length ? [{ id: 'agents', blocks: [{ type: 'list', items: agents.map((a) => ({ text: a, agent: a, page: `agent:${a}`, meta: s.agents[a].repo })) }] }] : []),
+    { id: 'new', title: 'Give an agent a house', blocks: [agentForm('', null)] }] };
 }
 
 function agentForm(agent, c) {
@@ -439,6 +465,8 @@ function agentOwnerPage(env, caller, nowMs) {
 
 export function page(env, { path, caller: c }, nowMs = Date.now()) {
   const caller = pageCaller(c);
+  const scope = scopeOf(env);
+  if (scope && (path === '' || path === undefined)) return agentTabPage(env, scope, caller, nowMs);
   if (Array.isArray(caller.agents)) return path === '' || path === undefined ? agentOwnerPage(env, caller, nowMs) : { title: 'Not found', sections: [] };
   if (path === '' || path === undefined) return boxesPage(env, nowMs);
   if (path === 'agents') return agentsPage(env);
@@ -455,8 +483,27 @@ function logError(env, action, err) {
 }
 
 /** The page's actions, as loom's caller: the household owner's all of them; an agent owner's, their agents' houses and services. */
+/** The agent whose tab this is (LOOM_SCOPE), or ''. */
+function scopeOf(env) {
+  const v = typeof env?.LOOM_SCOPE === 'string' ? env.LOOM_SCOPE.trim() : '';
+  return /^[a-z][a-z0-9-]{0,39}$/.test(v) ? v : '';
+}
+
+/** The agent an action is about: its field, or a house's own. */
+function targetOf(env, action, fields) {
+  if (action === 'down') return load(env).houses[fields.id]?.agent;
+  return fields.agent;
+}
+
+const AGENT_ACTIONS = new Set(['up', 'down', 'service-up', 'service-down', 'service-restart', 'service-move', 'remote-up', 'remote-down', 'set-primary', 'set-agent']);
+
 export function act(env, effects, { action, fields: raw = {}, caller: c }, publicUrl) {
   const OWNER = pageCaller(c);
+  // From an agent's Houses tab: that agent's things only, and none of the household's (boxes, joins).
+  const scope = scopeOf(env);
+  if (scope && (!AGENT_ACTIONS.has(action) || targetOf(env, action, raw) !== scope)) {
+    return { ok: false, message: `This is ${scope}'s page.` };
+  }
   if (Array.isArray(OWNER.agents) && !['up', 'down', 'service-up', 'service-down', 'service-restart'].includes(action)) {
     return { ok: false, message: 'That\'s the household owner\'s to do.' };
   }
@@ -479,7 +526,7 @@ export function act(env, effects, { action, fields: raw = {}, caller: c }, publi
       case 'revoke-box': { const r = revokeBox(env, effects, fields); return { ok: true, message: `Revoked ${r.name}. Its houses lost their tokens.`, page: '' }; }
       case 'may-host': { const r = setMayHost(env, effects, fields); return { ok: true, message: `Saved who ${r.name} may host.`, page: '' }; }
       case 'set-primary': { const r = setPrimary(env, effects, fields); return { ok: true, message: `${r.agent}'s primary is ${label(r.primary)}.`, page: '' }; }
-      case 'set-agent': { const r = setAgent(env, effects, fields); return { ok: true, message: `Saved ${r.agent}'s house.`, page: 'agents' }; }
+      case 'set-agent': { const r = setAgent(env, effects, fields); return { ok: true, message: `Saved ${r.agent}'s house.`, page: '' }; }
       case 'up': {
         const r = up(env, effects, OWNER, { agent: fields.agent, box: fields.box, needs: fields.needs, task: fields.task });
         return { ok: true, message: `${r.id}: ${r.agent} on ${label(r.box)}, waiting for the box to start it.`, page: '' };
@@ -487,9 +534,9 @@ export function act(env, effects, { action, fields: raw = {}, caller: c }, publi
       case 'down': { const r = down(env, effects, OWNER, fields); return { ok: true, message: `${r.id} is ${r.state}.`, page: '' }; }
       case 'remote-up': {
         const r = remoteUp(env, effects, { agent: fields.agent, box: fields.box, dir: fields.dir });
-        return { ok: true, message: `"${r.name}" is starting; its link shows here in a few seconds.`, page: 'agents' };
+        return { ok: true, message: `"${r.name}" is starting; its link shows here in a few seconds.`, page: '' };
       }
-      case 'remote-down': { const r = remoteDown(env, effects, fields); return { ok: true, message: `"${r.name}" is going down.`, page: 'agents' }; }
+      case 'remote-down': { const r = remoteDown(env, effects, fields); return { ok: true, message: `"${r.name}" is going down.`, page: '' }; }
       case 'service-up': { const r = serviceUp(env, effects, OWNER, fields); return { ok: true, message: `${r.service} is coming up on ${label(r.box)}.`, page: '' }; }
       case 'service-down': { const r = serviceDown(env, effects, OWNER, fields); return { ok: true, message: `${r.service} is going down.`, page: '' }; }
       case 'service-restart': {

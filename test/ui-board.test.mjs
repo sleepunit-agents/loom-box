@@ -22,7 +22,8 @@ const section = (p, id) => p.sections.find((s) => s.id === id);
 test('the agent form carries the tailnet grant, so saving it keeps it', () => {
   const { env, fx } = setup();
   assert.deepEqual(load(env).agents.art.tailnets, [{ name: 'fleet', socket: '/run/tailscale-fleet/tailscaled.sock' }]);
-  const form = section(page(env, { path: 'agents' }), 'agent-art').blocks.find((b) => b.type === 'form' && b.action === 'set-agent');
+  const tab = page({ ...env, LOOM_SCOPE: 'art' }, { path: '' });
+  const form = section(tab, 'agent-art').blocks.find((b) => b.type === 'details').blocks.find((b) => b.type === 'form' && b.action === 'set-agent');
   const f = form.fields.find((x) => x.name === 'tailnets');
   assert.equal(f.value, 'fleet=/run/tailscale-fleet/tailscaled.sock');
   // Saving the form as it is keeps the grant.
@@ -31,22 +32,30 @@ test('the agent form carries the tailnet grant, so saving it keeps it', () => {
   assert.deepEqual(load(env).agents.art.tailnets, [{ name: 'fleet', socket: '/run/tailscale-fleet/tailscaled.sock' }]);
 });
 
-test('the board\'s order: the box first (uptime, disk, houses), then services, then sessions with their links and one tap down at the row; Restart stops the house', () => {
+test("an agent's Houses tab: its houses, services with Restart, its sessions with their links; the board keeps boxes and links each agent; Restart stops the house", () => {
   const { env, fx } = setup();
   assert.equal(act(env, fx, { action: 'service-up', fields: { agent: 'art', name: 'remote' } }).ok, true);
   const house = load(env).services['art/remote'].house;
   mkdirSync(join(env.LOOM_BOX_DATA, 'houses', house), { recursive: true });
   writeFileSync(join(env.LOOM_BOX_DATA, 'houses', house, 'log'), 'starting…\nhttps://claude.ai/code?environment=env_01ABCdef\n');
-  const p = page(env, { path: '' });
+  const board = page(env, { path: '' });
+  const bids = board.sections.map((x) => x.id);
+  for (const gone of ['services', 'sessions', 'houses', 'up', 'primaries']) assert.ok(!bids.includes(gone), `the board has no ${gone}: ${bids}`);
+  assert.deepEqual(section(board, 'agents').blocks[0].items.map((i) => i.page), ['agent:art']);
+  const p = page({ ...env, LOOM_SCOPE: 'art' }, { path: '' });
   const ids = p.sections.map((x) => x.id);
-  assert.ok(ids.indexOf('box-one') < ids.indexOf('services') && ids.indexOf('services') < ids.indexOf('sessions'), ids.join(','));
+  assert.deepEqual(ids, ['houses', 'services', 'sessions', 'up', 'agent-art']);
   const sess = section(p, 'sessions');
   const items = sess.blocks.find((b) => b.type === 'list').items;
   assert.deepEqual(items.map((i) => [i.text, i.href, i.agent, i.act.action, i.act.tone]), [["art's house: house session", 'https://claude.ai/code?environment=env_01ABCdef', 'art', 'service-down', 'danger']]);
   // No box session yet: where it runs is a form, behind a details.
   assert.ok(sess.blocks.some((b) => b.type === 'details' && /first box session/.test(b.summary)));
   // A card for the box: its houses with their agent, and the machine's facts folded.
-  assert.ok(section(p, 'box-one').blocks.some((b) => b.type === 'details' && b.summary === 'Machine'));
+  assert.ok(section(board, 'box-one').blocks.some((b) => b.type === 'details' && b.summary === 'Machine'));
+  // From art's tab: art's things only, none of the household's.
+  const scoped = { ...env, LOOM_SCOPE: 'art' };
+  assert.match(act(scoped, fx, { action: 'service-restart', fields: { agent: 'mark', name: 'remote' } }).message, /art's page/);
+  assert.match(act(scoped, fx, { action: 'revoke-box', fields: { name: 'one' } }).message, /art's page/);
   // Each service up has Restart at its row.
   assert.deepEqual(section(p, 'services').blocks[0].items.map((i) => i.act?.action), ['service-restart']);
   // Not running yet: already a fresh start.
