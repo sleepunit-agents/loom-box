@@ -214,7 +214,7 @@ export const containerName = (id) => `loom-house-${id}`;
  * named here: the house's own secrets, its own dirs, plain env. `allowNested`
  * is the owner's say; the house file only asks.
  */
-export function runArgs(house, { id, agent, loomUrl, task, service, session, image, dirs, allowNested, allowPorts = [], allowTailnets = [] }) {
+export function runArgs(house, { id, agent, loomUrl, task, service, session, image, dirs, allowNested, allowPorts = [], allowTailnets = [], hasSocket = () => true, skipped = () => {} }) {
   // --init: a real PID 1 (catatonit) that reaps orphans. Without it the house's
   // own program is PID 1; every grandchild whose parent exits (claude's git
   // calls) is reparented to it and never reaped, until the pids limit is full
@@ -240,6 +240,9 @@ export function runArgs(house, { id, agent, loomUrl, task, service, session, ima
   for (const [name, target] of Object.entries(house.tailnets ?? {})) {
     const grant = allowTailnets.find((g) => g.name === name);
     if (!grant) throw new HouseFileError(`${agent}'s house asks for the ${name} tailnet, and the owner hasn't allowed that`);
+    // A tailnet is a socket on one box: a house on a box without it starts without it (2026-10-27, 'one'
+    // has no fleet tailnet), and its log says so, rather than the house never starting at all.
+    if (!hasSocket(grant.socket)) { skipped(name, grant.socket); continue; }
     args.push('-v', `${grant.socket}:${target}`);
   }
   for (const [name, where] of Object.entries(house.secrets)) {
