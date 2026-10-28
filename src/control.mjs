@@ -379,7 +379,9 @@ export function poll(env, effects, caller, { facts, sessions } = {}) {
     return {
       start: mine.filter((h) => h.state === 'wanted' && mayHost(b, h.agent) && !(h.notBefore && Date.parse(h.notBefore) > Date.parse(now(effects)))).map((h) => {
         const a = s.agents[h.agent] || {};
-        return { id: h.id, agent: h.agent, task: h.task, service: h.service ?? null, slot: h.slot ?? null, session: !!h.session, repo: a.repo, houseFile: a.houseFile || 'house/house.json', branch: a.branch ?? null };
+        return { id: h.id, agent: h.agent, task: h.task, service: h.service ?? null, slot: h.slot ?? null, session: !!h.session, repo: a.repo, houseFile: a.houseFile || 'house/house.json', branch: a.branch ?? null,
+          // A house asked for with a GPU need gets the box's GPU (t-1616).
+          gpu: (h.needs ?? []).some((n) => /^gpu(:|$)/.test(n)) };
       }),
       stop: mine.filter((h) => h.state === 'stopping').map((h) => h.id),
       // Taken by this box and not over: one the box doesn't have (it restarted) is lost.

@@ -158,6 +158,30 @@ test('a tailnet socket goes in only when the owner grants it for that agent, fro
   }
 });
 
+test('a house asked for with a GPU need gets the GPU through CDI; a box without the CDI spec says how to make it', async () => {
+  agentRepo(repo, { ...HOUSE, nested: false });
+  setAgent({ nested: false });
+  let cdi = false;
+  // This box has a GPU (its facts say so) and, until it's made, no CDI spec.
+  const g = runner(env, client, { loomUrl: 'http://loom.test/mcp', log: () => {}, labels: ['gpu:nvidia-test'], hasCdi: () => cdi });
+  await g.tick();
+  const want = (needs) => ok(api(env, fx, { caller: { kind: 'agent', agent: 'art' }, path: 'up', body: { task: 'x', needs } }));
+  const h1 = want(['gpu']);
+  await g.tick();
+  await until(() => house(h1.id).state === 'failed');
+  assert.match(house(h1.id).log, /no NVIDIA CDI spec: run `sudo nvidia-ctk cdi generate --output=\/etc\/cdi\/nvidia.yaml`/);
+  cdi = true;
+  const h2 = want(['gpu:nvidia']);
+  await g.tick();
+  await until(() => house(h2.id).state === 'done');
+  const a2 = ran(h2.id).args;
+  assert.equal(a2[a2.indexOf('--device') + 1], 'nvidia.com/gpu=all');
+  const h3 = want([]);
+  await g.tick();
+  await until(() => house(h3.id).state === 'done');
+  assert.ok(!ran(h3.id).args.includes('--device'), 'only when it asked for the GPU');
+});
+
 test('a port is published only when the owner allows it for that agent', async () => {
   agentRepo(repo, { ...HOUSE, nested: false, ports: ['7401', '127.0.0.1:4747'] });
   setAgent({ nested: false, ports: ['0.0.0.0:7401'] });
