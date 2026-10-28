@@ -20,6 +20,7 @@ import { BOX_NAME, stateDir } from './state.mjs';
 import { containerName, missingSecrets, parseHouseFile, podmanSecret, runArgs, specFor } from './house.mjs';
 import { PART_RAW, joinParts, partsOf } from './blobs.mjs';
 import { boxSessions } from './remote.mjs';
+import { sessionsBusy } from './busy.mjs';
 
 export const POLL_MS = 15_000;
 const STOP_GRACE_MS = 30_000;
@@ -496,7 +497,10 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
   }
 
   async function tick() {
-    const want = await client.call('poll', { facts: detectFacts(env, labels) });
+    // Which remote sessions here are mid-turn (busy.mjs): loom shows it on the agents' cards (t-1624).
+    let busy;
+    try { busy = sessionsBusy(pathJoin(stateDir(env), 'session-cpu.json')); } catch { busy = undefined; }
+    const want = await client.call('poll', { facts: detectFacts(env, labels), ...(busy ? { sessions: busy } : {}) });
     // The control plane thinks these are up here, but this box doesn't have them:
     // it restarted under them. Say so rather than leave them "running" forever.
     for (const id of want.active || []) {

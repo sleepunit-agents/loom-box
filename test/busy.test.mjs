@@ -56,3 +56,25 @@ test('Home\'s card: a busy remote session makes the agent working, and the readi
   assert.deepEqual([busy.art.state, busy.art.reason], ['working', 'in a remote session: box session on loom']);
   assert.equal(agentReports(s, Date.now(), {}).art.readings.find((r) => r.label === 'Remote').value, 'box session on loom · house session', 'unknown: no word');
 });
+
+test('another box reports its own sessions with its poll; loom shows them while the word is fresh', async () => {
+  const { api } = await import('../src/control.mjs');
+  const { reportedBusy } = await import('../src/ui.mjs');
+  const home = mkdtempSync(join(tmpdir(), 'loom-box-rb-'));
+  const env = { HOME: home, LOOM_BOX_HOME: join(home, 'state'), LOOM_BOX_LOCAL_NAME: 'loom' };
+  let t = Date.parse('2026-10-28T01:00:00Z');
+  const fx = { now: () => new Date(t), mint: () => 'loom_' + 'x'.repeat(40), revoke: () => {}, secret: () => '' };
+  const owner = { kind: 'owner' };
+  const id = api(env, fx, { caller: owner, path: 'add-box', body: { name: 'one' } }).body.box;
+  const { load, update } = await import('../src/state.mjs');
+  // h-9 runs on one, h-7 on loom; one's box session is placed on it.
+  update(env, (s) => {
+    s.houses['h-9'] = { id: 'h-9', agent: 'art', box: id, state: 'running' };
+    s.houses['h-7'] = { id: 'h-7', agent: 'art', box: 'loom', state: 'running' };
+    s.remotes = { art: { box: id, want: 'up', state: 'running', name: 'art on one (box session)' } };
+  });
+  const r = api(env, fx, { caller: { kind: 'piece', subject: id }, path: 'poll', body: { facts: [], sessions: { 'box:art on one (box session)': true, 'house:h-9': false, 'house:h-7': true, 'bad key': true, 'house:h-8': 'yes' } } });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.deepEqual(reportedBusy(load(env), t), { 'box:art on one (box session)': true, 'house:h-9': false }, 'not h-7: that house is loom\'s');
+  assert.deepEqual(reportedBusy(load(env), t + 10 * 60_000), {}, 'stale');
+});

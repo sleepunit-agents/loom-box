@@ -356,11 +356,22 @@ export function hello(env, effects, caller, { facts }) {
 }
 
 /** What this box should be running: houses to start, and houses to stop. */
-export function poll(env, effects, caller, { facts } = {}) {
+const SESSION_KEY = /^(box:[^\0]{1,120}|house:h-\d{1,9})$/;
+
+export function poll(env, effects, caller, { facts, sessions } = {}) {
   const f = facts === undefined ? null : listOf(facts, 'facts', FACT, 32);
+  // Its remote sessions, working or idle, as the box sampled them: only well-formed keys, a few.
+  const busy = sessions && typeof sessions === 'object' && !Array.isArray(sessions)
+    ? Object.fromEntries(Object.entries(sessions).filter(([k, v]) => SESSION_KEY.test(k) && typeof v === 'boolean').slice(0, 20)) : null;
   return update(env, (s) => {
     const b = boxOf(s, caller);
     if (f) b.facts = f;
+    // Only sessions this box runs: its houses, and the box sessions placed on it (it can't speak for another's).
+    if (busy) {
+      const ours = (k) => k.startsWith('house:') ? s.houses[k.slice(6)]?.box === caller.subject
+        : Object.values(s.remotes ?? {}).some((r) => r.box === caller.subject && `box:${r.name}` === k);
+      b.sessions = { at: now(effects), busy: Object.fromEntries(Object.entries(busy).filter(([k]) => ours(k))) };
+    }
     b.lastSeen = now(effects);
     // Boxes poll every few seconds: the natural place to finish any revoke that failed.
     retryRevokes(s, effects);
