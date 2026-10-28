@@ -163,7 +163,7 @@ async function main(argv, env) {
       const agent = flag(rest, '--agent') ?? (env.LOOM_URL && env.LOOM_TOKEN_FILE ? undefined : defaultAgent(env));
       const r = await call('up', { agent, box: flag(rest, '--box'), needs: flag(rest, '--needs'), task, slot: flag(rest, '--slot') });
       if (json) return out(r);
-      process.stdout.write(`${r.id}: ${r.agent} on ${r.box} (${r.state})\n`);
+      process.stdout.write(`${r.id}: ${r.agent} on ${r.boxName ?? r.box} (${r.state})\n`);
       return;
     }
     case 'service': {
@@ -191,7 +191,7 @@ async function main(argv, env) {
       const call = ownerOrRemote(env);
       const agent = flag(rest, '--agent') ?? defaultAgent(env);
       const r = await call('up', { agent, box: localBoxName(env), session: true });
-      process.stderr.write(`${r.id}: ${r.agent}'s session house on ${r.box}; starting (a first build can take a while)…\n`);
+      process.stderr.write(`${r.id}: ${r.agent}'s session house on ${r.boxName ?? r.box}; starting (a first build can take a while)…\n`);
       const ready = await waitRunning(call, r.id);
       if (ready !== 'running') throw new Fail(`${r.id} didn't start (${ready}); see loom box list`);
       const code = attachHere(env, r.id);

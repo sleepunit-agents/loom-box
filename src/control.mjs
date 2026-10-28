@@ -298,7 +298,7 @@ export function up(env, effects, caller, { agent, box, needs, task, session, slo
     const id = nextHouseId(s);
     const at = now(effects);
     s.houses[id] = { id, agent: a, box: where, task: t, needs: n, state: 'wanted', created: at, updated: at, by: caller.kind === 'agent' ? caller.agent : 'owner', ...(sess ? { session: true } : {}), ...(sl ? { slot: sl } : {}) };
-    return { id, agent: a, box: where, state: 'wanted', ...(sess ? { session: true } : {}), ...(sl ? { slot: sl } : {}) };
+    return { id, agent: a, box: where, boxName: boxLabelOf(s, where), state: 'wanted', ...(sess ? { session: true } : {}), ...(sl ? { slot: sl } : {}) };
   });
 }
 

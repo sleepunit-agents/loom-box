@@ -93,7 +93,29 @@ export function manifest(env) {
       ],
     })),
     agents: agentReports(s, Date.now(), sessionsBusy(join(stateDir(env), 'session-cpu.json'))),
+    notices: boxNotices(s),
   };
+}
+
+const NOTICE_WINDOW_MS = 24 * 3600_000;
+
+/**
+ * loom's Inbox, FYI (never unread): a box that joined this week, and a task house that failed in the
+ * last day, with the last thing it said (2026-10-27: two wakes died 'OAuth token revoked' and nobody saw).
+ */
+export function boxNotices(s, nowMs = Date.now()) {
+  const out = [];
+  for (const [id, b] of Object.entries(s.boxes)) {
+    if (b.revoked || !b.joined || nowMs - Date.parse(b.joined) > 7 * NOTICE_WINDOW_MS) continue;
+    out.push({ text: `${boxLabelOf(s, id)} joined loom`, meta: factsOf(b).filter((f) => !f.startsWith('runtime:')).slice(0, 5).join(', '), at: b.joined, page: '' });
+  }
+  for (const h of Object.values(s.houses)) {
+    if (h.service || h.state !== 'failed' || !h.updated || nowMs - Date.parse(h.updated) > NOTICE_WINDOW_MS) continue;
+    const last = String(h.log ?? '').trim().split('\n').filter(Boolean).pop() ?? '';
+    out.push({ text: `${h.agent}'s house ${h.id} failed: ${taskLine(h.task)}`.slice(0, 300), meta: last.slice(0, 200), at: h.updated,
+      ...(/^[a-z][a-z0-9-]{0,39}$/.test(h.agent) ? { agent: h.agent } : {}), page: '' });
+  }
+  return out.sort((x, y) => Date.parse(y.at) - Date.parse(x.at)).slice(0, 20);
 }
 
 /** The chat bridges among an agent's services (shuttle's adapters): what "Bridges" on its card means. */
