@@ -92,12 +92,24 @@ export function manifest(env) {
         { action: 'block-join', label: 'Block', tone: 'danger', fields: { id: j.id } },
       ],
     })),
-    agents: agentReports(s, Date.now(), sessionsBusy(join(stateDir(env), 'session-cpu.json'))),
+    agents: agentReports(s, Date.now(), { ...reportedBusy(s), ...sessionsBusy(join(stateDir(env), 'session-cpu.json')) }),
     notices: boxNotices(s),
   };
 }
 
 const NOTICE_WINDOW_MS = 24 * 3600_000;
+/** A box's word on its sessions holds this long (it polls every few seconds). */
+const SESSIONS_FRESH_MS = 3 * 60_000;
+
+/** What the other boxes said about their remote sessions (each samples its own), while it's fresh. */
+export function reportedBusy(s, nowMs = Date.now()) {
+  const out = {};
+  for (const b of Object.values(s.boxes)) {
+    if (b.revoked || !b.sessions?.at || nowMs - Date.parse(b.sessions.at) > SESSIONS_FRESH_MS) continue;
+    Object.assign(out, b.sessions.busy);
+  }
+  return out;
+}
 
 /**
  * loom's Inbox, FYI (never unread): a box that joined this week, and a task house that failed in the
