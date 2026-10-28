@@ -251,9 +251,20 @@ async function main(argv, env) {
       }
       const r = runner(env, client, { loomUrl, labels });
       const every = Number(env.LOOM_BOX_POLL_MS) || POLL_MS;
+      // systemd restarting this service with a house up (t-1498): a bare SIGTERM
+      // used to drop the process at once, leaving every house running until
+      // systemd's own stop timeout gave up on them. This waits for them first,
+      // the same way `down` does, so the restart is a clean exit instead.
+      let stopping = null;
+      process.on('SIGTERM', () => {
+        if (stopping) return;
+        process.stderr.write(`loom-box: SIGTERM: stopping ${r.houses.size} house(s) before exit\n`);
+        stopping = r.shutdown().then(() => process.exit(0));
+      });
       for (;;) {
+        if (stopping) return;
         try { await r.tick(); } catch (err) { process.stderr.write(`loom-box: poll: ${err.message}\n`); }
-        if (rest.includes('--once')) return;
+        if (rest.includes('--once') || stopping) return;
         await sleep(every);
       }
     }
