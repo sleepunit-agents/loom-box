@@ -8,7 +8,8 @@
 // killed with it. Houses don't notice: a box adopts its running houses when it
 // starts again. A failed install isn't tried again for UPGRADE_RETRY_MS.
 import { spawnSync } from 'node:child_process';
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -22,10 +23,30 @@ export function ownCommit(url = import.meta.url) {
 }
 
 /**
+ * Whether the box itself trusts a commit it's told to install, without trusting who told it:
+ * it must be on the canonical repo's main (not a fork's commit GitHub would also serve under
+ * that name), and not behind the one the box runs (going back is a rollback, done by hand).
+ * Returns null when it's fine, else why not.
+ */
+export function vetCommit(repo, want, mine, run = spawnSync) {
+  const dir = mkdtempSync(join(tmpdir(), 'loom-box-vet-'));
+  const git = (...args) => run('git', ['-C', dir, ...args], { stdio: 'ignore', timeout: 120_000 }).status;
+  try {
+    if (git('init', '-q') !== 0) return 'git is missing';
+    if (git('fetch', '-q', '--filter=blob:none', `https://github.com/${repo}.git`, 'main') !== 0) return `couldn't read ${repo}'s main`;
+    if (git('merge-base', '--is-ancestor', want, 'FETCH_HEAD') !== 0) return `${want.slice(0, 7)} isn't on ${repo}'s main`;
+    if (mine && git('merge-base', '--is-ancestor', want, mine) === 0) return `${want.slice(0, 7)} is behind this box's ${mine.slice(0, 7)}; a rollback is done by hand`;
+    return null;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/**
  * The box's part, once a poll: should it install the commit loom runs? Returns what it did, for the log
  * (null when nothing). `spawn` is injected in tests; `stateDir` keeps the last attempt.
  */
-export function maybeUpgrade({ want, mine = ownCommit(), starting = false, env = process.env, stateDir, nowMs = Date.now(), spawn = spawnSync }) {
+export function maybeUpgrade({ want, mine = ownCommit(), starting = false, env = process.env, stateDir, nowMs = Date.now(), spawn = spawnSync, vet = vetCommit }) {
   if (env.LOOM_BOX_UPGRADE === 'off' || !COMMIT.test(want ?? '') || !mine || want === mine || starting) return null;
   const file = join(stateDir, 'upgrade.json');
   let last = null;
@@ -34,6 +55,8 @@ export function maybeUpgrade({ want, mine = ownCommit(), starting = false, env =
   mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
   writeFileSync(file, JSON.stringify({ commit: want, from: mine, at: new Date(nowMs).toISOString() }) + '\n', { mode: 0o600 });
   const repo = env.LOOM_BOX_REPO || 'sleepunit-agents/loom-box';
+  const no = vet(repo, want, mine);
+  if (no) return `not installing loom-box ${want.slice(0, 7)}: ${no}; asking again in ${UPGRADE_RETRY_MS / 3600_000}h`;
   const r = spawn('systemd-run', ['--user', '--collect', '--quiet', `--unit=loom-box-upgrade-${want.slice(0, 12)}`,
     env.LOOM_BIN || 'loom', 'pieces', 'install', '--from', `github:${repo}#${want}`, '--yes'], { stdio: 'ignore', env });
   return r.status === 0
