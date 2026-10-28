@@ -274,6 +274,22 @@ export function setAgent(env, effects, { agent, repo, houseFile, nested, gpu, br
 
 // ------------------------------------------------------- owner and agents
 
+/**
+ * Whether a caller sees, and may act on, an agent's houses and services (loom
+ * docs/specs/owners.md): a household owner every agent's; an agent owner (an owner
+ * caller with a list of agents) their agents'; an agent its own.
+ */
+export function sees(caller, agent) {
+  if (caller.kind === 'owner') return !Array.isArray(caller.agents) || caller.agents.includes(agent);
+  return caller.kind === 'agent' && caller.agent === agent;
+}
+
+/** The household's owner: everything that isn't one agent's (boxes, enrolling, an agent's settings) is theirs. */
+export const householdOwner = (caller) => caller.kind === 'owner' && !Array.isArray(caller.agents);
+
+/** Who a record says acted: the agent, the member who's an owner, or 'owner'. */
+const actor = (caller) => (caller.kind === 'agent' ? caller.agent : typeof caller.who === 'string' && /^[a-z0-9]+(-[a-z0-9]+)*$/.test(caller.who) ? caller.who : 'owner');
+
 export function up(env, effects, caller, { agent, box, needs, task, session, slot }) {
   let a;
   if (caller.kind === 'agent') {
@@ -283,6 +299,7 @@ export function up(env, effects, caller, { agent, box, needs, task, session, slo
     a = str(agent, 'an agent', 40);
   }
   if (!AGENT_NAME.test(a)) fail('an agent name is lowercase letters, digits and dashes');
+  if (!sees(caller, a)) fail(`${a} isn't one of your agents`, 403);
   // A session house has no task: it waits for someone to attach (loom box session).
   const sess = session === true;
   const t = sess ? '(an interactive session)' : str(task, 'the task', MAX_TASK);
@@ -299,7 +316,7 @@ export function up(env, effects, caller, { agent, box, needs, task, session, slo
     const where = placeHouse(s, a, { box: box || undefined, needs: n }, env);
     const id = nextHouseId(s);
     const at = now(effects);
-    s.houses[id] = { id, agent: a, box: where, task: t, needs: n, state: 'wanted', created: at, updated: at, by: caller.kind === 'agent' ? caller.agent : 'owner', ...(sess ? { session: true } : {}), ...(sl ? { slot: sl } : {}) };
+    s.houses[id] = { id, agent: a, box: where, task: t, needs: n, state: 'wanted', created: at, updated: at, by: actor(caller), ...(sess ? { session: true } : {}), ...(sl ? { slot: sl } : {}) };
     return { id, agent: a, box: where, boxName: boxLabelOf(s, where), state: 'wanted', ...(sess ? { session: true } : {}), ...(sl ? { slot: sl } : {}) };
   });
 }
@@ -307,7 +324,7 @@ export function up(env, effects, caller, { agent, box, needs, task, session, slo
 export function down(env, effects, caller, { id }) {
   return update(env, (s) => {
     const h = s.houses[id];
-    if (!h || (caller.kind === 'agent' && h.agent !== caller.agent)) fail(`no house ${id}`, 404);
+    if (!h || !sees(caller, h.agent)) fail(`no house ${id}`, 404);
     if (h.service && LIVE.has(h.state)) fail(`${id} is the ${h.service} service's house: take the service down (service-down) or move it`, 409);
     if (TERMINAL.has(h.state)) return houseView(h);
     if (h.state === 'wanted') h.state = 'stopped';
@@ -320,18 +337,20 @@ export function down(env, effects, caller, { id }) {
 export function list(env, caller) {
   const s = load(env);
   const houses = Object.values(s.houses)
-    .filter((h) => caller.kind === 'owner' || (caller.kind === 'agent' && h.agent === caller.agent))
+    .filter((h) => sees(caller, h.agent))
     .sort((x, y) => Number(y.id.slice(2)) - Number(x.id.slice(2)))
     .slice(0, 50)
     .map(houseView);
+  // Boxes are the household's: its owner sees them all, with their grants; anyone else, the live ones that may host their agents.
+  const mine = caller.kind === 'agent' ? [caller.agent] : Array.isArray(caller.agents) ? caller.agents : null;
   const boxes = Object.entries(s.boxes)
-    .filter(([, b]) => caller.kind === 'owner' || (!b.revoked && caller.kind === 'agent' && mayHost(b, caller.agent)))
-    .map(([id, b]) => ({ id, name: b.name ?? id, local: !!b.local, facts: factsOf(b), lastSeen: b.lastSeen, ...(caller.kind === 'owner' ? { mayHost: b.mayHost, revoked: b.revoked ?? null, created: b.created } : {}) }));
+    .filter(([, b]) => householdOwner(caller) || (!b.revoked && mine?.some((a) => mayHost(b, a))))
+    .map(([id, b]) => ({ id, name: b.name ?? id, local: !!b.local, facts: factsOf(b), lastSeen: b.lastSeen, ...(householdOwner(caller) ? { mayHost: b.mayHost, revoked: b.revoked ?? null, created: b.created } : {}) }));
   const primary = caller.kind === 'agent' ? primaryOf(s, caller.agent, env) : undefined;
   const services = Object.entries(s.services ?? {})
-    .filter(([, v]) => caller.kind === 'owner' || (caller.kind === 'agent' && v.agent === caller.agent))
+    .filter(([, v]) => sees(caller, v.agent))
     .map(([key, v]) => ({ service: key, agent: v.agent, name: v.name, box: v.box, want: v.want, moveTo: v.moveTo ?? null, house: v.house, state: s.houses[v.house]?.state ?? null, restarts: v.restarts ?? 0, stateSaved: s.serviceState?.[key]?.at ?? null }));
-  const sessions = Object.entries(s.remotes ?? {}).filter(([a]) => caller.kind === 'owner' || (caller.kind === 'agent' && caller.agent === a))
+  const sessions = Object.entries(s.remotes ?? {}).filter(([a]) => sees(caller, a))
     .map(([a, r]) => remoteView(a, r));
   return { boxes, houses, services, remotes: sessions, ...(primary ? { primary } : {}) };
 }
@@ -558,6 +577,7 @@ function speaksFor(s, h) {
 function serviceOf(s, caller, { agent, name }) {
   const a = caller.kind === 'agent' ? caller.agent : agent;
   if (caller.kind === 'agent' && agent && agent !== caller.agent) fail(`this token is ${caller.agent}'s`, 403);
+  if (AGENT_NAME.test(a ?? '') && !sees(caller, a)) fail(`${a} isn't one of your agents`, 403);
   if (!AGENT_NAME.test(a ?? '')) fail('an agent name is lowercase letters, digits and dashes');
   if (!SERVICE_NAME.test(name ?? '')) fail('a service name is lowercase letters, digits and dashes, like discord');
   return { a, key: serviceKey(a, name) };
@@ -627,7 +647,7 @@ export function serviceMove(env, effects, caller, body) {
       return { service: key, box: to, house: id, moving: false };
     }
     if (body.force === true || body.force === 'true') {
-      if (caller.kind !== 'owner') fail('forcing a move is the owner\'s call', 403);
+      if (!householdOwner(caller)) fail('forcing a move is the household owner\'s call', 403);
       if (h.tokenLabel) revokeOrQueue(s, effects, h.tokenLabel);
       h.state = 'lost'; h.note = `written off by a forced move to ${to}`; h.updated = now(effects);
       svc.box = to; delete svc.moveTo;
@@ -815,7 +835,7 @@ export function api(env, effects, { caller, path, body }) {
     if (path === 'service-down') return { status: 200, body: serviceDown(env, effects, caller, b) };
     if (path === 'service-move') return { status: 200, body: serviceMove(env, effects, caller, b) };
     if (OWNER_ONLY[path]) {
-      if (caller.kind !== 'owner') fail(`${path} is the owner's`, 403);
+      if (!householdOwner(caller)) fail(`${path} is the household owner's`, 403);
       return { status: 200, body: OWNER_ONLY[path](env, effects, b) };
     }
     fail(`no such call: ${path}`, 404);
