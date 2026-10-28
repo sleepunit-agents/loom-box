@@ -10,6 +10,7 @@
 // gave it), its own state and nested-container dirs, and the repo mirror
 // read-only. No agent code runs on the box itself. When it ends, its secrets,
 // clone and dirs go.
+import { maybeUpgrade } from './version.mjs';
 import { spawn, spawnSync } from 'node:child_process';
 import { gunzipSync } from 'node:zlib';
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, rmSync, statSync, writeFileSync, writeSync } from 'node:fs';
@@ -363,7 +364,7 @@ function rootless(env) {
  * house went. `client` is the control plane (remote over HTTP, or in-process
  * on loom's own machine); `loomUrl` is what a house is told loom is.
  */
-export function runner(env, client, { loomUrl, labels = [], log = (m) => process.stderr.write(`loom-box: ${m}\n`), hasSocket = (p) => existsSync(p), hasCdi = () => CDI_SPECS.some((p) => existsSync(p)) }) {
+export function runner(env, client, { loomUrl, labels = [], log = (m) => process.stderr.write(`loom-box: ${m}\n`), hasSocket = (p) => existsSync(p), hasCdi = () => CDI_SPECS.some((p) => existsSync(p)), upgrade = maybeUpgrade }) {
   const houses = new Map(); // id -> { child, dir, stopAt? }
   const sessions = boxSessions(env, client, { dataDir: dataDir(env), log });
 
@@ -540,6 +541,11 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
     for (const id of want.stop || []) stop(id);
     for (const h of want.start || []) if (!houses.has(h.id)) await start(h);
     await sessions(want.remotes);
+    // On another loom-box than loom's: install that one, between house starts (version.mjs).
+    try {
+      const did = upgrade({ want: want.version, starting: (want.start || []).length > 0, env, stateDir: stateDir(env) });
+      if (did) log(did);
+    } catch (e) { log(`upgrade: ${e.message}`); }
     return want;
   }
 
