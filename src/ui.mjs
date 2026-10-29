@@ -172,6 +172,13 @@ export function doingOf(h, s) {
   };
 }
 
+/** A house's task in a line for its row: a lane or a wake by its note, else the task's first words; a service as itself. */
+export function houseTask(h, s) {
+  if (h.service) return `(service ${h.service})`;
+  const d = doingOf(h, s);
+  return d.where.startsWith('task ') ? d.text : `${d.where.split(' · ')[0]} · ${d.text}`;
+}
+
 /**
  * Each agent as the box runtime sees it, for its card on loom's Home (docs/extensions.md, "agents"): working while a
  * task house runs; unavailable while a service it wants up is down; broken when one keeps failing. Readings: its
@@ -371,11 +378,11 @@ function agentTabPage(env, agent, caller, nowMs) {
   const live_boxes = view.boxes.filter((b) => !b.revoked).map((b) => ({ ...b, label: boxLabelOf(s, b.id) }));
   const sections = [{ id: 'houses', title: 'Houses', blocks: [
     live.length
-      ? { type: 'list', items: live.slice(0, 30).map((h) => ({ text: h.id, meta: `${nameOf(h.box)} · ${short(h.task)}`, badge: h.state, tone: toneOf(h.state),
+      ? { type: 'list', items: live.slice(0, 30).map((h) => ({ text: h.id, meta: `${nameOf(h.box)} · ${short(houseTask(h, s))}`, badge: h.state, tone: toneOf(h.state),
         ...(h.state === 'wanted' || h.state === 'running' || h.state === 'starting' ? { act: { action: 'down', label: 'Stop', tone: 'danger', fields: { id: h.id }, confirm: `${h.id} stops.` } } : {}) })) }
       : { type: 'text', tone: 'muted', text: 'No houses up now.' },
     ...(houses.length > live.length ? [{ type: 'details', summary: 'Recent', blocks: [{ type: 'table', columns: ['House', 'Box', 'State', 'Task', 'Updated'],
-      rows: houses.filter((h) => !LIVE.has(h.state)).slice(0, 20).map((h) => [h.id, nameOf(h.box), h.state + (h.exit !== undefined ? ` (exit ${h.exit})` : ''), short(h.task), ago(h.updated, nowMs)]) }] }] : []),
+      rows: houses.filter((h) => !LIVE.has(h.state)).slice(0, 20).map((h) => [h.id, nameOf(h.box), h.state + (h.exit !== undefined ? ` (exit ${h.exit})` : ''), short(houseTask(h, s)), ago(h.updated, nowMs)]) }] }] : []),
   ] }];
   const svcs = view.services.filter((v) => v.agent === agent);
   if (svcs.length) {
