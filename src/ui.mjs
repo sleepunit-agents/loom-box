@@ -156,6 +156,23 @@ export function taskLine(task) {
 }
 
 /**
+ * A running task house as one thing its agent has going (loom's `doing`): a lane (the clock's schedule) or a wake,
+ * by its note; anything else, by its task's first words.
+ */
+export function doingOf(h, s) {
+  let t = String(h.task ?? '');
+  try { const j = JSON.parse(t); if (j && typeof j.prompt === 'string') t = j.prompt; } catch { /* plain text */ }
+  const m = /\(wake id w-[0-9a-f]+, kind (\w+)[^)]*?note: ([^\n]*?)\)\.\s/.exec(t);
+  const lane = m?.[1] === 'schedule';
+  const text = m ? m[2].replace(/^schedule\s+/, '').trim() : taskLine(h.task);
+  return {
+    text: (text || 'a task').slice(0, 100), kind: lane ? 'lane' : 'task',
+    where: `${lane ? 'lane' : m ? 'wake' : 'task'} · ${h.id} on ${boxLabelOf(s, h.box)}`,
+    since: h.started ?? h.created,
+  };
+}
+
+/**
  * Each agent as the box runtime sees it, for its card on loom's Home (docs/extensions.md, "agents"): working while a
  * task house runs; unavailable while a service it wants up is down; broken when one keeps failing. Readings: its
  * bridges, its remote sessions, and how many tasks are running. It says nothing about an agent with nothing here.
@@ -199,6 +216,13 @@ export function agentReports(s, nowMs = Date.now(), busy = {}) {
     if (remote.length) readings.push({ label: 'Remote', value: remote.join(' · '), tone: (r && r.want === 'up' && r.error) ? 'warn' : undefined });
     if (tasks.length) readings.push({ label: 'Tasks', value: `${tasks.length} running`, detail: tasks.map((h) => `${h.id} on ${boxLabelOf(s, h.box)}`).slice(0, 3).join(', ') });
     const report = { readings: readings.map((x) => Object.fromEntries(Object.entries(x).filter(([, v]) => v !== undefined))).slice(0, 4) };
+    // What it has going, for its card (loom's `doing`): each running task house, and a remote session mid-turn.
+    const doing = [
+      ...tasks.filter((h) => h.state === 'running').map((h) => doingOf(h, s)),
+      ...(r && r.want === 'up' && busy[`box:${r.name}`] === true ? [{ text: 'A remote session', kind: 'session', where: `box session on ${boxLabelOf(s, r.box)}` }] : []),
+      ...(rs && up(rs) && busy[`house:${rs.house}`] === true ? [{ text: 'A remote session', kind: 'session', where: `house session · ${rs.house}` }] : []),
+    ].slice(0, 6);
+    if (doing.length) report.doing = doing;
     if (failing.length) Object.assign(report, { state: 'broken', reason: `${failing.map((v) => v.name).join(' and ')} keep${failing.length === 1 ? 's' : ''} failing (${failing[0].restarts} restarts)` });
     else if (down.length) Object.assign(report, { state: 'unavailable', reason: `${down.map((v) => v.name).join(' and ')} ${down.length === 1 ? 'is' : 'are'} down` });
     else if (!tasks.length && working.length) Object.assign(report, { state: 'working', reason: `in a remote session: ${working.join(', ')}` });
@@ -206,7 +230,7 @@ export function agentReports(s, nowMs = Date.now(), busy = {}) {
       const h = tasks[0];
       Object.assign(report, { state: 'working', reason: `${taskLine(h.task)} · ${h.id} on ${boxLabelOf(s, h.box)}${h.started ? ` · ${shortAge(h.started, nowMs)}` : ` · ${h.state}`}` });
     }
-    if (report.state || report.readings.length) out[a] = report;
+    if (report.state || report.readings.length || report.doing) out[a] = report;
   }
   return out;
 }

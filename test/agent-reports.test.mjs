@@ -74,3 +74,20 @@ test('FYI for loom\'s Inbox: a box that joined this week, a task house that fail
   assert.equal(n[0].meta, 'Failed to authenticate: OAuth token revoked.');
   assert.equal(n[1].meta, 'cpus:64, gpu:nvidia-geforce-rtx-5090');
 });
+
+test('doing (loom\'s summary card): each running task house by its note, a lane apart from a wake, and a remote session mid-turn', () => {
+  const s = state();
+  s.houses['h-130'] = { id: 'h-130', agent: 'art', box: 'loom', state: 'running', created: ago(3), started: ago(2),
+    task: JSON.stringify({ prompt: 'You are Art, waking from a self-set alarm in a fresh house (loom-box) (wake id w-ab12cd, kind schedule, set 2026-10-27 08:00:00, note: schedule reflect: nightly retro). Go.' }) };
+  s.remotes.art.name = 'art';
+  const r = agentReports(s, now, { 'box:art': true });
+  assert.deepEqual(r.art.doing, [
+    { text: 'reflect: nightly retro', kind: 'lane', where: 'lane · h-130 on loom', since: ago(2) },   // newest first
+    { text: 't-1486: pond rollup (part a)', kind: 'task', where: 'wake · h-121 on one', since: ago(7) },
+    { text: 'A remote session', kind: 'session', where: 'box session on loom' },
+  ]);
+  // Starting isn't doing yet; an idle session isn't either; and Mark, with nothing going, has no doing at all.
+  assert.ok(!r.art.doing.some((d) => d.where.includes('h-122')));
+  assert.equal(agentReports(s, now, { 'box:art': false }).art.doing.length, 2);
+  assert.equal(r.mark.doing, undefined);
+});
