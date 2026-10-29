@@ -2,7 +2,7 @@
 // while a service it wants up is down, broken when one keeps failing; and its bridges, remote sessions and tasks.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { agentReports, manifest, taskLine } from '../src/ui.mjs';
+import { agentReports, houseTask, manifest, taskLine } from '../src/ui.mjs';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -90,4 +90,14 @@ test('doing (loom\'s summary card): each running task house by its note, a lane 
   assert.ok(!r.art.doing.some((d) => d.where.includes('h-122')));
   assert.equal(agentReports(s, now, { 'box:art': false }).art.doing.length, 2);
   assert.equal(r.mark.doing, undefined);
+});
+
+test('a house\'s row says its task in a line: a lane or a wake by its note, a service as itself, never the raw prompt', () => {
+  const s = state();
+  const lane = { id: 'h-130', box: 'loom', task: JSON.stringify({ prompt: 'You are Art, waking from a self-set alarm in a fresh house (loom-box) (wake id w-ab12cd, kind schedule, set 2026-10-27 08:00:00, note: schedule reflect: nightly retro). Go.' }) };
+  assert.equal(houseTask(lane, s), 'lane · reflect: nightly retro');
+  assert.equal(houseTask(s.houses['h-121'], s), 'wake · t-1486: pond rollup (part a)');
+  assert.equal(houseTask(s.houses['h-79'], s), '(service discord)');
+  assert.equal(houseTask(s.houses['h-122'], s), 'check CI');
+  assert.ok(!houseTask(lane, s).includes('prompt'));
 });
