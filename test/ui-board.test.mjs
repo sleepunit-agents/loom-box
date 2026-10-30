@@ -95,3 +95,39 @@ test("an agent owner's page is their agents' houses and services; the household'
   // The household owner's board, as before.
   assert.notEqual(page(env, { path: '', caller: { kind: 'owner', who: 'jonathan-barket', agents: '*' } }).title, 'Houses');
 });
+
+test("the Houses tab names each house by what it is (its service, its wake), its id trailing; a box's machine in words; just now, not 0s ago", () => {
+  const { env, fx } = setup();
+  assert.equal(act(env, fx, { action: 'service-up', fields: { agent: 'art', name: 'discord' } }).ok, true);
+  const wake = 'You are Art, waking (wake id w-6b2931, kind wake, set 2026-10-30 08:00:00, note: t-1689 cadence runner build round 1). Go.';
+  api(env, fx, { caller: { kind: 'agent', agent: 'art' }, path: 'up', body: { task: JSON.stringify({ prompt: wake }) } });
+  const s = load(env);
+  const bridge = s.services['art/discord'].house;
+  const task = Object.values(s.houses).find((h) => !h.service).id;
+  const p = page({ ...env, LOOM_SCOPE: 'art' }, { path: '' });
+  const rows = section(p, 'houses').blocks[0].items;
+  assert.deepEqual(rows.map((r) => [r.text, r.meta]).sort(), [
+    ["Art's Discord bridge", `one · ${bridge}`],
+    ['Wake: cadence runner build round 1 (t-1689)', `one · ${task}`],
+  ].sort());
+  assert.ok(rows.every((r) => r.act.confirm === 'This house stops.'));
+  // A stopped house goes to Recent: named the same, the id last, its age "just now".
+  assert.equal(act(env, fx, { action: 'down', fields: { id: task } }).ok, true);
+  const box = { caller: { kind: 'piece', subject: 'one' } };
+  api(env, fx, { ...box, path: 'claim', body: { id: task } });
+  api(env, fx, { ...box, path: 'report', body: { id: task, state: 'stopped', exit: 0 } });
+  const recent = section(page({ ...env, LOOM_SCOPE: 'art' }, { path: '' }), 'houses').blocks.find((b) => b.type === 'details').blocks[0];
+  assert.deepEqual(recent.columns, ['House', 'Box', 'State', 'Updated', 'Id']);
+  const row = recent.rows.find((r) => r[4] === task);
+  assert.equal(row[0], 'Wake: cadence runner build round 1 (t-1689)');
+  assert.equal(row[3], 'just now');
+  // The box's Machine card: its facts in words.
+  const st = load(env);
+  st.boxes.one.facts = ['os:linux', 'arch:x86_64', 'cpus:64', 'mem:94g', 'gpu:nvidia-geforce-rtx-5090', 'runtime:podman'];
+  writeFileSync(join(env.LOOM_BOX_HOME, 'state.json'), JSON.stringify(st));
+  const kv = section(page(env, { path: '' }), 'box-one').blocks.find((b) => b.summary === 'Machine').blocks[0].items;
+  assert.deepEqual(kv.slice(0, 6), [
+    { label: 'System', value: 'Linux' }, { label: 'Architecture', value: 'x86-64' }, { label: 'CPUs', value: '64' },
+    { label: 'Memory', value: '94 GB' }, { label: 'GPU', value: 'NVIDIA GeForce RTX 5090' }, { label: 'Runtime', value: 'podman' },
+  ]);
+});
