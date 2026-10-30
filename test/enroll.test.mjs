@@ -34,6 +34,7 @@ test('a box asks, the owner lets it in on the page, and only the box with the pr
   assert.equal(r.body.code, codeOf(sha(proof)));
   // The card: name, where it's from, the code to match.
   const [ask] = manifest(env).asks;
+  assert.equal(ask.kind, 'permission', "loom's Inbox files it under Permissions");
   assert.match(ask.text, /one-loom/);
   assert.match(ask.meta, new RegExp(`192\\.168\\.6\\.77, code ${r.body.code}`));
   assert.deepEqual(ask.actions.map((a) => a.action), ['allow-join', 'block-join']);
