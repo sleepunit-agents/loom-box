@@ -505,6 +505,28 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
     setTimeout(() => { try { process.kill(-e.child.pid, 'SIGKILL'); } catch { /* gone */ } }, STOP_GRACE_MS).unref();
   }
 
+  /**
+   * This box's own process going down (systemd restarting it, a deploy): every
+   * house still tracked gets the same per-house `stop(id)` a manual `down`
+   * reaches, and this waits for them rather than leaving the caller to exit out
+   * from under them — t-1498, `podman stop -t 25` never ran on a bare SIGTERM,
+   * so a container whose PID 1 ignores SIGTERM (no handler) never exited, and
+   * systemd's own stop timeout fired instead. A box can't tell the control
+   * plane a house is "stopping" (that's the owner's or agent's `down` to ask
+   * for); it can only make podman actually stop the container, so the house's
+   * own report of this still lands as its control-plane state allows (usually
+   * "failed" on the next poll, the same outcome this restart already produced
+   * before systemd's own timeout forced it) — stopping the container fast and
+   * cleanly, well under systemd's stop timeout, is the whole of this fix.
+   * A little past every house's own grace period, in case the last one's
+   * SIGKILL fallback is still landing.
+   */
+  async function shutdown() {
+    for (const id of houses.keys()) stop(id);
+    const until = Date.now() + STOP_GRACE_MS + 5_000;
+    while (houses.size && Date.now() < until) await new Promise((res) => setTimeout(res, 200));
+  }
+
   async function tick() {
     // Which remote sessions here are mid-turn (busy.mjs): loom shows it on the agents' cards (t-1624).
     let busy;
@@ -549,7 +571,7 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
     return want;
   }
 
-  return { tick, stop, houses };
+  return { tick, stop, houses, shutdown };
 }
 
 export { dataDir };
