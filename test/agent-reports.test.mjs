@@ -6,6 +6,7 @@ import { agentReports, houseTask, manifest, taskLine } from '../src/ui.mjs';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { scratch } from './scratch.mjs';
 
 const now = Date.parse('2026-10-27T18:40:00Z');
 const ago = (m) => new Date(now - m * 60_000).toISOString();
@@ -57,7 +58,7 @@ test('a service down past its grace is unavailable; one that keeps failing is br
 
 test('a task line falls back to the task itself, and loom\'s manifest carries the reports', () => {
   assert.equal(taskLine('check CI on loom#274'), 'check CI on loom#274');
-  const home = mkdtempSync(join(tmpdir(), 'loom-box-ar-'));
+  const home = scratch('loom-box-ar-');
   const m = manifest({ HOME: home, LOOM_BOX_HOME: join(home, 'state'), LOOM_BOX_LOCAL_NAME: 'loom' });
   assert.deepEqual(m.agents, {});
 });

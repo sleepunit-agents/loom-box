@@ -8,9 +8,10 @@ import { join } from 'node:path';
 import { act, page } from '../src/ui.mjs';
 import { load } from '../src/state.mjs';
 import { api } from '../src/control.mjs';
+import { scratch } from './scratch.mjs';
 
 function setup() {
-  const env = { HOME: mkdtempSync(join(tmpdir(), 'loom-box-b-')), LOOM_BOX_LOCAL_NAME: 'one' };
+  const env = { HOME: scratch('loom-box-b-'), LOOM_BOX_LOCAL_NAME: 'one' };
   env.LOOM_BOX_HOME = join(env.HOME, 'state');
   env.LOOM_BOX_DATA = join(env.HOME, 'data');
   const fx = { now: () => new Date(), mint: () => 'loom_' + 'x'.repeat(30), revoke: () => {}, secret: () => 's' };

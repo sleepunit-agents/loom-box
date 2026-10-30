@@ -5,6 +5,7 @@ import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ownCommit, maybeUpgrade, vetCommit, UPGRADE_RETRY_MS } from '../src/version.mjs';
+import { scratch } from './scratch.mjs';
 
 const A = 'a'.repeat(40), B = 'b'.repeat(40);
 
@@ -14,7 +15,7 @@ test('a process knows its commit from the path loom installed it at; a dev check
 });
 
 test('a box on another commit installs loom\'s, from a unit of its own, once until the retry time', () => {
-  const stateDir = mkdtempSync(join(tmpdir(), 'loom-box-v-'));
+  const stateDir = scratch('loom-box-v-');
   const runs = [];
   const spawn = (cmd, args) => { runs.push([cmd, ...args]); return { status: 0 }; };
   const t0 = Date.parse('2026-10-28T12:00:00Z');
@@ -30,7 +31,7 @@ test('a box on another commit installs loom\'s, from a unit of its own, once unt
 });
 
 test('nothing when it\'s the same, unknown, mid-start, off, or loom names no commit', () => {
-  const stateDir = mkdtempSync(join(tmpdir(), 'loom-box-v-'));
+  const stateDir = scratch('loom-box-v-');
   const spawn = () => assert.fail('nothing should run');
   for (const args of [{ want: A, mine: A }, { want: B, mine: null }, { want: B, mine: A, starting: true },
     { want: B, mine: A, env: { LOOM_BOX_UPGRADE: 'off' } }, { want: undefined, mine: A }, { want: 'not-a-commit', mine: A }]) {
@@ -39,7 +40,7 @@ test('nothing when it\'s the same, unknown, mid-start, off, or loom names no com
 });
 
 test('a commit the box can\'t vet isn\'t installed: off main, or behind what it runs', () => {
-  const stateDir = mkdtempSync(join(tmpdir(), 'loom-box-v-'));
+  const stateDir = scratch('loom-box-v-');
   const spawn = () => assert.fail('nothing should be installed');
   assert.match(maybeUpgrade({ want: B, mine: A, stateDir, env: {}, spawn, vet: () => `${B.slice(0, 7)} isn't on sleepunit-agents/loom-box's main` }), /not installing loom-box bbbbbbb: .* isn't on/);
 });

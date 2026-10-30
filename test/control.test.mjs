@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MAX_CLAIM_TRIES, api, meets } from '../src/control.mjs';
 import { load } from '../src/state.mjs';
+import { scratch } from './scratch.mjs';
 
 let env, fx, minted, revoked;
 const owner = { kind: 'owner' };
@@ -26,7 +27,7 @@ const call = (caller, path, body = {}) => api(env, fx, { caller, path, body });
 const ok = (r) => { assert.equal(r.status, 200, JSON.stringify(r.body)); return r.body; };
 
 beforeEach(() => {
-  env = { HOME: mkdtempSync(join(tmpdir(), 'loom-box-')), LOOM_BOX_LOCAL_NAME: 'one' };
+  env = { HOME: scratch('loom-box-'), LOOM_BOX_LOCAL_NAME: 'one' };
   env.LOOM_BOX_HOME = join(env.HOME, 'state');
   minted = []; revoked = [];
   let n = 0;

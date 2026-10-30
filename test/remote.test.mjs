@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { api } from '../src/control.mjs';
 import { boxSessions, loginPath, unitOf } from '../src/remote.mjs';
+import { scratch } from './scratch.mjs';
 
 let env, fx, fake, folder;
 const owner = { kind: 'owner' };
@@ -24,7 +25,7 @@ const client = { call: async (path, body) => ok(call(box('one'), path, body)) };
 const runs = () => (existsSync(join(fake, 'calls')) ? readFileSync(join(fake, 'calls'), 'utf-8').trim().split('\n').map((l) => JSON.parse(l)) : []);
 
 beforeEach(() => {
-  env = { HOME: mkdtempSync(join(tmpdir(), 'loom-box-remote-')), LOOM_BOX_LOCAL_NAME: 'one', PATH: process.env.PATH };
+  env = { HOME: scratch('loom-box-remote-'), LOOM_BOX_LOCAL_NAME: 'one', PATH: process.env.PATH };
   env.LOOM_BOX_HOME = join(env.HOME, 'state');
   env.LOOM_BOX_DATA = join(env.HOME, 'data');
   fx = { now: () => new Date('2026-10-25T03:00:00Z'), mint: () => 'loom_x', revoke: () => {}, secret: (n) => `v-${n}` };

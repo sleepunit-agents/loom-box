@@ -22,6 +22,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { api } from '../src/control.mjs';
+import { scratch } from './scratch.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const cli = join(here, '..', 'src', 'cli.mjs');
@@ -66,7 +67,7 @@ function fakeLoom(env, fx, boxId) {
 }
 
 test('SIGTERM stops every running house before loom-box exits (t-1498)', async () => {
-  const home = mkdtempSync(join(tmpdir(), 'loom-box-term-'));
+  const home = scratch('loom-box-term-');
   const bin = join(home, 'bin');
   mkdirSync(bin);
   copyFileSync(join(here, 'fake-podman.mjs'), join(bin, 'podman'));
