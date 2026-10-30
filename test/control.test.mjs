@@ -147,6 +147,35 @@ test('secrets for a house go once, to its box, and the house token is the agent\
   assert.equal(JSON.stringify(ok(call(owner, 'list'))).includes('tokenLabel'), false);
 });
 
+test('a token a killed mint left under the house\'s own label is revoked and minted again, once', () => {
+  // 2026-10-30: \`loom token create\` for h-438 was killed on its timeout after writing the token, and every claim
+  // after it failed "a live token is already labeled …" until someone revoked it by hand. The house is still
+  // waiting to start, so nothing can be using that token.
+  ok(call(owner, 'add-box', { name: 'thor' }));
+  const h = ok(call(art, 'up', { box: 'thor', task: 'x' }));
+  const label = `art · house ${h.id} on thor`;
+  let live = new Set([label]);
+  const left = {
+    ...fx,
+    mint: (role, l) => {
+      if (live.has(l)) throw new Error(`minting a token: a live token is already labeled ${JSON.stringify(l)}`);
+      live.add(l); return fx.mint(role, l);
+    },
+    revoke: (l) => { live.delete(l); fx.revoke(l); },
+  };
+  const c = ok(api(env, left, { caller: box('thor'), path: 'claim', body: { id: h.id } }));
+  assert.match(c.token, /^loom_/);
+  assert.deepEqual(revoked, [label]);
+  // Some other failure isn't retried, and a second "already labeled" (the revoke didn't take) fails the claim.
+  const h2 = ok(call(art, 'up', { box: 'thor', task: 'y' }));
+  const stuck = { ...fx, mint: () => { throw new Error('minting a token: a live token is already labeled "x"'); }, revoke: () => {} };
+  assert.equal(api(env, stuck, { caller: box('thor'), path: 'claim', body: { id: h2.id } }).status, 500);
+  const other = { ...fx, mint: () => { throw new Error('minting a token: loom printed something other than a token'); } };
+  revoked.length = 0;
+  assert.equal(api(env, other, { caller: box('thor'), path: 'claim', body: { id: h2.id } }).status, 500);
+  assert.deepEqual(revoked, []);
+});
+
 test('a secret that can\'t be read fails the claim and revokes the token it minted', () => {
   fx.secret = () => { throw new Error('store locked'); };
   const h = ok(call(art, 'up', { task: 'x' }));
