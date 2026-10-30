@@ -57,7 +57,7 @@ function sessionsSection(env, s, view, only) {
     const rs = view.services.find((v) => v.agent === a && v.name === 'remote');
     if (rs) {
       const link = rs.want === 'up' && rs.house ? remoteLink(env, rs.house) : null;
-      items.push({ text: `${a}'s house: house session`, meta: rs.want === 'up' ? `${rs.state ?? 'starting'} · ${rs.house} on ${boxLabelOf(s, rs.box)}` : 'down', tone: rs.want !== 'up' ? 'muted' : rs.state === 'running' ? 'ok' : 'warn', agent: a, ...(link ? { href: link } : {}),
+      items.push({ text: `${a}'s house: house session`, meta: rs.want === 'up' ? `${rs.state ?? 'starting'} on ${boxLabelOf(s, rs.box)}` : 'down', tone: rs.want !== 'up' ? 'muted' : rs.state === 'running' ? 'ok' : 'warn', agent: a, ...(link ? { href: link } : {}),
         act: rs.want === 'up'
           ? { action: 'service-down', label: 'Down', tone: 'danger', confirm: 'The house stops; anything open in the Claude app on it stops.', fields: { agent: a, name: 'remote' } }
           : { action: 'service-up', label: 'Up', tone: 'primary', fields: { agent: a, name: 'remote' } } });
@@ -150,9 +150,17 @@ const shortAge = (iso, nowMs) => {
 /** A wake's note (an agent's words) in a label: an approval's or request's id dropped, a leading task id after the words. */
 export function plainNote(note) {
   const t = String(note ?? '').replace(/\((?:[aq]-[0-9a-f]{6,}) (\w+)\)/g, '($1)').trim();
+  // The clock's resumed-wake prefix, old ("unparked (allowed): X") or new ("Resumed after your OK: X"), as the new.
+  const r = RESUMED_NOTE.exec(t);
+  if (r) return `Resumed after your OK${r[1] ? `: ${plainNote(r[1])}` : ''}`;
   const m = /^(t-\d+)[:,\s]+(\S.*)$/.exec(t);
   return m ? `${m[2]} (${m[1]})` : t;
 }
+
+/** A resumed wake's note prefix, either form, an id in it or not; group 1 is the agent's own note after it. */
+const RESUMED_NOTE = /^(?:unparked \((?:[aq]-[0-9a-f]{6,} )?(?:allowed|granted)\)|Resumed after your OK(?: \(?[aq]-[0-9a-f]{6,}\)?)?):?\s*(.*)$/;
+/** The clock's head on a wake resumed after Jonathan's OK (wake/wake unpark): "Jonathan allowed a-…. Pick up where you left off…". */
+const RESUMED_HEAD = /(?:^|\n)\s*Jonathan allowed [aq]-[0-9a-f]{6,}\.\s+Pick up where you left off\b/;
 
 const cap = (t) => (t ? t[0].toUpperCase() + t.slice(1) : t);
 /** A lane's name as words: "knowledge-verify" -> "Knowledge verify". */
@@ -170,6 +178,12 @@ function wakeOf(task) {
 /** What a task house is doing, in a line: a wake's note (the clock puts it in the prompt), else the task's start. */
 export function taskLine(task) {
   const w = wakeOf(task);
+  if (RESUMED_HEAD.test(w.t)) {
+    // Never the approval's or request's id: the resumed agent needs it, Jonathan doesn't.
+    const r = w.note !== undefined ? RESUMED_NOTE.exec(w.note.trim()) : null;
+    const n = plainNote(r ? r[1] : (w.note ?? '').replace(/^schedule\s+/, ''));
+    return (n ? `Picking up after your OK: ${n}` : 'Picking up after your OK').slice(0, 120);
+  }
   if (w.note !== undefined) return plainNote(w.note.replace(/^schedule\s+/, '')).slice(0, 120) || 'a wake';
   return w.t.replace(/\s+/g, ' ').trim().slice(0, 120) || 'a task';
 }
@@ -190,6 +204,7 @@ export function houseName(h) {
     const lm = /^([a-z][a-z0-9-]*)(?::\s*(.*))?$/.exec(t);
     return lm ? `${laneWords(lm[1])} lane${lm[2] ? `: ${lm[2]}` : ''}` : `Lane: ${t}`;
   }
+  if (RESUMED_HEAD.test(w.t)) return taskLine(h.task);
   if (w.note !== undefined) return `Wake: ${taskLine(h.task)}`;
   return taskLine(h.task);
 }
@@ -346,7 +361,7 @@ function boxesPage(env, nowMs) {
       { type: 'text', tone: 'muted', text: b.local ? `Up ${span(uptime() * 1000)}` : b.lastSeen ? `Seen ${ago(b.lastSeen, nowMs)}` : 'Not joined yet' },
       ...(disk ? [{ type: 'meter', items: [{ label: 'Disk', value: disk.used, detail: `${disk.free} free`, ...(disk.used >= 0.95 ? { tone: 'bad' } : disk.used >= 0.85 ? { tone: 'warn' } : {}) }] }] : []),
       here.length
-        ? { type: 'list', items: here.slice(0, 20).map((h) => ({ text: svcOf.has(h.id) ? `${h.agent}'s ${svcOf.get(h.id)}` : `${h.agent}'s house`, meta: h.id, badge: h.state, tone: toneOf(h.state), agent: h.agent })) }
+        ? { type: 'list', items: here.slice(0, 20).map((h) => ({ text: svcOf.has(h.id) ? `${h.agent}'s ${svcOf.get(h.id)}` : `${h.agent}'s house`, ...(svcOf.has(h.id) ? {} : { meta: short(houseName(h)) }), badge: h.state, tone: toneOf(h.state), agent: h.agent })) }
         : { type: 'text', tone: 'muted', text: 'No houses on it now.' },
       { type: 'details', summary: 'Machine', meta: b.local ? 'here' : '', blocks: [{ type: 'kv', items: [
         ...b.facts.map(factRow),
@@ -438,18 +453,18 @@ function agentTabPage(env, agent, caller, nowMs) {
   const live_boxes = view.boxes.filter((b) => !b.revoked).map((b) => ({ ...b, label: boxLabelOf(s, b.id) }));
   const sections = [{ id: 'houses', title: 'Houses', blocks: [
     live.length
-      ? { type: 'list', items: live.slice(0, 30).map((h) => ({ text: short(houseName(h)), meta: `${nameOf(h.box)} · ${h.id}`, badge: h.state, tone: toneOf(h.state),
+      ? { type: 'list', items: live.slice(0, 30).map((h) => ({ text: short(houseName(h)), meta: nameOf(h.box), badge: h.state, tone: toneOf(h.state),
         ...(h.state === 'wanted' || h.state === 'running' || h.state === 'starting' ? { act: { action: 'down', label: 'Stop', tone: 'danger', fields: { id: h.id }, confirm: 'This house stops.' } } : {}) })) }
       : { type: 'text', tone: 'muted', text: 'No houses up now.' },
-    ...(houses.length > live.length ? [{ type: 'details', summary: 'Recent', blocks: [{ type: 'table', columns: ['House', 'Box', 'State', 'Updated', 'Id'],
-      rows: houses.filter((h) => !LIVE.has(h.state)).slice(0, 20).map((h) => [short(houseName(h)), nameOf(h.box), h.state + (h.exit !== undefined ? ` (exit ${h.exit})` : ''), ago(h.updated, nowMs), h.id]) }] }] : []),
+    ...(houses.length > live.length ? [{ type: 'details', summary: 'Recent', blocks: [{ type: 'table', columns: ['House', 'Box', 'State', 'Updated'],
+      rows: houses.filter((h) => !LIVE.has(h.state)).slice(0, 20).map((h) => [short(houseName(h)), nameOf(h.box), h.state + (h.exit !== undefined ? ` (exit ${h.exit})` : ''), ago(h.updated, nowMs)]) }] }] : []),
   ] }];
   const svcs = view.services.filter((v) => v.agent === agent);
   if (svcs.length) {
     sections.push({ id: 'services', title: 'Services', blocks: [
       { type: 'list', items: svcs.map((v) => ({
         text: v.name,
-        meta: v.want === 'up' ? `${v.moveTo ? `${nameOf(v.box)} → ${nameOf(v.moveTo)}` : nameOf(v.box)} · ${v.house} ${v.state ?? ''}${v.restarts ? ` · ${v.restarts} restart${v.restarts === 1 ? '' : 's'}` : ''}` : 'down',
+        meta: v.want === 'up' ? `${v.moveTo ? `${nameOf(v.box)} → ${nameOf(v.moveTo)}` : nameOf(v.box)} · ${v.state ?? 'no house yet'}${v.restarts ? ` · ${v.restarts} restart${v.restarts === 1 ? '' : 's'}` : ''}` : 'down',
         tone: v.want !== 'up' ? 'muted' : v.state === 'running' ? 'ok' : v.state === 'failed' || v.state === 'lost' ? 'bad' : 'warn',
         act: v.want === 'up'
           ? { action: 'service-restart', label: 'Restart', ...(v.state === 'failed' || v.state === 'lost' ? { tone: 'primary' } : {}), fields: { agent: v.agent, name: v.name } }
@@ -541,7 +556,7 @@ function agentOwnerPage(env, caller, nowMs) {
   const view = list(env, caller);
   const live = view.houses.filter((h) => LIVE.has(h.state));
   const sections = [{ id: 'houses', title: 'Houses', blocks: [live.length
-    ? { type: 'list', items: live.slice(0, 30).map((h) => ({ text: short(houseName(h)), meta: `${h.state} · ${h.id}`, badge: h.state, tone: toneOf(h.state), agent: h.agent,
+    ? { type: 'list', items: live.slice(0, 30).map((h) => ({ text: short(houseName(h)), meta: h.state, badge: h.state, tone: toneOf(h.state), agent: h.agent,
       ...(h.state === 'wanted' || h.state === 'running' || h.state === 'starting' ? { act: { action: 'down', label: 'Stop', tone: 'danger', fields: { id: h.id }, confirm: 'This house stops.' } } : {}) })) }
     : { type: 'text', tone: 'muted', text: `No houses for ${caller.agents.join(', ')} now.` }] }];
   if (view.services.length) {

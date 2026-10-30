@@ -96,7 +96,7 @@ test("an agent owner's page is their agents' houses and services; the household'
   assert.notEqual(page(env, { path: '', caller: { kind: 'owner', who: 'jonathan-barket', agents: '*' } }).title, 'Houses');
 });
 
-test("the Houses tab names each house by what it is (its service, its wake), its id trailing; a box's machine in words; just now, not 0s ago", () => {
+test("the Houses tab names each house by what it is (its service, its wake), no house id in sight; a box's machine in words; just now, not 0s ago", () => {
   const { env, fx } = setup();
   assert.equal(act(env, fx, { action: 'service-up', fields: { agent: 'art', name: 'discord' } }).ok, true);
   const wake = 'You are Art, waking (wake id w-6b2931, kind wake, set 2026-10-30 08:00:00, note: t-1689 cadence runner build round 1). Go.';
@@ -107,18 +107,24 @@ test("the Houses tab names each house by what it is (its service, its wake), its
   const p = page({ ...env, LOOM_SCOPE: 'art' }, { path: '' });
   const rows = section(p, 'houses').blocks[0].items;
   assert.deepEqual(rows.map((r) => [r.text, r.meta]).sort(), [
-    ["Art's Discord bridge", `one · ${bridge}`],
-    ['Wake: cadence runner build round 1 (t-1689)', `one · ${task}`],
+    // Before (#42): "one · h-…". After: the box alone.
+    ["Art's Discord bridge", 'one'],
+    ['Wake: cadence runner build round 1 (t-1689)', 'one'],
   ].sort());
   assert.ok(rows.every((r) => r.act.confirm === 'This house stops.'));
-  // A stopped house goes to Recent: named the same, the id last, its age "just now".
+  // The id stays where it works: the Stop action's field.
+  assert.deepEqual(rows.map((r) => r.act.fields.id).sort(), [bridge, task].sort());
+  assert.ok(!JSON.stringify(section(p, 'houses').blocks.map((b) => (b.items ?? []).map((r) => [r.text, r.meta]))).match(/\bh-\d+/), 'no house id in a row');
+  // A stopped house goes to Recent: named the same, its age "just now", no Id column (before: [..., 'Updated', 'Id']).
   assert.equal(act(env, fx, { action: 'down', fields: { id: task } }).ok, true);
   const box = { caller: { kind: 'piece', subject: 'one' } };
   api(env, fx, { ...box, path: 'claim', body: { id: task } });
   api(env, fx, { ...box, path: 'report', body: { id: task, state: 'stopped', exit: 0 } });
   const recent = section(page({ ...env, LOOM_SCOPE: 'art' }, { path: '' }), 'houses').blocks.find((b) => b.type === 'details').blocks[0];
-  assert.deepEqual(recent.columns, ['House', 'Box', 'State', 'Updated', 'Id']);
-  const row = recent.rows.find((r) => r[4] === task);
+  assert.deepEqual(recent.columns, ['House', 'Box', 'State', 'Updated']);
+  assert.equal(recent.rows.length, 1);
+  assert.ok(recent.rows.every((r) => r.length === 4 && !r.some((c) => /\bh-\d+/.test(c))), 'no house id in Recent');
+  const row = recent.rows[0];
   assert.equal(row[0], 'Wake: cadence runner build round 1 (t-1689)');
   assert.equal(row[3], 'just now');
   // The box's Machine card: its facts in words.
