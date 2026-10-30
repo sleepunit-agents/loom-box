@@ -4,8 +4,9 @@
 // Values only ever travel on pipes, never in argv.
 import { spawnSync } from 'node:child_process';
 
+// 60s: on 2026-10-30 a `loom token create` on a box at load 120+ outran 20s and was killed after writing its token.
 function run(cmd, args, env, what) {
-  const r = spawnSync(cmd, args, { env, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 20_000 });
+  const r = spawnSync(cmd, args, { env, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000 });
   if (r.error) throw new Error(`${what}: can't run ${cmd}: ${r.error.message}`);
   if (r.status !== 0) throw new Error(`${what}: ${(r.stderr || '').trim().split('\n').pop() || `${cmd} exited ${r.status}`}`);
   return r.stdout;

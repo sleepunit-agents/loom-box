@@ -439,7 +439,18 @@ export function claim(env, effects, caller, { id }) {
     // A service house's token says so (agent:<a>/<service>): a piece can tell
     // the agent's bridge from its other bodies (t-1591, shuttle's relay-take).
     // ...and names its house, so a piece can grant this house alone (the secrets piece's requests).
-    const token = effects.mint(['--agent', h.agent, ...(h.service ? ['--service', h.service] : []), '--house', h.id], label);
+    const role = ['--agent', h.agent, ...(h.service ? ['--service', h.service] : []), '--house', h.id];
+    let token;
+    try {
+      token = effects.mint(role, label);
+    } catch (err) {
+      // A live token under this house's own label: a mint that was killed after loom wrote it (its caller's timeout,
+      // 2026-10-30), so no claim ever got it. The house is still waiting to start, so nothing is using it: revoke it
+      // and mint again, once. Anything else, or the same again, fails the claim as before.
+      if (!/a live token is already labeled/.test(String(err?.message))) throw err;
+      effects.revoke(label);
+      token = effects.mint(role, label);
+    }
     try {
       const secrets = {};
       // A secret named `sub:<provider>` is what the subscriptions piece issues for
