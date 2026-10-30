@@ -8,12 +8,13 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { act, manifest, page } from '../src/ui.mjs';
 import { api } from '../src/control.mjs';
+import { scratch } from './scratch.mjs';
 
 const dist = process.env.LOOM_DIST || join(homedir(), 'Code', 'loom', 'dist');
 const vocab = existsSync(join(dist, 'ui', 'vocab.js')) ? await import(join(dist, 'ui', 'vocab.js')) : null;
 
 test('the manifest, both pages and every action result are valid page vocabulary', { skip: !vocab && 'no built loom to validate against' }, () => {
-  const env = { HOME: mkdtempSync(join(tmpdir(), 'loom-box-c-')), LOOM_BOX_LOCAL_NAME: 'one' };
+  const env = { HOME: scratch('loom-box-c-'), LOOM_BOX_LOCAL_NAME: 'one' };
   env.LOOM_BOX_HOME = join(env.HOME, 'state');
   const fx = { now: () => new Date(), mint: () => 'loom_' + 'x'.repeat(30), revoke: () => {}, secret: () => 's' };
   const check = (what, r) => assert.notEqual(typeof r, 'string', `${what}: ${r}`);

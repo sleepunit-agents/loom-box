@@ -6,8 +6,9 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { load, renameLocal, update } from '../src/state.mjs';
+import { scratch } from './scratch.mjs';
 
-const home = () => mkdtempSync(join(tmpdir(), 'lb-name-'));
+const home = () => scratch('lb-name-');
 
 function seeded(name) {
   const env = { LOOM_BOX_HOME: home(), LOOM_BOX_LOCAL_NAME: name, HOME: '/nonexistent' };

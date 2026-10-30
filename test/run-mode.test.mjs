@@ -8,9 +8,10 @@ import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runsLocal, runMode } from '../src/box.mjs';
+import { scratch } from './scratch.mjs';
 
 test('run --local is the control plane\'s own box, unless this machine joined a loom', () => {
-  const home = mkdtempSync(join(tmpdir(), 'loom-box-mode-'));
+  const home = scratch('loom-box-mode-');
   const env = { HOME: home, LOOM_BOX_HOME: join(home, 'state') };
   assert.equal(runsLocal(env, true), true);
   assert.equal(runsLocal(env, false), false);
@@ -20,7 +21,7 @@ test('run --local is the control plane\'s own box, unless this machine joined a 
 });
 
 test('run --local on a machine that is neither loom nor joined waits to be joined, instead of being a control plane', () => {
-  const home = mkdtempSync(join(tmpdir(), 'loom-box-mode-'));
+  const home = scratch('loom-box-mode-');
   const env = { HOME: home, LOOM_BOX_HOME: join(home, 'state'), LOOM_HOME: join(home, 'loom') };
   assert.equal(runMode(env, true), 'unjoined');
   mkdirSync(env.LOOM_HOME, { recursive: true });
@@ -42,7 +43,7 @@ test('join with no terminal still asks loom (an agent runs it with none); only -
     res.end(JSON.stringify({ error: 'too many boxes are asking to join right now; try again later' }));
   });
   await new Promise((r) => srv.listen(0, '127.0.0.1', r));
-  const home = mkdtempSync(join(tmpdir(), 'loom-box-join-'));
+  const home = scratch('loom-box-join-');
   const cli = join(import.meta.dirname, '..', 'src', 'cli.mjs');
   const run = (args) => new Promise((resolve) => {
     const p = spawn(process.execPath, [cli, 'join', `http://127.0.0.1:${srv.address().port}`, '--name', 'one', ...args],

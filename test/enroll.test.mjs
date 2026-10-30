@@ -10,6 +10,7 @@ import { api } from '../src/control.mjs';
 import { act, manifest } from '../src/ui.mjs';
 import { codeOf, netOf } from '../src/enroll.mjs';
 import { askToJoin } from '../src/box.mjs';
+import { scratch } from './scratch.mjs';
 
 let env, fx, clock, minted;
 const owner = { kind: 'owner' };
@@ -18,7 +19,7 @@ const call = (caller, path, body = {}) => api(env, fx, { caller, path, body });
 const sha = (s) => createHash('sha256').update(s).digest('hex');
 
 beforeEach(() => {
-  env = { HOME: mkdtempSync(join(tmpdir(), 'loom-box-enroll-')), LOOM_BOX_LOCAL_NAME: 'loom' };
+  env = { HOME: scratch('loom-box-enroll-'), LOOM_BOX_LOCAL_NAME: 'loom' };
   env.LOOM_BOX_HOME = join(env.HOME, 'state');
   clock = Date.now(); // the page reads the wall clock for what's still waiting, so the test's clock starts there
   minted = [];
@@ -85,7 +86,7 @@ test('a name another box has is fine: the new box is its own, by id, and joins a
     return new Response(JSON.stringify(r.body), { status: r.status });
   };
   let allowed;
-  const there = { HOME: mkdtempSync(join(tmpdir(), 'loom-box-joiner-')) };
+  const there = { HOME: scratch('loom-box-joiner-') };
   there.LOOM_BOX_HOME = join(there.HOME, 'state');
   const hi = await askToJoin(there, { url: 'http://loom.test:8787', name: 'one' }, { fetchImpl, say: () => {}, every: 1 });
   assert.equal(asked.name, 'one', 'asked as one, and stays one');
@@ -109,7 +110,7 @@ test('loom box join at a terminal asks, waits for the owner, and joins with what
     return new Response(JSON.stringify(r.body), { status: r.status });
   };
   const said = [];
-  const there = { HOME: mkdtempSync(join(tmpdir(), 'loom-box-joiner-')) };
+  const there = { HOME: scratch('loom-box-joiner-') };
   there.LOOM_BOX_HOME = join(there.HOME, 'state');
   const hi = await askToJoin(there, { url: 'http://loom.test:8787', name: 'one-loom' }, { fetchImpl, say: (m) => said.push(m), every: 1 });
   assert.equal(hi.box, 'one-loom');
@@ -139,7 +140,7 @@ test('a box waiting to be let in rides out loom restarting (a 5xx or no answer),
     return new Response(JSON.stringify(r.body), { status: r.status });
   };
   let allowed;
-  const there = { HOME: mkdtempSync(join(tmpdir(), 'loom-box-joiner-')) };
+  const there = { HOME: scratch('loom-box-joiner-') };
   there.LOOM_BOX_HOME = join(there.HOME, 'state');
   const hi = await askToJoin(there, { url: 'http://loom.test:8787', name: 'one' }, { fetchImpl, say: () => {}, every: 1 });
   assert.equal(hi.name, 'one');

@@ -8,13 +8,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import { packState, restoreState } from '../src/box.mjs';
+import { scratch } from './scratch.mjs';
 
 function packed(fill) {
-  const src = mkdtempSync(join(tmpdir(), 'st-src-'));
+  const src = scratch('st-src-');
   fill(src);
   return spawnSync('tar', ['--format=ustar', '-C', src, '-czf', '-', '.']).stdout;
 }
-const fresh = () => mkdtempSync(join(tmpdir(), 'st-out-'));
+const fresh = () => scratch('st-out-');
 const reject = (buf, why) => {
   const out = fresh();
   assert.throws(() => restoreState(out, buf.toString('base64')), why);
@@ -43,7 +44,7 @@ test('a plain state comes back, files 0600', () => {
 test('a state saved with a link in it (mise\'s tracked-configs) packs to one the next house can restore: the link left out', () => {
   // Mark's lanes slot, 2026-10-27: mise in the house wrote ~/.local/state/mise/tracked-configs/<id> -> config.toml
   // into the mount, and the save that followed couldn't be restored, which would fail every later house.
-  const src = mkdtempSync(join(tmpdir(), 'st-src-'));
+  const src = scratch('st-src-');
   mkdirSync(join(src, 'mise', 'tracked-configs'), { recursive: true });
   symlinkSync('/home/mark/.config/mise/config.toml', join(src, 'mise', 'tracked-configs', 'e2c327c0d4b77be9'));
   mkdirSync(join(src, 'lanes', 'planning'), { recursive: true });
@@ -74,7 +75,7 @@ test('a lock left empty by a holder that died before writing its pid is cleared 
   const { mkdtempSync, mkdirSync, writeFileSync, utimesSync, existsSync, readdirSync } = await import('node:fs');
   const { tmpdir } = await import('node:os');
   const { join } = await import('node:path');
-  const home = mkdtempSync(join(tmpdir(), 'loom-box-lock-'));
+  const home = scratch('loom-box-lock-');
   const env = { HOME: home, LOOM_BOX_HOME: join(home, 'state'), LOOM_BOX_LOCAL_NAME: 'one' };
   mkdirSync(env.LOOM_BOX_HOME, { recursive: true });
   const lock = join(env.LOOM_BOX_HOME, 'state.lock');

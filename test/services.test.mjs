@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import { api } from '../src/control.mjs';
 import { MAX_PARTS, PART_RAW, joinParts, partsOf } from '../src/blobs.mjs';
 import { load, update } from '../src/state.mjs';
+import { scratch } from './scratch.mjs';
 
 let env, fx, revoked, clock;
 const owner = { kind: 'owner' };
@@ -29,7 +30,7 @@ const live = () => ok(call(owner, 'list')).houses.filter((h) => ['wanted', 'star
 const svc = () => ok(call(owner, 'list')).services[0];
 
 beforeEach(() => {
-  env = { HOME: mkdtempSync(join(tmpdir(), 'loom-box-svc-')), LOOM_BOX_LOCAL_NAME: 'one' };
+  env = { HOME: scratch('loom-box-svc-'), LOOM_BOX_LOCAL_NAME: 'one' };
   env.LOOM_BOX_HOME = join(env.HOME, 'state');
   revoked = [];
   clock = Date.parse('2026-10-25T04:00:00Z');

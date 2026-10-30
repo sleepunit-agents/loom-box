@@ -23,6 +23,7 @@ import { PART_RAW, partsOf } from '../src/blobs.mjs';
 import { randomBytes } from 'node:crypto';
 import { joinLoom, runner } from '../src/box.mjs';
 import { HouseFileError, NESTED_ARGS, parseHouseFile } from '../src/house.mjs';
+import { scratch } from './scratch.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 let env, fx, revoked, repo, client, r, fake;
@@ -65,7 +66,7 @@ function setAgent(body = {}) {
 const up = (task = 'say hi') => ok(api(env, fx, { caller: { kind: 'agent', agent: 'art' }, path: 'up', body: { task } }));
 
 beforeEach(() => {
-  const home = mkdtempSync(join(tmpdir(), 'loom-box-run-'));
+  const home = scratch('loom-box-run-');
   const bin = join(home, 'bin');
   mkdirSync(bin);
   copyFileSync(join(here, 'fake-podman.mjs'), join(bin, 'podman'));

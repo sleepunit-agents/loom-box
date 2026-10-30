@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BUSY_TICKS_PER_S, sessionTicks, sessionsBusy } from '../src/busy.mjs';
 import { agentReports } from '../src/ui.mjs';
+import { scratch } from './scratch.mjs';
 
 function proc(root, pid, ppid, argv, ticks = 0, start = 1000) {
   mkdirSync(join(root, String(pid), 'task', String(pid)), { recursive: true });
@@ -20,7 +21,7 @@ function proc(root, pid, ppid, argv, ticks = 0, start = 1000) {
 }
 
 test('a session is found by what runs it: a box session by its name, one in a house by the house', () => {
-  const root = mkdtempSync(join(tmpdir(), 'loom-box-proc-'));
+  const root = scratch('loom-box-proc-');
   proc(root, 10, 1, ['/home/art/.local/bin/claude', 'remote-control', '--name', 'art on loom (box session)']);
   proc(root, 11, 10, ['/x/versions/2.1.310', '--print', '--sdk-url', 'https://api.anthropic.com/v1/code/sessions/cse_1'], 500);
   proc(root, 20, 1, ['/usr/bin/conmon', '--api-version', '1', '-n', 'loom-house-h-45']);
@@ -36,7 +37,7 @@ test('a session is found by what runs it: a box session by its name, one in a ho
 });
 
 test('busy is CPU between two samples a minute apart; the first sample, or a stale one, says nothing', () => {
-  const file = join(mkdtempSync(join(tmpdir(), 'loom-box-cpu-')), 'session-cpu.json');
+  const file = join(scratch('loom-box-cpu-'), 'session-cpu.json');
   const t = (ticks, tools = 0) => ({ ticks, tools });
   assert.deepEqual(sessionsBusy(file, { now: 0, ticks: { a: t(100), b: t(100) } }), {});
   const busy = sessionsBusy(file, { now: 60_000, ticks: { a: t(100 + 60 * BUSY_TICKS_PER_S), b: t(103), c: t(5) } });
@@ -60,7 +61,7 @@ test('Home\'s card: a busy remote session makes the agent working, and the readi
 test('another box reports its own sessions with its poll; loom shows them while the word is fresh', async () => {
   const { api } = await import('../src/control.mjs');
   const { reportedBusy } = await import('../src/ui.mjs');
-  const home = mkdtempSync(join(tmpdir(), 'loom-box-rb-'));
+  const home = scratch('loom-box-rb-');
   const env = { HOME: home, LOOM_BOX_HOME: join(home, 'state'), LOOM_BOX_LOCAL_NAME: 'loom' };
   let t = Date.parse('2026-10-28T01:00:00Z');
   const fx = { now: () => new Date(t), mint: () => 'loom_' + 'x'.repeat(40), revoke: () => {}, secret: () => '' };
