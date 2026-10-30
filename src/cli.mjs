@@ -51,6 +51,21 @@ import { localBoxName, renameLocal, stateDir } from './state.mjs';
 import { exportPart, importPart } from './bundle.mjs';
 import { PART_RAW, joinParts, partsOf } from './blobs.mjs';
 
+/**
+ * Whether this box's houses should outlive it: LOOM_BOX_ON_EXIT=keep|stop says so; else it's whether the systemd
+ * unit it runs in keeps a stopped unit's other processes (KillMode=process). Under any other unit systemd would kill
+ * the houses' podman clients anyway, uncleanly, so they're stopped first (t-1498).
+ */
+export function keepsHousesOnExit(env, read = {}) {
+  if (env.LOOM_BOX_ON_EXIT === 'keep') return true;
+  if (env.LOOM_BOX_ON_EXIT === 'stop') return false;
+  const cgroup = read.cgroup ?? (() => { try { return readFileSync('/proc/self/cgroup', 'utf-8'); } catch { return ''; } });
+  const unit = /\/([^/\n]+\.service)\s*$/m.exec(cgroup())?.[1];
+  if (!unit) return false;
+  const show = read.killMode ?? ((u) => spawnSync('systemctl', ['--user', 'show', '-p', 'KillMode', '--value', u], { encoding: 'utf-8', timeout: 5_000 }).stdout ?? '');
+  return show(unit).trim() === 'process';
+}
+
 const USAGE = readFileSync(fileURLToPath(import.meta.url), 'utf-8').split('\n').slice(1).filter((l) => l.startsWith('//')).map((l) => l.slice(3)).join('\n') + '\n';
 
 class Fail extends Error { constructor(m, code = 1) { super(m); this.code = code; } }
@@ -255,9 +270,17 @@ async function main(argv, env) {
       // used to drop the process at once, leaving every house running until
       // systemd's own stop timeout gave up on them. This waits for them first,
       // the same way `down` does, so the restart is a clean exit instead.
+      // Unless its unit keeps what it started (loom's does: KillMode=process): then the houses outlive this
+      // process and the next start adopts them (box.mjs), so a restart for an update doesn't take every house
+      // down at once (2026-10-30: 7 houses, 10 minutes back at load 120+).
       let stopping = null;
       process.on('SIGTERM', () => {
         if (stopping) return;
+        if (keepsHousesOnExit(env)) {
+          process.stderr.write(`loom-box: SIGTERM: leaving ${r.houses.size} house(s) running; the next start adopts them\n`);
+          stopping = Promise.resolve();
+          process.exit(0);
+        }
         process.stderr.write(`loom-box: SIGTERM: stopping ${r.houses.size} house(s) before exit\n`);
         stopping = r.shutdown().then(() => process.exit(0));
       });
