@@ -91,7 +91,8 @@ export function manifest(env) {
     asks: pendingJoins(s).slice(0, 5).map((j) => ({
       text: `A box asks to join: ${j.name}`,
       meta: `from ${j.address}, code ${j.code}${j.facts.length ? ` · ${j.facts.filter((f) => !f.startsWith('runtime:')).slice(0, 4).map(factWords).join(' · ')}` : ''}`,
-      tone: 'warn', at: j.at, page: '',
+      // Something to allow: loom's Inbox files it under Permissions (it was Decisions, by default).
+      tone: 'warn', at: j.at, page: '', kind: 'permission',
       actions: [
         { action: 'allow-join', label: 'Let it in', tone: 'primary', fields: { id: j.id }, confirm: `Let ${j.name} in only if its terminal shows code ${j.code}.` },
         { action: 'block-join', label: 'Block', tone: 'danger', fields: { id: j.id } },
