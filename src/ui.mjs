@@ -14,7 +14,8 @@ const OWNER = { kind: 'owner' };
 const ago = (iso, nowMs = Date.now()) => {
   if (!iso) return 'never';
   const s = Math.max(0, Math.round((nowMs - Date.parse(iso)) / 1000));
-  if (s < 90) return `${s}s ago`;
+  if (s < 60) return 'just now';
+  if (s < 90) return '1m ago';
   if (s < 5400) return `${Math.round(s / 60)}m ago`;
   if (s < 129600) return `${Math.round(s / 3600)}h ago`;
   return `${Math.round(s / 86400)}d ago`;
@@ -89,7 +90,7 @@ export function manifest(env) {
     // A box asking to join is the owner's call: the code is the one on the box's own terminal.
     asks: pendingJoins(s).slice(0, 5).map((j) => ({
       text: `A box asks to join: ${j.name}`,
-      meta: `from ${j.address}, code ${j.code}${j.facts.length ? ` · ${j.facts.filter((f) => !f.startsWith('runtime:')).slice(0, 4).join(', ')}` : ''}`,
+      meta: `from ${j.address}, code ${j.code}${j.facts.length ? ` · ${j.facts.filter((f) => !f.startsWith('runtime:')).slice(0, 4).map(factWords).join(' · ')}` : ''}`,
       tone: 'warn', at: j.at, page: '',
       actions: [
         { action: 'allow-join', label: 'Let it in', tone: 'primary', fields: { id: j.id }, confirm: `Let ${j.name} in only if its terminal shows code ${j.code}.` },
@@ -123,12 +124,12 @@ export function boxNotices(s, nowMs = Date.now()) {
   const out = [];
   for (const [id, b] of Object.entries(s.boxes)) {
     if (b.revoked || !b.joined || nowMs - Date.parse(b.joined) > 7 * NOTICE_WINDOW_MS) continue;
-    out.push({ text: `${boxLabelOf(s, id)} joined loom`, meta: factsOf(b).filter((f) => !f.startsWith('runtime:')).slice(0, 5).join(', '), at: b.joined, page: '' });
+    out.push({ text: `${boxLabelOf(s, id)} joined loom`, meta: factsOf(b).filter((f) => !f.startsWith('runtime:')).slice(0, 5).map(factWords).join(' · '), at: b.joined, page: '' });
   }
   for (const h of Object.values(s.houses)) {
     if (h.service || h.state !== 'failed' || !h.updated || nowMs - Date.parse(h.updated) > NOTICE_WINDOW_MS) continue;
     const last = String(h.log ?? '').trim().split('\n').filter(Boolean).pop() ?? '';
-    out.push({ text: `${h.agent}'s house ${h.id} failed: ${taskLine(h.task)}`.slice(0, 300), meta: last.slice(0, 200), at: h.updated,
+    out.push({ text: `${cap(h.agent)}'s house failed: ${taskLine(h.task)}`.slice(0, 300), meta: last.slice(0, 200), at: h.updated,
       ...(/^[a-z][a-z0-9-]{0,39}$/.test(h.agent) ? { agent: h.agent } : {}), page: '' });
   }
   return out.sort((x, y) => Date.parse(y.at) - Date.parse(x.at)).slice(0, 20);
@@ -143,16 +144,54 @@ const BROKEN_RESTARTS = 3;
 
 const shortAge = (iso, nowMs) => {
   const m = Math.max(0, Math.round((nowMs - Date.parse(iso)) / 60_000));
-  return Number.isNaN(m) ? '' : m < 60 ? `${m}m` : m < 2880 ? `${Math.round(m / 60)}h` : `${Math.round(m / 1440)}d`;
+  return Number.isNaN(m) ? '' : m < 1 ? 'just now' : m < 60 ? `${m}m` : m < 2880 ? `${Math.round(m / 60)}h` : `${Math.round(m / 1440)}d`;
 };
+
+/** A wake's note (an agent's words) in a label: an approval's or request's id dropped, a leading task id after the words. */
+export function plainNote(note) {
+  const t = String(note ?? '').replace(/\((?:[aq]-[0-9a-f]{6,}) (\w+)\)/g, '($1)').trim();
+  const m = /^(t-\d+)[:,\s]+(\S.*)$/.exec(t);
+  return m ? `${m[2]} (${m[1]})` : t;
+}
+
+const cap = (t) => (t ? t[0].toUpperCase() + t.slice(1) : t);
+/** A lane's name as words: "knowledge-verify" -> "Knowledge verify". */
+const laneWords = (n) => cap(n.replace(/-/g, ' '));
+
+/** A task house's prompt, and the clock's wake line in it (its kind and note), if it has one. */
+function wakeOf(task) {
+  let t = String(task ?? '');
+  try { const j = JSON.parse(t); if (j && typeof j.prompt === 'string') t = j.prompt; } catch { /* plain text */ }
+  const m = /\(wake id w-[0-9a-f]+, kind (\w+)[^)]*?note: ([^\n]*?)\)\.\s/.exec(t) ?? /\(wake id w-[0-9a-f]+[^)]*?note: ([^\n]*?)\)\.\s/.exec(t);
+  if (!m) return { t };
+  return m.length === 3 ? { t, kind: m[1], note: m[2] } : { t, note: m[1] };
+}
 
 /** What a task house is doing, in a line: a wake's note (the clock puts it in the prompt), else the task's start. */
 export function taskLine(task) {
-  let t = String(task ?? '');
-  try { const j = JSON.parse(t); if (j && typeof j.prompt === 'string') t = j.prompt; } catch { /* plain text */ }
-  const note = /\(wake id (w-[0-9a-f]+)[^)]*?note: ([^\n]*?)\)\.\s/.exec(t);
-  if (note) return `${note[1]}: ${note[2]}`.slice(0, 120);
-  return t.replace(/\s+/g, ' ').trim().slice(0, 120) || 'a task';
+  const w = wakeOf(task);
+  if (w.note !== undefined) return plainNote(w.note.replace(/^schedule\s+/, '')).slice(0, 120) || 'a wake';
+  return w.t.replace(/\s+/g, ' ').trim().slice(0, 120) || 'a task';
+}
+
+/** A lane's note ("reflect: nightly retro"), its lane name in words: "Reflect: nightly retro". */
+const laneLine = (text) => text.replace(/^([a-z][a-z0-9-]*)(?=:|$)/, (n) => laneWords(n));
+
+/** A house by what it is: "Art's Discord bridge", "Wake: cadence runner build (t-1689)", "Reflect lane: nightly retro". */
+export function houseName(h) {
+  const who = cap(String(h.agent ?? ''));
+  if (h.service) {
+    if (h.service === 'remote') return `${who}'s house session`;
+    return BRIDGE.test(h.service) ? `${who}'s ${cap(h.service)} bridge` : `${who}'s ${h.service}`;
+  }
+  const w = wakeOf(h.task);
+  if (w.kind === 'schedule') {
+    const t = taskLine(h.task);
+    const lm = /^([a-z][a-z0-9-]*)(?::\s*(.*))?$/.exec(t);
+    return lm ? `${laneWords(lm[1])} lane${lm[2] ? `: ${lm[2]}` : ''}` : `Lane: ${t}`;
+  }
+  if (w.note !== undefined) return `Wake: ${taskLine(h.task)}`;
+  return taskLine(h.task);
 }
 
 /**
@@ -160,23 +199,43 @@ export function taskLine(task) {
  * by its note; anything else, by its task's first words.
  */
 export function doingOf(h, s) {
-  let t = String(h.task ?? '');
-  try { const j = JSON.parse(t); if (j && typeof j.prompt === 'string') t = j.prompt; } catch { /* plain text */ }
-  const m = /\(wake id w-[0-9a-f]+, kind (\w+)[^)]*?note: ([^\n]*?)\)\.\s/.exec(t);
-  const lane = m?.[1] === 'schedule';
-  const text = m ? m[2].replace(/^schedule\s+/, '').trim() : taskLine(h.task);
+  const w = wakeOf(h.task);
+  const lane = w.kind === 'schedule';
+  const text = taskLine(h.task);
   return {
-    text: (text || 'a task').slice(0, 100), kind: lane ? 'lane' : 'task',
-    where: `${lane ? 'lane' : m ? 'wake' : 'task'} · ${h.id} on ${boxLabelOf(s, h.box)}`,
+    text: cap(lane ? laneLine(text) : text).slice(0, 100), kind: lane ? 'lane' : 'task',
+    where: `a house on ${boxLabelOf(s, h.box)}`,
     since: h.started ?? h.created,
   };
 }
 
-/** A house's task in a line for its row: a lane or a wake by its note, else the task's first words; a service as itself. */
-export function houseTask(h, s) {
-  if (h.service) return `(service ${h.service})`;
-  const d = doingOf(h, s);
-  return d.where.startsWith('task ') ? d.text : `${d.where.split(' · ')[0]} · ${d.text}`;
+/** A house's row label: what it is, by its service, its lane or wake, or its task's first words (never its id). */
+export function houseTask(h) {
+  return houseName(h);
+}
+
+const FACT_WORDS = { nvidia: 'NVIDIA', geforce: 'GeForce', rtx: 'RTX', gtx: 'GTX', amd: 'AMD', radeon: 'Radeon', intel: 'Intel', apple: 'Apple', tesla: 'Tesla', quadro: 'Quadro', ti: 'Ti' };
+const OS_WORDS = { linux: 'Linux', darwin: 'macOS', win32: 'Windows', freebsd: 'FreeBSD' };
+const ARCH_WORDS = { x86_64: 'x86-64', arm64: 'ARM64', aarch64: 'ARM64' };
+/** A box's fact in words, "mem:94g" -> "94 GB"; one it doesn't know stays as it is. */
+export function factWords(f) {
+  const i = f.indexOf(':');
+  const [k, v] = i > 0 ? [f.slice(0, i), f.slice(i + 1)] : [f, ''];
+  if (k === 'os' && v) return OS_WORDS[v] ?? cap(v);
+  if (k === 'arch' && v) return ARCH_WORDS[v] ?? v;
+  if (k === 'cpus' && /^\d+$/.test(v)) return `${v} CPU${v === '1' ? '' : 's'}`;
+  if (k === 'mem' && /^\d+g$/.test(v)) return `${v.slice(0, -1)} GB`;
+  if (k === 'gpu' && v) return v.split('-').map((p) => FACT_WORDS[p] ?? (/\d/.test(p) ? p.toUpperCase() : cap(p))).join(' ');
+  return f;
+}
+/** A fact as a row of the Machine card: its name in words, and its value in words. */
+const FACT_LABELS = { os: 'System', arch: 'Architecture', cpus: 'CPUs', mem: 'Memory', gpu: 'GPU', runtime: 'Runtime' };
+function factRow(f) {
+  const i = f.indexOf(':');
+  if (i <= 0) return { label: f, value: 'yes' };
+  const k = f.slice(0, i), v = f.slice(i + 1);
+  const w = factWords(f);
+  return { label: FACT_LABELS[k] ?? k, value: k === 'cpus' || w === f ? v : w };
 }
 
 /**
@@ -218,16 +277,16 @@ export function agentReports(s, nowMs = Date.now(), busy = {}) {
     if (rs) {
       const k = `house:${rs.house}`;
       remote.push(`house session${up(rs) ? word(k) : ' (down)'}`);
-      if (busy[k] && up(rs)) working.push(`house session (${rs.house})`);
+      if (busy[k] && up(rs)) working.push('house session');
     }
     if (remote.length) readings.push({ label: 'Remote', value: remote.join(' · '), tone: (r && r.want === 'up' && r.error) ? 'warn' : undefined });
-    if (tasks.length) readings.push({ label: 'Tasks', value: `${tasks.length} running`, detail: tasks.map((h) => `${h.id} on ${boxLabelOf(s, h.box)}`).slice(0, 3).join(', ') });
+    if (tasks.length) readings.push({ label: 'Tasks', value: `${tasks.length} running`, detail: tasks.map((h) => `${short(houseName(h), 40)} on ${boxLabelOf(s, h.box)}`).slice(0, 3).join(', ') });
     const report = { readings: readings.map((x) => Object.fromEntries(Object.entries(x).filter(([, v]) => v !== undefined))).slice(0, 4) };
     // What it has going, for its card (loom's `doing`): each running task house, and a remote session mid-turn.
     const doing = [
       ...tasks.filter((h) => h.state === 'running').map((h) => doingOf(h, s)),
       ...(r && r.want === 'up' && busy[`box:${r.name}`] === true ? [{ text: 'A remote session', kind: 'session', where: `box session on ${boxLabelOf(s, r.box)}` }] : []),
-      ...(rs && up(rs) && busy[`house:${rs.house}`] === true ? [{ text: 'A remote session', kind: 'session', where: `house session · ${rs.house}` }] : []),
+      ...(rs && up(rs) && busy[`house:${rs.house}`] === true ? [{ text: 'A remote session', kind: 'session', where: 'house session' }] : []),
     ].slice(0, 6);
     if (doing.length) report.doing = doing;
     if (failing.length) Object.assign(report, { state: 'broken', reason: `${failing.map((v) => v.name).join(' and ')} keep${failing.length === 1 ? 's' : ''} failing (${failing[0].restarts} restarts)` });
@@ -235,7 +294,8 @@ export function agentReports(s, nowMs = Date.now(), busy = {}) {
     else if (!tasks.length && working.length) Object.assign(report, { state: 'working', reason: `in a remote session: ${working.join(', ')}` });
     else if (tasks.length) {
       const h = tasks[0];
-      Object.assign(report, { state: 'working', reason: `${taskLine(h.task)} · ${h.id} on ${boxLabelOf(s, h.box)}${h.started ? ` · ${shortAge(h.started, nowMs)}` : ` · ${h.state}`}` });
+      const d = doingOf(h, s);
+      Object.assign(report, { state: 'working', reason: `${d.text} · ${d.where}${h.started ? ` · ${shortAge(h.started, nowMs)}` : ` · ${h.state}`}` });
     }
     if (report.state || report.readings.length || report.doing) out[a] = report;
   }
@@ -289,7 +349,7 @@ function boxesPage(env, nowMs) {
         ? { type: 'list', items: here.slice(0, 20).map((h) => ({ text: svcOf.has(h.id) ? `${h.agent}'s ${svcOf.get(h.id)}` : `${h.agent}'s house`, meta: h.id, badge: h.state, tone: toneOf(h.state), agent: h.agent })) }
         : { type: 'text', tone: 'muted', text: 'No houses on it now.' },
       { type: 'details', summary: 'Machine', meta: b.local ? 'here' : '', blocks: [{ type: 'kv', items: [
-        ...b.facts.map((f) => { const i = f.indexOf(':'); return i > 0 ? { label: f.slice(0, i), value: f.slice(i + 1) } : { label: f, value: 'yes' }; }),
+        ...b.facts.map(factRow),
         { label: 'may host', value: mayHostText(b.mayHost) },
       ] }] },
     ] });
@@ -378,11 +438,11 @@ function agentTabPage(env, agent, caller, nowMs) {
   const live_boxes = view.boxes.filter((b) => !b.revoked).map((b) => ({ ...b, label: boxLabelOf(s, b.id) }));
   const sections = [{ id: 'houses', title: 'Houses', blocks: [
     live.length
-      ? { type: 'list', items: live.slice(0, 30).map((h) => ({ text: h.id, meta: `${nameOf(h.box)} · ${short(houseTask(h, s))}`, badge: h.state, tone: toneOf(h.state),
-        ...(h.state === 'wanted' || h.state === 'running' || h.state === 'starting' ? { act: { action: 'down', label: 'Stop', tone: 'danger', fields: { id: h.id }, confirm: `${h.id} stops.` } } : {}) })) }
+      ? { type: 'list', items: live.slice(0, 30).map((h) => ({ text: short(houseName(h)), meta: `${nameOf(h.box)} · ${h.id}`, badge: h.state, tone: toneOf(h.state),
+        ...(h.state === 'wanted' || h.state === 'running' || h.state === 'starting' ? { act: { action: 'down', label: 'Stop', tone: 'danger', fields: { id: h.id }, confirm: 'This house stops.' } } : {}) })) }
       : { type: 'text', tone: 'muted', text: 'No houses up now.' },
-    ...(houses.length > live.length ? [{ type: 'details', summary: 'Recent', blocks: [{ type: 'table', columns: ['House', 'Box', 'State', 'Task', 'Updated'],
-      rows: houses.filter((h) => !LIVE.has(h.state)).slice(0, 20).map((h) => [h.id, nameOf(h.box), h.state + (h.exit !== undefined ? ` (exit ${h.exit})` : ''), short(houseTask(h, s)), ago(h.updated, nowMs)]) }] }] : []),
+    ...(houses.length > live.length ? [{ type: 'details', summary: 'Recent', blocks: [{ type: 'table', columns: ['House', 'Box', 'State', 'Updated', 'Id'],
+      rows: houses.filter((h) => !LIVE.has(h.state)).slice(0, 20).map((h) => [short(houseName(h)), nameOf(h.box), h.state + (h.exit !== undefined ? ` (exit ${h.exit})` : ''), ago(h.updated, nowMs), h.id]) }] }] : []),
   ] }];
   const svcs = view.services.filter((v) => v.agent === agent);
   if (svcs.length) {
@@ -481,8 +541,8 @@ function agentOwnerPage(env, caller, nowMs) {
   const view = list(env, caller);
   const live = view.houses.filter((h) => LIVE.has(h.state));
   const sections = [{ id: 'houses', title: 'Houses', blocks: [live.length
-    ? { type: 'list', items: live.slice(0, 30).map((h) => ({ text: `${h.agent}'s house`, meta: `${h.id} · ${h.state}`, badge: h.state, tone: toneOf(h.state), agent: h.agent,
-      ...(h.state === 'wanted' || h.state === 'running' || h.state === 'starting' ? { act: { action: 'down', label: 'Stop', tone: 'danger', fields: { id: h.id }, confirm: `${h.id} stops.` } } : {}) })) }
+    ? { type: 'list', items: live.slice(0, 30).map((h) => ({ text: short(houseName(h)), meta: `${h.state} · ${h.id}`, badge: h.state, tone: toneOf(h.state), agent: h.agent,
+      ...(h.state === 'wanted' || h.state === 'running' || h.state === 'starting' ? { act: { action: 'down', label: 'Stop', tone: 'danger', fields: { id: h.id }, confirm: 'This house stops.' } } : {}) })) }
     : { type: 'text', tone: 'muted', text: `No houses for ${caller.agents.join(', ')} now.` }] }];
   if (view.services.length) {
     sections.push({ id: 'services', title: 'Services', blocks: [{ type: 'list', items: view.services.slice(0, 20).map((v) => ({
