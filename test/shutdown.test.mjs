@@ -66,7 +66,7 @@ function fakeLoom(env, fx, boxId) {
   return new Promise((resolve) => srv.listen(0, '127.0.0.1', () => resolve(srv)));
 }
 
-test('SIGTERM stops every running house before loom-box exits (t-1498)', async () => {
+async function sigtermWithAHouseUp(onExit, check) {
   const home = scratch('loom-box-term-');
   const bin = join(home, 'bin');
   mkdirSync(bin);
@@ -84,7 +84,7 @@ test('SIGTERM stops every running house before loom-box exits (t-1498)', async (
     HOME: home, PATH: process.env.PATH,
     LOOM_BOX_HOME: join(home, 'state'), LOOM_BOX_DATA: join(home, 'data'),
     LOOM_BOX_LOCAL_NAME: 'one', LOOM_BOX_PODMAN: join(bin, 'podman'),
-    LOOM_BOX_POLL_MS: '150',
+    LOOM_BOX_POLL_MS: '150', LOOM_BOX_ON_EXIT: onExit,
   };
   const fx = { now: () => new Date(), mint: () => 'loom_house_token_aaaaaaaaaaaaaaaa', revoke: () => {}, secret: (n) => `secret:${n}` };
   const owner = { kind: 'owner' };
@@ -116,6 +116,17 @@ test('SIGTERM stops every running house before loom-box exits (t-1498)', async (
     clearTimeout(giveUp);
 
     assert.notEqual(result, 'timeout', `loom-box didn't exit within 20s of SIGTERM (stderr: ${err})`);
+    assert.equal(result.code, 0, `exit code (stderr: ${err})`);
+    assert.equal(result.signal, null, `exit signal (stderr: ${err})`);
+    await check({ result, err, fake, h });
+  } finally {
+    srv.close();
+    try { child.kill('SIGKILL'); } catch { /* already gone */ }
+  }
+}
+
+test('SIGTERM stops every running house before loom-box exits, when its unit would kill them anyway (t-1498)', async () => {
+  await sigtermWithAHouseUp('stop', ({ result, err, fake, h }) => {
     // Clean and prompt: well inside systemd's 90s "final-sigterm" timeout, and exited on
     // its own (code 0), not killed out from under a stop still in flight.
     assert.equal(result.code, 0, `exit code (stderr: ${err})`);
@@ -125,8 +136,28 @@ test('SIGTERM stops every running house before loom-box exits (t-1498)', async (
     // which is what it takes for even a PID 1 that ignores SIGTERM to be made to exit.
     assert.ok(existsSync(join(fake, 'runs', `loom-house-${h.id}.stop`)), 'podman stop was never called for the running house');
     assert.match(err, /SIGTERM: stopping 1 house/);
-  } finally {
-    srv.close();
-    try { child.kill('SIGKILL'); } catch { /* already gone */ }
-  }
+  });
+});
+
+test('SIGTERM leaves the houses running when its unit keeps them: the next start adopts them (a box update)', async () => {
+  // 2026-10-30: \`loom pieces update box\` stopped all 7 houses at once, and at load 120+ they took 10 minutes to
+  // come back. Under loom's unit (KillMode=process) a house outlives loom-box; the restarted box adopts it.
+  await sigtermWithAHouseUp('keep', ({ result, err, fake, h }) => {
+    assert.ok(result.ms < 5000, `took ${result.ms}ms to exit`);
+    assert.equal(existsSync(join(fake, 'runs', `loom-house-${h.id}.stop`)), false, 'podman stop ran: the house went down with the box');
+    const pid = Number(readFileSync(join(fake, 'runs', `loom-house-${h.id}.pid`), 'utf-8'));
+    assert.doesNotThrow(() => process.kill(pid, 0), 'the house is still running');
+    process.kill(pid, 'SIGKILL');
+    assert.match(err, /SIGTERM: leaving 1 house\(s\) running/);
+  });
+});
+
+test('whether the houses outlive the box: the setting, else the unit it runs in', async () => {
+  const { keepsHousesOnExit } = await import('../src/cli.mjs');
+  const inUnit = (unit, mode) => ({ cgroup: () => `0::/user.slice/user-1000.slice/user@1000.service/app.slice/${unit}\n`, killMode: (u) => (u === unit ? `${mode}\n` : '') });
+  assert.equal(keepsHousesOnExit({}, inUnit('loom-piece-box-run.service', 'process')), true);
+  assert.equal(keepsHousesOnExit({}, inUnit('loom-box.service', 'control-group')), false);
+  assert.equal(keepsHousesOnExit({}, { cgroup: () => '0::/user.slice/session-3.scope\n', killMode: () => 'process' }), false, 'not a service: stop them');
+  assert.equal(keepsHousesOnExit({ LOOM_BOX_ON_EXIT: 'keep' }, inUnit('x.service', 'control-group')), true);
+  assert.equal(keepsHousesOnExit({ LOOM_BOX_ON_EXIT: 'stop' }, inUnit('x.service', 'process')), false);
 });
