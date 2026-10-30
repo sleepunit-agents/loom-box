@@ -112,9 +112,10 @@ test('a house is named by what it is, never its id: a bridge, a house session, a
   assert.equal(houseName({ id: 'h-394', agent: 'art', service: 'remote' }), 'Art\'s house session');
   assert.equal(houseName({ id: 'h-395', agent: 'art', service: 'pond' }), 'Art\'s pond');
   assert.equal(houseName(wake('t-1689 cadence runner build round 1')), 'Wake: cadence runner build round 1 (t-1689)');
-  // An approval's id is dropped from the clock's "unparked" line; the agent's note stays as written.
+  // An approval's id is dropped from the clock's "unparked" line, which reads as the new form; the agent's note stays as written.
+  // Before: "Wake: unparked (allowed): homelab DNS health check (Jonathan #homelab)".
   assert.equal(houseName(wake('unparked (a-24e194de allowed): homelab DNS health check (Jonathan #homelab)')),
-    'Wake: unparked (allowed): homelab DNS health check (Jonathan #homelab)');
+    'Wake: Resumed after your OK: homelab DNS health check (Jonathan #homelab)');
   assert.equal(houseName(wake('schedule knowledge-verify', 'schedule')), 'Knowledge verify lane');
   assert.equal(plainNote('t-397 PR122 nudge-watch round 7'), 'PR122 nudge-watch round 7 (t-397)');
   assert.equal(plainNote('a note with no ids'), 'a note with no ids');
@@ -137,4 +138,33 @@ test('a box\'s facts in words: "Linux · x86-64 · 64 CPUs · 94 GB · NVIDIA Ge
     'Linux · x86-64 · 64 CPUs · 94 GB · NVIDIA GeForce RTX 5090');
   assert.equal(factWords('mem:16g'), '16 GB');
   assert.equal(factWords('jonathan-rig'), 'jonathan-rig');
+});
+
+test('a note resumed after Jonathan\'s OK, old form or new, reads "Resumed after your OK: …" and never shows the id', () => {
+  assert.equal(plainNote('unparked (a-24e194de allowed): homelab DNS check'), 'Resumed after your OK: homelab DNS check');
+  assert.equal(plainNote('unparked (q-7c3f35ab granted): t-1655 token for the deploy'), 'Resumed after your OK: token for the deploy (t-1655)');
+  assert.equal(plainNote('unparked (allowed): homelab DNS check'), 'Resumed after your OK: homelab DNS check');   // before: as it was
+  assert.equal(plainNote('Resumed after your OK: homelab DNS check'), 'Resumed after your OK: homelab DNS check');
+  assert.equal(plainNote('Resumed after your OK (a-24e194de): homelab DNS check'), 'Resumed after your OK: homelab DNS check');
+  assert.equal(plainNote('unparked (a-24e194de denied): homelab DNS check'), 'unparked (denied): homelab DNS check');   // only an OK is an OK
+});
+
+test('a wake resumed after Jonathan\'s OK is named "Picking up after your OK: <its note>", never by the clock\'s line or its id', () => {
+  const head = 'Jonathan allowed a-24e194de. Pick up where you left off, and spend it with --approval a-24e194de on exactly the action it allows.';
+  const secret = 'Jonathan allowed q-7c3f35ab. Pick up where you left off. A secret: `secret request <name> --why …` again, and it\'s granted to this house at once; then `secret get <name>`.';
+  const withWake = (h, note) => ({ id: 'h-401', agent: 'art', box: 'loom', task: JSON.stringify({ prompt:
+    `You are Art, waking (wake id w-6b2931, kind wake, set 2026-10-30 08:00:00, note: ${note}). Go.\n\n---\n\n${h}\n\n---\n\nfix the DNS` }) });
+  const bare = (h) => ({ id: 'h-402', agent: 'art', box: 'loom', task: JSON.stringify({ prompt: `${h}\n\n---\n\nfix the DNS` }) });
+  // Before: "Jonathan allowed a-24e194de. Pick up where you left off, and spend it with --approval a-24e194de on exactly the…"
+  assert.equal(houseName(bare(head)), 'Picking up after your OK');
+  assert.equal(houseName(bare(secret)), 'Picking up after your OK');
+  // Before: "Wake: unparked (allowed): t-1687 homelab DNS check round 2"
+  assert.equal(houseName(withWake(head, 'unparked (a-24e194de allowed): t-1687 homelab DNS check round 2')), 'Picking up after your OK: homelab DNS check round 2 (t-1687)');
+  assert.equal(houseName(withWake(secret, 'Resumed after your OK: deploy token')), 'Picking up after your OK: deploy token');
+  assert.equal(taskLine(withWake(head, 'unparked (a-24e194de allowed): homelab DNS check').task), 'Picking up after your OK: homelab DNS check');
+  for (const h of [bare(head), bare(secret), withWake(head, 'unparked (a-24e194de allowed): x')]) assert.ok(!/[aq]-[0-9a-f]{6,}/.test(houseName(h)), 'no approval or request id');
+  // On Home's doing line too.
+  const s = state();
+  s.houses['h-401'] = { ...withWake(head, 'unparked (a-24e194de allowed): homelab DNS check'), state: 'running', created: ago(3), started: ago(2) };
+  assert.equal(agentReports(s, now).art.doing[0].text, 'Picking up after your OK: homelab DNS check');
 });
