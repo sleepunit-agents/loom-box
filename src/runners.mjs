@@ -11,6 +11,10 @@
 //   status(body)                           → 'working' (mid-turn), 'idle' (its turn ended; resumable), 'ended'
 //                                            or 'unknown'.
 //   slotOf(body)                           → the slot that resumes it ({harness, session}), once the harness says.
+//   sessionFiles(slot, body?)              → the harness's own local files for that session: {keep: [{root, rel}]}
+//                                            (its transcript: what a resume needs, packed into a continuity slot)
+//                                            and {drop: [path]} (the body's job or run dir: its brief, its events).
+//   roots                                  → {name: dir}: where `keep` paths are relative to (and restored into).
 //
 // Two harnesses today, ported from the bridges piece's runners (shuttle/runner.py, shuttle/runners/codex.py):
 // Claude Code as `claude --bg`, and Codex as `codex exec --json`. Feeding goes through a body's inbox: the layout
@@ -18,15 +22,22 @@
 // has that hook hears follow-ups mid-turn. With no inbox dir, a body can't be fed.
 import { spawn as nodeSpawn, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 export class RunnerError extends Error {}
+
+/** A harness's session id, as it may appear in a file name: never a path. */
+const SESSION = /^[A-Za-z0-9][A-Za-z0-9._-]{3,127}$/;
+/** The names in a dir (with files too, when `all`), [] for none. */
+const dirs = (d, all = false) => { try { return readdirSync(d, { withFileTypes: true }).filter((e) => all || e.isDirectory()).map((e) => e.name); } catch { return []; } };
 
 const readJson = (p) => { try { return JSON.parse(readFileSync(p, 'utf-8')); } catch { return null; } };
 const sleepMs = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 const hex8 = () => randomBytes(4).toString('hex');
+
+const lines = (p) => { try { return readFileSync(p, 'utf-8').split('\n').flatMap((l) => { try { const v = JSON.parse(l); return v && typeof v === 'object' ? [v] : []; } catch { return []; } }); } catch { return []; } };
 
 /** A body's inbox, in the bridges piece's layout (shuttle/inbox.py), so its hook reads what's put here. */
 export function inbox(dir, { run = spawnSync } = {}) {
@@ -49,6 +60,15 @@ export function inbox(dir, { run = spawnSync } = {}) {
       if (!existsSync(at(id))) return;
       run('flock', [join(at(id), 'lock'), 'touch', 'closed'], { cwd: at(id), stdio: 'ignore', timeout: 10_000 });
     },
+    /** What's still pending (put, never taken by the hook): after close, final (shuttle's inbox.close). Body-writable: ids only mean anything. */
+    pending(id) {
+      const took = new Set(this.taken(id));
+      return lines(join(at(id), 'pending.jsonl')).filter((v) => !took.has(v.id));
+    },
+    /** The ids its hook took (delivered.jsonl). */
+    taken(id) { return lines(join(at(id), 'delivered.jsonl')).map((v) => v.id).filter((k) => typeof k === 'string'); },
+    /** Gone, with every message's text in it: message text lives in an inbox only while its body runs. */
+    remove(id) { rmSync(at(id), { recursive: true, force: true }); },
   };
 }
 
@@ -70,9 +90,24 @@ export class ClaudeRunner {
   harness = 'claude';
   static TOKEN_LINE = '(bridge spawn token {token}: ignore this line)';
 
-  constructor({ claude = 'claude', jobsDir = join(homedir(), '.claude', 'jobs'), args = [], inboxDir, run = spawnSync, sleep = sleepMs, claimPolls = 10, token = hex8 } = {}) {
+  constructor({ claude = 'claude', jobsDir = join(homedir(), '.claude', 'jobs'), projectsDir, args = [], inboxDir, run = spawnSync, sleep = sleepMs, claimPolls = 10, token = hex8 } = {}) {
     Object.assign(this, { claude, jobsDir, args, run, sleep, claimPolls, token });
     this.inbox = inboxDir ? inbox(inboxDir, { run }) : null;
+    // Claude Code keeps a session's transcript at <config>/projects/<cwd, slugged>/<session>.jsonl (and its tool
+    // results beside it, <session>/): the config dir is the jobs dir's parent.
+    this.roots = { projects: projectsDir ?? join(dirname(jobsDir), 'projects') };
+  }
+
+  sessionFiles(slot, body) {
+    const keep = [];
+    const session = slot?.session;
+    if (typeof session === 'string' && SESSION.test(session)) {
+      for (const p of dirs(this.roots.projects)) {
+        for (const name of [`${session}.jsonl`, session]) if (existsSync(join(this.roots.projects, p, name))) keep.push({ root: 'projects', rel: join(p, name) });
+      }
+    }
+    const drop = body?.id && /^[A-Za-z0-9-]{4,64}$/.test(body.id) ? [join(this.jobsDir, String(body.id).slice(0, 8))] : [];
+    return { keep, drop };
   }
 
   agents(env) {
@@ -148,9 +183,28 @@ const scrub = (env) => Object.fromEntries(Object.entries(env).filter(([k]) => !k
 export class CodexRunner {
   harness = 'codex';
 
-  constructor({ codex = 'codex', profile, runsDir = join(homedir(), '.local', 'share', 'loom-runtime', 'codex-runs'), inboxDir, spawn = nodeSpawn, run = spawnSync, key = hex8 } = {}) {
+  constructor({ codex = 'codex', profile, runsDir = join(homedir(), '.local', 'share', 'loom-runtime', 'codex-runs'), sessionsDir = join(process.env.CODEX_HOME || join(homedir(), '.codex'), 'sessions'), inboxDir, spawn = nodeSpawn, run = spawnSync, key = hex8 } = {}) {
     Object.assign(this, { codex, profile, runsDir, spawn, run, key });
     this.inbox = inboxDir ? inbox(inboxDir, { run }) : null;
+    // Codex keeps a thread's rollout at <CODEX_HOME>/sessions/YYYY/MM/DD/rollout-<when>-<thread>.jsonl.
+    this.roots = { sessions: sessionsDir };
+  }
+
+  sessionFiles(slot, body) {
+    const keep = [];
+    const thread = slot?.session;
+    if (typeof thread === 'string' && SESSION.test(thread)) {
+      const walk = (rel, depth) => {
+        for (const n of dirs(join(this.roots.sessions, rel), true)) {
+          const r = join(rel, n);
+          if (depth < 3) walk(r, depth + 1);
+          else if (n.endsWith(`-${thread}.jsonl`)) keep.push({ root: 'sessions', rel: r });
+        }
+      };
+      walk('', 0);
+    }
+    const drop = body?.id && /^[A-Za-z0-9-]{4,64}$/.test(body.id) ? [join(this.runsDir, body.id)] : [];
+    return { keep, drop };
   }
 
   launch({ brief, model, cwd, env, deny = [], resume }) {
@@ -226,10 +280,10 @@ export function runnerFor(harness, env = process.env, opts = {}) {
   const argv = (v) => { try { const a = JSON.parse(v); return Array.isArray(a) && a.every((x) => typeof x === 'string') ? a : []; } catch { return []; } };
   const inboxDir = env.LOOM_RUNTIME_INBOX_DIR || undefined;
   if (harness === 'claude') {
-    return new ClaudeRunner({ claude: env.LOOM_RUNTIME_CLAUDE || 'claude', ...(env.LOOM_RUNTIME_CLAUDE_JOBS ? { jobsDir: env.LOOM_RUNTIME_CLAUDE_JOBS } : {}), args: argv(env.LOOM_RUNTIME_CLAUDE_ARGS), inboxDir, ...opts });
+    return new ClaudeRunner({ claude: env.LOOM_RUNTIME_CLAUDE || 'claude', ...(env.LOOM_RUNTIME_CLAUDE_JOBS ? { jobsDir: env.LOOM_RUNTIME_CLAUDE_JOBS } : {}), ...(env.LOOM_RUNTIME_CLAUDE_PROJECTS ? { projectsDir: env.LOOM_RUNTIME_CLAUDE_PROJECTS } : {}), args: argv(env.LOOM_RUNTIME_CLAUDE_ARGS), inboxDir, ...opts });
   }
   if (harness === 'codex') {
-    return new CodexRunner({ codex: env.LOOM_RUNTIME_CODEX || 'codex', profile: env.LOOM_RUNTIME_CODEX_PROFILE || undefined, ...(env.LOOM_RUNTIME_CODEX_RUNS ? { runsDir: env.LOOM_RUNTIME_CODEX_RUNS } : {}), inboxDir, ...opts });
+    return new CodexRunner({ codex: env.LOOM_RUNTIME_CODEX || 'codex', profile: env.LOOM_RUNTIME_CODEX_PROFILE || undefined, ...(env.LOOM_RUNTIME_CODEX_RUNS ? { runsDir: env.LOOM_RUNTIME_CODEX_RUNS } : {}), ...(env.LOOM_RUNTIME_CODEX_SESSIONS ? { sessionsDir: env.LOOM_RUNTIME_CODEX_SESSIONS } : {}), inboxDir, ...opts });
   }
   throw new RunnerError(`no runner for harness ${JSON.stringify(harness)}`);
 }

@@ -194,3 +194,30 @@ test('loom-runtime body start: the CLI a source calls, end to end on a stand-in 
   assert.equal(cli(['models', 'resolve', '--agent', 'art', '--venue', 'relay'], '').stdout.split('\n')[0], 'claude-opus-5-5 (claude, anthropic)');
   assert.match(cli(['body', 'start', '--agent', 'art', '--venue', 'wake', '--brief', ''], '').stderr, /^loom runtime: a body needs a brief/);
 });
+
+test('a runner names its session\'s own local files: the transcript a slot keeps, and the job or run dir that goes', () => {
+  const h = harness();
+  assert.equal(new ClaudeRunner({ jobsDir: join(h.D, 'claude', 'jobs') }).roots.projects, join(h.D, 'claude', 'projects'), 'beside its jobs, in its config dir');
+  const c = new ClaudeRunner({ claude: join(here, 'fake-claude.mjs'), jobsDir: join(h.D, 'jobs'), projectsDir: join(h.D, 'claude', 'projects'), inboxDir: h.inbox, sleep: () => {} });
+  mkdirSync(join(c.roots.projects, '-home-art-Art', 'sess-1234'), { recursive: true });
+  writeFileSync(join(c.roots.projects, '-home-art-Art', 'sess-1234.jsonl'), '{}\n');
+  assert.deepEqual(c.sessionFiles({ harness: 'claude', session: 'sess-1234' }, { id: 'abcdef12' }), {
+    keep: [{ root: 'projects', rel: join('-home-art-Art', 'sess-1234.jsonl') }, { root: 'projects', rel: join('-home-art-Art', 'sess-1234') }],
+    drop: [join(h.D, 'jobs', 'abcdef12')],
+  });
+  assert.deepEqual(c.sessionFiles({ harness: 'claude', session: '../../etc' }).keep, [], 'a session id is never a path');
+  const x = new CodexRunner({ runsDir: join(h.D, 'runs'), sessionsDir: join(h.D, 'codex', 'sessions') });
+  mkdirSync(join(x.roots.sessions, '2026', '11', '02'), { recursive: true });
+  writeFileSync(join(x.roots.sessions, '2026', '11', '02', 'rollout-2026-11-02T12-00-00-th-42ab.jsonl'), '{}\n');
+  assert.deepEqual(x.sessionFiles({ harness: 'codex', session: 'th-42ab' }, { id: 'k1234567' }), {
+    keep: [{ root: 'sessions', rel: join('2026', '11', '02', 'rollout-2026-11-02T12-00-00-th-42ab.jsonl') }],
+    drop: [join(h.D, 'runs', 'k1234567')],
+  });
+  // The inbox: what it still held, once closed; then gone, its text with it.
+  const b = c.start({ brief: 'hi', model: 'm', cwd: h.D, env: h.env });
+  c.feed(b, { id: 'k1', text: 'unread' });
+  c.inbox.close(b.id);
+  assert.deepEqual(c.inbox.pending(b.id).map((p) => [p.id, p.text]), [['k1', 'unread']]);
+  c.inbox.remove(b.id);
+  assert.equal(existsSync(join(h.inbox, b.id)), false);
+});

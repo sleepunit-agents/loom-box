@@ -45,6 +45,13 @@
 //   loom runtime body feed <body> --text <text|->                      a message mid-turn, where the harness allows
 //   loom runtime body resume <body> | --slot <harness>:<session> [--agent a --venue v] --brief <text|->
 //   loom runtime body end <body>   |   loom runtime body list [--json]
+// Delivery (agent-runtime.md, section 5; the runtime's `delivery` offer, which core runs):
+//   loom runtime deliver < {source, id, agent, venue, place, label?, from, kind, at, text}   (core adds source)
+//                      the turn to core, then the conversation's body: {conversation, seq, body, reason?}
+//   loom runtime send --conversation <cv> --text <text|->              a body's message out, in its venue: {accepted, ref}
+//                                                                        at once; a failed post comes back through its inbox
+//   loom runtime deliver tick [--conversation <cv>] | deliver run [--every <ms>] | deliver list [--json]
+//   loom runtime body-host [--piece <name>] --host-key <boot key>   in an agent's house, as its task: the bodies delivery asks for
 // Models and accounts (the owner's, on loom's machine):
 //   loom runtime models [--json]                                         the model list and each agent's settings
 //   loom runtime models set --json < {list?, agent?, allow?, prefer?}    change them
@@ -75,6 +82,9 @@ import { join } from 'node:path';
 import { readModels, resolveFor, setModels } from './models.mjs';
 import { endBody, feedBody, listBodies, resumeBody, startBody } from './bodies.mjs';
 import { PART_RAW, joinParts, partsOf } from './blobs.mjs';
+import { deliver, listConvs, post, send, tick } from './delivery.mjs';
+import { runBodyHost } from './bodyhost.mjs';
+import { runnerFor } from './runners.mjs';
 
 /**
  * Whether this box's houses should outlive it: LOOM_BOX_ON_EXIT=keep|stop says so; else it's whether the systemd
@@ -133,9 +143,21 @@ function ownerOrRemote(env) {
   }
   const effects = realEffects(env);
   return async (path, body) => {
-    const r = api(env, effects, { caller: { kind: 'owner' }, path, body });
+    const r = await api(env, effects, { caller: { kind: 'owner' }, path, body });
     if (r.status !== 200) throw new Fail(r.body.error);
     return r.body;
+  };
+}
+
+/** The runtime's piece API, as this token (a house's): its answer, whatever its status. */
+function pieceCall(env, piece) {
+  const base = env.LOOM_URL.replace(/\/mcp\/?$/, '').replace(/\/+$/, '');
+  const name = piece && /^[a-z][a-z0-9-]{0,39}$/.test(piece) ? piece : pieceName(env);
+  return async (path, body) => {
+    const token = readFileSync(env.LOOM_TOKEN_FILE, 'utf-8').trim();
+    const r = await fetch(`${base}/api/${name}/${path}`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` }, body: JSON.stringify(body), signal: AbortSignal.timeout(20_000) });
+    const out = await r.json().catch(() => ({}));
+    return r.ok || out.ok === false ? out : { ok: false, error: out.error ?? `${r.status}`, reason: out.error ?? `${r.status}` };
   };
 }
 
@@ -162,7 +184,7 @@ async function main(argv, env) {
     }
     case 'api': {
       if (!json) throw new Fail(USAGE, 2);
-      return out(api(env, realEffects(env), JSON.parse(await readStdin())));
+      return out(await api(env, realEffects(env), JSON.parse(await readStdin())));
     }
     case 'bundle': {
       if (rest[0] === 'export') { process.stdout.write(exportPart(env)); return; }
@@ -318,6 +340,22 @@ async function main(argv, env) {
       }
     }
     case 'body': return body(rest, env, json);
+    case 'deliver': return delivery(rest, env, json);
+    case 'send': {
+      // From a body in its house: through the piece API, as its own agent (its house's token), with its run's key.
+      const msg = { conversation: flag(rest, '--conversation'), text: await textOf(rest, '--text'), key: env.LOOM_BODY_KEY };
+      const r = env.LOOM_URL && env.LOOM_TOKEN_FILE ? await pieceCall(env, flag(rest, '--piece'))('send', msg) : await send(env, msg, { detach: true });
+      out(r);
+      if (!r.accepted) process.exitCode = 1;
+      return;
+    }
+    case 'body-host': {
+      // In an agent's house, as its task (houserunner.mjs, hostTask): wake the bodies the runtime asks for, here.
+      if (!env.LOOM_URL || !env.LOOM_TOKEN_FILE) throw new Fail('the body host runs in a house: it needs LOOM_URL and LOOM_TOKEN_FILE');
+      const call = pieceCall(env, flag(rest, '--piece'));
+      await runBodyHost({ client: async (p, b) => { const r = await call(p, b); if (r.error) throw new Fail(r.error); return r; }, runner: (h) => runnerFor(h, env), env, hostKey: flag(rest, '--host-key'), log: (m) => process.stderr.write(`loom-runtime body-host: ${m}\n`), ...(flag(rest, '--beats') ? { beats: Number(flag(rest, '--beats')) } : {}) });
+      return;
+    }
     case 'models': return models(rest, env, json);
     case 'accounts': {
       const a = accountsFrom(env);
@@ -403,6 +441,52 @@ async function body(rest, env, json) {
     return;
   }
   throw new Fail('usage: loom runtime body start|feed|resume|end|list …', 2);
+}
+
+/**
+ * loom runtime deliver …: with no verb, one delivery (the body on stdin, the answer on stdout; a refusal or a turn
+ * core couldn't write is {status, error}, exit 1). The body is reached from a detached process, so a harness slow to
+ * start doesn't hold the source past its 2 s.
+ */
+async function delivery(rest, env, json) {
+  const [sub] = positional(rest);
+  if (sub === undefined) {
+    let raw;
+    try { raw = JSON.parse(await readStdin()); } catch { raw = null; }
+    const r = await deliver(env, raw, { detach: true });
+    out(r);
+    if (r.status) process.exitCode = 1;
+    return;
+  }
+  if (sub === 'tick') {
+    // A delivery's worker: a message the runtime couldn't seal comes on stdin ({key: text}), never in a file or argv.
+    let mem = new Map();
+    if (rest.includes('--stdin')) { try { mem = new Map(Object.entries(JSON.parse((await readStdin()) || '{}')).filter(([, v]) => typeof v === 'string')); } catch { mem = new Map(); } }
+    return tick(env, {}, flag(rest, '--conversation'), mem);
+  }
+  if (sub === 'post') {
+    // A body's accepted message, posted (delivery.mjs, post): its text on stdin, never a file or argv.
+    let m = {};
+    try { m = JSON.parse((await readStdin()) || '{}'); } catch { m = {}; }
+    if (typeof m.text !== 'string') throw new Fail('post takes {text, body?, run?} on stdin');
+    return out(await post(env, flag(rest, '--conversation'), flag(rest, '--ref'), m.text, { body: m.body, run: m.run }));
+  }
+  if (sub === 'run') {
+    const every = Number(flag(rest, '--every')) || 5000;
+    for (;;) {
+      try { await tick(env); } catch (err) { process.stderr.write(`loom-runtime deliver: tick: ${err.message}\n`); }
+      if (rest.includes('--once')) return;
+      await sleep(every);
+    }
+  }
+  if (sub === 'list') {
+    // Names and states only: a waiting message's text stays sealed.
+    const l = listConvs(env).map(({ outcomes: _o, queue, ...c }) => ({ ...c, queued: queue?.length ?? 0 }));
+    if (json) return out(l);
+    for (const c of l) process.stdout.write(`${c.conversation} ${c.agent} ${c.venue} ${c.label ?? c.place}: ${c.body ?? (c.slot ? `slot until ${c.slot.until}` : 'no body')}${c.queued ? `, ${c.queued} waiting (${c.waiting})` : ''}\n`);
+    return;
+  }
+  throw new Fail('usage: loom runtime deliver [tick|run|list] …', 2);
 }
 
 /** loom runtime models …: the list, each agent's settings, and the resolver. */

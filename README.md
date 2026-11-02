@@ -246,6 +246,19 @@ loom runtime body end claude:99553cf9  |  loom runtime body list
 - **Feeding** goes through the body's inbox, in the layout the bridges' inbox hook reads, under `LOOM_RUNTIME_INBOX_DIR`. Without one, or once the turn is over, a body isn't fed: resume it.
 - **A body's record** (`<LOOM_BOX_DATA>/bodies`, 0600) holds its agent, venue, model, harness and slot, never its brief or a message.
 
+## Delivery
+
+Anything addressed to an agent arrives through core's `deliver`, which runs this piece's `delivery` offer (`loom-runtime deliver`, the body on stdin). The turn goes to core first and its text to the audit log. Then the conversation's body is reached within 2 s: `fed`, `resumed`, `started`, `queued` or `failed`.
+
+- **A body is a session in its agent's own warm house.** Delivery asks for the agent's house (`up`) with the task `loom-runtime body-host --piece <name> --host-key <boot key>`. The house runs it, and the body host there wakes the bodies with the house's own harness, login, repo, cwd, secrets and agent token. The house file's command must run that task. Nothing of the runtime's environment goes along, only each body's run key, `LOOM_BODY_KEY`.
+- **The body host's own key:** `body-sync` takes only the body host's key, never a body's credentials. The task's boot key is good for one use: the host's first sync trades it for its own key, which it holds in memory. Bodies get neither key, nor the task.
+- **Placement** is the same rule the accounts and the claim use (`mayHost` and `mayUseLogin`, [docs/model-accounts.md](docs/model-accounts.md)). The box must be one that may host the agent, logged in to the body's harness, owned by the agent's owner (a loan hosts the agent but doesn't lend the login), with that login granted to the agent. The house must declare the harness in its house file's `"harnesses"`, or it gets no login and its body fails saying so. With no such box, the body is `failed` and says why.
+- **Once only:** each turn carries core's idempotency key, `<source>:<id>` (loom#426). A retry after a lost answer gets the same turn back, and a key that belongs to another turn is refused. The same `(source, id)` arriving with a different message is refused (409), and one still being made answers 503 with `retryAfter`.
+- **Capacity** counts busy bodies (`LOOM_RUNTIME_BUSY_LIMIT`, 5 per agent). Over it, a new conversation takes the least recently active idle body's place. A body idle for `LOOM_RUNTIME_WARM_IDLE_S` (600) ends, and so does a house with no body.
+- **Continuity:** a body that ends leaves a slot. Its session files are sent back by its host, sealed with age to the runtime's own key (`<LOOM_BOX_DATA>/delivery/runtime.key`), and kept for its venue's window (`LOOM_RUNTIME_CONTINUITY`, at most 14 days). A resume puts the files back in the house before resuming. When the slot goes, the conversation resumes from its digests.
+- **Answering:** a body pipes its message to `loom runtime send --conversation <cv>`, which goes through the piece API as its own agent with its run key. Only the body holding the conversation now can speak in it. It answers `{accepted, ref}` at once, and the runtime then runs the venue's `send` with its full 15 s. It retries only when the adapter answered no, never after a timeout, because a post that timed out may have landed. The reply turn is recorded as `answered` or `failed`, and a failure goes back to the body through its inbox.
+- **Every end leaves nothing in the clear:** a body that ends is either packed into a slot or has its harness's session files deleted.
+
 ## Model choice
 
 ```bash
@@ -334,6 +347,8 @@ A box never reads loom's stores, and loom never reaches into a box. The box poll
 | `claim` | a box | take a waiting house, once: its token and secrets |
 | `report` | a box | how a house is going; ending one revokes its token |
 | `up`, `down`, `list` | owner, agent | ask for, stop and see houses (an agent only its own) |
+| `body-sync` | an agent's house | its body host's report in; bodies to start, stop and feed out (its own agent's, its own house's only) |
+| `send` | an agent | a body's message out, in its own agent's conversation, with its run's `LOOM_BODY_KEY` |
 | `add-box`, `revoke-box`, `may-host`, `set-primary`, `set-agent` | owner | enrollment and config |
 | `login-report` | a box | how an owner's login on it is going: the CLI's link and device code, then done or failed |
 | `login-start`, `login-code`, `login-cancel` | owner | log a box in with the CLI's own login; the pasted code goes to the box once |

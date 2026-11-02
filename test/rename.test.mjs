@@ -25,7 +25,7 @@ test('the package is the runtime piece: loom-runtime, with loom-box as a second 
   // Two loom-<name> bins: loom.name says which one is the piece (loom's pieces-managed.ts).
   assert.equal(pkg.loom.name, 'runtime');
   assert.equal(pkg.loom.role, 'runtime');
-  assert.deepEqual(pkg.loom.services.map((s) => s.argv[0]), ['loom-runtime']);
+  assert.deepEqual(pkg.loom.services.map((s) => [s.name, s.argv[0]]), [['run', 'loom-runtime'], ['delivery', 'loom-runtime']]);
   assert.deepEqual(pkg.loom.strangers, ['join-request', 'join-poll']);
   // loom lets a piece declare settings only under its own prefix: the runtime's are LOOM_RUNTIME_*.
   for (const s of pkg.loom.settings) assert.match(s.name, /^LOOM_RUNTIME_/);
