@@ -40,8 +40,16 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const dataDir = (env) => env.LOOM_BOX_DATA || join(env.HOME || '', '.local', 'share', 'loom-box');
 const hostsDir = (env) => join(dataDir(env), 'delivery', 'hosts');
 const hostFile = (env, agent) => join(hostsDir(env), `${agent}.json`);
-const packedFile = (env, id) => join(hostsDir(env), 'packed', `${id}.age`);
-const partFile = (env, id, i) => join(hostsDir(env), 'parts', id, String(i));
+// Every path is the agent's and the house's own, and an id is checked before it names one.
+const safe = (agent, house, id) => AGENT_NAME.test(agent ?? '') && HOUSE.test(house ?? '') && BODY_ID.test(id ?? '');
+const packedFile = (env, agent, house, id) => { if (!safe(agent, house, id)) throw new StateError('not a body of a house', 400); return join(hostsDir(env), 'packed', agent, house, `${id}.age`); };
+const partDir = (env, agent, house, id) => { if (!safe(agent, house, id)) throw new StateError('not a body of a house', 400); return join(hostsDir(env), 'parts', agent, house, id); };
+/**
+ * A body's id, as the runtime knows it: its house's id, then the id the house's harness gave it. House ids are never
+ * reused, so no house can report an id that's another house's body (another agent's, or its own agent's earlier house).
+ */
+export const bodyIdOf = (house, raw) => `${house}-${raw}`;
+const rawOf = (body) => (body?.house && HOUSE.test(body.house) && String(body.id).startsWith(`${body.house}-`) ? String(body.id).slice(body.house.length + 1) : null);
 
 const readJson = (p) => { try { return JSON.parse(readFileSync(p, 'utf-8')); } catch { return null; } };
 function writeJson(p, v) {
@@ -89,35 +97,45 @@ function cleanReport(r) {
 export function bodySync(env, caller, body, o = {}) {
   if (caller?.kind !== 'agent' || !AGENT_NAME.test(caller.agent ?? '')) throw new StateError('body-sync is a body host\'s, in its agent\'s house', 403);
   const agent = caller.agent;
-  const house = caller.house ?? body?.house;
-  if (!HOUSE.test(house ?? '')) throw new StateError('body-sync comes from a house (its token names it)', 403);
+  // Which house this is, only from its token (core gives the caller's house): never from what it says.
+  const house = caller.house;
+  if (!HOUSE.test(house ?? '')) throw new StateError('body-sync comes from a house, and this token names none', 403);
   const sealer = o.sealer ?? ageSealer(env, join(dataDir(env), 'delivery'));
   const now = (o.now ?? (() => new Date()))().getTime();
   return hostLocked(env, () => {
     const h = loadHost(env, agent);
     const live = houseLive(env, house);
-    if (!h.house && live && live.agent === agent) h.house = house;
+    if (!h.house && live && live.agent === agent) { h.house = house; h.req = {}; h.stop = {}; h.inbox = {}; h.claimed = {}; }
     if (h.house !== house) return { exit: true, reason: `${agent}'s bodies are ${h.house ?? 'nowhere'}'s now` };
     const { bodies, done } = cleanReport(body?.report);
+    // An id this house already gave one request is never another's (a second claim of the same body is refused).
+    h.claimed ??= {};
+    for (const [rid, d] of Object.entries(done)) {
+      if (!d.id || !h.req?.[rid]) continue;
+      if (h.claimed[d.id] && h.claimed[d.id] !== rid) done[rid] = { error: `${house} reported ${d.id} for a second request` };
+      else h.claimed[d.id] = rid;
+    }
     h.report = { at: now, house, bodies, done };
     // A packed session, in parts: kept as they come, then sealed whole.
     const got = [];
     for (const [id, p] of Object.entries(body?.report?.packed ?? {}).slice(0, 8)) {
       if (!BODY_ID.test(id) || !h.stop?.[id]?.pack || !Number.isSafeInteger(p?.part) || !Number.isSafeInteger(p?.parts) || p.parts < 1 || p.parts > 64 || p.part < 0 || p.part >= p.parts || typeof p.data !== 'string' || p.data.length > PART_CHARS) continue;
-      writeJson(partFile(env, id, p.part), p.data);
+      const dir = partDir(env, agent, house, id);
+      writeJson(join(dir, String(p.part)), p.data);
       got.push([id, p.part]);
-      const all = Array.from({ length: p.parts }, (_, i) => readJson(partFile(env, id, i)));
+      const all = Array.from({ length: p.parts }, (_, i) => readJson(join(dir, String(i))));
       if (all.every((x) => typeof x === 'string')) {
         const whole = Buffer.from(all.join(''), 'base64');
-        mkdirSync(dirname(packedFile(env, id)), { recursive: true, mode: 0o700 });
-        writeFileSync(packedFile(env, id), sealer.seal(whole), { mode: 0o600 });
-        rmSync(join(hostsDir(env), 'parts', id), { recursive: true, force: true });
+        const f = packedFile(env, agent, house, id);
+        mkdirSync(dirname(f), { recursive: true, mode: 0o700 });
+        writeFileSync(f, sealer.seal(whole), { mode: 0o600 });
+        rmSync(dir, { recursive: true, force: true });
       }
     }
     // A stop is done once its body is gone from the report (and its pack, if it was asked for, is in).
     for (const id of Object.keys(h.stop ?? {})) {
       const gone = !bodies[id] || bodies[id].status === 'ended';
-      if (gone && (!h.stop[id].pack || existsSync(packedFile(env, id)) || now - h.stop[id].at > CLAIM_MS)) delete h.stop[id];
+      if (gone && (!h.stop[id].pack || existsSync(packedFile(env, agent, house, id)) || now - h.stop[id].at > CLAIM_MS)) delete h.stop[id];
     }
     const req = {};
     for (const [rid, r] of Object.entries(h.req ?? {})) {
@@ -163,7 +181,8 @@ export class HouseRunner {
         const at = bodyBox(s, agent, this.harness, this.env);
         if (!at.box) throw new RunnerError(at.reason);
         const r = this.up(this.env, { now: () => this.now() }, { kind: 'owner' }, { agent, box: at.box, task: hostTask(this.env) });
-        hostLocked(this.env, () => { const x = loadHost(this.env, agent); x.house = r.id; delete x.report; writeJson(hostFile(this.env, agent), x); });
+        // A new house: what was asked of the last one (and what it claimed) isn't this one's.
+        hostLocked(this.env, () => { const x = loadHost(this.env, agent); x.house = r.id; delete x.report; x.req = {}; x.stop = {}; x.inbox = {}; x.claimed = {}; writeJson(hostFile(this.env, agent), x); });
       }
       if (Date.now() > end) throw new RunnerError(`${agent}'s house ${h.house ?? ''} didn't start its body host in ${this.warmMs / 1000} s`);
       await sleep(this.poll);
@@ -184,7 +203,11 @@ export class HouseRunner {
     try {
       for (;;) {
         const d = this.host(o.agent).report?.done?.[rid];
-        if (d?.id) return { id: d.id, harness: this.harness, model: o.model, house, ...(resume ? { slot: resume } : {}) };
+        if (d?.id) {
+          const id = bodyIdOf(house, d.id);
+          if (existsSync(join(dataDir(this.env), 'bodies', `${this.harness}-${id}.json`))) throw new RunnerError(`${house} reported ${d.id}, which is already a body's`);
+          return { id, harness: this.harness, model: o.model, house, ...(resume ? { slot: resume } : {}) };
+        }
         if (d?.error) throw new RunnerError(d.error);
         if (Date.now() > end) throw new RunnerError(`${o.agent}'s body host didn't start the body in ${this.claimMs / 1000} s`);
         await sleep(this.poll);
@@ -201,9 +224,10 @@ export class HouseRunner {
   }
 
   entry(body) {
+    const raw = rawOf(body);
     const h = this.host(body.agent);
-    if (!fresh(h, this.now().getTime()) || h.house !== (body.house ?? h.house)) return null;
-    return h.report.bodies[body.id] ?? { status: 'ended' };
+    if (!raw || !fresh(h, this.now().getTime()) || h.house !== body.house) return null;
+    return h.report.bodies[raw] ?? { status: 'ended' };
   }
 
   status(body) { return this.entry(body)?.status ?? 'unknown'; }
@@ -217,35 +241,40 @@ export class HouseRunner {
     if (!e.feedable) return { fed: false, reason: 'its house\'s harness has no inbox, so a body hears nothing mid-turn' };
     hostLocked(this.env, () => {
       const h = loadHost(this.env, body.agent);
-      ((h.inbox ??= {})[body.id] ??= []).push({ key: message.id, sealed: this.sealer.seal(Buffer.from(String(message.text))).toString('base64') });
+      if (h.house !== body.house) return;
+      ((h.inbox ??= {})[rawOf(body)] ??= []).push({ key: message.id, sealed: this.sealer.seal(Buffer.from(String(message.text))).toString('base64') });
       writeJson(hostFile(this.env, body.agent), h);
     });
     return { fed: true };
   }
 
   end(body) {
-    if (!body.agent) return;
+    const raw = rawOf(body);
+    if (!body.agent || !raw) return;
     hostLocked(this.env, () => {
       const h = loadHost(this.env, body.agent);
-      (h.stop ??= {})[body.id] ??= { pack: false, at: this.now().getTime() };
+      if (h.house !== body.house) return;
+      (h.stop ??= {})[raw] ??= { pack: false, at: this.now().getTime() };
       writeJson(hostFile(this.env, body.agent), h);
     });
   }
 
   /** Its session's files, from its house: it's stopped there and its host sends them back. [] when its house is gone. */
   async pack(body) {
-    if (!this.alive(body) && !existsSync(packedFile(this.env, body.id))) return [];
+    const raw = rawOf(body);
+    if (!raw) return [];
+    const f = packedFile(this.env, body.agent, body.house, raw);
+    if (!this.alive(body) && !existsSync(f)) return [];
     hostLocked(this.env, () => {
       const h = loadHost(this.env, body.agent);
-      (h.stop ??= {})[body.id] = { pack: true, at: this.now().getTime() };
+      (h.stop ??= {})[raw] = { pack: true, at: this.now().getTime() };
       writeJson(hostFile(this.env, body.agent), h);
     });
     const end = Date.now() + this.claimMs;
-    while (!existsSync(packedFile(this.env, body.id))) {
+    while (!existsSync(f)) {
       if (Date.now() > end || !fresh(this.host(body.agent), this.now().getTime())) throw new RunnerError(`${body.agent}'s house didn't send ${body.id}'s session back`);
       await sleep(this.poll);
     }
-    const f = packedFile(this.env, body.id);
     try { return JSON.parse(this.sealer.open(readFileSync(f)).toString('utf-8')); } finally { rmSync(f, { force: true }); }
   }
 }
