@@ -298,14 +298,21 @@ test('the runtime\'s part of the bundle comes back on another machine, as that m
   revoked = [];
   importPart(forced, part, { force: true });
   ok(api(forced, fx, { caller: { kind: 'piece', subject: 'two' }, path: 'poll', body: {} }));
-  assert.ok(revoked.includes('box · laptop') && revoked.includes(`art · house ${live.id} on two`));
+  // A box's credential label is `box · <name> (<id>)` since boxes had ids.
+  const boxCred = (n) => revoked.some((l) => l === `box · ${n}` || l.startsWith(`box · ${n} (`));
+  assert.ok(boxCred('laptop') && revoked.includes(`art · house ${live.id} on two`));
   // thor is in both: its credential here is queued too (a forced restore re-adds what should stay).
-  assert.ok(revoked.includes('box · thor'));
+  assert.ok(boxCred('thor'));
   // Ids keep counting from the higher of the two, so no label repeats.
   // (both machines had used up to h-1)
   assert.equal(ok(api(forced, fx, { caller: owner, path: 'up', body: { agent: 'art', task: 'y' } })).id, 'h-2');
-  // A bundle with a remote box named like this machine is refused.
-  assert.throws(() => importPart({ ...there, LOOM_BOX_HOME: join(env.HOME, 'clash'), LOOM_BOX_LOCAL_NAME: 'thor' }, part), /a box named thor, this machine's name/);
+  // A remote box only named like this machine is its own box, by id: it can't speak for loom's own (whose key is
+  // the machine's name), so it restores. (One from before ids, keyed by that name, is still refused: bundle.mjs.)
+  const clash = { ...there, LOOM_BOX_HOME: join(env.HOME, 'clash'), LOOM_BOX_LOCAL_NAME: 'thor' };
+  importPart(clash, part);
+  const cl = ok(api(clash, fx, { caller: owner, path: 'list', body: {} })).boxes;
+  assert.deepEqual(cl.filter((b) => b.local).map((b) => b.id), ['thor']);
+  assert.equal(cl.filter((b) => b.name === 'thor' && !b.local).length, 1);
   assert.throws(() => importPart({ ...there, LOOM_BOX_HOME: join(env.HOME, 'x'), LOOM_IMPORT_IDENTITY: join(env.HOME, 'nokey') }, part), /doesn't decrypt/);
 });
 

@@ -105,8 +105,9 @@ export function importPart(env, part, { force = false } = {}) {
       for (const h of Object.values(cur.houses ?? {})) {
         if (!['done', 'failed', 'stopped', 'lost'].includes(h.state) && h.tokenLabel && !s.pendingRevokes.includes(h.tokenLabel)) s.pendingRevokes.push(h.tokenLabel);
       }
-      for (const [name, b] of Object.entries(cur.boxes ?? {})) {
-        const label = `box · ${name}`;
+      for (const [id, b] of Object.entries(cur.boxes ?? {})) {
+        // Its credential's own label (`box · <name> (<id>)` since boxes had ids), else the old `box · <id>`.
+        const label = b.credLabel ?? `box · ${id}`;
         // Every one, even a box the bundle also has: labels can't tell this
         // machine's credential from the bundle's. A box that should stay is re-added.
         if (!b.local && !b.revoked && !s.pendingRevokes.includes(label)) s.pendingRevokes.push(label);
