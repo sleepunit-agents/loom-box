@@ -149,7 +149,8 @@ export function resolveModel({ agent, kind, models, settings = {}, accounts, sco
     // Only an account the model's own harness can run on: a Claude login runs Claude Code, not Codex.
     const mine = accountsFor(accounts, agent, provider).filter((a) => !a.harness || a.harness === m.harness);
     const acct = mine.find((a) => hasRoom(a, m.window));
-    room.set(m.id, acct ? { ok: true, account: acct.name } : { ok: false, reason: mine.length ? `${mine.map((a) => a.name).join(', ')} out of quota` : `no box of ${agent}'s owner is logged in to ${m.harness}, and ${agent} has no ${provider} API key` });
+    // A body is told the account's label, never its key.
+    room.set(m.id, acct ? { ok: true, account: acct.label ?? acct.name } : { ok: false, reason: mine.length ? `${mine.map((a) => a.name).join(', ')} out of quota` : `no box of ${agent}'s owner is logged in to ${m.harness}, and ${agent} has no ${provider} API key` });
   }
   if (!accounts) why.push('quota not checked: no box reports here (off the control plane, or LOOM_RUNTIME_ACCOUNTS=none); fails open, as the resolvers before did');
   const usable = allowed.filter((m) => room.get(m.id).ok);

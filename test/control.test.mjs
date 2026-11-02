@@ -29,6 +29,7 @@ const ok = (r) => { assert.equal(r.status, 200, JSON.stringify(r.body)); return 
 beforeEach(() => {
   env = { HOME: scratch('loom-box-'), LOOM_BOX_LOCAL_NAME: 'one' };
   env.LOOM_BOX_HOME = join(env.HOME, 'state');
+  env.XDG_RUNTIME_DIR = join(env.HOME, 'run');
   minted = []; revoked = [];
   let n = 0;
   fx = {
@@ -374,11 +375,20 @@ test('a box reports its harnesses; the owner logs it in from its page: the box r
   const lp = JSON.stringify(page(env, { path: `login:${l.id}` }));
   assert.match(lp, /Sign in to Claude/);
   assert.equal(lp.includes(link), true);
+  // Not for an agent's tab, nor an agent owner: 403, and no link.
+  for (const [e2, c2] of [[{ ...env, LOOM_SCOPE: 'art' }, undefined], [env, { kind: 'owner', who: 'loren', agents: ['art'] }]]) {
+    const p2 = page(e2, { path: `login:${l.id}`, caller: c2 });
+    assert.equal(p2.status, 403);
+    assert.equal(JSON.stringify(p2).includes(link), false);
+  }
   ok(call(owner, 'login-code', { id: l.id, code: 'abcdefgh#state123' }));
   assert.equal(JSON.stringify(page(env, { path: `login:${l.id}` })).includes('abcdefgh#state123'), false);
-  // The code reaches the box once, then it's gone from loom's state.
+  // The code never goes into state.json: it waits in the runtime dir (0600), reaches the box once, and is gone.
+  assert.equal(readFileSync(join(env.LOOM_BOX_HOME, 'state.json'), 'utf-8').includes('abcdefgh#state123'), false);
+  assert.equal(statSync(join(env.XDG_RUNTIME_DIR, 'loom-runtime-codes', l.id)).mode & 0o777, 0o600);
   assert.deepEqual(ok(call(box('one'), 'poll')).logins, [{ id: l.id, harness: 'claude', state: 'checking', code: 'abcdefgh#state123' }]);
-  assert.equal(JSON.stringify(load(env)).includes('abcdefgh#state123'), false);
+  assert.equal(readFileSync(join(env.LOOM_BOX_HOME, 'state.json'), 'utf-8').includes('abcdefgh#state123'), false);
+  assert.throws(() => statSync(join(env.XDG_RUNTIME_DIR, 'loom-runtime-codes', l.id)));
   assert.deepEqual(ok(call(box('one'), 'poll')).logins, []);
   ok(call(box('one'), 'login-report', { id: l.id, state: 'done', harnesses: { claude: { installed: true, loggedIn: true, method: 'claude.ai', plan: 'max', account: 'claude-0123456789' } } }));
   assert.equal(load(env).logins[l.id].state, 'done');
@@ -409,10 +419,16 @@ test('usage comes from a house\'s own run output, onto its box\'s login; the acc
   ok(call(house, 'usage', { harness: 'claude', reading: { windows: { '7d': 0.63, '5h': 7 }, resets: { '7d': 1793300000, '5h': 1899999999 }, checked: 1999999999 } }));
   assert.deepEqual(load(env).boxes.one.usage.claude.house, { windows: { '7d': 0.63, '5h': 1 }, resets: { '7d': 1793300000 }, checked: 1792897200, source: 'house', house: h.id });
   const a = stateAccounts(env, { now: () => Date.parse('2026-10-25T03:00:00Z') }).list().accounts;
-  assert.deepEqual(a.map((x) => [x.name, x.harness, x.label, x.boxes, x.agents]), [
-    ['claude-0123456789', 'claude', 'Claude Max · 456789', ['one'], ['art', 'mark']],
-    ['codex-box-one', 'codex', 'Codex Pro · ox-one', ['one'], ['art', 'mark']],
+  // Keys are the box owner's, salted; the label is all a body sees. art was granted Claude only: Codex's account isn't offered to it.
+  assert.deepEqual(a.map((x) => [x.harness, x.label, x.boxes, x.agents]), [
+    ['claude', 'Claude Max (owner\'s)', ['one'], ['art', 'mark']],
+    ['codex', 'Codex Pro (owner\'s)', ['one'], ['mark']],
   ]);
+  assert.match(a[0].name, /^owner:claude-[0-9a-f]{10}$/);
+  assert.equal(JSON.stringify(a).includes('0123456789'), false);
+  // An agent caller sees no account hash in the list.
+  assert.equal(JSON.stringify(ok(call(art, 'list')).boxes).includes('0123456789'), false);
+  assert.equal(JSON.stringify(ok(call(owner, 'list')).boxes).includes('0123456789'), true);
   assert.deepEqual(a[0].usage, { '7d': 0.63, '5h': 1, reset_7d: 1793300000, checked: 1792897200 });
   assert.deepEqual([a[0].usageFrom, a[1].usageFrom], ['house', 'box']);
   // 5h is full: no room on that account.
@@ -449,10 +465,11 @@ test('an agent\'s work runs only on its owner\'s boxes: member B\'s agent never 
   const models = { ...env, LOOM_RUNTIME_SCORECARDS: 'off' };
   assert.equal((await resolveFor(models, { agent: 'art', venue: 'wake', accounts })).harness, 'claude');
   await assert.rejects(resolveFor(models, { agent: 'pond-bot', venue: 'wake', accounts }), (e) => e.status === 409 && /no box of pond-bot's owner is logged in to claude/.test(e.message));
-  // Lent by name, jonathan's box takes pond-bot's work, and its login serves it.
+  // Lent by name, jonathan's box takes pond-bot's work, but never on jonathan's login: nothing is offered for it,
+  // as the claim won't mount it (one rule for both: owners.mjs, mayUseLogin).
   ok(call(owner, 'box-lend', { name: 'one', agents: 'pond-bot' }));
   assert.equal(ok(call(owner, 'up', { agent: 'pond-bot', box: 'one', task: 't' })).box, 'one');
-  assert.equal((await resolveFor(models, { agent: 'pond-bot', venue: 'wake', accounts })).harness, 'claude');
+  await assert.rejects(resolveFor(models, { agent: 'pond-bot', venue: 'wake', accounts }), (e) => e.status === 409);
   ok(call(owner, 'box-lend', { name: 'one', agents: '' }));
   assert.equal(call(owner, 'up', { agent: 'pond-bot', box: 'one', task: 't' }).status, 403);
 });
@@ -592,8 +609,46 @@ test('a house gets the box\'s logins only on a box its agent\'s owner owns, and 
   ok(call(box('one'), 'poll'));
   ok(call(box('one'), 'claim', { id: h.id }));
   ok(call({ ...art, house: h.id }, 'usage', { harness: 'codex', reading: { windows: { '7d': 0.9 } } }));
-  const codexOf = () => stateAccounts(env, { now: () => Date.parse('2026-10-25T03:00:00Z') }).list().accounts.find((x) => x.name === 'codex-box-one');
+  const codexOf = () => stateAccounts(env, { now: () => Date.parse('2026-10-25T03:00:00Z') }).list().accounts.find((x) => x.harness === 'codex' && x.boxes.includes('one'));
   assert.deepEqual([codexOf().usage['7d'], codexOf().usageFrom], [0.9, 'house']);
   ok(call(box('one'), 'poll', { usage: { codex: { windows: { '7d': 0.2 }, checked: 1792890000 } } }));
   assert.deepEqual([codexOf().usage['7d'], codexOf().usageFrom], [0.2, 'box']);
+});
+
+test('a pasted code expires after 10 minutes unclaimed, and isn\'t taken at all without a runtime dir', async () => {
+  const { utimesSync } = await import('node:fs');
+  ok(call(box('one'), 'poll', { harnesses: { claude: { installed: true, loggedIn: false } } }));
+  const l = ok(call(owner, 'login-start', { box: 'one', harness: 'claude' }));
+  ok(call(box('one'), 'poll'));
+  ok(call(box('one'), 'login-report', { id: l.id, state: 'waiting', link: 'https://claude.com/cai/oauth/authorize?x=1', kind: 'paste-code' }));
+  ok(call(owner, 'login-code', { id: l.id, code: 'abcdefgh#state123' }));
+  const f = join(env.XDG_RUNTIME_DIR, 'loom-runtime-codes', l.id);
+  const old = new Date(Date.now() - 11 * 60_000);
+  utimesSync(f, old, old);
+  fx.now = () => new Date();
+  assert.deepEqual(ok(call(box('one'), 'poll')).logins, [{ id: l.id, harness: 'claude', state: 'failed' }]);
+  assert.match(load(env).logins[l.id].error, /expired/);
+  // No runtime dir: no code is taken (it would have nowhere to wait but state.json).
+  const l2 = ok(call(owner, 'login-start', { box: 'one', harness: 'claude' }));
+  ok(call(box('one'), 'poll'));
+  ok(call(box('one'), 'login-report', { id: l2.id, state: 'waiting', link: 'https://claude.com/cai/oauth/authorize?x=2', kind: 'paste-code' }));
+  delete env.XDG_RUNTIME_DIR;
+  assert.equal(call(owner, 'login-code', { id: l2.id, code: 'abcdefgh#state456' }).status, 409);
+});
+
+test('a box polling loom over plain HTTP outside the tailnet won\'t run a login', async () => {
+  const { secureLoomUrl } = await import('../src/logins.mjs');
+  for (const [u, yes] of [['https://loom.example.com', true], ['http://100.79.56.125:8787', true], ['http://loom.tail1234.ts.net:8787', true], ['http://127.0.0.1:8787', true],
+    ['http://192.168.6.30:8787', false], ['http://100.200.1.1:8787', false], ['http://loom.example.com', false], ['ftp://x', false]]) assert.equal(secureLoomUrl(u), yes, u);
+  const { runner } = await import('../src/box.mjs');
+  const started = [];
+  const client = { async call(path, body) { const r = api(env, fx, { caller: box('one'), path, body }); if (r.status !== 200) throw new Error(r.body.error); return r.body; } };
+  const r = runner({ ...env, LOOM_BOX_DATA: join(env.HOME, 'data') }, client, { loomUrl: 'http://192.168.6.30:8787/mcp', log: () => {}, secureChannel: false,
+    status: () => ({ claude: { installed: true, loggedIn: false } }), login: (h) => { started.push(h); return { code() {}, cancel() {} }; }, upgrade: () => null });
+  const l = ok(call(owner, 'login-start', { box: 'one', harness: 'claude' }));
+  await r.tick();
+  await new Promise((res) => setTimeout(res, 50));
+  assert.deepEqual(started, []);
+  assert.equal(load(env).logins[l.id].state, 'failed');
+  assert.match(load(env).logins[l.id].error, /plain HTTP, outside the tailnet/);
 });

@@ -9,6 +9,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { LOGIN_NAMES } from './logins.mjs';
 
 const PERSON = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 
@@ -37,6 +38,26 @@ export function ownersOf(members, agent) {
 export function boxOwner(box, members) {
   if (typeof box?.owner === 'string' && PERSON.test(box.owner) && members.some((m) => m.person === box.owner)) return box.owner;
   return householdOwners(members)[0] ?? members[0]?.person ?? 'owner';
+}
+
+/** Whether the agent's own owner owns the box (a loan doesn't count): only then may its houses have the box's logins. */
+export const ownsBox = (box, agent, members) => ownersOf(members, agent).includes(boxOwner(box, members));
+
+/** The box logins an agent's houses may have: the owner's grant, else all for a household owner's own agent, else none. */
+export function loginsOf(a, agent, members) {
+  if (Array.isArray(a?.logins)) return a.logins;
+  return ownersOf(members, agent).some((p) => householdOwners(members).includes(p)) ? [...LOGIN_NAMES] : [];
+}
+
+/**
+ * The one rule for whether an agent's work may run on a box's login for a harness: the box is live and logged in to
+ * it, the agent's owner owns the box, and the owner granted the agent that login. The model resolver offers an
+ * account by it (accounts.mjs) and the claim mounts a login by it (control.mjs), so neither offers what the other
+ * won't give.
+ */
+export function mayUseLogin(box, agentCfg, agent, harness, members) {
+  return !box?.revoked && !!box?.harnesses?.[harness]?.loggedIn && !box.harnesses[harness].unhealthy
+    && ownsBox(box, agent, members) && loginsOf(agentCfg, agent, members).includes(harness);
 }
 
 /** Whether a box runs this agent's work: its owner owns the agent, or lent it the box by name. */

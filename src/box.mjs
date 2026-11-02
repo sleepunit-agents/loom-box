@@ -373,7 +373,7 @@ function rootless(env) {
  * on loom's own machine); `loomUrl` is what a house is told loom is.
  */
 export function runner(env, client, { loomUrl, labels = [], log = (m) => process.stderr.write(`loom-box: ${m}\n`), hasSocket = (p) => existsSync(p), hasCdi = () => CDI_SPECS.some((p) => existsSync(p)), upgrade = maybeUpgrade,
-  status = () => harnessStatus(env), login = (h, o) => startLogin(env, h, o), codexUsage = () => null, clock = () => Date.now() }) {
+  status = () => harnessStatus(env), login = (h, o) => startLogin(env, h, o), codexUsage = () => null, clock = () => Date.now(), secureChannel = true }) {
   const houses = new Map(); // id -> { child, dir, stopAt? }
   // The harness CLIs' own word on their logins, asked every STATUS_MS (and after a login), not every poll.
   let harnesses = null;
@@ -393,6 +393,11 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
       if (l.state === 'cancel') { have?.cancel(); continue; }
       if (have) { if (l.code) have.code(l.code); continue; }
       if (l.state !== 'wanted' || !LOGIN_HARNESSES[l.harness]) continue;
+      // A pasted code would cross this box's channel to loom: not over plain HTTP outside the tailnet.
+      if (!secureChannel) {
+        client.call('login-report', { id: l.id, state: 'failed', error: 'this box reaches loom over plain HTTP, outside the tailnet: a login needs HTTPS or the tailnet (loom box join with an https:// or tailnet URL)' }).catch(() => {});
+        continue;
+      }
       log(`logging in ${l.harness} (the owner asked, from loom's page)`);
       const report = (st) => {
         if (st.state !== 'waiting') { logins.delete(l.id); log(`${l.harness} login: ${st.state}${st.error ? ` (${st.error})` : ''}`); }

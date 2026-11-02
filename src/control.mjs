@@ -9,20 +9,14 @@
 import { ownCommit } from './version.mjs';
 import { pieceName } from './piece.mjs';
 import { randomBytes } from 'node:crypto';
+import { chmodSync, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { AGENT_NAME, BOX_NAME, SECRET_NAME, StateError, load, localBoxName, nextHouseId, update } from './state.mjs';
 import { joinPoll, joinRequest } from './enroll.mjs';
 import { MAX_PARTS, PART_RAW, drop, partsOf, putPart, putWhole, readPart } from './blobs.mjs';
 import { parsePortGrant, parseTailnetGrant } from './house.mjs';
 import { CODE, LOGIN_NAMES } from './logins.mjs';
-import { boxOwner, householdOwners, membersOf, ownersAllow, ownersOf } from './owners.mjs';
-
-/** Whether the agent's own owner owns the box (a loan doesn't count): only then does a house get the box's logins. */
-export const ownsBox = (box, agent, members) => ownersOf(members, agent).includes(boxOwner(box, members));
-/** The box logins an agent's houses may have: the owner's grant, else all for a household owner's own agent, else none. */
-export function loginsOf(a, agent, members) {
-  if (Array.isArray(a?.logins)) return a.logins;
-  return ownersOf(members, agent).some((p) => householdOwners(members).includes(p)) ? [...LOGIN_NAMES] : [];
-}
+import { boxOwner, mayUseLogin, membersOf, ownersAllow } from './owners.mjs';
 
 const TERMINAL = new Set(['done', 'failed', 'stopped', 'lost']);
 const LIVE = new Set(['wanted', 'starting', 'running', 'stopping']);
@@ -378,7 +372,7 @@ export function list(env, caller) {
   const mine = caller.kind === 'agent' ? [caller.agent] : Array.isArray(caller.agents) ? caller.agents : null;
   const boxes = Object.entries(s.boxes)
     .filter(([, b]) => householdOwner(caller) || (!b.revoked && mine?.some((a) => mayHost(b, a, members))))
-    .map(([id, b]) => ({ id, name: b.name ?? id, local: !!b.local, facts: factsOf(b), lastSeen: b.lastSeen, harnesses: harnessesOf(b),
+    .map(([id, b]) => ({ id, name: b.name ?? id, local: !!b.local, facts: factsOf(b), lastSeen: b.lastSeen, harnesses: harnessesOf(b, householdOwner(caller)),
       ...(householdOwner(caller) ? { mayHost: b.mayHost, owner: boxOwner(b, members), lentTo: b.lentTo ?? [], revoked: b.revoked ?? null, created: b.created } : {}) }));
   const primary = caller.kind === 'agent' ? primaryOf(s, caller.agent, env) : undefined;
   const services = Object.entries(s.services ?? {})
@@ -426,7 +420,9 @@ export function poll(env, effects, caller, { facts, sessions, harnesses, usage }
     const b = boxOf(s, caller);
     if (f) b.facts = f;
     if (hs) b.harnesses = stamp(hs, now(effects));
-    // A box's own reading (from the rollouts in its login dir) is kept apart from a house's report.
+    // The household's own salt for account keys (accounts.mjs): made once, never shown.
+    s.accountSalt ??= randomBytes(16).toString('hex');
+    // A box-taken reading (none today: the shared login dir holds no session files) is kept apart from a house's report.
     for (const [h, r] of Object.entries(us ?? {})) ((b.usage ??= {})[h] = usageSlot(b.usage[h])).box = { ...r, source: 'box' };
     // Only sessions this box runs: its houses, and the box sessions placed on it (it can't speak for another's).
     if (busy) {
@@ -443,10 +439,13 @@ export function poll(env, effects, caller, { facts, sessions, harnesses, usage }
     return {
       // Logins the owner started from the box's page: the CLI's own login, run here (logins.mjs). A pasted code goes
       // to the box once and is gone from loom's state.
-      logins: Object.values(s.logins ?? {}).filter((l) => l.box === caller.subject && (l.state === 'wanted' || l.code || l.state === 'cancel'))
+      logins: Object.values(s.logins ?? {}).filter((l) => l.box === caller.subject && (l.state === 'wanted' || l.codeWaiting || l.state === 'cancel'))
         .map((l) => {
-          const out = { id: l.id, harness: l.harness, state: l.state, ...(l.code ? { code: l.code } : {}) };
-          delete l.code;
+          // The code, if one waits, goes to the box once and is gone (takeCode removes it; an old one has expired).
+          const code = l.codeWaiting ? takeCode(env, l.id, Date.parse(now(effects))) : null;
+          if (l.codeWaiting && !code) { l.state = 'failed'; l.error = 'The code expired before the box took it; start again.'; }
+          delete l.codeWaiting;
+          const out = { id: l.id, harness: l.harness, state: l.state, ...(code ? { code } : {}) };
           if (l.state === 'wanted') l.state = 'starting';
           if (l.state === 'cancel') l.state = 'failed';
           return out;
@@ -515,9 +514,7 @@ export function claim(env, effects, caller, { id }) {
       // the agent (loginsOf), and only on a box its owner owns. A box lent to the agent runs its work, not on its
       // owner's login: the login file is readable from inside the house (docs/model-accounts.md).
       const members = membersOf(env);
-      const own = ownsBox(s.boxes[caller.subject], h.agent, members);
-      const granted = loginsOf(a, h.agent, members);
-      const logins = own ? Object.entries(s.boxes[caller.subject].harnesses ?? {}).filter(([k, v]) => v.loggedIn && granted.includes(k)).map(([k]) => k) : [];
+      const logins = LOGIN_NAMES.filter((k) => mayUseLogin(s.boxes[caller.subject], a, h.agent, k, members));
       h.logins = logins;
       const repoAuth = a.repoSecret ? effects.secret(a.repoSecret) : null;
       h.state = 'starting'; h.tokenLabel = label; h.updated = now(effects);
@@ -868,6 +865,34 @@ export function remoteReport(env, effects, caller, { agent, state, url, error })
 const ACCOUNT = /^[a-z]+-[0-9a-f]{10}$/;
 const LOGIN_ID = /^l-[0-9a-f]{12}$/;
 const LOGIN_TTL_MS = 20 * 60_000;
+/** A pasted sign-in code waits at most this long for its box. */
+export const CODE_TTL_MS = 10 * 60_000;
+
+/**
+ * Where a pasted sign-in code waits for its box's next poll: never state.json. The piece's API runs as one process
+ * per call, so "in memory" is the user's runtime dir (XDG_RUNTIME_DIR, a tmpfs), 0700, one 0600 file per login,
+ * removed when the box takes it or after CODE_TTL_MS. With no runtime dir, a code isn't taken at all.
+ */
+function codeDir(env) {
+  if (!env.XDG_RUNTIME_DIR) return null;
+  const d = join(env.XDG_RUNTIME_DIR, 'loom-runtime-codes');
+  mkdirSync(d, { recursive: true, mode: 0o700 });
+  chmodSync(d, 0o700);
+  return d;
+}
+function takeCode(env, id, nowMs) {
+  const d = codeDir(env);
+  if (!d || !LOGIN_ID.test(id)) return null;
+  const p = join(d, id);
+  let code = null;
+  try {
+    const st = lstatSync(p);
+    if (st.isFile() && nowMs - st.mtimeMs <= CODE_TTL_MS) code = readFileSync(p, 'utf-8');
+  } catch { code = null; }
+  rmSync(p, { force: true });
+  return code && CODE.test(code) ? code : null;
+}
+function dropCode(env, id) { const d = codeDir(env); if (d && LOGIN_ID.test(id)) rmSync(join(d, id), { force: true }); }
 const WINDOW = /^[0-9]+[hd](_[a-z0-9]+)?$/;
 /** A box's usage for one harness: its own reading and a house's, kept apart. A reading from before is the box's. */
 const usageSlot = (u) => (u && (u.box || u.house) ? u : u && u.windows ? { box: u } : {});
@@ -915,7 +940,7 @@ function usageReport(v, nowS) {
 }
 
 /** A box's harnesses, for a list: states only. */
-export const harnessesOf = (b) => Object.fromEntries(Object.entries(b.harnesses ?? {}).map(([k, v]) => [k, { installed: !!v.installed, loggedIn: !!v.loggedIn, ...(v.unhealthy ? { unhealthy: v.unhealthy } : {}), ...(v.method ? { method: v.method } : {}), ...(v.plan ? { plan: v.plan } : {}), ...(v.account ? { account: v.account } : {}), ...(v.checked ? { checked: v.checked } : {}) }]));
+export const harnessesOf = (b, full = false) => Object.fromEntries(Object.entries(b.harnesses ?? {}).map(([k, v]) => [k, { installed: !!v.installed, loggedIn: !!v.loggedIn, ...(v.unhealthy ? { unhealthy: v.unhealthy } : {}), ...(v.method ? { method: v.method } : {}), ...(v.plan ? { plan: v.plan } : {}), ...(full && v.account ? { account: v.account } : {}), ...(v.checked ? { checked: v.checked } : {}) }]));
 
 /** A login nobody finished goes, and so does a finished one after a while. */
 function expireLogins(s, effects) {
@@ -924,7 +949,7 @@ function expireLogins(s, effects) {
     const age = t - Date.parse(l.updated ?? l.created);
     if (age > LOGIN_TTL_MS) {
       if (['done', 'failed'].includes(l.state)) delete s.logins[id];
-      else { l.state = 'failed'; l.error = 'No sign-in in time; start again.'; delete l.code; l.updated = now(effects); }
+      else { l.state = 'failed'; l.error = 'No sign-in in time; start again.'; l.updated = now(effects); }
     }
   }
 }
@@ -952,11 +977,17 @@ export function loginStart(env, effects, { box, harness }) {
 export function loginCode(env, effects, { id, code }) {
   const c = typeof code === 'string' ? code.trim() : '';
   if (!CODE.test(c)) fail('That doesn\'t look like the code the sign-in page showed.');
+  const d = codeDir(env);
+  if (!d) fail('This loom has no runtime dir (XDG_RUNTIME_DIR) to keep a sign-in code out of its state: it can\'t take one', 409);
   return update(env, (s) => {
     const l = s.logins?.[id];
     if (!LOGIN_ID.test(id ?? '') || !l) fail('That sign-in is gone; start again.', 404);
     if (l.state !== 'waiting' || l.kind !== 'paste-code') fail(`That sign-in isn't waiting for a code (it's ${l.state}).`, 409);
-    l.code = c; l.state = 'checking'; l.updated = now(effects);
+    // The code itself goes only to the runtime dir; state.json says just that one is waiting.
+    const p = join(d, id);
+    rmSync(p, { force: true });
+    writeFileSync(p, c, { mode: 0o600, flag: 'wx' });
+    l.codeWaiting = true; l.state = 'checking'; l.updated = now(effects);
     return { id, state: l.state };
   });
 }
@@ -965,7 +996,7 @@ export function loginCancel(env, effects, { id }) {
   return update(env, (s) => {
     const l = s.logins?.[id];
     if (!l) fail('That sign-in is gone.', 404);
-    if (!['done', 'failed'].includes(l.state)) { l.state = 'cancel'; delete l.code; l.updated = now(effects); }
+    if (!['done', 'failed'].includes(l.state)) { l.state = 'cancel'; delete l.codeWaiting; dropCode(env, id); l.updated = now(effects); }
     return { id, state: l.state };
   });
 }
@@ -974,7 +1005,7 @@ export function loginCancel(env, effects, { id }) {
 export function loginView(env, id) {
   const l = load(env).logins?.[id];
   if (!l) return null;
-  const { code: _c, ...rest } = l;
+  const { codeWaiting: _c, ...rest } = l;
   return rest;
 }
 
@@ -994,7 +1025,7 @@ export function loginReport(env, effects, caller, { id, state, link, userCode, k
     if (link) l.link = link;
     if (userCode) l.userCode = userCode;
     if (kind === 'paste-code' || kind === 'device') l.kind = kind;
-    if (state === 'failed') { l.error = String(error ?? 'it didn\'t work').slice(0, 300); delete l.code; }
+    if (state === 'failed') { l.error = String(error ?? 'it didn\'t work').slice(0, 300); delete l.codeWaiting; dropCode(env, id); }
     if (state !== 'waiting') delete l.link;
     return { ok: true };
   });

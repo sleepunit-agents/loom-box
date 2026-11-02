@@ -639,6 +639,10 @@ function agentOwnerPage(env, caller, nowMs) {
 export function page(env, { path, caller: c }, nowMs = Date.now()) {
   const caller = pageCaller(c);
   const scope = scopeOf(env);
+  // A box's login is its owner's, the way the login actions are: never an agent's tab or an agent owner's page.
+  if (typeof path === 'string' && path.startsWith('login:') && (scope || Array.isArray(caller.agents))) {
+    return { status: 403, title: 'Not allowed', sections: [{ id: 'no', blocks: [{ type: 'text', tone: 'muted', text: 'A box\'s login is the household owner\'s.' }] }] };
+  }
   if (scope && (path === '' || path === undefined)) return agentTabPage(env, scope, caller, nowMs);
   if (Array.isArray(caller.agents)) return path === '' || path === undefined ? agentOwnerPage(env, caller, nowMs) : { title: 'Not found', sections: [] };
   if (path === '' || path === undefined) return boxesPage(env, nowMs);

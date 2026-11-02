@@ -12,11 +12,12 @@
 //                credentials: [{kind, status}], usage: {"5h": 0.4, "7d": 0.2, reset_7d, checked}}]}
 // `agents` is which agents the account may do work for: the agents whose owner owns one of its boxes (owners.mjs).
 // Nothing here ever holds a credential.
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { load, stateDir } from './state.mjs';
 import { LOGIN_HARNESSES } from './logins.mjs';
-import { membersOf, ownersAllow } from './owners.mjs';
+import { boxOwner, mayUseLogin, membersOf } from './owners.mjs';
 import { setting } from './piece.mjs';
 
 export const PROVIDERS = /^(anthropic|openai|google|mistral)$/;
@@ -56,12 +57,18 @@ export function deriveAccounts(s, { members, nowMs = Date.now() } = {}) {
   const by = new Map();
   for (const [id, b] of Object.entries(s.boxes ?? {})) {
     if (b.revoked) continue;
-    const fresh = b.local || (b.lastSeen && nowMs - Date.parse(b.lastSeen) < STALE_MS);
+    // A box not seen lately can't run anything now: its logins offer nothing.
+    if (!(b.local || (b.lastSeen && nowMs - Date.parse(b.lastSeen) < STALE_MS))) continue;
+    const fresh = true;
     for (const [h, st] of Object.entries(b.harnesses ?? {})) {
       const def = LOGIN_HARNESSES[h];
       if (!def || !st?.loggedIn) continue;
-      const name = st.account ?? `${h}-box-${id.replace(/[^a-z0-9]/g, '').slice(0, 12)}`;
-      const a = by.get(name) ?? { name, provider: def.provider, harness: h, kind: 'login', label: '', plan: '', method: st.method ?? '', boxes: [], agents: new Set(), boxReadings: [], houseReadings: [], fresh: false };
+      // The account's key: its box's owner, and a hash salted with this household's own secret of what the box
+      // reported (or of the box, when its CLI names no account). A box chooses what it reports, so the owner in front
+      // keeps one box from merging into another owner's account; the salt keeps the hash meaningless elsewhere.
+      const owner = boxOwner(b, members ?? [{ person: 'owner', agents: '*' }]);
+      const name = `${owner}:${h}-${createHash('sha256').update(`${s.accountSalt ?? ''}\0${owner}\0${st.account ?? `box:${id}`}`).digest('hex').slice(0, 10)}`;
+      const a = by.get(name) ?? { name, owner, provider: def.provider, harness: h, kind: 'login', label: '', plan: '', method: st.method ?? '', boxes: [], agents: new Set(), boxReadings: [], houseReadings: [], fresh: false };
       a.boxes.push(id);
       a.fresh ||= !!fresh;
       if (st.plan && !a.plan) a.plan = String(st.plan);
@@ -72,13 +79,15 @@ export function deriveAccounts(s, { members, nowMs = Date.now() } = {}) {
       if (slot.house) a.houseReadings.push(slot.house);
       const plan = slot.box?.plan ?? slot.house?.plan;
       if (plan && !a.plan) a.plan = plan;
-      for (const ag of agents) if (ownersAllow(b, ag, members)) a.agents.add(ag);
+      // The same rule the claim mounts a login by (owners.mjs, mayUseLogin): never offer what a house won't be given.
+      for (const ag of agents) if (mayUseLogin(b, s.agents[ag], ag, h, members ?? [{ person: 'owner', agents: '*' }])) a.agents.add(ag);
       by.set(name, a);
     }
   }
   const accounts = [...by.values()].map((a) => ({
     name: a.name, provider: a.provider, harness: a.harness, kind: 'login',
-    label: `${LOGIN_HARNESSES[a.harness].label}${a.plan ? ` ${cap(a.plan)}` : ''} · ${a.name.slice(-6)}`,
+    // What anyone but the household owner sees of an account: this label, never its key.
+    label: `${LOGIN_HARNESSES[a.harness].label}${a.plan ? ` ${cap(a.plan)}` : ''} (${a.owner}'s)`,
     plan: a.plan, boxes: a.boxes.sort(), agents: [...a.agents].sort(),
     credentials: [{ kind: 'login', status: a.fresh ? 'valid' : 'unknown' }],
     // The box's own readings when it has any (read from the harness's files on the box), else what houses reported.

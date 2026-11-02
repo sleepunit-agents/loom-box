@@ -76,6 +76,7 @@ beforeEach(() => {
   env = { HOME: home, PATH: process.env.PATH, LOOM_BOX_HOME: join(home, 'state'), LOOM_BOX_DATA: join(home, 'data'), LOOM_BOX_LOCAL_NAME: 'one', LOOM_BOX_PODMAN: join(bin, 'podman'), SECRET_IN_BOX_ENV: 'never-in-a-house',
     // No real harness CLI answers for this box's logins (a test of its own says what it reports).
     LOOM_RUNTIME_CLAUDE: '/nonexistent/claude', LOOM_RUNTIME_CODEX: '/nonexistent/codex' };
+  env.XDG_RUNTIME_DIR = join(home, 'run');
   revoked = [];
   fx = { now: () => new Date(), mint: () => 'loom_house_token_aaaaaaaaaaaaaaaa', revoke: (l) => revoked.push(l), secret: (n) => `secret:${n}` };
   repo = join(home, 'art-repo');
@@ -514,4 +515,45 @@ test('a box reports its harness logins on its poll, runs the owner\'s login, and
   await box.tick();
   await until(() => house(h4.id).state === 'failed');
   assert.match(house(h4.id).log, /login dir isn't safe to mount: \.credentials\.json is a symlink/);
+});
+
+test('a sentinel token in the box\'s credential files never shows in any argv, env, log line, call body, state.json or house file loom makes', async () => {
+  const SENTINEL = 'sk-ant-oat01-SENTINEL-must-never-leave-the-file-0000';
+  const { spawn: realSpawn, spawnSync: realSpawnSync } = await import('node:child_process');
+  const { harnessStatus, startLogin, loginDir } = await import('../src/logins.mjs');
+  const fake = join(here, 'fake-login.mjs');
+  // Two fake CLIs (claude, codex) that log in and read their own credential files, as the real ones do.
+  const bin = join(env.HOME, 'clis');
+  mkdirSync(bin);
+  for (const h of ['claude', 'codex']) { writeFileSync(join(bin, h), `#!/bin/sh\nFAKE_LOGIN_AS=${h} exec "${process.execPath}" "${fake}" "$@"\n`); chmodSync(join(bin, h), 0o755); }
+  const benv = { ...env, PATH: `${bin}:${env.PATH}`, LOOM_RUNTIME_CLAUDE: join(bin, 'claude'), LOOM_RUNTIME_CODEX: join(bin, 'codex'), FAKE_LOGIN_DEVICE_MS: '200' };
+  writeFileSync(join(loginDir(benv, 'claude'), '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: SENTINEL } }), { mode: 0o600 });
+  writeFileSync(join(loginDir(benv, 'codex'), 'auth.json'), JSON.stringify({ tokens: { access_token: SENTINEL } }), { mode: 0o600 });
+  // Everything loom hands anything: each spawn's argv and env, each log line, each call to the control plane.
+  const seen = [];
+  const note = (what, v) => seen.push(`${what} ${JSON.stringify(v)}`);
+  const run = (cmd, args, o = {}) => { note('spawnSync', [cmd, args, o.env, o.input]); return realSpawnSync(cmd, args, o); };
+  const spawnImpl = (cmd, args, o = {}) => { note('spawn', [cmd, args, o.env]); const c = realSpawn(cmd, args, o); const w = c.stdin.write.bind(c.stdin); c.stdin.write = (d, ...r) => { note('stdin', String(d)); return w(d, ...r); }; return c; };
+  const spied = { async call(path, body) { note(`call ${path}`, body); const out = await client.call(path, body); note(`answer ${path}`, out); return out; } };
+  const box = runner(benv, spied, { loomUrl: 'http://loom.test/mcp', log: (m) => note('log', m),
+    status: () => harnessStatus(benv, { run }), login: (h, o) => startLogin(benv, h, { ...o, spawnImpl, every: 100 }) });
+  // A status, a Codex login (device: it finishes by itself), and a house on the Claude login.
+  await box.tick();
+  assert.equal(load(env).boxes.one.harnesses.claude.loggedIn, true);
+  const l = ok(api(env, fx, { caller: owner, path: 'login-start', body: { box: 'one', harness: 'codex' } }));
+  await box.tick();
+  await until(() => load(env).logins[l.id].state === 'done');
+  agentRepo(repo, { ...HOUSE, harnesses: ['claude', 'codex'] });
+  setAgent();
+  const h = up();
+  await box.tick();
+  await until(() => house(h.id).state === 'done');
+  // Sanity: the sentinel is where the CLI keeps it (the Codex one replaced by the fresh login), and loom's things were watched.
+  assert.equal(readFileSync(join(loginDir(benv, 'claude'), '.credentials.json'), 'utf-8').includes(SENTINEL), true);
+  assert.ok(seen.some((x) => x.startsWith('spawnSync')) && seen.some((x) => x.startsWith('spawn ')) && seen.some((x) => x.startsWith('call poll')));
+  const everything = [...seen, readFileSync(join(env.LOOM_BOX_HOME, 'state.json'), 'utf-8'), JSON.stringify(ran(h.id))];
+  const hd = join(env.LOOM_BOX_DATA, 'houses');
+  if (existsSync(hd)) for (const id of readdirSync(hd)) for (const f of readdirSync(join(hd, id))) { try { everything.push(readFileSync(join(hd, id, f), 'utf-8')); } catch { /* a dir */ } }
+  for (const x of everything) assert.equal(x.includes(SENTINEL), false, x.slice(0, 200));
+  assert.equal(everything.join('\n').includes('SENTINEL'), false);
 });

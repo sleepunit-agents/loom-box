@@ -95,32 +95,25 @@ test('the box never runs a CLI in the shared login dir: a planted config.toml wi
   assert.deepEqual(readdirSync(shared), ['auth.json']);
 });
 
-test('a credential file is only moved: a symlinked one is refused, an oversize or non-JSON one too, and the box reports that login unhealthy', async () => {
-  const { symlinkSync, chmodSync: ch } = await import('node:fs');
-  const { CRED_MAX, checkLoginDir, cliHome, moveCredential } = await import('../src/logins.mjs');
+test('a credential file in the shared dir is never opened by loom: a symlinked one is refused, and the box reports that login unhealthy', async () => {
+  const { symlinkSync, chmodSync: ch, rmSync } = await import('node:fs');
+  const { checkLoginDir, credentialState } = await import('../src/logins.mjs');
   const env = fakeBox('codex');
-  const shared = loginDir(env, 'codex'), mine = cliHome(env, 'codex');
-  assert.equal(moveCredential('codex', shared, mine), 'absent');
+  const shared = loginDir(env, 'codex');
+  assert.equal(credentialState(env, 'codex'), 'absent');
   writeFileSync(join(shared, 'auth.json'), '{"a":1}');
-  assert.equal(moveCredential('codex', shared, mine), 'moved');
-  assert.equal(moveCredential('codex', shared, mine), 'same');
-  assert.equal(readFileSync(join(mine, 'auth.json'), 'utf-8'), '{"a":1}');
+  assert.equal(credentialState(env, 'codex'), null);
   // A symlinked auth.json (to something of the box's): refused, never followed.
   const outside = join(env.HOME, 'box-file.json');
   writeFileSync(outside, '{"box":1}');
-  const { rmSync } = await import('node:fs');
   rmSync(join(shared, 'auth.json'));
   symlinkSync(outside, join(shared, 'auth.json'));
-  assert.throws(() => moveCredential('codex', shared, mine), /auth\.json is a symlink/);
+  assert.equal(credentialState(env, 'codex'), 'auth.json is a symlink');
   const st = harnessStatus(env).codex;
   assert.deepEqual([st.loggedIn, st.unhealthy], [false, 'auth.json is a symlink']);
-  assert.throws(() => startLogin(env, 'codex', { say: () => {} }), /isn't safe to use: auth\.json isn't a regular file/);
+  assert.throws(() => startLogin(env, 'codex', { say: () => {} }), /isn't safe to use: auth\.json is a symlink/);
+  // checkLoginDir still refuses a setuid file among the allowlisted names.
   rmSync(join(shared, 'auth.json'));
-  writeFileSync(join(shared, 'auth.json'), 'x'.repeat(CRED_MAX + 1));
-  assert.throws(() => moveCredential('codex', shared, mine), /bigger than/);
-  writeFileSync(join(shared, 'auth.json'), 'not json');
-  assert.throws(() => moveCredential('codex', shared, mine), /isn't JSON/);
-  // checkLoginDir still refuses a setuid file or a deep symlink, after a prune keeps only allowlisted names.
   writeFileSync(join(shared, 'auth.json'), '{}');
   writeFileSync(join(shared, 'auth.json.lock'), '');
   ch(join(shared, 'auth.json.lock'), 0o4755);
@@ -169,10 +162,15 @@ test('logging a box in to Claude runs the CLI\'s own login there: its link to th
 test('logging a box in to Codex: the device link and code to the owner, and it finishes by itself', async () => {
   const env = fakeBox('codex');
   const said = [];
-  startLogin(env, 'codex', { say: (x) => said.push(x), status: () => harnessStatus(env).codex, every: 100 });
+  startLogin(env, 'codex', { say: (x) => said.push(x), every: 100 });
   const done = await waitFor(() => said.find((x) => x.state !== 'waiting'));
   assert.deepEqual(said[0], { state: 'waiting', link: 'https://auth.openai.com/codex/device', userCode: 'ABCD-EFGH1' });
   assert.deepEqual(done, { state: 'done' });
+  // Its new auth file was renamed into the shared dir; the box's private home links to it.
+  const { lstatSync: ls, readlinkSync } = await import('node:fs');
+  const { cliHome } = await import('../src/logins.mjs');
+  assert.equal(ls(join(loginDir(env, 'codex'), 'auth.json')).isFile(), true);
+  assert.equal(readlinkSync(join(cliHome(env, 'codex'), 'auth.json')), join(loginDir(env, 'codex'), 'auth.json'));
   assert.deepEqual(harnessStatus(env).codex, { installed: true, loggedIn: true, method: 'chatgpt' });
 });
 
@@ -215,19 +213,36 @@ test('the accounts are a view of the boxes\' reports: one account per signed-in 
       gone: { mayHost: '*', lastSeen: '2026-11-01T00:00:00Z', harnesses: { claude: { installed: true, loggedIn: true, account: 'claude-bbbbbbbbbb' } } },
       out: { mayHost: '*', revoked: '2026-10-01T00:00:00Z', harnesses: { claude: { installed: true, loggedIn: true, account: 'claude-cccccccccc' } } },
       off: { mayHost: '*', lastSeen: fresh, harnesses: { claude: { installed: true, loggedIn: false } } },
+      // loren's box reports the same account as jonathan's: it can't merge into his.
+      lorens: { mayHost: '*', owner: 'loren', lastSeen: fresh, harnesses: { claude: { installed: true, loggedIn: true, plan: 'pro', account: 'claude-aaaaaaaaaa' } } },
     },
+    accountSalt: 'household-salt',
   };
-  const l = deriveAccounts(s, { members: [{ person: 'jonathan', agents: '*' }], nowMs });
-  assert.deepEqual(l.accounts.map((a) => [a.name, a.kind, a.boxes, a.credentials[0].status]), [
-    ['claude-aaaaaaaaaa', 'login', ['loom', 'rig'], 'valid'],
-    ['claude-bbbbbbbbbb', 'login', ['gone'], 'unknown'],
-    ['codex-box-loom', 'login', ['loom'], 'valid'],
-    ['openai-api-key-mark', 'api-key', [], 'unknown'],
-  ]);
+  s.agents['pond-bot'] = { secrets: {} };
+  const members = [{ person: 'jonathan', agents: '*' }, { person: 'loren', agents: ['pond-bot'] }];
+  const l = deriveAccounts(s, { members, nowMs });
+  // One account for jonathan's two boxes on the same login; loren's apart; a box not seen lately (gone) offers
+  // nothing; a revoked one or one not logged in neither.
+  const rows = (xs) => xs.map((x) => JSON.stringify(x)).sort();
+  assert.deepEqual(rows(l.accounts.map((a) => [a.kind, a.harness, a.boxes, a.label, a.agents])), rows([
+    ['login', 'claude', ['loom', 'rig'], 'Claude Max (jonathan\'s)', ['art', 'mark']],
+    ['login', 'codex', ['loom'], 'Codex (jonathan\'s)', ['art', 'mark']],
+    ['login', 'claude', ['lorens'], 'Claude Pro (loren\'s)', []],
+    ['api-key', 'codex', [], 'Openai API key (mark)', ['mark']],
+  ]));
+  const by = (box, h) => l.accounts.find((a) => a.boxes.includes(box) && a.harness === h);
+  assert.deepEqual([by('loom', 'claude').boxes, by('loom', 'claude').agents], [['loom', 'rig'], ['art', 'mark']]);
+  assert.deepEqual([by('lorens', 'claude').boxes, by('lorens', 'claude').agents], [['lorens'], []], 'pond-bot\'s login grant is off by default');
+  assert.equal(l.accounts.some((a) => a.boxes.includes('gone') || a.boxes.includes('out') || a.boxes.includes('off')), false);
+  assert.match(by('loom', 'claude').name, /^jonathan:claude-[0-9a-f]{10}$/);
+  assert.match(by('lorens', 'claude').name, /^loren:claude-[0-9a-f]{10}$/);
+  assert.equal(JSON.stringify(l).includes('aaaaaaaaaa'), false, 'the box-reported hash doesn\'t show');
+  // A different household salt gives a different key: the hash means nothing elsewhere.
+  assert.notEqual(deriveAccounts({ ...s, accountSalt: 'other' }, { members, nowMs }).accounts.find((a) => a.boxes.includes('loom')).name, by('loom', 'claude').name);
   // The newest reading per window, across the account's boxes.
-  assert.deepEqual(l.accounts[0].usage, { '7d': 0.6, '5h': 0.1, checked: 200 });
-  assert.equal(l.accounts[3].agents.join(), 'mark');
-  assert.deepEqual(usageOf(l)[0].windows, { '7d': 0.6, '5h': 0.1 });
+  assert.deepEqual(by('loom', 'claude').usage, { '7d': 0.6, '5h': 0.1, checked: 200 });
+  assert.equal(l.accounts.find((a) => a.kind === 'api-key').agents.join(), 'mark');
+  assert.deepEqual(usageOf(l).find((u) => u.account === by('loom', 'claude').name).windows, { '7d': 0.6, '5h': 0.1 });
   assert.equal(hasRoom({ usage: { '7d': 0.98 } }), false);
   assert.equal(hasRoom({ usage: { '7d': 0.2, '7d_opus': 0.99 } }), true);
   assert.equal(hasRoom({ usage: { '7d': 0.2, '7d_opus': 0.99 } }, '7d_opus'), false);
