@@ -246,6 +246,16 @@ loom runtime body end claude:99553cf9  |  loom runtime body list
 - **Feeding** goes through the body's inbox, in the layout the bridges' inbox hook reads, under `LOOM_RUNTIME_INBOX_DIR`. Without one, or once the turn is over, a body isn't fed: resume it.
 - **A body's record** (`<LOOM_BOX_DATA>/bodies`, 0600) holds its agent, venue, model, harness and slot, never its brief or a message.
 
+## Delivery
+
+Anything addressed to an agent arrives through core's `deliver`, which runs this piece's `delivery` offer (`loom-runtime deliver`, the body on stdin). The turn goes to core first and its text to the audit log. Then the conversation's body is reached within 2 s: `fed`, `resumed`, `started`, `queued` or `failed`.
+
+- **A body is a session in its agent's own warm house.** Delivery asks for the agent's house (`up`) with the task `loom-runtime body-host --piece <name>`. The house runs it, and the body host there wakes the bodies with the house's own harness, login, repo, cwd, secrets and agent token. The house file's command must run that task. Nothing of the runtime's environment goes along, only each body's run key, `LOOM_BODY_KEY`.
+- **Placement:** only on a box owned by the agent's owner (or lent to it), that may host it, and that reports the body's harness logged in. With none, the body is `failed` and says why.
+- **Capacity** counts busy bodies (`LOOM_RUNTIME_BUSY_LIMIT`, 5 per agent). Over it, a new conversation takes the least recently active idle body's place. A body idle for `LOOM_RUNTIME_WARM_IDLE_S` (600) ends, and so does a house with no body.
+- **Continuity:** a body that ends leaves a slot. Its session files are sent back by its host, sealed with age to the runtime's own key (`<LOOM_BOX_DATA>/delivery/runtime.key`), and kept for its venue's window (`LOOM_RUNTIME_CONTINUITY`, at most 14 days). A resume puts the files back in the house before resuming. When the slot goes, the conversation resumes from its digests.
+- **Answering:** a body pipes its message to `loom runtime send --conversation <cv>`, which goes through the piece API as its own agent with its run key. Only the body holding the conversation now can speak in it. The venue's `send` runs once more if it fails, and the reply turn is recorded as `answered` or `failed`.
+
 ## Model choice
 
 ```bash
@@ -333,6 +343,8 @@ A box never reads loom's stores, and loom never reaches into a box. The box poll
 | `claim` | a box | take a waiting house, once: its token and secrets |
 | `report` | a box | how a house is going; ending one revokes its token |
 | `up`, `down`, `list` | owner, agent | ask for, stop and see houses (an agent only its own) |
+| `body-sync` | an agent's house | its body host's report in; bodies to start, stop and feed out (its own agent's, its own house's only) |
+| `send` | an agent | a body's message out, in its own agent's conversation, with its run's `LOOM_BODY_KEY` |
 | `add-box`, `revoke-box`, `may-host`, `set-primary`, `set-agent` | owner | enrollment and config |
 
 `<piece>` is the name loom runs it under: `box`, or `runtime` once it's installed by its new name. A box remembers the name it joined under (`piece` in its `box.json`), and one that joined before the rename keeps calling `/api/box/`, which its `piece:box/<id>` credential names.

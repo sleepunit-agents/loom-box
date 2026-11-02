@@ -843,6 +843,18 @@ export function api(env, effects, { caller, path, body }) {
     }
     if (caller.kind === 'piece') fail(`a box can't ${path || 'do that'}`, 403);
     if (caller.kind !== 'owner' && caller.kind !== 'agent') fail('not for you', 403);
+    // A body host, in its agent's house, as that house's own token (houserunner.mjs).
+    if (path === 'body-sync') {
+      if (caller.kind !== 'agent') fail('body-sync is a body host\'s, in its agent\'s house', 403);
+      return import('./houserunner.mjs').then((m) => ({ status: 200, body: m.bodySync(env, caller, b) })).catch(apiError);
+    }
+    // A body's message out, as its own agent, proving its run with LOOM_BODY_KEY (delivery.mjs, send). Async: the
+    // venue's send runs, then core records it, inside the piece API's 15 s.
+    if (path === 'send') {
+      if (caller.kind !== 'agent') fail('send is a body\'s, as its own agent', 403);
+      return import('./delivery.mjs').then((m) => m.send(env, { conversation: b.conversation, text: b.text, key: b.key }, { caller, sendMs: m.SEND_VIA_API_MS }))
+        .then((r) => ({ status: r.ok ? 200 : 409, body: r }), apiError);
+    }
     if (path === 'up') return { status: 200, body: up(env, effects, caller, b) };
     if (path === 'down') return { status: 200, body: down(env, effects, caller, b) };
     if (path === 'list' || path === '') return { status: 200, body: list(env, caller) };
@@ -855,11 +867,15 @@ export function api(env, effects, { caller, path, body }) {
     }
     fail(`no such call: ${path}`, 404);
   } catch (err) {
-    if (err instanceof StateError) return { status: err.status, body: { error: err.message } };
-    // Not the caller's doing: core turns this into a 502. The detail stays in the daemon's log.
-    process.stderr.write(`loom-box: ${err.stack || err}\n`);
-    return { status: 500, body: { error: 'the runtime failed' } };
+    return apiError(err);
   }
+}
+
+function apiError(err) {
+  if (err instanceof StateError) return { status: err.status, body: { error: err.message } };
+  // Not the caller's doing: core turns this into a 502. The detail stays in the daemon's log.
+  process.stderr.write(`loom-box: ${err?.stack || err}\n`);
+  return { status: 500, body: { error: 'the runtime failed' } };
 }
 
 export { LIVE, TERMINAL };

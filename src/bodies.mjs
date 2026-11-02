@@ -51,11 +51,11 @@ export async function startBody(env, { agent, brief: b, venue, venueKind, prefer
   if (typeof venue !== 'string' || !/^[a-z][a-z0-9-]{0,39}$/.test(venue)) fail('which venue (wake, relay, session, discord, slack, …)');
   const pick = await resolveFor(env, { agent, venue, venueKind, prefer, accounts: d.accounts, now: d.now(), fetchImpl: d.fetchImpl });
   const runner = d.runner(pick.harness);
-  const body = runner.start({ brief: text, model: pick.model, cwd, env: o.bodyEnv, deny });
+  const body = await runner.start({ agent, brief: text, model: pick.model, cwd, env: o.bodyEnv, deny });
   const rec = {
     body: `${body.harness}:${body.id}`, agent, venue, kind: pick.kind, ...(place ? { place: String(place).slice(0, 200) } : {}),
     harness: body.harness, model: pick.model, family: pick.family, ...(pick.account ? { account: pick.account } : {}),
-    started: d.now().toISOString(), ...(body.slot ? { slot: body.slot } : {}),
+    started: d.now().toISOString(), ...(body.slot ? { slot: body.slot } : {}), ...(body.house ? { house: body.house } : {}),
   };
   save(env, rec);
   return { ...rec, why: pick.why };
@@ -68,7 +68,7 @@ export function feedBody(env, ref, message, o = {}) {
 }
 
 /** A body continued: by its id (its slot, from the harness), or by a slot ({harness, session}) another machine kept. */
-export async function resumeBody(env, { body: ref, slot, agent, venue, venueKind, brief: b, prefer = [], cwd, deny = [] }, o = {}) {
+export async function resumeBody(env, { body: ref, slot, agent, venue, venueKind, brief: b, prefer = [], cwd, deny = [], files }, o = {}) {
   const d = deps(env, o);
   let rec = null;
   if (ref) {
@@ -82,11 +82,11 @@ export async function resumeBody(env, { body: ref, slot, agent, venue, venueKind
   // A resume keeps the slot's harness; its model is chosen again, among that harness's (quota may have moved).
   const pick = await resolveFor(env, { agent: who, venue: where, venueKind: rec?.kind ?? venueKind, prefer: [...prefer, ...(rec ? [rec.model] : [])], harness: slot.harness, accounts: d.accounts, now: d.now(), fetchImpl: d.fetchImpl });
   const runner = d.runner(slot.harness);
-  const body = runner.resume(slot, { brief: brief(b), model: pick.model, cwd, env: o.bodyEnv, deny });
+  const body = await runner.resume(slot, { agent: who, brief: brief(b), model: pick.model, cwd, env: o.bodyEnv, deny, ...(files ? { files } : {}) });
   const next = {
     body: `${body.harness}:${body.id}`, agent: who, venue: where, kind: pick.kind, ...(rec?.place ? { place: rec.place } : {}),
     harness: body.harness, model: pick.model, family: pick.family, ...(pick.account ? { account: pick.account } : {}),
-    started: d.now().toISOString(), slot: body.slot ?? slot, ...(ref ? { resumed: ref } : {}),
+    started: d.now().toISOString(), slot: body.slot ?? slot, ...(ref ? { resumed: ref } : {}), ...(body.house ? { house: body.house } : {}),
   };
   save(env, next);
   return { ...next, why: pick.why };

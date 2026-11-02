@@ -16,6 +16,8 @@ const job = (id) => join(D, 'jobs', id.slice(0, 8), 'state.json');
 if (args[0] === '--bg') {
   if (existsSync(join(D, 'refuse'))) { process.stderr.write('Error: not logged in\n'); process.exit(1); }
   const prompt = readFileSync(0, 'utf-8');
+  // What reached the body's environment: names, and its run's key (the tests check nothing of the runtime's got here).
+  appendFileSync(join(D, 'env.log'), JSON.stringify({ names: Object.keys(process.env).sort(), key: process.env.LOOM_BODY_KEY ?? null }) + '\n');
   const at = args.indexOf('--resume');
   const id = randomBytes(4).toString('hex');
   const sessionId = at >= 0 ? args[at + 1] : `${id}-${randomUUID().slice(9)}`;

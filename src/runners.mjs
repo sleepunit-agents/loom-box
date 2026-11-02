@@ -37,6 +37,8 @@ const readJson = (p) => { try { return JSON.parse(readFileSync(p, 'utf-8')); } c
 const sleepMs = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 const hex8 = () => randomBytes(4).toString('hex');
 
+const lines = (p) => { try { return readFileSync(p, 'utf-8').split('\n').flatMap((l) => { try { const v = JSON.parse(l); return v && typeof v === 'object' ? [v] : []; } catch { return []; } }); } catch { return []; } };
+
 /** A body's inbox, in the bridges piece's layout (shuttle/inbox.py), so its hook reads what's put here. */
 export function inbox(dir, { run = spawnSync } = {}) {
   const at = (id) => join(dir, String(id).slice(0, 8));
@@ -58,12 +60,13 @@ export function inbox(dir, { run = spawnSync } = {}) {
       if (!existsSync(at(id))) return;
       run('flock', [join(at(id), 'lock'), 'touch', 'closed'], { cwd: at(id), stdio: 'ignore', timeout: 10_000 });
     },
-    /** What's still pending (put, never taken by the hook): after close, final (shuttle's inbox.close). */
+    /** What's still pending (put, never taken by the hook): after close, final (shuttle's inbox.close). Body-writable: ids only mean anything. */
     pending(id) {
-      try {
-        return readFileSync(join(at(id), 'pending.jsonl'), 'utf-8').split('\n').flatMap((l) => { try { const v = JSON.parse(l); return v && typeof v === 'object' ? [v] : []; } catch { return []; } });
-      } catch { return []; }
+      const took = new Set(this.taken(id));
+      return lines(join(at(id), 'pending.jsonl')).filter((v) => !took.has(v.id));
     },
+    /** The ids its hook took (delivered.jsonl). */
+    taken(id) { return lines(join(at(id), 'delivered.jsonl')).map((v) => v.id).filter((k) => typeof k === 'string'); },
     /** Gone, with every message's text in it: message text lives in an inbox only while its body runs. */
     remove(id) { rmSync(at(id), { recursive: true, force: true }); },
   };

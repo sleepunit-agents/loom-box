@@ -19,9 +19,13 @@ import { fileURLToPath } from 'node:url';
 import { staticAccounts } from '../src/accounts.mjs';
 import { readBody } from '../src/bodies.mjs';
 import { CoreError, venuesOf } from '../src/core.mjs';
-import { deliver, deliveryDir, loadConv, send, tick } from '../src/delivery.mjs';
+import { deliver, deliveryDir, depsOf, drain, loadConv, send, tick, windowMs } from '../src/delivery.mjs';
+import { api, setAgent } from '../src/control.mjs';
+import { bodyBox } from '../src/placement.mjs';
+import { runtimeKey } from '../src/sealed.mjs';
+import { load, update } from '../src/state.mjs';
 import { setModels } from '../src/models.mjs';
-import { RunnerError } from '../src/runners.mjs';
+import { RunnerError, inbox } from '../src/runners.mjs';
 import { ageSealer } from '../src/sealed.mjs';
 import { scratch } from './scratch.mjs';
 
@@ -31,7 +35,7 @@ const cvOf = (agent, venue, place) => `cv-${createHash('sha256').update(`${agent
 const hasAge = spawnSync('age', ['--version']).status === 0 && spawnSync('age-keygen', ['--help']).error === undefined;
 
 /** A runner that records into `log`, keeps each session's "transcript" as a file under its root, and is told when a turn ends. */
-function fakeRunner(log, root, harness = 'claude') {
+function fakeRunner(log, root, harness = 'claude', { inboxDir } = {}) {
   let n = 0;
   const state = {};
   const session = {};
@@ -39,32 +43,38 @@ function fakeRunner(log, root, harness = 'claude') {
   mkdirSync(roots.sess, { recursive: true });
   const tfile = (s) => join(roots.sess, `${s}.jsonl`);
   const r = {
-    harness, roots, inbox: null, failStart: null, envs: {},
+    harness, roots, inbox: inboxDir ? inbox(inboxDir) : null, failStart: null, failResume: null, envs: {}, dead: new Set(), delay: 0,
     start(o) {
       if (r.failStart) throw new RunnerError(r.failStart);
+      if (r.delay) { const ms = r.delay; r.delay = 0; return new Promise((res) => setTimeout(res, ms)).then(() => r.start(o)); }
       const id = `${harness[0]}000000${n++}`;
       session[id] = `s-${id}`;
       writeFileSync(tfile(session[id]), `transcript of ${id}: ${o.brief}\n`);
       log.push(['start', id, o.brief]);
       r.envs[id] = o.env;
       state[id] = 'working';
+      r.inbox?.open(id, {});
       return { id, harness, model: o.model, slot: { harness, session: session[id] } };
     },
     resume(slot, o) {
+      if (r.failResume) throw new RunnerError(r.failResume);
       const id = `r000000${n++}`;
       session[id] = slot.session;
       log.push(['resume', id, slot.session, existsSync(tfile(slot.session)) ? readFileSync(tfile(slot.session), 'utf-8') : null, o.brief]);
       r.envs[id] = o.env;
       state[id] = 'working';
+      r.inbox?.open(id, {});
       return { id, harness, model: o.model, slot };
     },
     feed(b, m) {
       if (state[b.id] !== 'working') return { fed: false, reason: 'its turn is over: resume it' };
       log.push(['feed', b.id, m.text]);
+      if (r.inbox) r.inbox.put(b.id, [{ id: m.id, text: m.text, msg: m.id }]);
       return { fed: true };
     },
     end(b) { log.push(['end', b.id]); state[b.id] = 'idle'; },
     status: (b) => state[b.id] ?? 'unknown',
+    alive: (b) => !r.dead.has(b.id),
     slotOf: (b) => (session[b.id] ? { harness, session: session[b.id] } : null),
     sessionFiles(slot) { return { keep: slot && existsSync(tfile(slot.session)) ? [{ root: 'sess', rel: `${slot.session}.jsonl` }] : [], drop: [] }; },
     /** The test's hand: this body's turn is over. */
@@ -103,13 +113,13 @@ const testSealer = {
   open: (b) => Buffer.from(b.toString().slice(3).split('').reverse().join(''), 'base64'),
 };
 
-function world(extra = {}) {
+function world(extra = {}, { inboxDir } = {}) {
   const HOME = scratch('rt-deliver-');
   const env = { HOME, PATH: '/usr/bin:/bin', LANG: 'C.UTF-8', LOOM_RUNTIME_TOKEN_FILE: join(HOME, 'runtime-token'), LOOM_RUNTIME_LOOM_URL: 'http://127.0.0.1:1/mcp', ANTHROPIC_BASE_URL: 'http://proxy', SOMETHING_ELSE: 'x', LOOM_BOX_LOCAL_NAME: 'one', LOOM_BOX_HOME: join(HOME, 'state'), LOOM_BOX_DATA: join(HOME, 'data'), LOOM_RUNTIME_SCORECARDS: 'off', ...extra };
   setModels(env, { list: [{ id: 'opus', harness: 'claude', family: 'anthropic' }], agent: 'art', prefer: ['opus'] });
   setModels(env, { agent: 'mark', prefer: ['opus'] });
   const log = [];
-  const runner = fakeRunner(log, HOME);
+  const runner = fakeRunner(log, HOME, 'claude', { inboxDir: inboxDir ? join(HOME, 'inbox') : undefined });
   const core = fakeCore(log);
   let t = Date.parse('2026-11-02T12:00:00Z');
   const clock = { now: () => new Date(t), advance: (ms) => { t += ms; } };
@@ -375,86 +385,6 @@ test('outbound: the venue\'s send (--place, --agent, the text on stdin), one ret
   delete process.env.FAKE_SEND;
 });
 
-/** A core that answers the two routes delivery writes, as loom does (src/conversations.ts, src/audit.ts), with a runtime token. */
-async function coreServer() {
-  const seen = [];
-  const seqs = {};
-  const server = createServer((req, res) => {
-    let raw = '';
-    req.on('data', (d) => { raw += d; });
-    req.on('end', () => {
-      const body = JSON.parse(raw || '{}');
-      seen.push({ path: req.url, auth: req.headers.authorization, body });
-      res.setHeader('content-type', 'application/json');
-      if (req.headers.authorization !== 'Bearer loom_runtime_test_token_xxxxxxxx') { res.statusCode = 401; return res.end('{"error":"unauthorized"}'); }
-      if (req.url === '/api/loom/conversations/turn') {
-        const cv = cvOf(body.agent, body.venue, body.place);
-        return res.end(JSON.stringify({ conversation: cv, seq: (seqs[cv] = (seqs[cv] ?? 0) + 1) }));
-      }
-      if (req.url === '/api/loom/audit') return res.end(JSON.stringify({ conversation: body.conversation, seq: body.seq }));
-      if (req.url === '/api/loom/venues' && req.method === 'GET') return res.end(JSON.stringify({ venues: [{ name: 'slack', kind: 'live', piece: 'slack', send: ['loom-slack', 'send'] }] }));
-      res.statusCode = 404;
-      res.end('{"error":"not-found"}');
-    });
-  });
-  await new Promise((r) => server.listen(0, '127.0.0.1', r));
-  return { seen, url: `http://127.0.0.1:${server.address().port}/mcp`, close: () => new Promise((r) => server.close(r)) };
-}
-
-test('loom-runtime deliver: the offer\'s argv, end to end on a stand-in core and Claude Code, the body reached from a detached process', { skip: !hasAge && 'age isn\'t installed' }, async () => {
-  const core = await coreServer();
-  const D = scratch('rt-deliver-cli-');
-  writeFileSync(join(D, 'token'), 'loom_runtime_test_token_xxxxxxxx\n');
-  mkdirSync(join(D, 'work'));
-  const env = { ...process.env, HOME: D, FAKE_HARNESS: D, LOOM_BOX_LOCAL_NAME: 'one', LOOM_BOX_HOME: join(D, 'state'), LOOM_BOX_DATA: join(D, 'data'), LOOM_HOME: join(D, 'loom'),
-    LOOM_RUNTIME_CLAUDE: join(here, 'fake-claude.mjs'), LOOM_RUNTIME_CLAUDE_JOBS: join(D, 'jobs'), LOOM_RUNTIME_ACCOUNTS: 'none', LOOM_RUNTIME_SCORECARDS: 'off',
-    LOOM_RUNTIME_LOOM_URL: core.url, LOOM_RUNTIME_TOKEN_FILE: join(D, 'token'), LOOM_RUNTIME_BODY_CWD: join(D, 'work'), LOOM_RUNTIME_BODY_ENV: 'FAKE_HARNESS' };
-  const cli = (args, input, e = env) => new Promise((resolve) => {
-    const p = spawn(process.execPath, [join(here, '..', 'src', 'cli.mjs'), ...args], { env: e, cwd: join(D, 'work') });
-    let stdout = '';
-    let stderr = '';
-    p.stdout.on('data', (d) => { stdout += d; });
-    p.stderr.on('data', (d) => { stderr += d; });
-    p.on('close', (status) => resolve({ status, stdout, stderr }));
-    p.stdin.end(input);
-  });
-  try {
-    const body = { source: 'slack', id: '1730550000.000100', agent: 'art', venue: 'slack', place: 'dm:U1', label: 'Loren (DM)', from: { kind: 'person', slug: 'loren' }, kind: 'message', at: new Date().toISOString(), text: 'are we still on for Thursday?' };
-    const t0 = Date.now();
-    const r = await cli(['deliver'], JSON.stringify(body));
-    assert.equal(r.status, 0, r.stderr);
-    assert.ok(Date.now() - t0 < 6000);
-    const a = JSON.parse(r.stdout);
-    assert.deepEqual([a.conversation, a.seq], [cvOf('art', 'slack', 'dm:U1'), 1]);
-    assert.ok(['started', 'queued'].includes(a.body), JSON.stringify(a));
-    assert.deepEqual(core.seen.map((s) => s.path).filter((p) => p !== '/api/loom/venues'), ['/api/loom/conversations/turn', '/api/loom/audit']);
-    assert.ok(core.seen.some((s) => s.path === '/api/loom/venues' && s.auth === 'Bearer loom_runtime_test_token_xxxxxxxx'), 'the venues come from core, as the runtime');
-    assert.equal(core.seen[0].body.text, undefined, 'a turn carries no text');
-    assert.equal(core.seen[1].body.text, 'are we still on for Thursday?');
-    // The detached process starts the body (here, within the 2 s): a `claude --bg` with the brief on stdin, never argv.
-    const end = Date.now() + 15_000;
-    while (!loadConv(env, a.conversation)?.body && Date.now() < end) await new Promise((res) => setTimeout(res, 100));
-    const c = loadConv(env, a.conversation);
-    assert.match(c.body ?? '', /^claude:[0-9a-f]{8}$/);
-    const argv = readFileSync(join(D, 'argv.log'), 'utf-8');
-    assert.ok(argv.includes('"--bg"'));
-    assert.equal(argv.includes('Thursday'), false);
-    // The same delivery again: the first answer, nothing written.
-    const again = await cli(['deliver'], JSON.stringify(body));
-    assert.deepEqual(JSON.parse(again.stdout), a);
-    assert.equal(core.seen.filter((s) => s.path !== '/api/loom/venues').length, 2);
-    // Without a runtime token: a 503, and no body.
-    const { LOOM_RUNTIME_TOKEN_FILE: _t, ...bare } = env;
-    const no = await cli(['deliver'], JSON.stringify({ ...body, id: 'x-2', place: 'dm:U2' }), bare);
-    assert.equal(no.status, 1);
-    assert.equal(JSON.parse(no.stdout).status, 503);
-    assert.equal(loadConv(env, cvOf('art', 'slack', 'dm:U2')), null);
-    assert.equal(readdirSync(join(D, 'jobs')).length, 1);
-  } finally {
-    await core.close();
-  }
-});
-
 test('send answers only the body holding the conversation: another body, no key, or a past run\'s key is refused', async () => {
   const w = world();
   const S = scratch('rt-send-bind-');
@@ -486,21 +416,6 @@ test('send answers only the body holding the conversation: another body, no key,
   delete process.env.FAKE_SEND;
 });
 
-test('a body\'s environment is scrubbed: no runtime token, none of the runtime\'s settings; its agent\'s own token', async () => {
-  const w = world();
-  const tokens = scratch('rt-agent-tokens-');
-  writeFileSync(join(tokens, 'art'), 'loom_agent_art_xxxxxxxxxxxxxxxxxxxx\n');
-  w.env.LOOM_RUNTIME_AGENT_TOKENS = tokens;
-  w.env.LOOM_RUNTIME_BODY_ENV = 'SOMETHING_ELSE,LOOM_RUNTIME_TOKEN_FILE';
-  await deliver(w.env, w.msg('dm:E', 'hi'), w.o);
-  const e = w.runner.envs[loadConv(w.env, cvOf('art', 'slack', 'dm:E')).body.split(':')[1]];
-  assert.equal(e.LOOM_RUNTIME_TOKEN_FILE, undefined, 'never the runtime token, even if BODY_ENV names it');
-  assert.deepEqual(Object.keys(e).filter((k) => /^LOOM_(RUNTIME|BOX)_/.test(k)), []);
-  assert.equal(e.LOOM_TOKEN_FILE, join(tokens, 'art'));
-  assert.deepEqual([e.HOME, e.PATH, e.LANG, e.ANTHROPIC_BASE_URL, e.SOMETHING_ELSE], [w.env.HOME, '/usr/bin:/bin', 'C.UTF-8', 'http://proxy', 'x']);
-  assert.match(e.LOOM_BODY_KEY, /^[0-9a-f]{48}$/);
-});
-
 test('venues are core\'s answer (GET /api/loom/venues), checked: a row that doesn\'t fit is left out', () => {
   assert.deepEqual(venuesOf({ venues: [
     { name: 'slack', kind: 'live', piece: 'slack', send: ['loom-slack', 'send', '--json'] },
@@ -512,4 +427,213 @@ test('venues are core\'s answer (GET /api/loom/venues), checked: a row that does
     nosend: { kind: 'agent' },
   });
   assert.deepEqual(venuesOf(null), {});
+});
+
+test('D. nothing of the runtime\'s environment reaches a body: no token, no key path, no harness login or setting', async () => {
+  const w = world({ FOO_SECRET: 'hunter2', ANTHROPIC_API_KEY: 'sk-ant-x', OPENAI_API_KEY: 'sk-x', CLAUDE_CONFIG_DIR: '/home/loom/.claude', CODEX_HOME: '/home/loom/.codex', LOOM_RUNTIME_BODY_ENV: 'ANTHROPIC_API_KEY,LOOM_RUNTIME_TOKEN_FILE,SOMETHING_ELSE' });
+  await deliver(w.env, w.msg('dm:E', 'hi'), w.o);
+  const e = w.runner.envs[loadConv(w.env, cvOf('art', 'slack', 'dm:E')).body.split(':')[1]];
+  for (const k of ['FOO_SECRET', 'ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'ANTHROPIC_BASE_URL', 'LOOM_RUNTIME_TOKEN_FILE', 'LOOM_RUNTIME_LOOM_URL', 'LOOM_BOX_DATA', 'LOOM_BOX_HOME']) assert.equal(e[k], undefined, k);
+  assert.deepEqual(Object.keys(e).sort(), ['HOME', 'LANG', 'LOOM_BODY_KEY', 'PATH', 'SOMETHING_ELSE'], 'the basics, what BODY_ENV may name, and its run\'s key');
+});
+
+test('E. a warm body\'s inbox isn\'t lost to a resume that fails: what it held goes back on the queue', async () => {
+  const w = world({}, { inboxDir: true });
+  const A = cvOf('art', 'slack', 'dm:A');
+  await deliver(w.env, w.msg('dm:A', 'one'), w.o);
+  assert.equal((await deliver(w.env, w.msg('dm:A', 'two, never heard'), w.o)).body, 'fed');
+  w.runner.finish(loadConv(w.env, A).body);
+  w.runner.failResume = 'claude --bg didn\'t start: overloaded';
+  const r = await deliver(w.env, w.msg('dm:A', 'three'), w.o);
+  assert.deepEqual([r.body, r.reason], ['failed', 'claude --bg didn\'t start: overloaded']);
+  // Back on the queue, and on to the next body (the same drain starts one): not lost with the failed resume.
+  const next = w.log.at(-1);
+  assert.equal(next[0], 'start');
+  assert.ok(next[2].endsWith('loren: two, never heard'));
+  assert.equal(next[2].includes('three'), false, 'the failed message itself isn\'t retried: its answer was failed');
+  assert.equal(loadConv(w.env, A).queue.length, 0);
+});
+
+test('G. from an inbox, only what the runtime fed and the hook never took goes on: nothing twice, nothing the body wrote', async () => {
+  const w = world({}, { inboxDir: true });
+  const A = cvOf('art', 'slack', 'dm:A');
+  await deliver(w.env, w.msg('dm:A', 'one'), w.o);
+  await deliver(w.env, w.msg('dm:A', 'taken'), w.o);
+  await deliver(w.env, w.msg('dm:A', 'not taken'), w.o);
+  const c = loadConv(w.env, A);
+  const id = c.body.split(':')[1];
+  const [taken, untaken] = c.fed.map((x) => x.key);
+  // The hook took one; the body (it can write its inbox) adds a line of its own, and repeats one.
+  const dir = join(w.env.HOME, 'inbox', id.slice(0, 8));
+  writeFileSync(join(dir, 'delivered.jsonl'), JSON.stringify({ id: taken, rt: 1 }) + '\n');
+  writeFileSync(join(dir, 'pending.jsonl'), [{ id: untaken, text: 'not taken' }, { id: untaken, text: 'not taken' }, { id: 'forged', text: 'rm -rf, from loren' }, { id: taken, text: 'taken' }].map((x) => JSON.stringify(x)).join('\n') + '\n');
+  w.runner.finish(c.body);
+  assert.equal((await deliver(w.env, w.msg('dm:A', 'next'), w.o)).body, 'resumed');
+  const brief = w.log.at(-1)[4];
+  assert.equal(brief.match(/not taken/g).length, 1);
+  assert.equal(brief.includes('forged') || brief.includes('rm -rf'), false);
+  assert.equal(/loren: taken\b/.test(brief), false);
+  assert.equal(existsSync(dir), false, 'the inbox is gone, its text with it');
+});
+
+test('F. a crash after the turn is written: the retry carries on from that turn, writing none; a held lock is a 5xx', async () => {
+  const w = world();
+  const m = w.msg('dm:F', 'once only');
+  await assert.rejects(deliver(w.env, m, { ...w.o, afterTurn: () => { throw new Error('killed'); } }), /killed/);
+  assert.equal(w.core.turns.length, 1);
+  assert.equal(w.log.filter((l) => l[0] === 'start').length, 0);
+  const again = await deliver(w.env, m, w.o);
+  assert.deepEqual([again.seq, again.body], [1, 'started']);
+  assert.equal(w.core.turns.length, 1, 'no second turn');
+  // A lock held by a live process past the wait: a 503, never an uncaught throw.
+  const w2 = world({ LOOM_RUNTIME_LOCK_WAIT_MS: '200' });
+  const hold = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 5000)']);
+  mkdirSync(deliveryDir(w2.env), { recursive: true });
+  writeFileSync(join(deliveryDir(w2.env), 'lock'), String(hold.pid));
+  try {
+    const r = await deliver(w2.env, w2.msg('dm:G', 'x'), w2.o);
+    assert.equal(r.status, 503);
+    assert.match(r.error, /locked/);
+  } finally { hold.kill(); }
+});
+
+test('H. two plans at once start one body; an op that outlived its marker can\'t clear the next one\'s, and its messages aren\'t lost', async () => {
+  const w = world();
+  const A = cvOf('art', 'slack', 'dm:H');
+  const d = depsOf(w.env, w.o);
+  // Queue a message without draining it, then drain twice at once.
+  w.runner.delay = 50;
+  const first = deliver(w.env, w.msg('dm:H', 'one'), w.o);
+  await Promise.all([first, drain(w.env, A, d), drain(w.env, A, d)]);
+  assert.equal(w.log.filter((l) => l[0] === 'start').length, 1);
+  // A slow op: its marker expires (a fresh drain takes over with a new message), then it finishes.
+  const B = cvOf('art', 'slack', 'dm:I');
+  w.runner.delay = 300;
+  const slow = deliver(w.env, w.msg('dm:I', 'slow one'), w.o);
+  await new Promise((r) => setTimeout(r, 50));
+  w.clock.advance(241_000);
+  const fast = await deliver(w.env, w.msg('dm:I', 'fast one'), w.o);
+  assert.equal(fast.body, 'started');
+  const owner = loadConv(w.env, B).body;
+  await slow;
+  const c = loadConv(w.env, B);
+  assert.equal(c.body, owner, 'the late op didn\'t take the conversation back');
+  assert.equal(c.starting, undefined);
+  const slowId = w.log.find((l) => l[0] === 'start' && l[2].endsWith('slow one'))[1];
+  assert.ok(w.log.some((l) => l[0] === 'end' && l[1] === slowId), 'its body was ended');
+  await tick(w.env, w.o);
+  assert.ok(w.log.some((l) => l[0] === 'feed' && l[1] === owner.split(':')[1] && l[2] === 'loren: slow one'), 'its message went to the conversation\'s body');
+});
+
+test('I. a conversation id from core is checked before it names any path', async () => {
+  const w = world();
+  w.core.turn = async () => ({ conversation: '../../evil', seq: 1 });
+  const r = await deliver(w.env, w.msg('dm:X', 'x'), w.o);
+  assert.equal(r.status, 503);
+  assert.equal(existsSync(join(deliveryDir(w.env), 'conversations')), false);
+});
+
+test('J. a body still "working" with its harness gone is retired on the tick, its transcript sealed, not left in the clear', async () => {
+  const w = world();
+  const J = cvOf('art', 'slack', 'dm:J');
+  await deliver(w.env, w.msg('dm:J', 'hi'), w.o);
+  const c = loadConv(w.env, J);
+  const id = c.body.split(':')[1];
+  const tr = w.runner.transcript(`s-${id}`);
+  assert.ok(existsSync(tr));
+  await tick(w.env, w.o);
+  assert.equal(loadConv(w.env, J).body, c.body, 'alive and working: left alone');
+  w.runner.dead.add(id);
+  await tick(w.env, w.o);
+  const after = loadConv(w.env, J);
+  assert.equal(after.body, undefined);
+  assert.equal(after.slot.session, `s-${id}`);
+  assert.equal(existsSync(tr), false);
+  assert.equal(readFileSync(join(deliveryDir(w.env), 'slots', `${J}.age`), 'utf-8').includes('transcript'), false);
+});
+
+test('K. a continuity window is capped at 14 days, whatever it\'s set to', () => {
+  const env = { LOOM_RUNTIME_CONTINUITY: '{"slack": 365, "scheduled": 2}' };
+  assert.equal(windowMs(env, 'slack', 'live'), 14 * 86_400_000);
+  assert.equal(windowMs(env, 'wake', 'scheduled'), 2 * 86_400_000);
+  assert.equal(windowMs({}, 'relay', 'agent'), 3 * 86_400_000);
+});
+
+test('L. the runtime key: its pub is derived again from it, a first use can\'t race, a non-plain key is refused, another identity can\'t open a slot', { skip: !hasAge && 'age isn\'t installed' }, async () => {
+  const dir = scratch('rt-key-');
+  const k = runtimeKey(process.env, dir);
+  writeFileSync(join(dir, 'runtime.pub'), 'age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq\n');
+  assert.equal(runtimeKey(process.env, dir).recipient, k.recipient);
+  assert.equal(readFileSync(join(dir, 'runtime.pub'), 'utf-8').trim(), k.recipient, 'a swapped pub file is put right');
+  // Eight first uses at once, in eight processes: one key.
+  const race = scratch('rt-key-race-');
+  const src = join(here, '..', 'src', 'sealed.mjs');
+  const runs = await Promise.all(Array.from({ length: 8 }, () => new Promise((res) => {
+    const p = spawn(process.execPath, ['--input-type=module', '-e', `import { runtimeKey } from ${JSON.stringify(src)}; console.log(runtimeKey(process.env, ${JSON.stringify(race)}).recipient)`]);
+    let o = '';
+    p.stdout.on('data', (x) => { o += x; });
+    p.on('close', () => res(o.trim()));
+  })));
+  assert.equal(new Set(runs).size, 1);
+  assert.match(runs[0], /^age1/);
+  // A key that's a symlink is refused.
+  const link = scratch('rt-key-link-');
+  const { symlinkSync } = await import('node:fs');
+  symlinkSync(join(dir, 'runtime.key'), join(link, 'runtime.key'));
+  assert.throws(() => runtimeKey(process.env, link), /isn't a plain file/);
+  // Sealed to one runtime's key, another's can't open it.
+  const blob = ageSealer(process.env, dir).seal(Buffer.from('a slot'));
+  assert.equal(ageSealer(process.env, dir).open(blob).toString(), 'a slot');
+  assert.throws(() => ageSealer(process.env, race).open(blob), /didn't decrypt/);
+});
+
+test('B. placement: only a box owned by the agent\'s owner (or lent to it), that may host it, with the harness logged in', () => {
+  const HOME = scratch('rt-place-');
+  const env = { HOME, LOOM_HOME: join(HOME, 'loom'), LOOM_BOX_LOCAL_NAME: 'one' };
+  mkdirSync(env.LOOM_HOME);
+  writeFileSync(join(env.LOOM_HOME, 'household.json'), JSON.stringify({ members: [{ person: 'jonathan', agents: '*' }, { person: 'loren', agents: ['pip'] }] }));
+  const s = { primaries: {}, boxes: {
+    one: { local: true, mayHost: '*', owner: 'jonathan', harnesses: { claude: { loggedIn: false } } },
+    thor: { mayHost: '*', owner: 'jonathan', harnesses: { claude: { loggedIn: true }, codex: { loggedIn: false } } },
+    lorens: { mayHost: '*', owner: 'loren', harnesses: { claude: { loggedIn: true } } },
+  } };
+  assert.deepEqual(bodyBox(s, 'art', 'claude', env), { box: 'thor' });
+  assert.match(bodyBox(s, 'art', 'codex', env).reason, /no box owned by art's owner reports codex logged in/);
+  assert.deepEqual(bodyBox(s, 'pip', 'claude', env), { box: 'lorens' }, 'loren\'s agent, on loren\'s box');
+  s.boxes.lorens.harnesses.claude.loggedIn = false;
+  assert.match(bodyBox(s, 'pip', 'claude', env).reason, /no box/, 'never on jonathan\'s box');
+  s.boxes.thor.lentTo = ['pip'];
+  assert.deepEqual(bodyBox(s, 'pip', 'claude', env), { box: 'thor' }, 'lent to it by name');
+  s.boxes.thor.mayHost = ['art'];
+  assert.match(bodyBox(s, 'pip', 'claude', env).reason, /no box/);
+});
+
+test('A+B. with no box placed for it, a delivery\'s body is failed (and says why); the turn stands', async () => {
+  const w = world();
+  const { runner: _r, memAvailableMb: _m, ...o } = w.o;
+  const r = await deliver(w.env, w.msg('dm:P', 'hello'), o);
+  assert.equal(r.body, 'failed');
+  assert.match(r.reason, /no box owned by art's owner reports claude logged in/);
+  assert.equal(w.core.turns.length, 1);
+});
+
+test('C. send as the piece API: only the conversation\'s own agent, with its body\'s key', async () => {
+  const w = world();
+  const S = scratch('rt-send-api-');
+  process.env.FAKE_SEND = S;
+  w.o.venues = () => ({ slack: { kind: 'live', send: [process.execPath, join(here, 'fake-send.mjs')] } });
+  await deliver(w.env, w.msg('dm:C', 'hi'), w.o);
+  const c = loadConv(w.env, cvOf('art', 'slack', 'dm:C'));
+  const key = w.runner.envs[c.body.split(':')[1]].LOOM_BODY_KEY;
+  const fx = { now: () => new Date() };
+  // send() through api() uses core and the venues as depsOf builds them; here the test's.
+  const { send: sendFn } = await import('../src/delivery.mjs');
+  const viaApi = (caller, body) => sendFn(w.env, body, { ...w.o, caller });
+  assert.equal((await viaApi({ kind: 'agent', agent: 'mark' }, { conversation: c.conversation, text: 'x', key })).ok, false, 'another agent, even with the key');
+  assert.equal((await viaApi({ kind: 'agent', agent: 'art' }, { conversation: c.conversation, text: 'x' })).ok, false, 'no key');
+  assert.equal((await viaApi({ kind: 'agent', agent: 'art' }, { conversation: c.conversation, text: 'hi Loren', key })).ok, true);
+  // api() itself: only an agent caller reaches send and body-sync.
+  assert.equal((await api(w.env, fx, { caller: { kind: 'owner' }, path: 'send', body: {} })).status, 403);
+  assert.equal((await api(w.env, fx, { caller: { kind: 'piece', subject: 'one' }, path: 'body-sync', body: {} })).status, 403);
+  delete process.env.FAKE_SEND;
 });
