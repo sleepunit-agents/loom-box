@@ -257,3 +257,34 @@ test('a house is who its token says: one that names another house is refused, an
   for (const [a, h] of [['art', 'h-8'], ['mark', 'h-9']]) writeFileSync(join(env.LOOM_BOX_DATA, 'delivery', 'hosts', `${a}.json`), JSON.stringify({ agent: a, house: h, req: {}, stop: {}, inbox: {} }));
   await Promise.all([artHost, markHost]);
 });
+
+test('a pack for a body whose house isn\'t the agent\'s now asks nothing and waits for nothing', async () => {
+  const { HouseRunner, hostOf: host } = await import('../src/houserunner.mjs');
+  const D = scratch('rt-house-pack-');
+  const env = { HOME: D, LOOM_BOX_DATA: join(D, 'data'), LOOM_BOX_HOME: join(D, 'state'), LOOM_BOX_LOCAL_NAME: 'one' };
+  mkdirSync(join(env.LOOM_BOX_DATA, 'delivery', 'hosts'), { recursive: true });
+  writeFileSync(join(env.LOOM_BOX_DATA, 'delivery', 'hosts', 'art.json'), JSON.stringify({ agent: 'art', house: 'h-2', req: {}, stop: {}, inbox: {} }));
+  const hr = new HouseRunner(env, 'claude', { poll: 10, claimMs: 60_000, sealer: { seal: (b) => b, open: (b) => b } });
+  // As if it was alive a moment ago, in its old house: the check inside the lock is what stops it.
+  hr.alive = () => true;
+  const t0 = Date.now();
+  assert.deepEqual(await hr.pack({ id: 'h-1-b0000000', agent: 'art', house: 'h-1', harness: 'claude' }), []);
+  assert.ok(Date.now() - t0 < 1000, 'no wait');
+  assert.deepEqual(host(env, 'art').stop, {}, 'and nothing asked of the agent\'s new house');
+});
+
+test('a house\'s body id fits a body ref with its house in front, or it\'s refused: never accepted here and refused there', async () => {
+  const { HouseRunner, MAX_BODY_ID } = await import('../src/houserunner.mjs');
+  const D = scratch('rt-house-idlen-');
+  const env = { HOME: D, LOOM_BOX_DATA: join(D, 'data'), LOOM_BOX_HOME: join(D, 'state'), LOOM_BOX_LOCAL_NAME: 'one' };
+  const hr = new HouseRunner(env, 'claude', { poll: 5, sealer: { seal: (b) => b, open: (b) => b } });
+  hr.warm = async () => 'h-1';
+  const answering = (raw) => { hr.host = () => ({ report: { done: new Proxy({}, { get: () => ({ id: raw }) }) } }); };
+  const room = MAX_BODY_ID - 'h-1-'.length;
+  answering('a'.repeat(room));
+  const b = await hr.start({ agent: 'art', brief: 'x', model: 'm' });
+  assert.equal(b.id.length, MAX_BODY_ID);
+  assert.match(`claude:${b.id}`, /^(claude|codex):([A-Za-z0-9-]{4,64})$/, 'what bodies.mjs takes as a ref');
+  answering('a'.repeat(room + 1));
+  await assert.rejects(hr.start({ agent: 'art', brief: 'x', model: 'm' }), new RegExp(`too long to be one here \\(${room + 1} characters; at most ${room}\\)`));
+});

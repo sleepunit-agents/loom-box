@@ -33,6 +33,9 @@ export const CLAIM_MS = 60_000;
 /** A packed session travels in parts this big (base64), inside loom's piece API body cap. */
 export const PART_CHARS = 360 * 1024;
 const RID = /^[0-9a-f]{16}$/;
+/** A body ref's id part, as bodies.mjs takes it: a house's body id (house, dash, the harness's id) fits it, or is refused. */
+export const MAX_BODY_ID = 64;
+const BODY_REF = new RegExp(`^[A-Za-z0-9-]{4,${MAX_BODY_ID}}$`);
 const BODY_ID = /^[A-Za-z0-9-]{4,64}$/;
 const HOUSE = /^h-[0-9]{1,9}$/;
 
@@ -205,6 +208,8 @@ export class HouseRunner {
         const d = this.host(o.agent).report?.done?.[rid];
         if (d?.id) {
           const id = bodyIdOf(house, d.id);
+          // The composed id must still be a body ref (bodies.mjs REF: 4-64 of [A-Za-z0-9-]): the house's id takes room.
+          if (!BODY_REF.test(id)) throw new RunnerError(`${house} reported a body id too long to be one here (${d.id.length} characters; at most ${MAX_BODY_ID - house.length - 1})`);
           if (existsSync(join(dataDir(this.env), 'bodies', `${this.harness}-${id}.json`))) throw new RunnerError(`${house} reported ${d.id}, which is already a body's`);
           return { id, harness: this.harness, model: o.model, house, ...(resume ? { slot: resume } : {}) };
         }
@@ -265,11 +270,15 @@ export class HouseRunner {
     if (!raw) return [];
     const f = packedFile(this.env, body.agent, body.house, raw);
     if (!this.alive(body) && !existsSync(f)) return [];
-    hostLocked(this.env, () => {
+    const asked = hostLocked(this.env, () => {
       const h = loadHost(this.env, body.agent);
+      // Its house isn't the agent's house now: nothing there to ask, and nothing to wait for.
+      if (h.house !== body.house) return false;
       (h.stop ??= {})[raw] = { pack: true, at: this.now().getTime() };
       writeJson(hostFile(this.env, body.agent), h);
+      return true;
     });
+    if (!asked) return [];
     const end = Date.now() + this.claimMs;
     while (!existsSync(f)) {
       if (Date.now() > end || !fresh(this.host(body.agent), this.now().getTime())) throw new RunnerError(`${body.agent}'s house didn't send ${body.id}'s session back`);
