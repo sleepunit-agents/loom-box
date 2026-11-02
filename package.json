@@ -60,6 +60,16 @@
         "name": "LOOM_RUNTIME_BODY_CWD",
         "label": "Where a delivered body starts",
         "hint": "a directory on this machine (default: the runtime's own)"
+      },
+      {
+        "name": "LOOM_RUNTIME_AGENT_TOKENS",
+        "label": "Each agent's own loom token, for its bodies",
+        "hint": "a dir holding one token file per agent, named for it; a body gets its own agent's as LOOM_TOKEN_FILE, never the runtime's"
+      },
+      {
+        "name": "LOOM_RUNTIME_BODY_ENV",
+        "label": "More environment a body may have",
+        "hint": "variable names, comma-separated (never LOOM_RUNTIME_* or LOOM_BOX_*); a body otherwise gets the basics and its harness's own"
       }
     ],
     "services": [

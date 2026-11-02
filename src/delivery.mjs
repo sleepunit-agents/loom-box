@@ -26,7 +26,7 @@
 // Outbound (`send`): the venue's declared send argv, `--place <place> --agent <agent>`, the text on stdin, 15 s,
 // `{ok, id?}`, one retry; then the agent's turn (`reply`, outcome answered or failed) and its text, to core.
 import { spawn as nodeSpawn, spawnSync } from 'node:child_process';
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, normalize, sep } from 'node:path';
@@ -130,6 +130,37 @@ function memAvailableMb() {
   } catch { return Infinity; }
 }
 
+// ─── A body's environment ───────────────────────────────────────────────────
+
+/**
+ * What a body's environment may carry: the basics a harness runs with, the harness's own settings, and nothing of the
+ * runtime's (no LOOM_RUNTIME_* or LOOM_BOX_*: not its token, not where its key or slots are). LOOM_RUNTIME_BODY_ENV
+ * names more, comma-separated (never one of the runtime's own). The agent's own loom token, when the runtime is
+ * given a dir of them (LOOM_RUNTIME_AGENT_TOKENS/<agent>), is its LOOM_TOKEN_FILE, with LOOM_URL beside it.
+ */
+const BODY_ENV = /^(PATH|HOME|USER|LOGNAME|SHELL|LANG|LANGUAGE|LC_[A-Z_]+|TERM|COLORTERM|TZ|TMPDIR|XDG_[A-Z_]+|CLAUDE_CONFIG_DIR|ANTHROPIC_[A-Z0-9_]+|CODEX_HOME|OPENAI_[A-Z0-9_]+|NODE_EXTRA_CA_CERTS|SSL_CERT_FILE|SSL_CERT_DIR)$/;
+const RUNTIME_OWN = /^(LOOM_RUNTIME_|LOOM_BOX_|LOOM_TOKEN|LOOM_AGE)/;
+export const BODY_KEY = 'LOOM_BODY_KEY';
+
+export function bodyEnvOf(env, { agent, key } = {}) {
+  const extra = new Set(String(setting(env, 'BODY_ENV') ?? '').split(',').map((x) => x.trim()).filter(Boolean));
+  const out = {};
+  for (const [k, v] of Object.entries(env)) {
+    if (typeof v !== 'string' || RUNTIME_OWN.test(k) || k === BODY_KEY) continue;
+    if (BODY_ENV.test(k) || extra.has(k)) out[k] = v;
+  }
+  const dir = setting(env, 'AGENT_TOKENS');
+  if (agent && dir && AGENT_NAME.test(agent) && existsSync(join(dir, agent))) {
+    out.LOOM_TOKEN_FILE = join(dir, agent);
+    out.LOOM_URL = `${(setting(env, 'LOOM_URL') || 'http://127.0.0.1:8787/mcp')}`;
+  }
+  // Its run's own key: `send` answers only the body holding its conversation's current one.
+  if (key) out[BODY_KEY] = key;
+  return out;
+}
+
+const keyHash = (k) => createHash('sha256').update(String(k)).digest();
+
 /** What delivery is made of, so a test (or a caller) can hand in fakes: core, the runners, the key, the clock. */
 export function depsOf(env, o = {}) {
   let sealer;
@@ -143,7 +174,8 @@ export function depsOf(env, o = {}) {
     fetchImpl: o.fetchImpl,
     venues: o.venues ?? (() => venuesFrom(env)),
     run: o.run ?? spawnSync,
-    bodyEnv: o.bodyEnv,
+    /** A body's environment: scrubbed of the runtime's own (bodyEnvOf), with its agent's token and its run's key. */
+    bodyEnv: (agent, key) => bodyEnvOf(env, { agent, key }),
     cwd: o.cwd ?? setting(env, 'BODY_CWD'),
     warn: o.warn ?? ((m) => process.stderr.write(`loom-runtime deliver: ${m}\n`)),
   };
@@ -419,7 +451,8 @@ async function execute(env, op, d, mem) {
     const msgs = op.msgs.map((x) => ({ ...x, text: open(d, x, mem) })).filter((x) => x.text !== null);
     if (!msgs.length) throw new DeliveryError('its messages\' text is gone');
     const sends = !!(() => { try { return d.venues()[c0.venue]?.send; } catch { return undefined; } })();
-    const bodyDeps = { runner: d.runner, accounts: d.accounts, now: d.now, fetchImpl: d.fetchImpl, bodyEnv: d.bodyEnv };
+    const runKey = randomBytes(24).toString('hex');
+    const bodyDeps = { runner: d.runner, accounts: d.accounts, now: d.now, fetchImpl: d.fetchImpl, bodyEnv: d.bodyEnv(c0.agent, runKey) };
     const base = { agent: c0.agent, venue: c0.venue, venueKind: c0.kind, cwd: d.cwd };
     let r;
     if (op.type === 'start') {
@@ -443,6 +476,7 @@ async function execute(env, op, d, mem) {
       const c = loadConv(env, op.cv);
       c.body = r.body;
       c.run = run;
+      c.sendKey = keyHash(runKey).toString('hex');
       c.runs = (c.runs ?? 0) + 1;
       if (op.type === 'resume') delete c.slot;
       delete c.starting;
@@ -502,7 +536,7 @@ function retire(env, cv, ref, d, stop) {
   try { rec = readBody(env, ref); } catch { return { slot: null, pending: [] }; }
   const runner = d.runner(rec.harness);
   const body = { id: idOf(ref), ...rec };
-  if (stop && !rec.ended) endBody(env, ref, { runner: d.runner, now: d.now, bodyEnv: d.bodyEnv });
+  if (stop && !rec.ended) endBody(env, ref, { runner: d.runner, now: d.now, bodyEnv: d.bodyEnv(rec.agent) });
   const pending = takeInbox(runner, ref).map((p) => {
     try { return { key: p.id, id: p.id, at: d.now().toISOString(), from: { kind: 'unknown' }, kind: 'message', sealed: d.sealer.seal(Buffer.from(p.text, 'utf-8')).toString('base64') }; } catch { return null; }
   }).filter(Boolean);
@@ -616,10 +650,15 @@ function sendOnce(d, argv, c, text) {
  * An agent's message out, in its conversation's venue: sent first (one retry), then its turn recorded with outcome
  * `answered`, or `failed` when the send failed twice; the answer is what the body is told.
  */
-export async function send(env, { conversation, text }, o = {}) {
+export async function send(env, { conversation, text, key }, o = {}) {
   const d = depsOf(env, o);
   const c = loadConv(env, conversation);
   if (!c) return { ok: false, reason: `no conversation ${conversation} here` };
+  // Only the body holding this conversation now, in its current run, speaks in it (as its agent, to its place).
+  const want = typeof c.sendKey === 'string' && /^[0-9a-f]{64}$/.test(c.sendKey) ? Buffer.from(c.sendKey, 'hex') : null;
+  if (!want || !c.body || typeof key !== 'string' || !key || !timingSafeEqual(keyHash(key), want)) {
+    return { ok: false, reason: `only the body holding ${conversation} speaks in it (its run's ${BODY_KEY} doesn't match)` };
+  }
   if (!str(text, MAX_TEXT)) return { ok: false, reason: `a message is 1-${MAX_TEXT} characters` };
   const v = (() => { try { return d.venues()[c.venue]; } catch { return undefined; } })();
   if (!v?.send) return { ok: false, reason: `venue ${c.venue} declares no send: nothing posts there` };

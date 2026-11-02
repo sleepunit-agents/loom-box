@@ -39,13 +39,14 @@ function fakeRunner(log, root, harness = 'claude') {
   mkdirSync(roots.sess, { recursive: true });
   const tfile = (s) => join(roots.sess, `${s}.jsonl`);
   const r = {
-    harness, roots, inbox: null, failStart: null,
+    harness, roots, inbox: null, failStart: null, envs: {},
     start(o) {
       if (r.failStart) throw new RunnerError(r.failStart);
       const id = `${harness[0]}000000${n++}`;
       session[id] = `s-${id}`;
       writeFileSync(tfile(session[id]), `transcript of ${id}: ${o.brief}\n`);
       log.push(['start', id, o.brief]);
+      r.envs[id] = o.env;
       state[id] = 'working';
       return { id, harness, model: o.model, slot: { harness, session: session[id] } };
     },
@@ -53,6 +54,7 @@ function fakeRunner(log, root, harness = 'claude') {
       const id = `r000000${n++}`;
       session[id] = slot.session;
       log.push(['resume', id, slot.session, existsSync(tfile(slot.session)) ? readFileSync(tfile(slot.session), 'utf-8') : null, o.brief]);
+      r.envs[id] = o.env;
       state[id] = 'working';
       return { id, harness, model: o.model, slot };
     },
@@ -103,7 +105,7 @@ const testSealer = {
 
 function world(extra = {}) {
   const HOME = scratch('rt-deliver-');
-  const env = { HOME, LOOM_BOX_LOCAL_NAME: 'one', LOOM_BOX_HOME: join(HOME, 'state'), LOOM_BOX_DATA: join(HOME, 'data'), LOOM_RUNTIME_SCORECARDS: 'off', ...extra };
+  const env = { HOME, PATH: '/usr/bin:/bin', LANG: 'C.UTF-8', LOOM_RUNTIME_TOKEN_FILE: join(HOME, 'runtime-token'), LOOM_RUNTIME_LOOM_URL: 'http://127.0.0.1:1/mcp', ANTHROPIC_BASE_URL: 'http://proxy', SOMETHING_ELSE: 'x', LOOM_BOX_LOCAL_NAME: 'one', LOOM_BOX_HOME: join(HOME, 'state'), LOOM_BOX_DATA: join(HOME, 'data'), LOOM_RUNTIME_SCORECARDS: 'off', ...extra };
   setModels(env, { list: [{ id: 'opus', harness: 'claude', family: 'anthropic' }], agent: 'art', prefer: ['opus'] });
   setModels(env, { agent: 'mark', prefer: ['opus'] });
   const log = [];
@@ -339,7 +341,8 @@ test('outbound: the venue\'s send (--place, --agent, the text on stdin), one ret
   const turn = w.core.turn;
   let sentBefore;
   w.core.turn = (t) => { sentBefore = calls().length; return turn(t); };
-  const ok = await send(w.env, { conversation: cv, text: 'Hi Loren!' }, w.o);
+  const key = w.runner.envs[c.body.split(':')[1]].LOOM_BODY_KEY;
+  const ok = await send(w.env, { conversation: cv, text: 'Hi Loren!', key }, w.o);
   w.core.turn = turn;
   assert.equal(sentBefore, 1);
   assert.equal(ok.ok, true);
@@ -350,19 +353,20 @@ test('outbound: the venue\'s send (--place, --agent, the text on stdin), one ret
   assert.deepEqual(w.core.audits.at(-1), { conversation: cv, seq: 2, text: 'Hi Loren!' });
   // One failure: retried once, and it went.
   writeFileSync(join(S, 'fail'), '1');
-  assert.equal((await send(w.env, { conversation: cv, text: 'again' }, w.o)).ok, true);
+  assert.equal((await send(w.env, { conversation: cv, text: 'again', key }, w.o)).ok, true);
   assert.equal(calls().length, 3);
   assert.equal(w.core.turns.at(-1).outcome, 'answered');
   // Two: the body is told why, and the turn says failed.
   writeFileSync(join(S, 'fail'), '2');
-  const no = await send(w.env, { conversation: cv, text: 'and again' }, w.o);
+  const no = await send(w.env, { conversation: cv, text: 'and again', key }, w.o);
   assert.deepEqual([no.ok, no.reason], [false, 'the bot has no access to that channel']);
   assert.equal(calls().length, 5);
   assert.equal(w.core.turns.at(-1).outcome, 'failed');
   // A venue with no send: nothing posts, nothing is recorded.
   await deliver(w.env, { id: 'r-1', agent: 'art', venue: 'relay', place: 'mark', from: { kind: 'agent', id: 'mark' }, kind: 'message', at: w.clock.now().toISOString(), text: 'x' }, w.o);
   const turns = w.core.turns.length;
-  assert.match((await send(w.env, { conversation: cvOf('art', 'relay', 'mark'), text: 'x' }, w.o)).reason, /declares no send/);
+  const rc = loadConv(w.env, cvOf('art', 'relay', 'mark'));
+  assert.match((await send(w.env, { conversation: rc.conversation, text: 'x', key: w.runner.envs[rc.body.split(':')[1]].LOOM_BODY_KEY }, w.o)).reason, /declares no send/);
   assert.equal(w.core.turns.length, turns);
   delete process.env.FAKE_SEND;
 });
@@ -399,7 +403,7 @@ test('loom-runtime deliver: the offer\'s argv, end to end on a stand-in core and
   mkdirSync(join(D, 'work'));
   const env = { ...process.env, HOME: D, FAKE_HARNESS: D, LOOM_BOX_LOCAL_NAME: 'one', LOOM_BOX_HOME: join(D, 'state'), LOOM_BOX_DATA: join(D, 'data'), LOOM_HOME: join(D, 'loom'),
     LOOM_RUNTIME_CLAUDE: join(here, 'fake-claude.mjs'), LOOM_RUNTIME_CLAUDE_JOBS: join(D, 'jobs'), LOOM_RUNTIME_ACCOUNTS: 'none', LOOM_RUNTIME_SCORECARDS: 'off',
-    LOOM_RUNTIME_LOOM_URL: core.url, LOOM_RUNTIME_TOKEN_FILE: join(D, 'token'), LOOM_RUNTIME_BODY_CWD: join(D, 'work') };
+    LOOM_RUNTIME_LOOM_URL: core.url, LOOM_RUNTIME_TOKEN_FILE: join(D, 'token'), LOOM_RUNTIME_BODY_CWD: join(D, 'work'), LOOM_RUNTIME_BODY_ENV: 'FAKE_HARNESS' };
   const cli = (args, input, e = env) => new Promise((resolve) => {
     const p = spawn(process.execPath, [join(here, '..', 'src', 'cli.mjs'), ...args], { env: e, cwd: join(D, 'work') });
     let stdout = '';
@@ -443,4 +447,50 @@ test('loom-runtime deliver: the offer\'s argv, end to end on a stand-in core and
   } finally {
     await core.close();
   }
+});
+
+test('send answers only the body holding the conversation: another body, no key, or a past run\'s key is refused', async () => {
+  const w = world();
+  const S = scratch('rt-send-bind-');
+  process.env.FAKE_SEND = S;
+  await deliver(w.env, w.msg('dm:A', 'for art, from loren'), w.o);
+  await deliver(w.env, { ...w.msg('dm:B', 'for mark'), agent: 'mark' }, w.o);
+  const A = loadConv(w.env, cvOf('art', 'slack', 'dm:A'));
+  const B = loadConv(w.env, cvOf('mark', 'slack', 'dm:B'));
+  const keyOf = (c) => w.runner.envs[c.body.split(':')[1]].LOOM_BODY_KEY;
+  assert.match(keyOf(A), /^[0-9a-f]{48}$/);
+  assert.notEqual(keyOf(A), keyOf(B));
+  // Body A, on body B's conversation: refused, nothing posted, nothing recorded.
+  const turns = w.core.turns.length;
+  const r = await send(w.env, { conversation: B.conversation, text: 'posing as mark', key: keyOf(A) }, w.o);
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /only the body holding/);
+  assert.equal((await send(w.env, { conversation: B.conversation, text: 'no key' }, w.o)).ok, false);
+  assert.equal(existsSync(join(S, 'calls.log')), false);
+  assert.equal(w.core.turns.length, turns);
+  // Its own conversation: it goes.
+  assert.equal((await send(w.env, { conversation: B.conversation, text: 'hi', key: keyOf(B) }, w.o)).ok, true);
+  // A resumed body has a new run and a new key: the old one no longer speaks.
+  const old = keyOf(A);
+  w.runner.finish(A.body);
+  assert.equal((await deliver(w.env, w.msg('dm:A', 'again'), w.o)).body, 'resumed');
+  const A2 = loadConv(w.env, A.conversation);
+  assert.equal((await send(w.env, { conversation: A.conversation, text: 'stale', key: old }, w.o)).ok, false);
+  assert.equal((await send(w.env, { conversation: A.conversation, text: 'fresh', key: keyOf(A2) }, w.o)).ok, true);
+  delete process.env.FAKE_SEND;
+});
+
+test('a body\'s environment is scrubbed: no runtime token, none of the runtime\'s settings; its agent\'s own token', async () => {
+  const w = world();
+  const tokens = scratch('rt-agent-tokens-');
+  writeFileSync(join(tokens, 'art'), 'loom_agent_art_xxxxxxxxxxxxxxxxxxxx\n');
+  w.env.LOOM_RUNTIME_AGENT_TOKENS = tokens;
+  w.env.LOOM_RUNTIME_BODY_ENV = 'SOMETHING_ELSE,LOOM_RUNTIME_TOKEN_FILE';
+  await deliver(w.env, w.msg('dm:E', 'hi'), w.o);
+  const e = w.runner.envs[loadConv(w.env, cvOf('art', 'slack', 'dm:E')).body.split(':')[1]];
+  assert.equal(e.LOOM_RUNTIME_TOKEN_FILE, undefined, 'never the runtime token, even if BODY_ENV names it');
+  assert.deepEqual(Object.keys(e).filter((k) => /^LOOM_(RUNTIME|BOX)_/.test(k)), []);
+  assert.equal(e.LOOM_TOKEN_FILE, join(tokens, 'art'));
+  assert.deepEqual([e.HOME, e.PATH, e.LANG, e.ANTHROPIC_BASE_URL, e.SOMETHING_ELSE], [w.env.HOME, '/usr/bin:/bin', 'C.UTF-8', 'http://proxy', 'x']);
+  assert.match(e.LOOM_BODY_KEY, /^[0-9a-f]{48}$/);
 });

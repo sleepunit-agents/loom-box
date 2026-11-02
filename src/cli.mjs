@@ -317,7 +317,7 @@ async function main(argv, env) {
     case 'body': return body(rest, env, json);
     case 'deliver': return delivery(rest, env, json);
     case 'send': {
-      const r = await send(env, { conversation: flag(rest, '--conversation'), text: await textOf(rest, '--text') });
+      const r = await send(env, { conversation: flag(rest, '--conversation'), text: await textOf(rest, '--text'), key: env.LOOM_BODY_KEY });
       out(r);
       if (!r.ok) process.exitCode = 1;
       return;
