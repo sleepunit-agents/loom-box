@@ -1,6 +1,6 @@
 // Delivery (loom docs/specs/agent-runtime.md, section 5): anything addressed to an agent arrives the same way.
 //
-//   a source ──► deliver {id, agent, venue, place, label?, from, kind, at, text}
+//   a source ──► core ──► deliver {source, id, agent, venue, place, label?, from, kind: message|wake, at, text}
 //                  1. the turn, then its text, to core (core.mjs): if the turn can't be written, a 5xx answer,
 //                     and nothing reaches a body
 //                  2. the conversation's body, for up to 2 s: live → fed; turn over → resumed (the same session);
@@ -33,7 +33,7 @@ import { dirname, isAbsolute, join, normalize, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { accountsFrom } from './accounts.mjs';
 import { endBody, readBody, resumeBody, startBody } from './bodies.mjs';
-import { CoreError, coreFrom, venuesFrom } from './core.mjs';
+import { CoreError, coreFrom } from './core.mjs';
 import { venueKind as kindOf } from './models.mjs';
 import { setting } from './piece.mjs';
 import { runnerFor } from './runners.mjs';
@@ -65,7 +65,7 @@ const MAX_SLOT_BYTES = 64 * 1024 * 1024;
 const STARTING_MS = 120_000;
 const OUTCOME_MS = 3_600_000;
 
-const KINDS = ['message', 'wake', 'note'];
+const KINDS = ['message', 'wake'];
 const FROM_KINDS = ['person', 'agent', 'schedule', 'unknown'];
 const VENUE = /^[a-z][a-z0-9-]{0,31}$/;
 const PIECE = /^[a-z][a-z0-9-]{0,39}$/;
@@ -164,15 +164,16 @@ const keyHash = (k) => createHash('sha256').update(String(k)).digest();
 /** What delivery is made of, so a test (or a caller) can hand in fakes: core, the runners, the key, the clock. */
 export function depsOf(env, o = {}) {
   let sealer;
+  const core = o.core ?? coreFrom(env, { fetchImpl: o.fetchImpl });
   return {
-    core: o.core ?? coreFrom(env, { fetchImpl: o.fetchImpl }),
+    core,
     runner: o.runner ?? ((h) => runnerFor(h, env)),
     sealer: o.sealer ?? (sealer ??= ageSealer(env, deliveryDir(env))),
     now: o.now ?? (() => new Date()),
     memAvailableMb: o.memAvailableMb ?? memAvailableMb,
     accounts: o.accounts ?? accountsFrom(env),
     fetchImpl: o.fetchImpl,
-    venues: o.venues ?? (() => venuesFrom(env)),
+    venues: o.venues ?? (() => core.venues()),
     run: o.run ?? spawnSync,
     /** A body's environment: scrubbed of the runtime's own (bodyEnvOf), with its agent's token and its run's key. */
     bodyEnv: (agent, key) => bodyEnvOf(env, { agent, key }),
@@ -183,9 +184,14 @@ export function depsOf(env, o = {}) {
 
 // ─── The deliver body ───────────────────────────────────────────────────────
 
+/** A venue as core has it ({kind, piece, send?}), or undefined: none, or core couldn't say. */
+async function venueOf(d, name) {
+  try { return (await d.venues())?.[name]; } catch (e) { d.warn(`core couldn't list the venues: ${e.message}`); return undefined; }
+}
+
 const str = (v, max, min = 1) => typeof v === 'string' && v.length >= min && v.length <= max;
 
-/** The deliver body (agent-runtime.md, "The deliver contract"), checked whole. `source` is the calling piece, as core forwards it. */
+/** The deliver body (agent-runtime.md, "The deliver contract"), checked whole: `source` (the calling piece) is core's, added as it forwards. */
 export function parseDelivery(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) fail('a delivery is a JSON object');
   const bad = Object.keys(raw).find((k) => !['id', 'agent', 'venue', 'place', 'label', 'from', 'kind', 'at', 'text', 'source'].includes(k));
@@ -199,12 +205,12 @@ export function parseDelivery(raw) {
   if (!KINDS.includes(raw.kind)) fail(`kind is ${KINDS.join(', ')}`);
   if (typeof raw.at !== 'string' || Number.isNaN(Date.parse(raw.at))) fail('at is an ISO-8601 time');
   if (!str(raw.text, MAX_TEXT)) fail(`text is 1-${MAX_TEXT} characters`);
-  if (raw.source !== undefined && !PIECE.test(raw.source)) fail('source is a piece name');
+  if (!PIECE.test(raw.source ?? '')) fail('source is the calling piece, as core forwards it');
   return { ...raw };
 }
 
 /** A delivery's key: (source piece, id), as one opaque name. */
-export const deliveryKey = (m) => createHash('sha256').update(`${m.source ?? ''}\0${m.id}`).digest('hex').slice(0, 32);
+export const deliveryKey = (m) => createHash('sha256').update(`${m.source}\0${m.id}`).digest('hex').slice(0, 32);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -252,7 +258,7 @@ export async function deliver(env, raw, o = {}) {
   // 2. The body. The message joins its conversation's queue (sealed), and the queue is drained.
   let sealed = null;
   try { sealed = d.sealer.seal(Buffer.from(m.text, 'utf-8')).toString('base64'); } catch (e) { d.warn(`can't seal the message (${e.message}): it's delivered from memory, or not at all`); }
-  const venueInfo = (() => { try { return d.venues()[m.venue]; } catch { return undefined; } })();
+  const venueInfo = await venueOf(d, m.venue);
   let kind;
   try { kind = kindOf(m.venue, venueInfo?.kind); } catch { kind = 'live'; }
   locked(env, () => {
@@ -450,7 +456,7 @@ async function execute(env, op, d, mem) {
   try {
     const msgs = op.msgs.map((x) => ({ ...x, text: open(d, x, mem) })).filter((x) => x.text !== null);
     if (!msgs.length) throw new DeliveryError('its messages\' text is gone');
-    const sends = !!(() => { try { return d.venues()[c0.venue]?.send; } catch { return undefined; } })();
+    const sends = !!(await venueOf(d, c0.venue))?.send;
     const runKey = randomBytes(24).toString('hex');
     const bodyDeps = { runner: d.runner, accounts: d.accounts, now: d.now, fetchImpl: d.fetchImpl, bodyEnv: d.bodyEnv(c0.agent, runKey) };
     const base = { agent: c0.agent, venue: c0.venue, venueKind: c0.kind, cwd: d.cwd };
@@ -660,7 +666,7 @@ export async function send(env, { conversation, text, key }, o = {}) {
     return { ok: false, reason: `only the body holding ${conversation} speaks in it (its run's ${BODY_KEY} doesn't match)` };
   }
   if (!str(text, MAX_TEXT)) return { ok: false, reason: `a message is 1-${MAX_TEXT} characters` };
-  const v = (() => { try { return d.venues()[c.venue]; } catch { return undefined; } })();
+  const v = await venueOf(d, c.venue);
   if (!v?.send) return { ok: false, reason: `venue ${c.venue} declares no send: nothing posts there` };
   let r = sendOnce(d, v.send, c, text);
   if (!r.ok) r = sendOnce(d, v.send, c, text);

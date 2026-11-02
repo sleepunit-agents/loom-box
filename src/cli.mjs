@@ -45,7 +45,7 @@
 //   loom runtime body resume <body> | --slot <harness>:<session> [--agent a --venue v] --brief <text|->
 //   loom runtime body end <body>   |   loom runtime body list [--json]
 // Delivery (agent-runtime.md, section 5; the runtime's `delivery` offer, which core runs):
-//   loom runtime deliver < {id, agent, venue, place, label?, from, kind, at, text}
+//   loom runtime deliver < {source, id, agent, venue, place, label?, from, kind, at, text}   (core adds source)
 //                      the turn to core, then the conversation's body: {conversation, seq, body, reason?}
 //   loom runtime send --conversation <cv> --text <text|->              a body's message out, in its venue
 //   loom runtime deliver tick [--conversation <cv>] | deliver run [--every <ms>] | deliver list [--json]

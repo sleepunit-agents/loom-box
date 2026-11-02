@@ -18,7 +18,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { staticAccounts } from '../src/accounts.mjs';
 import { readBody } from '../src/bodies.mjs';
-import { CoreError } from '../src/core.mjs';
+import { CoreError, venuesOf } from '../src/core.mjs';
 import { deliver, deliveryDir, loadConv, send, tick } from '../src/delivery.mjs';
 import { setModels } from '../src/models.mjs';
 import { RunnerError } from '../src/runners.mjs';
@@ -119,7 +119,7 @@ function world(extra = {}) {
     venues: () => ({ slack: { kind: 'live', send: [process.execPath, join(here, 'fake-send.mjs')] }, relay: { kind: 'agent' } }),
   };
   let n = 0;
-  const msg = (place, text, more = {}) => ({ id: `m-${++n}`, agent: 'art', venue: 'slack', place, label: `Loren (${place})`, from: { kind: 'person', slug: 'loren' }, kind: 'message', at: clock.now().toISOString(), text, ...more });
+  const msg = (place, text, more = {}) => ({ source: 'test-source', id: `m-${++n}`, agent: 'art', venue: 'slack', place, label: `Loren (${place})`, from: { kind: 'person', slug: 'loren' }, kind: 'message', at: clock.now().toISOString(), text, ...more });
   return { env, log, runner, core, clock, o, msg, kinds: () => log.map((l) => l[0]) };
 }
 
@@ -144,7 +144,7 @@ test('1. one way to start a body: a delivery from a source, and a relay, each st
   assert.equal(c.body, `claude:${id}`);
   assert.equal(readBody(w.env, c.body).venue, 'slack');
   // A relay: from another agent, on the runtime's own venue.
-  const r = await deliver(w.env, { id: 'relay-1', agent: 'art', venue: 'relay', place: 'mark', from: { kind: 'agent', id: 'mark' }, kind: 'message', at: w.clock.now().toISOString(), text: 'can you look at PR 12?' }, w.o);
+  const r = await deliver(w.env, { source: 'runtime', id: 'relay-1', agent: 'art', venue: 'relay', place: 'mark', from: { kind: 'agent', id: 'mark' }, kind: 'message', at: w.clock.now().toISOString(), text: 'can you look at PR 12?' }, w.o);
   assert.equal(r.body, 'started');
   const starts = w.log.filter((l) => l[0] === 'start');
   assert.equal(starts.length, 2);
@@ -207,6 +207,10 @@ test('2. delivery records first, and once; a body that fails to start leaves the
   assert.equal((await deliver(w.env, { ...w.msg('dm:U6', 'x'), text: '' }, w.o)).status, 400);
   assert.equal((await deliver(w.env, { ...w.msg('dm:U6', 'x'), extra: 1 }, w.o)).status, 400);
   assert.equal((await deliver(w.env, { ...w.msg('dm:U6', 'x'), kind: 'reply' }, w.o)).status, 400);
+  // core refuses `note` on deliver, and adds `source` as it forwards: a body without one isn't core's.
+  assert.equal((await deliver(w.env, { ...w.msg('dm:U6', 'x'), kind: 'note' }, w.o)).status, 400);
+  const { source: _s, ...unsourced } = w.msg('dm:U6', 'x');
+  assert.match((await deliver(w.env, unsourced, w.o)).error, /source is the calling piece/);
   assert.equal(w.core.turns.length, before);
 });
 
@@ -363,7 +367,7 @@ test('outbound: the venue\'s send (--place, --agent, the text on stdin), one ret
   assert.equal(calls().length, 5);
   assert.equal(w.core.turns.at(-1).outcome, 'failed');
   // A venue with no send: nothing posts, nothing is recorded.
-  await deliver(w.env, { id: 'r-1', agent: 'art', venue: 'relay', place: 'mark', from: { kind: 'agent', id: 'mark' }, kind: 'message', at: w.clock.now().toISOString(), text: 'x' }, w.o);
+  await deliver(w.env, { source: 'runtime', id: 'r-1', agent: 'art', venue: 'relay', place: 'mark', from: { kind: 'agent', id: 'mark' }, kind: 'message', at: w.clock.now().toISOString(), text: 'x' }, w.o);
   const turns = w.core.turns.length;
   const rc = loadConv(w.env, cvOf('art', 'relay', 'mark'));
   assert.match((await send(w.env, { conversation: rc.conversation, text: 'x', key: w.runner.envs[rc.body.split(':')[1]].LOOM_BODY_KEY }, w.o)).reason, /declares no send/);
@@ -388,6 +392,7 @@ async function coreServer() {
         return res.end(JSON.stringify({ conversation: cv, seq: (seqs[cv] = (seqs[cv] ?? 0) + 1) }));
       }
       if (req.url === '/api/loom/audit') return res.end(JSON.stringify({ conversation: body.conversation, seq: body.seq }));
+      if (req.url === '/api/loom/venues' && req.method === 'GET') return res.end(JSON.stringify({ venues: [{ name: 'slack', kind: 'live', piece: 'slack', send: ['loom-slack', 'send'] }] }));
       res.statusCode = 404;
       res.end('{"error":"not-found"}');
     });
@@ -414,7 +419,7 @@ test('loom-runtime deliver: the offer\'s argv, end to end on a stand-in core and
     p.stdin.end(input);
   });
   try {
-    const body = { id: '1730550000.000100', agent: 'art', venue: 'slack', place: 'dm:U1', label: 'Loren (DM)', from: { kind: 'person', slug: 'loren' }, kind: 'message', at: new Date().toISOString(), text: 'are we still on for Thursday?' };
+    const body = { source: 'slack', id: '1730550000.000100', agent: 'art', venue: 'slack', place: 'dm:U1', label: 'Loren (DM)', from: { kind: 'person', slug: 'loren' }, kind: 'message', at: new Date().toISOString(), text: 'are we still on for Thursday?' };
     const t0 = Date.now();
     const r = await cli(['deliver'], JSON.stringify(body));
     assert.equal(r.status, 0, r.stderr);
@@ -422,7 +427,8 @@ test('loom-runtime deliver: the offer\'s argv, end to end on a stand-in core and
     const a = JSON.parse(r.stdout);
     assert.deepEqual([a.conversation, a.seq], [cvOf('art', 'slack', 'dm:U1'), 1]);
     assert.ok(['started', 'queued'].includes(a.body), JSON.stringify(a));
-    assert.deepEqual(core.seen.map((s) => s.path), ['/api/loom/conversations/turn', '/api/loom/audit']);
+    assert.deepEqual(core.seen.map((s) => s.path).filter((p) => p !== '/api/loom/venues'), ['/api/loom/conversations/turn', '/api/loom/audit']);
+    assert.ok(core.seen.some((s) => s.path === '/api/loom/venues' && s.auth === 'Bearer loom_runtime_test_token_xxxxxxxx'), 'the venues come from core, as the runtime');
     assert.equal(core.seen[0].body.text, undefined, 'a turn carries no text');
     assert.equal(core.seen[1].body.text, 'are we still on for Thursday?');
     // The detached process starts the body (here, within the 2 s): a `claude --bg` with the brief on stdin, never argv.
@@ -436,7 +442,7 @@ test('loom-runtime deliver: the offer\'s argv, end to end on a stand-in core and
     // The same delivery again: the first answer, nothing written.
     const again = await cli(['deliver'], JSON.stringify(body));
     assert.deepEqual(JSON.parse(again.stdout), a);
-    assert.equal(core.seen.length, 2);
+    assert.equal(core.seen.filter((s) => s.path !== '/api/loom/venues').length, 2);
     // Without a runtime token: a 503, and no body.
     const { LOOM_RUNTIME_TOKEN_FILE: _t, ...bare } = env;
     const no = await cli(['deliver'], JSON.stringify({ ...body, id: 'x-2', place: 'dm:U2' }), bare);
@@ -493,4 +499,17 @@ test('a body\'s environment is scrubbed: no runtime token, none of the runtime\'
   assert.equal(e.LOOM_TOKEN_FILE, join(tokens, 'art'));
   assert.deepEqual([e.HOME, e.PATH, e.LANG, e.ANTHROPIC_BASE_URL, e.SOMETHING_ELSE], [w.env.HOME, '/usr/bin:/bin', 'C.UTF-8', 'http://proxy', 'x']);
   assert.match(e.LOOM_BODY_KEY, /^[0-9a-f]{48}$/);
+});
+
+test('venues are core\'s answer (GET /api/loom/venues), checked: a row that doesn\'t fit is left out', () => {
+  assert.deepEqual(venuesOf({ venues: [
+    { name: 'slack', kind: 'live', piece: 'slack', send: ['loom-slack', 'send', '--json'] },
+    { name: 'wake', kind: 'scheduled', piece: 'loom' },
+    { name: 'Bad Name', kind: 'live' }, { name: 'odd', kind: 'weekly' }, { name: 'nosend', kind: 'agent', send: [1] },
+  ] }), {
+    slack: { kind: 'live', piece: 'slack', send: ['loom-slack', 'send', '--json'] },
+    wake: { kind: 'scheduled', piece: 'loom' },
+    nosend: { kind: 'agent' },
+  });
+  assert.deepEqual(venuesOf(null), {});
 });

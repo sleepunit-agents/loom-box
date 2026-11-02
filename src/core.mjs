@@ -8,11 +8,12 @@
 // Both with the runtime's token (role `runtime`, LOOM_RUNTIME_TOKEN_FILE), at loom's URL (LOOM_RUNTIME_LOOM_URL, its
 // /mcp dropped). A refusal keeps core's status; anything else (no URL, no token, core down, a timeout) is a 503.
 //
-// And the venues (conversations.md, "Venues"; agent-runtime.md, "Outbound"): which piece declares each venue, its
-// kind and its `send` argv, read from the managed pieces' records ($LOOM_HOME/pieces/<name>/piece.json, as core reads
-// them), with argv[0] one of that piece's bins, run from the managed bin dir.
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+//   GET  /api/loom/venues              → {venues: [{name, kind, piece, send?: [argv]}]}
+//                                      the venues registry, as core keeps it (conversations.md, "Venues"; agent-runtime.md,
+//                                      "Outbound"). A piece reads only its own store, so the runtime asks core, never the
+//                                      other pieces' files; a venue's send runs as core answered its argv.
+//                                      NOT YET IN CORE (being added beside this): coded to the agreed shape, in venues().
+import { readFileSync } from 'node:fs';
 import { setting } from './piece.mjs';
 
 export class CoreError extends Error {
@@ -23,7 +24,7 @@ export class CoreError extends Error {
 export const apiBase = (env) => (setting(env, 'LOOM_URL') || 'http://127.0.0.1:8787/mcp').replace(/\/mcp\/?$/, '').replace(/\/+$/, '');
 
 export function coreFrom(env, { fetchImpl = fetch, timeoutMs = 5000 } = {}) {
-  const post = async (path, body) => {
+  const call = async (method, path, body) => {
     const tokenFile = setting(env, 'TOKEN_FILE');
     if (!tokenFile) throw new CoreError('no runtime token (LOOM_RUNTIME_TOKEN_FILE): the runtime can\'t write to core');
     let token;
@@ -31,13 +32,14 @@ export function coreFrom(env, { fetchImpl = fetch, timeoutMs = 5000 } = {}) {
     let r;
     try {
       r = await fetchImpl(`${apiBase(env)}/api/loom/${path}`, {
-        method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` }, body: JSON.stringify(body), signal: AbortSignal.timeout(timeoutMs),
+        method, headers: { ...(body !== undefined ? { 'content-type': 'application/json' } : {}), authorization: `Bearer ${token}` }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (e) { throw new CoreError(`core didn't answer ${path}: ${e.name === 'TimeoutError' ? `no answer in ${timeoutMs / 1000}s` : e.message}`); }
     const out = await r.json().catch(() => ({}));
     if (!r.ok) throw new CoreError(`core refused ${path}: ${out.error ?? `${r.status}`}`, r.status >= 500 ? 503 : r.status);
     return out;
   };
+  const post = (path, body) => call('POST', path, body);
   return {
     async turn(t) {
       const out = await post('conversations/turn', t);
@@ -45,28 +47,22 @@ export function coreFrom(env, { fetchImpl = fetch, timeoutMs = 5000 } = {}) {
       return { conversation: out.conversation, seq: out.seq };
     },
     audit: (a) => post('audit', a),
+    venues: async () => venuesOf(await call('GET', 'venues')),
   };
 }
 
-const loomHome = (env) => env.LOOM_HOME || join(env.HOME || '', '.config', 'loom');
+const VENUE = /^[a-z][a-z0-9-]{0,31}$/;
 
-/** Every venue the managed pieces declare: {name: {piece, label, kind, send?: [abs bin, ...args]}}. */
-export function venuesFrom(env) {
-  const root = join(loomHome(env), 'pieces');
+/**
+ * Core's venues answer, checked and keyed by name: {name: {kind, piece, send?}}. The one place its shape is read, so
+ * when core's route lands only this changes if the shape does. A row that doesn't fit is left out (no venue, no send).
+ */
+export function venuesOf(raw) {
   const out = {};
-  let names = [];
-  try { names = readdirSync(root); } catch { return out; }
-  for (const name of names) {
-    let rec;
-    try { rec = JSON.parse(readFileSync(join(root, name, 'piece.json'), 'utf-8')); } catch { continue; }
-    const venues = rec?.loom?.venues;
-    if (!venues || typeof venues !== 'object') continue;
-    for (const [v, d] of Object.entries(venues)) {
-      if (!d || typeof d !== 'object') continue;
-      const send = Array.isArray(d.send) && d.send.every((a) => typeof a === 'string') && Array.isArray(rec.bins) && rec.bins.includes(d.send[0]) && existsSync(join(root, 'bin', d.send[0]))
-        ? [join(root, 'bin', d.send[0]), ...d.send.slice(1)] : undefined;
-      out[v] = { piece: rec.name ?? name, label: d.label, kind: d.kind, ...(send ? { send } : {}) };
-    }
+  for (const v of Array.isArray(raw?.venues) ? raw.venues : []) {
+    if (!v || !VENUE.test(v.name ?? '') || !['live', 'scheduled', 'agent'].includes(v.kind)) continue;
+    const send = Array.isArray(v.send) && v.send.length >= 1 && v.send.length <= 16 && v.send.every((a) => typeof a === 'string' && a && a.length <= 200) ? [...v.send] : undefined;
+    out[v.name] = { kind: v.kind, ...(typeof v.piece === 'string' ? { piece: v.piece } : {}), ...(send ? { send } : {}) };
   }
   return out;
 }
