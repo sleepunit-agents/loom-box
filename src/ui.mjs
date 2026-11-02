@@ -8,8 +8,9 @@ import { join } from 'node:path';
 import { StateError, load, localBoxName, stateDir } from './state.mjs';
 import { sessionsBusy } from './busy.mjs';
 import { allowJoin, blockAllJoins, blockJoin, pendingJoins } from './enroll.mjs';
-import { addBox, boxLabelOf, factsOf, lendBox, list, loginCancel, loginCode, loginStart, loginView, primaryOf, remoteDown, remoteUp, revokeBox, serviceDown, serviceMove, serviceRestart, serviceUp, setAgent, setBoxOwner, setMayHost, setPrimary, up, down, LIVE } from './control.mjs';
+import { addBox, assertBoxOwner, isBoxOwner, boxLabelOf, boxOfCall, boxUpdateNow, loginOver, factsOf, lendBox, list, loginCancel, loginCode, loginStart, loginView, primaryOf, remoteDown, remoteUp, revokeBox, serviceDown, serviceMove, serviceRestart, serviceUp, setAgent, setBoxOwner, setMayHost, setPrimary, up, down, LIVE } from './control.mjs';
 import { LOGIN_HARNESSES } from './logins.mjs';
+import { ownCommit, swapCommand } from './version.mjs';
 import { stateAccounts } from './accounts.mjs';
 
 const OWNER = { kind: 'owner' };
@@ -340,7 +341,9 @@ function diskUse(env) {
   } catch { return null; }
 }
 
-function boxesPage(env, nowMs) {
+function boxesPage(env, nowMs, caller = OWNER) {
+  // A box's logins and Update now are its owner's (control.mjs, assertBoxOwner): another household owner sees, doesn't press.
+  const mayAct = (b) => isBoxOwner(env, caller, b.id);
   const s = load(env);
   const view = list(env, OWNER);
   const agents = Object.keys(s.agents).sort();
@@ -353,7 +356,7 @@ function boxesPage(env, nowMs) {
   const svcOf = new Map(view.services.map((v) => [v.house, v.name]));
   if (live_boxes.length > 3) {
     sections.push({ id: 'all-boxes', title: 'Boxes', blocks: [{ type: 'list', items: live_boxes.map((b) => ({
-      text: b.local ? `${b.label} · loom's own` : b.label, meta: `${live.filter((h) => h.box === b.id).length} houses · ${b.local ? 'here' : b.lastSeen ? `seen ${ago(b.lastSeen, nowMs)}` : 'not joined yet'}`,
+      text: b.local ? `${b.label} · loom's own` : b.label, meta: `${live.filter((h) => h.box === b.id).length} houses · ${b.local ? 'here' : b.lastSeen ? `seen ${ago(b.lastSeen, nowMs)}` : 'not joined yet'}${b.lastSeen || b.local ? ` · ${runtimeRow(env, b, nowMs).meta}` : ''}`,
     })) }] });
   }
   for (const b of live_boxes.length > 3 ? [] : live_boxes) {
@@ -362,6 +365,9 @@ function boxesPage(env, nowMs) {
     const disk = b.local ? diskUse(env) : null;
     sections.push({ id: `box-${b.id}`, title: b.local ? `${b.label} · loom's own` : b.label, tone: b.local || b.lastSeen ? undefined : 'warn', blocks: [
       { type: 'text', tone: 'muted', text: b.local ? `Up ${span(uptime() * 1000)}` : b.lastSeen ? `Seen ${ago(b.lastSeen, nowMs)}` : 'Not joined yet' },
+      // Up front: which runtime it runs against loom's, and each harness: installed, logged in, or a Log in button.
+      { type: 'list', items: [...(b.lastSeen || b.local ? [runtimeRow(env, b, nowMs, mayAct(b))] : []), ...harnessRows(s, b, nowMs, mayAct(b))] },
+      ...runtimeHelp(env, b),
       ...(disk ? [{ type: 'meter', items: [{ label: 'Disk', value: disk.used, detail: `${disk.free} free`, ...(disk.used >= 0.95 ? { tone: 'bad' } : disk.used >= 0.85 ? { tone: 'warn' } : {}) }] }] : []),
       here.length
         ? { type: 'list', items: here.slice(0, 20).map((h) => ({ text: svcOf.has(h.id) ? `${h.agent}'s ${svcOf.get(h.id)}` : `${h.agent}'s house`, ...(svcOf.has(h.id) ? {} : { meta: short(houseName(h)) }), badge: h.state, tone: toneOf(h.state), agent: h.agent })) }
@@ -387,7 +393,7 @@ function boxesPage(env, nowMs) {
     })),
   ] });
 
-  sections.push(loginsSection(env, s, live_boxes, nowMs));
+  sections.push(loginsSection(env, s, live_boxes, nowMs, live_boxes.length > 3));
 
   // Each agent's houses, services and sessions are its own (its Houses tab): here, a link each.
   if (agents.length) {
@@ -421,31 +427,98 @@ function boxesPage(env, nowMs) {
   return { title: 'Boxes', intro: `${live_boxes.length} box${live_boxes.length === 1 ? '' : 'es'}, ${live.length} house${live.length === 1 ? '' : 's'} up${waiting ? ' or waiting' : ''}. A house is an agent's container, started for a task.`, sections };
 }
 
+const short7 = (c) => (c ? c.slice(0, 7) : '?');
+/** When, from now: "in 5h", "in 20m", "any moment". */
+const inTime = (iso, nowMs = Date.now()) => {
+  const s = Math.round((Date.parse(iso) - nowMs) / 1000);
+  if (!Number.isFinite(s) || s < 60) return 'any moment';
+  if (s < 5400) return `in ${Math.round(s / 60)}m`;
+  return `in ${Math.round(s / 3600)}h`;
+};
+
 /**
- * Model logins (docs/model-accounts.md): each box's harnesses, logged in or not, with a button that runs the CLI's
- * own login on that box; and the accounts those logins make, with how full each is.
+ * A box's runtime against loom's (version.mjs): up to date; updating…; why the last try failed and when it tries
+ * again, with "Update now"; or too old to say (an old `box` piece: runtimeHelp says what to run on it).
  */
-function loginsSection(env, s, boxes, nowMs) {
-  const items = [];
-  for (const b of boxes) {
-    for (const [h, def] of Object.entries(LOGIN_HARNESSES)) {
-      const st = b.harnesses?.[h];
-      const where = `${b.label} · ${def.label}`;
-      if (!st) { items.push({ text: where, meta: 'not reported yet', tone: 'muted' }); continue; }
-      if (!st.installed) { items.push({ text: where, meta: `${def.bin} isn't installed there`, tone: 'muted' }); continue; }
-      const under = Object.values(s.logins ?? {}).find((l) => l.box === b.id && l.harness === h && !['done', 'failed'].includes(l.state));
-      if (st.unhealthy) { items.push({ text: where, meta: `not used: its login dir has something in it that shouldn't be (${st.unhealthy})`, tone: 'bad' }); continue; }
-      items.push({ text: where, meta: st.loggedIn ? `logged in${st.plan ? `, ${st.plan}` : ''}${st.method ? ` (${st.method})` : ''}` : 'not logged in', tone: st.loggedIn ? 'ok' : 'warn',
-        ...(under ? { page: `login/${under.id}`, badge: 'signing in' }
-          : { act: { action: 'login-start', label: st.loggedIn ? `Log in ${def.label} again` : `Log in ${def.label}`, ...(st.loggedIn ? {} : { tone: 'primary' }), fields: { box: b.id, harness: h } } }) });
-    }
+function runtimeRow(env, b, nowMs, may = true) {
+  const loomC = ownCommit();
+  const rt = b.runtime ?? {};
+  const mine = rt.commit;
+  const now = may ? { action: 'box-update-now', label: 'Update now', fields: { name: b.id } } : null;
+  // loom's commit is ownCommit() alone, what it tells boxes to run: a dev checkout has none, so nothing to compare or press.
+  if (!loomC) return { text: 'Runtime', meta: `${mine ? `${short7(mine)} · ` : ''}loom's version unknown`, tone: 'muted' };
+  if (b.local && !mine) return { text: 'Runtime', meta: `${short7(loomC)} · loom's own`, tone: 'ok' };
+  if (!mine) return { text: 'Runtime', meta: `too old to say which · loom's ${short7(loomC)}`, tone: 'warn', badge: 'old' };
+  if (mine === loomC) return { text: 'Runtime', meta: `${short7(mine)} · up to date with loom's`, tone: 'ok' };
+  const u = rt.upgrade?.commit === loomC ? rt.upgrade : null;
+  const lag = `${short7(mine)} · loom's ${short7(loomC)}`;
+  if (u && (u.state === 'failed' || u.state === 'refused')) {
+    return { text: 'Runtime', meta: `${lag} · the update didn't work: ${u.error ?? 'no reason given'}${u.retryAt ? ` · tries again ${inTime(u.retryAt, nowMs)}` : ''}`, tone: 'bad', ...(now ? { act: { ...now, tone: 'primary' } } : {}) };
   }
+  if (u?.state === 'rolling-back') return { text: 'Runtime', meta: `${lag} · the update didn't work; putting the ${rt.piece ?? 'old'} piece back: ${u.error ?? ''}`.trim(), tone: 'bad', badge: 'rolling back' };
+  const swap = rt.piece && rt.piece !== 'runtime' ? `, swapping its ${rt.piece} piece for runtime` : '';
+  // Updating, or about to (it tries on its next poll): the button only once it's been a while.
+  const since = u?.at ? nowMs - Date.parse(u.at) : Infinity;
+  return { text: 'Runtime', meta: `${lag} · updating…${swap}`, tone: 'warn', badge: 'updating…', ...(now && since > 10 * 60_000 && !(u && ['removing', 'installing'].includes(u.state)) ? { act: now } : {}) };
+}
+
+/** Below the runtime row: the failed update's last lines, or, for a box too old to report, the one line to run on it. */
+function runtimeHelp(env, b) {
+  const loomC = ownCommit();
+  const rt = b.runtime ?? {};
+  if (!loomC || b.local) return [];
+  if (!rt.commit && b.lastSeen) {
+    return [{ type: 'callout', tone: 'warn', title: 'This box is on the old box piece',
+      text: `It can't update itself to the runtime piece: the two can't be installed side by side, and its version is older than the swap. Run this once on ${b.label}. It keeps its settings, data and houses (docs/upgrading.md).` },
+    { type: 'code', label: `on ${b.label}`, text: swapCommand(loomC) }];
+  }
+  const u = rt.upgrade;
+  if (rt.commit !== loomC && u?.commit === loomC && (u.state === 'failed' || u.state === 'refused') && u.detail) {
+    return [{ type: 'details', summary: 'What the install said', blocks: [{ type: 'code', text: u.detail }] }];
+  }
+  return [];
+}
+
+/** How a login reads: "claude.ai, Max". */
+const loginWords = (st) => [st?.method, st?.plan ? st.plan.charAt(0).toUpperCase() + st.plan.slice(1) : null].filter(Boolean)
+  .map((w) => (w === 'chatgpt' ? 'ChatGPT' : w === 'api-key' ? 'API key' : w)).join(', ');
+
+/**
+ * Each harness on a box, as one row: not reported yet, not installed, unhealthy, signing in (its page), logged
+ * in (how, and its plan; "Log in again"), or not (a "Log in" button; after a failed try, why, and "Try again").
+ */
+function harnessRows(s, b, nowMs, may = true) {
+  void nowMs;
+  const items = [];
+  for (const [h, def] of Object.entries(LOGIN_HARNESSES)) {
+    const st = b.harnesses?.[h];
+    if (!st) { items.push({ text: def.label, meta: 'not reported yet', tone: 'muted' }); continue; }
+    if (!st.installed) { items.push({ text: def.label, meta: st.unhealthy ? `can't sign in here: ${st.unhealthy}` : `${def.bin} isn't installed there`, tone: 'muted' }); continue; }
+    if (st.unhealthy) { items.push({ text: def.label, meta: `not used: its login dir has something in it that shouldn't be (${st.unhealthy})`, tone: 'bad' }); continue; }
+    const mine = Object.values(s.logins ?? {}).filter((l) => l.box === b.id && l.harness === h).sort((x, y) => Date.parse(y.created) - Date.parse(x.created));
+    const under = mine.find((l) => !['done', 'failed'].includes(l.state));
+    const start = { action: 'login-start', fields: { box: b.id, harness: h } };
+    if (under) { items.push({ text: def.label, meta: 'signing in…', badge: 'signing in', tone: 'warn', ...(may ? { page: `login/${under.id}` } : {}) }); continue; }
+    if (st.loggedIn) { items.push({ text: def.label, meta: `✓ logged in${loginWords(st) ? ` (${loginWords(st)})` : ''}`, tone: 'ok', ...(may ? { act: { ...start, label: 'Log in again' } } : {}) }); continue; }
+    const lastFail = mine[0]?.state === 'failed' ? mine[0] : null;
+    items.push({ text: def.label, meta: lastFail ? `not logged in · last try: ${lastFail.error}` : 'installed, not logged in', tone: lastFail ? 'bad' : 'warn',
+      ...(lastFail && may ? { page: `login/${lastFail.id}` } : {}), ...(may ? { act: { ...start, label: lastFail ? 'Try again' : `Log in ${def.label}`, tone: 'primary' } } : {}) });
+  }
+  return items;
+}
+
+/**
+ * Model logins (docs/model-accounts.md): the accounts the boxes' logins make, with how full each is. Each box's
+ * harnesses are on its own card (harnessRows); here as well past three boxes, when there are no cards.
+ */
+function loginsSection(env, s, boxes, nowMs, rows) {
+  const items = rows ? boxes.flatMap((b) => harnessRows(s, b, nowMs).map((r) => ({ ...r, text: `${b.label} · ${r.text}` }))) : [];
   let accounts = [];
   try { accounts = stateAccounts(env, { now: () => nowMs }).list().accounts; } catch { accounts = []; }
   const pct = (v) => `${Math.round(v * 100)}%`;
   return { id: 'logins', title: 'Model logins', blocks: [
     { type: 'text', tone: 'muted', text: 'Each box signs in to Claude and Codex itself, with its owner\'s own subscription: Log in runs the CLI\'s own login on that box. loom never sees the login.' },
-    items.length ? { type: 'list', items } : { type: 'text', tone: 'muted', text: 'No box has reported its harnesses yet.' },
+    ...(items.length ? [{ type: 'list', items }] : boxes.some((b) => b.harnesses && Object.keys(b.harnesses).length) ? [] : [{ type: 'text', tone: 'muted', text: 'No box has reported its harnesses yet.' }]),
     ...(accounts.length ? [{ type: 'details', summary: 'Accounts', meta: `${accounts.length}`, blocks: [{ type: 'list', items: accounts.map((a) => {
       const w = Object.entries(a.usage).filter(([k]) => !k.startsWith('reset_') && k !== 'checked');
       return { text: a.label, meta: `${w.length ? w.map(([k, v]) => `${k} ${pct(v)}`).join(', ') : 'usage not read yet'}${a.boxes.length ? ` · on ${a.boxes.map((id) => boxLabelOf(s, id)).join(', ')}` : ''} · for ${a.agents.join(', ') || 'no agent'}` };
@@ -453,29 +526,69 @@ function loginsSection(env, s, boxes, nowMs) {
   ] };
 }
 
-/** One login under way: the provider's link, and where to paste its code (Claude) or the code to enter (Codex). */
-function loginPage(env, id) {
-  const l = loginView(env, id);
-  if (!l) return { title: 'Not found', sections: [] };
+/**
+ * One login, start to finish, without a reload: while the box is starting the CLI, checking a pasted code, or
+ * waiting for a device sign-in, the page says so beside a spinner (a busy callout) and reloads itself (refresh:
+ * loom core's page vocabulary), then flips to "✓ Claude logged in (claude.ai, Max)", or to why it didn't and "Try again".
+ */
+function loginPage(env, id, nowMs = Date.now()) {
+  const seen = loginView(env, id);
+  // A page changes nothing: a login loom would give up on its next look (its box went quiet) reads as failed now.
+  const over = seen ? loginOver(load(env), seen, nowMs) : null;
+  const l = over ? { ...seen, state: 'failed', error: over, link: undefined } : seen;
+  if (!l) return { title: 'Not found', sections: [{ id: 'gone', blocks: [{ type: 'text', tone: 'muted', text: 'That sign-in is gone (finished ones go after 20 minutes).' }, { type: 'link', text: 'Back to Boxes', page: '' }] }] };
+  const s = load(env);
   const def = LOGIN_HARNESSES[l.harness];
-  const where = boxLabelOf(load(env), l.box);
+  const who = def.provider === 'anthropic' ? 'Anthropic' : 'OpenAI';
+  const where = boxLabelOf(s, l.box);
+  const box = s.boxes[l.box] ?? {};
   const blocks = [];
-  if (l.state === 'wanted' || l.state === 'starting') blocks.push({ type: 'text', tone: 'muted', text: `${where} is starting ${def.label}'s own login; reload in a few seconds.` });
-  else if (l.state === 'checking') blocks.push({ type: 'text', tone: 'muted', text: `${where}'s ${def.bin} is checking the code; reload in a moment.` });
-  else if (l.state === 'waiting') {
-    blocks.push({ type: 'link', text: `Sign in to ${def.label}`, href: l.link });
+  let refresh;
+  const busy = (title, text) => blocks.push({ type: 'callout', busy: true, title, text });
+  if (l.state === 'wanted') {
+    const quiet = box.lastSeen && !box.local && nowMs - Date.parse(box.lastSeen) > 60_000;
+    busy(quiet ? `Waiting for ${where} to pick it up…` : `Starting ${def.label}'s sign-in on ${where}…`,
+      quiet ? `${where} was last seen ${ago(box.lastSeen, nowMs)}. It starts ${def.bin}'s own login on its next poll.` : 'Its link shows here in a few seconds.');
+    refresh = 2;
+  } else if (l.state === 'starting') {
+    busy(`Starting ${def.label}'s sign-in on ${where}…`, `${where} is running ${def.bin}'s own login. Its link shows here in a few seconds.`);
+    refresh = 2;
+  } else if (l.state === 'checking') {
+    busy(`Checking with ${who}…`, `${where}'s ${def.bin} is finishing the sign-in with your code. This page updates by itself.`);
+    refresh = 2;
+  } else if (l.state === 'cancel') {
+    busy('Cancelling…', `${where} is stopping the sign-in.`);
+    refresh = 2;
+  } else if (l.state === 'waiting') {
     if (l.kind === 'paste-code') {
-      blocks.push({ type: 'form', action: 'login-code', submit: 'Finish', hidden: { id }, note: `Paste the code the sign-in page shows. It goes to ${def.bin} on ${where}, once.`,
+      blocks.push({ type: 'text', text: `Open ${who}'s sign-in page and sign in, then paste the code it shows here.` });
+      blocks.push({ type: 'link', text: `Open ${who}'s sign-in page`, href: l.link });
+      blocks.push({ type: 'form', action: 'login-code', submit: 'Finish', hidden: { id }, note: `It goes to ${def.bin} on ${where}, once. This page then shows how it went.`,
         fields: [{ name: 'code', label: 'Code', kind: 'secret', required: true }] });
+      // Slowly, to catch a sign-in that timed out: loom never reloads while the code field is in use, and an
+      // unchanged page costs a 304.
+      refresh = 10;
     } else {
-      if (l.userCode) blocks.push({ type: 'kv', items: [{ label: 'Code to enter', value: l.userCode }] });
-      blocks.push({ type: 'text', tone: 'muted', text: 'This finishes by itself once you\'ve signed in; reload to see.' });
+      if (l.userCode) blocks.push({ type: 'code', label: 'Code to enter', text: l.userCode });
+      blocks.push({ type: 'link', text: `Open ${who}'s device page`, href: l.link });
+      busy(`Waiting for you to enter the code at ${who}…`, `${where} sees the login by itself once you have, and this page updates when it does.`);
+      refresh = 3;
     }
-  } else if (l.state === 'done') blocks.push({ type: 'callout', tone: 'ok', text: `${where} is logged in to ${def.label}. Its own ${def.bin} keeps the login and refreshes it; houses there that ask for it use it.` });
-  else blocks.push({ type: 'callout', tone: 'bad', text: l.error || 'It didn\'t work.' });
-  if (!['done', 'failed'].includes(l.state)) blocks.push({ type: 'buttons', items: [{ action: 'login-cancel', label: 'Cancel', tone: 'danger', fields: { id } }] });
-  blocks.push({ type: 'link', text: 'Back', page: '' });
-  return { title: `Log ${where} in to ${def.label}`, sections: [{ id: 'login', title: 'Sign-in', blocks }] };
+  } else if (l.state === 'done') {
+    const how = loginWords(l) || loginWords(box.harnesses?.[l.harness]);
+    blocks.push({ type: 'callout', tone: 'ok', title: `✓ ${def.label} logged in${how ? ` (${how})` : ''}`,
+      text: `${where} is signed in. Its own ${def.bin} keeps the login and refreshes it; houses there that ask for it use it.` });
+  } else {
+    blocks.push({ type: 'callout', tone: 'bad', title: `${def.label} didn't log in`, text: l.error || 'It ended without saying why.' });
+    if (l.detail || Number.isInteger(l.exit)) {
+      blocks.push({ type: 'details', summary: `What ${def.bin} said`, meta: Number.isInteger(l.exit) ? `exit ${l.exit}` : '', blocks: [
+        ...(l.detail ? [{ type: 'code', text: l.detail }] : []), ...(Number.isInteger(l.exit) ? [{ type: 'text', tone: 'muted', text: `It exited with status ${l.exit}.` }] : [])] });
+    }
+    blocks.push({ type: 'buttons', items: [{ action: 'login-start', label: 'Try again', tone: 'primary', fields: { box: l.box, harness: l.harness } }] });
+  }
+  if (!['done', 'failed', 'cancel'].includes(l.state)) blocks.push({ type: 'buttons', items: [{ action: 'login-cancel', label: 'Cancel', tone: 'danger', fields: { id } }] });
+  blocks.push({ type: 'link', text: 'Back to Boxes', page: '' });
+  return { title: `Log ${where} in to ${def.label}`, sections: [{ id: 'login', title: 'Sign-in', blocks }], ...(refresh ? { refresh } : {}) };
 }
 
 /** One box session: how it is, and its link once it has one. */
@@ -645,9 +758,13 @@ export function page(env, { path, caller: c }, nowMs = Date.now()) {
   }
   if (scope && (path === '' || path === undefined)) return agentTabPage(env, scope, caller, nowMs);
   if (Array.isArray(caller.agents)) return path === '' || path === undefined ? agentOwnerPage(env, caller, nowMs) : { title: 'Not found', sections: [] };
-  if (path === '' || path === undefined) return boxesPage(env, nowMs);
+  if (path === '' || path === undefined) return boxesPage(env, nowMs, caller);
   if (path === 'agents') return agentsPage(env);
-  if (typeof path === 'string' && /^login\/l-[0-9a-f]{12}$/.test(path)) return loginPage(env, path.slice(6));
+  if (typeof path === 'string' && /^login\/l-[0-9a-f]{12}$/.test(path)) {
+    const l = load(env).logins?.[path.slice(6)];
+    if (l) { try { assertBoxOwner(env, caller, l.box); } catch (e) { return { status: 403, title: 'Not allowed', sections: [{ id: 'no', blocks: [{ type: 'text', tone: 'muted', text: e.message }] }] }; } }
+    return loginPage(env, path.slice(6), nowMs);
+  }
   return { title: 'Not found', sections: [] };
 }
 
@@ -692,6 +809,8 @@ export function act(env, effects, { action, fields: raw = {}, caller: c }, publi
   }
   const label = (id) => boxLabelOf(load(env), id);
   try {
+    // A box's logins and Update now: its owner's only.
+    if (['login-start', 'login-code', 'login-cancel', 'box-update-now'].includes(action)) assertBoxOwner(env, OWNER, boxOfCall(env, action, fields));
     switch (action) {
       case 'add-box': {
         const { name, token } = addBox(env, effects, fields);
@@ -709,7 +828,8 @@ export function act(env, effects, { action, fields: raw = {}, caller: c }, publi
         const r = loginStart(env, effects, fields);
         return { ok: true, message: `${label(r.box)} is starting ${LOGIN_HARNESSES[r.harness].label}'s own login; its link shows here in a few seconds.`, page: `login/${r.id}` };
       }
-      case 'login-code': { loginCode(env, effects, fields); return { ok: true, message: 'The code is on its way to the box; reload in a moment.', page: `login/${fields.id}` }; }
+      case 'login-code': { loginCode(env, effects, fields); return { ok: true, message: 'Got it: the box is checking the code.', page: `login/${fields.id}` }; }
+      case 'box-update-now': { const r = boxUpdateNow(env, effects, fields); return { ok: true, message: `${r.name} tries loom's runtime on its next poll.`, page: '' }; }
       case 'login-cancel': { loginCancel(env, effects, fields); return { ok: true, message: 'Cancelled.', page: '' }; }
       case 'set-primary': { const r = setPrimary(env, effects, fields); return { ok: true, message: `${r.agent}'s primary is ${label(r.primary)}.`, page: '' }; }
       case 'set-agent': { const r = setAgent(env, effects, fields); return { ok: true, message: `Saved ${r.agent}'s house.`, page: '' }; }

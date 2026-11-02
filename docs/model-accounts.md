@@ -16,6 +16,38 @@ to those binaries. It does not log in for them.
   finishes by itself. The CLI then writes its own login into the box's login dir
   (`~/.local/share/loom-box/logins/<harness>`), and refreshes it itself from then
   on. `loom runtime login <box> claude|codex` starts the same from a terminal.
+- **The sign-in page keeps up by itself.** While the box starts the CLI, checks
+  a pasted code, or waits for a device sign-in, the page says so beside a
+  spinner and reloads itself (loom core's page `refresh`). It then shows
+  "✓ Claude logged in (claude.ai, Max)", or why the login didn't work, with
+  **Try again**. A failure keeps the CLI's last few lines and its exit status.
+  Anything in them that looks like a code or a token is cut out first: the text
+  after `code=` or "token", any long base64-like string, and the pasted code
+  itself.
+- **The sign-in link is kept only while it's needed.** Claude's authorize link
+  carries the sign-in's `state` and `code_challenge`, and the owner has to open
+  it, so it can't be scrubbed. loom keeps it in its state only while that
+  sign-in is `waiting`, and deletes it at any other step: checking, cancelled,
+  failed, expired, or done. It never goes into a log line. Anywhere else it
+  turns up, such as the CLI's last lines, its query is cut out. The risk this
+  leaves is small. Someone who can read loom's state during the few minutes a
+  sign-in waits learns the `state` and the challenge. Without the code the
+  owner pastes, those can't finish the sign-in, and the code itself is never
+  written to state.
+- **A box's sign-ins are its owner's.** Log in, the sign-in page, pasting a
+  code, Cancel, and Update now go only to the box's owner (`boxOwner`: who let
+  it in, else the first household owner). Another household owner sees the
+  card but has nothing to press, and the calls answer 403.
+- **Log in always starts something that's alive.** The box tells loom which
+  sign-ins its runner has going. A sign-in handed to an earlier runner (the
+  runtime restarted) or one the runner lost is marked failed with the reason,
+  and **Log in** starts a fresh one. So is one older than 16 minutes, or one on
+  a box that's been silent for 2 minutes since the later of its last poll and
+  the sign-in's start. That includes one the box never picked up. A runner that goes down tells loom first ("the
+  runtime restarted during the sign-in; start again") and stops its sign-in
+  containers. A runner that starts removes any sign-in container left behind,
+  found by their `loom.cli` label. If podman can't list or remove them, it logs
+  that and tries again on each poll until it works once.
 - **The pasted code.** It's never written to loom's state. It waits in the
   user's runtime dir (`$XDG_RUNTIME_DIR`, a tmpfs) for the box's next poll,
   goes to the CLI's stdin on that box once, and is deleted. A code nobody picks
