@@ -12,10 +12,11 @@
 //
 // Bodies, capacity and continuity are bridges.md's, ported from the bridges piece (shuttle): dispatch.py's `offer`
 // (the conversation's body takes it, else it's held, else a fresh body), nowlog.py's hold order (the conversation's
-// body is busy → queued; every slot busy → queued), core.py's drop (what a body's inbox still held goes to the next
+// body is busy → queued; every slot busy → queued; its memory guard is the box's now), core.py's drop (what a body's inbox still held goes to the next
 // body), config.py's limit (5 busy), and the body host's idle time (600 s). What bridges.md added and shuttle never
 // had is here too:
-//   - capacity counts busy bodies (mid-turn, or starting): a body whose turn is over stays warm and holds no slot;
+//   - capacity counts busy bodies (mid-turn, or starting), and nothing else makes a message wait: a body whose turn
+//     is over stays warm and holds no slot;
 //   - over the limit, a new conversation takes the least recently active warm idle body's place (ended, its slot
 //     saved); only busy bodies make a message wait;
 //   - continuity: a body that ends leaves a slot, its harness's session files sealed to the runtime's key
@@ -38,7 +39,7 @@ import { fileURLToPath } from 'node:url';
 import { accountsFrom } from './accounts.mjs';
 import { endBody, readBody, resumeBody, startBody } from './bodies.mjs';
 import { CoreError, coreFrom } from './core.mjs';
-import { HouseRunner } from './houserunner.mjs';
+import { HouseRunner, sweepParts } from './houserunner.mjs';
 import { venueKind as kindOf } from './models.mjs';
 import { setting } from './piece.mjs';
 import { dropSession, packSession, restoreFiles } from './sessions.mjs';
@@ -56,8 +57,6 @@ export const REACH_MS = 2000;
 export const BUSY_LIMIT = 5;
 /** A warm body whose turn is over is ended after this long idle (shuttle's body host, idle_s). */
 export const WARM_IDLE_S = 600;
-/** No new body below this much available memory (shuttle's MIN_AVAIL_MB): only where bodies run here (a local runner). */
-export const MIN_AVAIL_MB = 1500;
 /** A slot lasts its venue's continuity window, and never longer than this. */
 export const MAX_CONTINUITY_DAYS = 14;
 /** Each venue kind's window, unless LOOM_RUNTIME_CONTINUITY says (bridges.md: a DM for weeks, a busy thread a day). */
@@ -118,7 +117,6 @@ export function limitsOf(env) {
   return {
     busy: Math.max(1, Math.floor(num(setting(env, 'BUSY_LIMIT'), BUSY_LIMIT))),
     warmIdleS: num(setting(env, 'WARM_IDLE_S'), WARM_IDLE_S),
-    minAvailMb: num(setting(env, 'MIN_AVAIL_MB'), MIN_AVAIL_MB),
     continuity,
   };
 }
@@ -128,13 +126,6 @@ export function windowMs(env, venue, kind) {
   const c = limitsOf(env).continuity;
   const days = num(c[venue], num(c[kind], CONTINUITY_DAYS[kind] ?? MAX_CONTINUITY_DAYS));
   return Math.min(days, MAX_CONTINUITY_DAYS) * DAY_MS;
-}
-
-function memAvailableMb() {
-  try {
-    const m = /^MemAvailable:\s+(\d+) kB/m.exec(readFileSync('/proc/meminfo', 'utf-8'));
-    return m ? Number(m[1]) / 1024 : Infinity;
-  } catch { return Infinity; }
 }
 
 // ─── A body's environment ───────────────────────────────────────────────────
@@ -175,8 +166,6 @@ export function depsOf(env, o = {}) {
     runner: o.runner ?? ((h) => (houses[h] ??= new HouseRunner(env, h, { sealer: seal, now: o.now }))),
     sealer: seal,
     now: o.now ?? (() => new Date()),
-    // The machine's memory only matters where bodies run here, with a local runner; a house's box is its own limit.
-    memAvailableMb: o.memAvailableMb ?? (o.runner ? memAvailableMb : () => Infinity),
     accounts: o.accounts ?? accountsFrom(env),
     fetchImpl: o.fetchImpl,
     venues: o.venues ?? (() => core.venues()),
@@ -234,21 +223,50 @@ export async function deliver(env, raw, o = {}) {
   }
 }
 
+/** Core's conversation id for a key (loom src/backends/conversations.ts, conversationId): known before core answers. */
+export const conversationIdOf = (agent, venue, place) => `cv-${createHash('sha256').update(`${agent}\0${venue}\0${place}`).digest('hex').slice(0, 12)}`;
+
+/** The seqs the runtime knows it wrote in a conversation (it's the only writer of its venues' turns), last 64. */
+const noteSeq = (c, seq) => { c.seqs = [...new Set([...(c.seqs ?? []), seq])].sort((a, b) => a - b).slice(-64); };
+
+/**
+ * A turn write that may have landed (core didn't answer): is it there? Core has no lookup by (source, id), so this asks
+ * with what it does have: an audit write for the seqs after the last one the runtime knew of, in order. A seq with no
+ * turn answers 404 (so none after it is the one); one that's there takes this message's text (200), or already has
+ * text (409). That turn is this message's: the runtime is its venue's only writer, so a seq it didn't record is the
+ * one whose answer was lost. Another writer's turn (403) is skipped.
+ */
+async function findLanded(d, u, text, known) {
+  for (let seq = (u.before ?? 0) + 1, i = 0; i < 16; seq++, i++) {
+    if (known.includes(seq)) continue;
+    try { await d.core.audit({ conversation: u.cv, seq, text }); return { conversation: u.cv, seq }; } catch (e) {
+      if (e?.status === 409) return { conversation: u.cv, seq };
+      if (e?.status === 404) return null;
+      if (e?.status === 403) continue;
+      throw e;
+    }
+  }
+  return null;
+}
+
 async function deliverOnce(env, raw, o) {
   const d = depsOf(env, o);
   let m;
   try { m = parseDelivery(raw); } catch (e) { return { status: e.status ?? 400, error: e.message }; }
   const key = deliveryKey(m);
   const now = () => d.now().getTime();
+  const cvGuess = conversationIdOf(m.agent, m.venue, m.place);
 
   // Once: the same (source, id) within 24 hours answers what the first call answered, and writes nothing. A call
   // that wrote its turn and then died left the turn's seq here: its retry carries on from that turn, writing none.
+  // A turn write core didn't answer is `uncertain`: its retry looks for it before writing again (findLanded).
   const first = locked(env, () => {
     const s = readJson(seenFile(env, key));
-    const live = s && alive(s.pid) && (s.pid !== process.pid || inFlight.has(key));
-    if (s && now() - s.at < DAY_MS && (s.answer || live)) return { wait: s };
-    writeJson(seenFile(env, key), { at: now(), pid: process.pid, ...(s?.turn && now() - s.at < DAY_MS ? { turn: s.turn } : {}) });
-    return { resume: s?.turn && now() - s.at < DAY_MS ? s.turn : null };
+    const recent = s && now() - s.at < DAY_MS;
+    const live = recent && alive(s.pid) && (s.pid !== process.pid || inFlight.has(key));
+    if (recent && (s.answer || live)) return { wait: s };
+    writeJson(seenFile(env, key), { at: now(), pid: process.pid, ...(recent && s.turn ? { turn: s.turn } : {}), ...(recent && s.uncertain ? { uncertain: s.uncertain } : {}) });
+    return { resume: recent && s.turn ? s.turn : null, uncertain: recent && !s.turn ? s.uncertain ?? null : null };
   });
   if (first.wait) {
     let answer = first.wait.answer;
@@ -261,64 +279,82 @@ async function deliverOnce(env, raw, o) {
 
     // 1. The turn, first; a body sees nothing that isn't recorded.
     let turn = first.resume;
+    let audited = false;
+    if (!turn && first.uncertain) {
+      try { turn = await findLanded(d, first.uncertain, m.text, loadConv(env, cvGuess)?.seqs ?? []); } catch (e) {
+        return { status: 503, error: `couldn't tell whether this message's turn is in core: ${e.message}` };
+      }
+      audited = !!turn;
+    }
     if (!turn) {
+      const before = Math.max(0, ...(loadConv(env, cvGuess)?.seqs ?? []), first.uncertain?.before ?? 0);
       try {
         turn = await d.core.turn({ agent: m.agent, venue: m.venue, place: m.place, at: m.at, from: m.from, kind: m.kind, ...(m.label !== undefined ? { label: m.label } : {}) });
       } catch (e) {
-        locked(env, () => rmSync(seenFile(env, key), { force: true }));
-        const status = e instanceof CoreError && e.status < 500 ? e.status : 503;
-        return { status, error: e.message };
+        const definite = e instanceof CoreError && e.status < 500;
+        // Refused (4xx): nothing was written. Anything else (core down, a timeout) may have landed: kept as uncertain.
+        locked(env, () => (definite ? rmSync(seenFile(env, key), { force: true }) : writeJson(seenFile(env, key), { at: now(), uncertain: { cv: cvGuess, before } })));
+        return { status: definite ? e.status : 503, error: e.message };
       }
       if (!CV.test(turn?.conversation ?? '') || !Number.isSafeInteger(turn?.seq) || turn.seq < 1) {
         return { status: 503, error: 'core answered the turn write with something that isn\'t a conversation id and seq' };
       }
-      // On record at once: a crash from here on, and the retry uses this turn.
-      locked(env, () => writeJson(seenFile(env, key), { at: now(), pid: process.pid, turn: { conversation: turn.conversation, seq: turn.seq } }));
-      o.afterTurn?.();
-      // Its text, for review. A failed audit write leaves the turn standing without it (conversations.md).
-      try { await d.core.audit({ conversation: turn.conversation, seq: turn.seq, text: m.text }); } catch (e) { d.warn(`the turn stands without its audit text: ${e.message}`); }
-    } else {
-      // The audit entry may or may not have been written before the crash: core refuses a second one (409).
-      try { await d.core.audit({ conversation: turn.conversation, seq: turn.seq, text: m.text }); } catch { /* written, or it stands without */ }
     }
+    // On record at once: a crash from here on, and the retry uses this turn.
+    locked(env, () => writeJson(seenFile(env, key), { at: now(), pid: process.pid, turn: { conversation: turn.conversation, seq: turn.seq } }));
+    o.afterTurn?.();
+    // Its text, for review. A failed audit write leaves the turn standing without it (conversations.md); a retry's
+    // second one is refused by core (409), which is fine.
+    if (!audited) { try { await d.core.audit({ conversation: turn.conversation, seq: turn.seq, text: m.text }); } catch (e) { if (e?.status !== 409) d.warn(`the turn stands without its audit text: ${e.message}`); } }
 
-    // 2. The body. The message joins its conversation's queue (sealed), and the queue is drained.
+    // 2. The body. The message joins its conversation's queue (sealed; without age, only in memory, on its way to
+    // the worker), and the queue is drained: from a detached worker (the CLI), or here; never waited on past 2 s.
     let sealed = null;
-    try { sealed = d.sealer.seal(Buffer.from(m.text, 'utf-8')).toString('base64'); } catch (e) { d.warn(`can't seal the message (${e.message}): it's delivered from memory, or not at all`); }
+    try { sealed = d.sealer.seal(Buffer.from(m.text, 'utf-8')).toString('base64'); } catch (e) { d.warn(`can't seal the message (${e.message}): it goes to the body from memory, and can't wait`); }
     const venueInfo = await venueOf(d, m.venue);
     let kind;
     try { kind = kindOf(m.venue, venueInfo?.kind); } catch { kind = 'live'; }
     locked(env, () => {
       const c = loadConv(env, turn.conversation) ?? { conversation: turn.conversation, agent: m.agent, venue: m.venue, place: m.place, kind, queue: [], outcomes: {}, runs: 0, started: d.now().toISOString() };
       if (m.label !== undefined) c.label = m.label;
+      noteSeq(c, turn.seq);
       // A retry after a crash may find its message already queued (or already answered): never twice.
       if (!c.queue.some((x) => x.key === key) && !c.outcomes?.[key]) c.queue.push({ key, id: m.id, at: m.at, from: m.from, kind: m.kind, ...(sealed ? { sealed } : { mem: true }) });
       c.last = d.now().toISOString();
       saveConv(env, c);
     });
     const mem = new Map(sealed ? [] : [[key, m.text]]);
-    if (o.detach && sealed) {
-      o.spawnWorker?.(turn.conversation) ?? spawnWorker(env, turn.conversation);
+    // The source's 2 s are real time, whatever clock the records are kept by.
+    const reachEnd = Date.now() + REACH_MS;
+    if (o.detach) {
+      (o.spawnWorker ?? ((cv, mm) => spawnWorker(env, cv, mm)))(turn.conversation, mem);
     } else {
-      await drain(env, turn.conversation, d, mem);
+      const drained = drain(env, turn.conversation, d, mem).catch((e) => d.warn(`reaching ${turn.conversation}'s body: ${e.message}`));
+      o.onDrain?.(drained);
+      await Promise.race([drained, sleep(Math.max(0, reachEnd - Date.now()))]);
     }
     let out;
-    for (const end = now() + REACH_MS; ; await sleep(50)) {
+    for (; ; await sleep(50)) {
       out = loadConv(env, turn.conversation)?.outcomes?.[key];
-      if (out || now() >= end) break;
+      if (out || Date.now() >= reachEnd) break;
     }
     const { at: _at, ...body } = out ?? { body: 'queued', reason: 'its body is still starting' };
     return settle({ conversation: turn.conversation, seq: turn.seq, ...body });
   } finally { inFlight.delete(key); }
 }
 
-/** `loom-runtime deliver tick --conversation <cv>`, detached: it outlives the call (core's runner ends that process group). */
-function spawnWorker(env, cv) {
+/**
+ * `loom-runtime deliver tick --conversation <cv> --stdin`, detached: it outlives the call (core's runner ends that
+ * process group). A message the runtime couldn't seal goes to it on its stdin, never in a file or argv.
+ */
+function spawnWorker(env, cv, mem = new Map()) {
   if (!CV.test(cv)) fail('not a conversation id', 500);
   const cli = join(dirname(fileURLToPath(import.meta.url)), 'cli.mjs');
   mkdirSync(deliveryDir(env), { recursive: true, mode: 0o700 });
   const log = openSync(join(deliveryDir(env), 'worker.log'), 'a', 0o600);
-  const child = nodeSpawn(process.execPath, [cli, 'deliver', 'tick', '--conversation', cv], { env, detached: true, stdio: ['ignore', log, log] });
+  const child = nodeSpawn(process.execPath, [cli, 'deliver', 'tick', '--conversation', cv, '--stdin'], { env, detached: true, stdio: ['pipe', log, log] });
+  child.stdin.on('error', () => {});
+  child.stdin.end(JSON.stringify(Object.fromEntries(mem)));
   child.unref();
 }
 
@@ -387,12 +423,12 @@ function outcome(c, keys, o, now) {
 /** Messages back on a conversation's queue, ahead of what's there, none twice. */
 function requeue(c, items) {
   const have = new Set((c.queue ?? []).map((x) => x.key));
-  c.queue = [...items.filter((x) => x.sealed && !have.has(x.key) && (have.add(x.key), true)), ...(c.queue ?? [])];
+  c.queue = [...items.filter((x) => (x.sealed || x.mem) && !have.has(x.key) && (have.add(x.key), true)), ...(c.queue ?? [])];
 }
 
 /**
  * The next thing to do for conversation `cv`, decided under the lock (dispatch.py's `offer`, in its order): the body
- * holding it takes the messages; else they wait (every body busy, short of memory); else a warm idle body makes room;
+ * holding it takes the messages; else they wait (only when every slot's body is busy); else a warm idle body makes room;
  * else its body is resumed (its session, or its slot) or started. Feeding happens here; anything that runs a harness
  * is returned, with the conversation marked starting by this op (it counts as busy until it's done).
  */
@@ -446,7 +482,6 @@ function plan(env, cv, d, mem) {
     return begin({ type: 'retire', body: c.body });
   }
   if (busy.length >= limits.busy) return wait(`every body is busy (${busy.length} of ${limits.busy} mid-turn)`);
-  if (d.memAvailableMb() < limits.minAvailMb) return wait(`this machine is short of memory (under ${limits.minAvailMb} MB available)`);
   if (busy.length + idle.length >= limits.busy) {
     // Over the limit with a warm idle body: it makes room (the least recently active), its conversation saved.
     const victim = idle.filter((v) => v.conversation !== cv && !v.queue?.length).sort((a, b) => String(a.last).localeCompare(String(b.last)))[0];
@@ -473,6 +508,23 @@ const newRun = () => `run-${randomBytes(6).toString('hex')}`;
 
 async function execute(env, op, d, mem) {
   const now = () => d.now().getTime();
+  if (op.type === 'resume-warm') {
+    // Its own warm body, its turn over: its session is sealed into its slot first (so a resume that fails leaves no
+    // transcript in the clear), and what it was given goes back on the queue; the next plan resumes from that slot,
+    // or starts fresh when there's none.
+    let saved = { slot: null, pending: [] };
+    try { saved = await retire(env, op.cv, op.body, d, true); } catch (e) { d.warn(`ending ${op.body}: ${e.message}`); }
+    locked(env, () => {
+      const c = loadConv(env, op.cv);
+      if (!c) return;
+      if (c.body === op.body) { c.body = undefined; c.idleSince = undefined; }
+      if (saved.slot) c.slot = saved.slot; else delete c.slot;
+      requeue(c, [...saved.pending, ...op.msgs]);
+      if (ours(c, op)) delete c.starting;
+      saveConv(env, c);
+    });
+    return;
+  }
   if (op.type === 'retire' || op.type === 'evict') {
     let saved = { slot: null, pending: [] };
     try { saved = await retire(env, op.cv, op.body, d, op.type === 'evict'); } catch (e) { d.warn(`ending ${op.body}: ${e.message}`); }
@@ -492,7 +544,7 @@ async function execute(env, op, d, mem) {
   const run = newRun();
   const keys = op.msgs.map((x) => x.key);
   let restored = [];
-  let pending = [];
+  const pending = [];
   let r;
   try {
     const msgs = op.msgs.map((x) => ({ ...x, text: open(d, x, mem) })).filter((x) => x.text !== null);
@@ -503,16 +555,6 @@ async function execute(env, op, d, mem) {
     const base = { agent: c0.agent, venue: c0.venue, venueKind: c0.kind, cwd: d.cwd };
     if (op.type === 'start') {
       r = await startBody(env, { ...base, place: c0.place, brief: startBrief(c0, msgs, run, sends) }, bodyDeps);
-    } else if (op.type === 'resume-warm') {
-      const rec = readBody(env, op.body);
-      const runner = d.runner(rec.harness);
-      const slot = runner.slotOf(bodyOf(op.body, rec)) ?? rec.slot;
-      if (!slot) throw new DeliveryError(`${op.body} has no slot: its harness never said which session it is`);
-      // What its inbox held is taken, sealed, kept until the resume has it (E: never lost to a failed resume).
-      pending = takeInbox(runner, op.body, c0);
-      endBody(env, op.body, { ...bodyDeps, bodyEnv: d.bodyEnv() });
-      const extra = pending.map((p) => ({ ...p, text: open(d, p, mem) })).filter((p) => p.text !== null);
-      r = await resumeBody(env, { ...base, slot, brief: resumeBrief(c0, [...extra, ...msgs], run) }, bodyDeps);
     } else {
       const pack = JSON.parse(d.sealer.open(readFileSync(slotFile(env, op.cv))).toString('utf-8'));
       if (pack?.v !== 1 || !Array.isArray(pack.files)) throw new DeliveryError('its slot isn\'t one this runtime wrote');
@@ -547,16 +589,20 @@ async function execute(env, op, d, mem) {
     });
     if (!keep) { try { endBody(env, r.body, { runner: d.runner, now: d.now, bodyEnv: d.bodyEnv() }); } catch { /* gone */ } }
   } catch (e) {
-    // A body that fails to start is `failed`: the turn stands, and nothing is retried here. What a warm body's inbox
-    // held (fed earlier, never heard) goes back on the queue for the next body.
     for (const p of restored) rmSync(p, { recursive: true, force: true });
     locked(env, () => {
       const c = loadConv(env, op.cv);
       if (!c) return;
       if (ours(c, op)) delete c.starting;
-      if (op.type === 'resume-warm' && c.body === op.body) c.body = undefined;
-      outcome(c, keys, { body: 'failed', reason: String(e.message).split('\n')[0].slice(0, 300) }, now());
-      requeue(c, pending);
+      if (op.type === 'resume') {
+        // A slot that won't resume is no slot: cleared, and the messages go back for a fresh body, in this same drain.
+        rmSync(slotFile(env, op.cv), { force: true });
+        delete c.slot;
+        requeue(c, op.msgs);
+      } else {
+        // A body that fails to start is `failed`: the turn stands, and nothing is retried here.
+        outcome(c, keys, { body: 'failed', reason: String(e.message).split('\n')[0].slice(0, 300) }, now());
+      }
       saveConv(env, c);
     });
   }
@@ -566,13 +612,22 @@ async function execute(env, op, d, mem) {
  * A body's inbox, closed: the messages the runtime fed it that its hook never took (G: not one it took, nor one already
  * waiting again, nor one twice), from the runtime's own sealed copies; then the inbox is gone, its text with it.
  */
-function takeInbox(runner, ref, c) {
+function takeInbox(runner, ref, c, rec) {
   const id = idOf(ref);
+  const queued = new Set((c?.queue ?? []).map((x) => x.key));
+  if (runner.remote) {
+    // A house's body: what its house never acknowledged, or still holds unheard; all of it when its host can't say
+    // (it died). From the runtime's own copies, as for a local inbox (a duplicate beats a loss).
+    const body = bodyOf(ref, rec ?? {});
+    const unheard = runner.unheard?.(body);
+    const out = (c?.fed ?? []).filter((x, i, all) => (unheard === null || unheard === undefined || unheard.includes(x.key)) && !queued.has(x.key) && all.findIndex((y) => y.key === x.key) === i);
+    runner.forgetInbox?.(body);
+    return out;
+  }
   if (!runner.inbox) return [];
   runner.inbox.close(id);
   const pending = new Set(runner.inbox.pending(id).map((p) => p?.id).filter((k) => typeof k === 'string'));
   const taken = new Set(runner.inbox.taken(id));
-  const queued = new Set((c?.queue ?? []).map((x) => x.key));
   const out = [];
   for (const x of c?.fed ?? []) {
     if (!pending.has(x.key) || taken.has(x.key) || queued.has(x.key) || out.some((y) => y.key === x.key)) continue;
@@ -596,7 +651,7 @@ async function retire(env, cv, ref, d, stop) {
   try { rec = readBody(env, ref); } catch { return { slot: null, pending: [] }; }
   const runner = d.runner(rec.harness);
   const body = bodyOf(ref, rec);
-  const pending = takeInbox(runner, ref, c);
+  const pending = takeInbox(runner, ref, c, rec);
   const slot = (() => { try { return runner.slotOf(body) ?? rec.slot; } catch { return rec.slot; } })();
   let files = [];
   try {
@@ -609,7 +664,9 @@ async function retire(env, cv, ref, d, stop) {
   if (runner.remote && !rec.ended) { try { endBody(env, ref, { runner: d.runner, now: d.now, bodyEnv: d.bodyEnv() }); } catch { /* gone */ } }
   if (!runner.remote) dropSession(runner, slot, body);
   let kept = null;
-  if (slot && c && files !== null) {
+  // An empty pack (its harness kept nothing, or it was too big to keep) is no slot: a slot that could never resume
+  // would fail every delivery for its whole window. The next body starts fresh, from the conversation's digests.
+  if (slot && c && Array.isArray(files) && files.length) {
     try {
       const blob = d.sealer.seal(Buffer.from(JSON.stringify({ v: 1, harness: slot.harness, session: slot.session, files })));
       mkdirSync(dirname(slotFile(env, cv)), { recursive: true, mode: 0o700 });
@@ -640,10 +697,12 @@ function expireSlot(env, c, d) {
  * (their transcript sealed, not left in the clear); slots past their window go; and every queue is drained.
  * `only`: one conversation's queue first (the detached worker a delivery starts).
  */
-export async function tick(env, o = {}, only) {
+export async function tick(env, o = {}, only, mem = new Map()) {
   const d = depsOf(env, o);
-  if (only) await drain(env, only, d);
+  if (only) await drain(env, only, d, mem);
   const now = d.now().getTime();
+  // A house's session coming back in parts that stopped coming: swept after an hour.
+  try { sweepParts(env, now); } catch (e) { d.warn(`sweeping part transfers: ${e.message}`); }
   const warm = limitsOf(env).warmIdleS * 1000;
   const ops = [];
   locked(env, () => {
@@ -725,6 +784,7 @@ export async function send(env, { conversation, text, key }, o = {}) {
   let seq;
   try {
     ({ seq } = await d.core.turn(turn));
+    locked(env, () => { const x = loadConv(env, conversation); if (x) { noteSeq(x, seq); saveConv(env, x); } });
     try { await d.core.audit({ conversation: c.conversation, seq, text }); } catch (e) { d.warn(`the reply's turn stands without its audit text: ${e.message}`); }
   } catch (e) { d.warn(`the reply went out but its turn wasn't recorded: ${e.message}`); }
   locked(env, () => { const x = loadConv(env, conversation); if (x) { x.last = d.now().toISOString(); saveConv(env, x); } });

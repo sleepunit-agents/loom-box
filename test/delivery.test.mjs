@@ -29,109 +29,7 @@ import { RunnerError, inbox } from '../src/runners.mjs';
 import { ageSealer } from '../src/sealed.mjs';
 import { scratch } from './scratch.mjs';
 
-const here = dirname(fileURLToPath(import.meta.url));
-const pkg = JSON.parse(readFileSync(join(here, '..', 'package.json'), 'utf-8'));
-const cvOf = (agent, venue, place) => `cv-${createHash('sha256').update(`${agent}\0${venue}\0${place}`).digest('hex').slice(0, 12)}`;
-const hasAge = spawnSync('age', ['--version']).status === 0 && spawnSync('age-keygen', ['--help']).error === undefined;
-
-/** A runner that records into `log`, keeps each session's "transcript" as a file under its root, and is told when a turn ends. */
-function fakeRunner(log, root, harness = 'claude', { inboxDir } = {}) {
-  let n = 0;
-  const state = {};
-  const session = {};
-  const roots = { sess: join(root, 'sess') };
-  mkdirSync(roots.sess, { recursive: true });
-  const tfile = (s) => join(roots.sess, `${s}.jsonl`);
-  const r = {
-    harness, roots, inbox: inboxDir ? inbox(inboxDir) : null, failStart: null, failResume: null, envs: {}, dead: new Set(), delay: 0,
-    start(o) {
-      if (r.failStart) throw new RunnerError(r.failStart);
-      if (r.delay) { const ms = r.delay; r.delay = 0; return new Promise((res) => setTimeout(res, ms)).then(() => r.start(o)); }
-      const id = `${harness[0]}000000${n++}`;
-      session[id] = `s-${id}`;
-      writeFileSync(tfile(session[id]), `transcript of ${id}: ${o.brief}\n`);
-      log.push(['start', id, o.brief]);
-      r.envs[id] = o.env;
-      state[id] = 'working';
-      r.inbox?.open(id, {});
-      return { id, harness, model: o.model, slot: { harness, session: session[id] } };
-    },
-    resume(slot, o) {
-      if (r.failResume) throw new RunnerError(r.failResume);
-      const id = `r000000${n++}`;
-      session[id] = slot.session;
-      log.push(['resume', id, slot.session, existsSync(tfile(slot.session)) ? readFileSync(tfile(slot.session), 'utf-8') : null, o.brief]);
-      r.envs[id] = o.env;
-      state[id] = 'working';
-      r.inbox?.open(id, {});
-      return { id, harness, model: o.model, slot };
-    },
-    feed(b, m) {
-      if (state[b.id] !== 'working') return { fed: false, reason: 'its turn is over: resume it' };
-      log.push(['feed', b.id, m.text]);
-      if (r.inbox) r.inbox.put(b.id, [{ id: m.id, text: m.text, msg: m.id }]);
-      return { fed: true };
-    },
-    end(b) { log.push(['end', b.id]); state[b.id] = 'idle'; },
-    status: (b) => state[b.id] ?? 'unknown',
-    alive: (b) => !r.dead.has(b.id),
-    slotOf: (b) => (session[b.id] ? { harness, session: session[b.id] } : null),
-    sessionFiles(slot) { return { keep: slot && existsSync(tfile(slot.session)) ? [{ root: 'sess', rel: `${slot.session}.jsonl` }] : [], drop: [] }; },
-    /** The test's hand: this body's turn is over. */
-    finish(ref) { state[ref.split(':')[1]] = 'idle'; },
-    transcript: tfile,
-  };
-  return r;
-}
-
-/** Core's conversation and audit writes, recorded into `log`: seq per conversation, as core assigns it. */
-function fakeCore(log) {
-  const seqs = {};
-  const c = {
-    turns: [], audits: [], down: false, auditDown: false,
-    async turn(t) {
-      if (c.down) throw new CoreError('core didn\'t answer conversations/turn: connect ECONNREFUSED', 503);
-      const cv = cvOf(t.agent, t.venue, t.place);
-      const seq = (seqs[cv] = (seqs[cv] ?? 0) + 1);
-      c.turns.push({ ...t, conversation: cv, seq });
-      log.push(['turn', cv, seq, t.kind]);
-      return { conversation: cv, seq };
-    },
-    async audit(a) {
-      if (c.auditDown) throw new CoreError('the audit log needs the age programs', 503);
-      c.audits.push(a);
-      log.push(['audit', a.conversation, a.seq]);
-      return { conversation: a.conversation, seq: a.seq };
-    },
-  };
-  return c;
-}
-
-/** Not encryption: a reversible stand-in, so a test can see that nothing's kept as it came (the age test is below). */
-const testSealer = {
-  seal: (b) => Buffer.from(`T1:${Buffer.from(b).toString('base64').split('').reverse().join('')}`),
-  open: (b) => Buffer.from(b.toString().slice(3).split('').reverse().join(''), 'base64'),
-};
-
-function world(extra = {}, { inboxDir } = {}) {
-  const HOME = scratch('rt-deliver-');
-  const env = { HOME, PATH: '/usr/bin:/bin', LANG: 'C.UTF-8', LOOM_RUNTIME_TOKEN_FILE: join(HOME, 'runtime-token'), LOOM_RUNTIME_LOOM_URL: 'http://127.0.0.1:1/mcp', ANTHROPIC_BASE_URL: 'http://proxy', SOMETHING_ELSE: 'x', LOOM_BOX_LOCAL_NAME: 'one', LOOM_BOX_HOME: join(HOME, 'state'), LOOM_BOX_DATA: join(HOME, 'data'), LOOM_RUNTIME_SCORECARDS: 'off', ...extra };
-  setModels(env, { list: [{ id: 'opus', harness: 'claude', family: 'anthropic' }], agent: 'art', prefer: ['opus'] });
-  setModels(env, { agent: 'mark', prefer: ['opus'] });
-  const log = [];
-  const runner = fakeRunner(log, HOME, 'claude', { inboxDir: inboxDir ? join(HOME, 'inbox') : undefined });
-  const core = fakeCore(log);
-  let t = Date.parse('2026-11-02T12:00:00Z');
-  const clock = { now: () => new Date(t), advance: (ms) => { t += ms; } };
-  const o = {
-    core, runner: () => runner, sealer: testSealer, now: clock.now, memAvailableMb: () => 8000, warn: () => {},
-    accounts: staticAccounts({ accounts: [{ name: 'max', provider: 'anthropic', credentials: [{ kind: 'k', status: 'valid' }], usage: {} }] }),
-    venues: () => ({ slack: { kind: 'live', send: [process.execPath, join(here, 'fake-send.mjs')] }, relay: { kind: 'agent' } }),
-  };
-  let n = 0;
-  const msg = (place, text, more = {}) => ({ source: 'test-source', id: `m-${++n}`, agent: 'art', venue: 'slack', place, label: `Loren (${place})`, from: { kind: 'person', slug: 'loren' }, kind: 'message', at: clock.now().toISOString(), text, ...more });
-  return { env, log, runner, core, clock, o, msg, kinds: () => log.map((l) => l[0]) };
-}
+import { here, pkg, cvOf, hasAge, fakeRunner, fakeCore, testSealer, world } from './delivery-world.mjs';
 
 test('the piece offers delivery: an argv of its own bin, which core runs with the deliver body on stdin', () => {
   assert.deepEqual(pkg.loom.delivery, ['loom-runtime', 'deliver']);
@@ -178,13 +76,18 @@ test('2. delivery records first, and once; a body that fails to start leaves the
   assert.match(down.error, /ECONNREFUSED/);
   assert.equal(w.log.filter((l) => l[0] === 'start').length, 1);
   assert.equal(loadConv(w.env, cvOf('art', 'slack', 'dm:U2')), null);
-  // ...and the same message, once core is back, is a new delivery (a failed one isn't remembered).
+  // A turn core didn't answer may have landed: it's remembered as uncertain, and its retry looks for it (an audit
+  // write, as core has no lookup by source and id) before writing it again. This one never landed: written once.
   w.core.down = false;
   const again = { ...w.msg('dm:U2', 'are you there?'), id: 'retry-me' };
   w.core.down = true;
-  await deliver(w.env, again, w.o);
+  assert.equal((await deliver(w.env, again, w.o)).status, 503);
+  const seenDir = join(deliveryDir(w.env), 'seen');
+  assert.ok(readdirSync(seenDir).map((n) => JSON.parse(readFileSync(join(seenDir, n), 'utf-8'))).some((x) => x.uncertain?.cv === cvOf('art', 'slack', 'dm:U2')));
   w.core.down = false;
+  const turnsBefore = w.core.turns.length;
   assert.equal((await deliver(w.env, again, w.o)).body, 'started');
+  assert.equal(w.core.turns.length, turnsBefore + 1);
 
   // A body that fails to start: `failed`, with the reason; the turn stands.
   w.runner.failStart = 'claude --bg didn\'t start: Error: not logged in';
@@ -309,16 +212,11 @@ test('3. capacity and continuity: same body, busy-only capacity, a warm idle bod
   assert.ok(w.log.at(-1)[2].includes(`read it with conversation({id: "${B}"})`));
 });
 
-test('short of memory, a new body waits; a message the runtime can\'t seal is delivered at once or not kept', async () => {
-  const w = world();
-  w.o.memAvailableMb = () => 900;
-  const r = await deliver(w.env, w.msg('dm:M', 'hi'), w.o);
-  assert.equal(r.body, 'queued');
-  assert.match(r.reason, /short of memory/);
-  w.o.memAvailableMb = () => 8000;
+test('a message the runtime can\'t seal is delivered at once, or (when it would have to wait) not kept', async () => {
+  const w = world({ LOOM_RUNTIME_BUSY_LIMIT: '1' });
   const broken = { ...w.o, sealer: { seal() { throw new Error('no age'); }, open() { throw new Error('no age'); } } };
   assert.equal((await deliver(w.env, w.msg('dm:N', 'unsealed but deliverable'), broken)).body, 'started');
-  broken.memAvailableMb = () => 900;
+  // Its one slot is busy: this one would have to wait, and can't be kept.
   const lost = await deliver(w.env, w.msg('dm:O', 'would have to wait'), broken);
   assert.equal(lost.body, 'failed');
   assert.match(lost.reason, /can't keep its text/);
@@ -445,12 +343,13 @@ test('E. a warm body\'s inbox isn\'t lost to a resume that fails: what it held g
   w.runner.finish(loadConv(w.env, A).body);
   w.runner.failResume = 'claude --bg didn\'t start: overloaded';
   const r = await deliver(w.env, w.msg('dm:A', 'three'), w.o);
-  assert.deepEqual([r.body, r.reason], ['failed', 'claude --bg didn\'t start: overloaded']);
-  // Back on the queue, and on to the next body (the same drain starts one): not lost with the failed resume.
+  // Its session was sealed into its slot first; the slot wouldn't resume, so it's cleared and a fresh body takes both
+  // the unheard message and the new one, in this same delivery.
+  assert.equal(r.body, 'started');
   const next = w.log.at(-1);
   assert.equal(next[0], 'start');
-  assert.ok(next[2].endsWith('loren: two, never heard'));
-  assert.equal(next[2].includes('three'), false, 'the failed message itself isn\'t retried: its answer was failed');
+  assert.ok(next[2].includes('loren: two, never heard'));
+  assert.ok(next[2].endsWith('loren: three'));
   assert.equal(loadConv(w.env, A).queue.length, 0);
 });
 
@@ -503,19 +402,23 @@ test('H. two plans at once start one body; an op that outlived its marker can\'t
   const d = depsOf(w.env, w.o);
   // Queue a message without draining it, then drain twice at once.
   w.runner.delay = 50;
-  const first = deliver(w.env, w.msg('dm:H', 'one'), w.o);
+  let drained;
+  const first = deliver(w.env, w.msg('dm:H', 'one'), { ...w.o, onDrain: (p) => { drained = p; } });
   await Promise.all([first, drain(w.env, A, d), drain(w.env, A, d)]);
+  await drained;
   assert.equal(w.log.filter((l) => l[0] === 'start').length, 1);
   // A slow op: its marker expires (a fresh drain takes over with a new message), then it finishes.
   const B = cvOf('art', 'slack', 'dm:I');
   w.runner.delay = 300;
-  const slow = deliver(w.env, w.msg('dm:I', 'slow one'), w.o);
+  let slowDrain;
+  const slow = deliver(w.env, w.msg('dm:I', 'slow one'), { ...w.o, onDrain: (p) => { slowDrain = p; } });
   await new Promise((r) => setTimeout(r, 50));
   w.clock.advance(241_000);
   const fast = await deliver(w.env, w.msg('dm:I', 'fast one'), w.o);
   assert.equal(fast.body, 'started');
   const owner = loadConv(w.env, B).body;
   await slow;
+  await slowDrain;
   const c = loadConv(w.env, B);
   assert.equal(c.body, owner, 'the late op didn\'t take the conversation back');
   assert.equal(c.starting, undefined);

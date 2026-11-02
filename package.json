@@ -86,6 +86,12 @@
       "loom-runtime",
       "deliver"
     ],
+    "venues": {
+      "relay": {
+        "label": "Relay",
+        "kind": "agent"
+      }
+    },
     "strangers": [
       "join-request",
       "join-poll"

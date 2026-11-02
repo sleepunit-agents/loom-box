@@ -421,7 +421,12 @@ async function delivery(rest, env, json) {
     if (r.status) process.exitCode = 1;
     return;
   }
-  if (sub === 'tick') return tick(env, {}, flag(rest, '--conversation'));
+  if (sub === 'tick') {
+    // A delivery's worker: a message the runtime couldn't seal comes on stdin ({key: text}), never in a file or argv.
+    let mem = new Map();
+    if (rest.includes('--stdin')) { try { mem = new Map(Object.entries(JSON.parse((await readStdin()) || '{}')).filter(([, v]) => typeof v === 'string')); } catch { mem = new Map(); } }
+    return tick(env, {}, flag(rest, '--conversation'), mem);
+  }
   if (sub === 'run') {
     const every = Number(flag(rest, '--every')) || 5000;
     for (;;) {
