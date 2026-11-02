@@ -130,7 +130,7 @@ export function gradedOf(rows, model, kind, { since } = {}) {
  * Pick the model for a body. Pure: everything it reads is passed in.
  *   models     the model list
  *   settings   the agent's {allow?, prefer?}
- *   accounts   the accounts provider's list ({accounts, assign}), or null when there's none or it couldn't be read
+ *   accounts   the accounts view ({accounts}, accounts.mjs: from the boxes' reports), or null when it can't be read
  *   scorecards rows from loom, [] when there are none
  *   prefer     a preference for this one body (the caller's), ahead of the agent's own
  * Returns {model, harness, family, account?, kind, why: [lines]}, or throws a StateError (409) naming why no model
@@ -146,11 +146,13 @@ export function resolveModel({ agent, kind, models, settings = {}, accounts, sco
     const provider = providerOf(m.family);
     if (!provider) { room.set(m.id, { ok: true }); continue; }
     if (!accounts) { room.set(m.id, { ok: true, unread: true }); continue; }
-    const mine = accountsFor(accounts, agent, provider);
+    // Only an account the model's own harness can run on: a Claude login runs Claude Code, not Codex.
+    const mine = accountsFor(accounts, agent, provider).filter((a) => !a.harness || a.harness === m.harness);
     const acct = mine.find((a) => hasRoom(a, m.window));
-    room.set(m.id, acct ? { ok: true, account: acct.name } : { ok: false, reason: mine.length ? `${mine.map((a) => a.name).join(', ')} out of quota` : `no ${provider} account for ${agent}` });
+    // A body is told the account's label, never its key.
+    room.set(m.id, acct ? { ok: true, account: acct.label ?? acct.name } : { ok: false, reason: mine.length ? `${mine.map((a) => a.name).join(', ')} out of quota` : `no box of ${agent}'s owner is logged in to ${m.harness}, and ${agent} has no ${provider} API key` });
   }
-  if (!accounts) why.push('quota not checked: no account list (no provider, or it couldn\'t be read); fails open, as the resolvers before did');
+  if (!accounts) why.push('quota not checked: no box reports here (off the control plane, or LOOM_RUNTIME_ACCOUNTS=none); fails open, as the resolvers before did');
   const usable = allowed.filter((m) => room.get(m.id).ok);
   for (const m of allowed) if (!room.get(m.id).ok) why.push(`${m.id}: ${room.get(m.id).reason}`);
   if (!usable.length) fail(`no model is left for ${agent}: ${why.join('; ')}`, 409);
@@ -216,7 +218,7 @@ export async function resolveFor(env, { agent, venue, venueKind: told, prefer = 
   const list = harness ? all.filter((m) => m.harness === harness) : all;
   if (!list.length) fail(`the runtime has no ${harness} model`, 409);
   let listed = null;
-  // No provider (`none`) is a household whose harnesses keep their own logins: quota isn't the runtime's to check.
+  // `none` is a household that doesn't want quota read; off the control plane there are no box reports to read.
   try { listed = accounts.kind === 'none' ? null : accounts.list(); } catch { listed = null; }
   const since = sinceDay(now);
   const cards = await fetchScorecards(env, { kind, since, fetchImpl });

@@ -14,7 +14,7 @@
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -24,6 +24,7 @@ import { randomBytes } from 'node:crypto';
 import { joinLoom, runner } from '../src/box.mjs';
 import { HouseFileError, NESTED_ARGS, parseHouseFile } from '../src/house.mjs';
 import { scratch } from './scratch.mjs';
+import { load } from '../src/state.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 let env, fx, revoked, repo, client, r, fake;
@@ -37,7 +38,7 @@ const podmanCfg = (c) => { mkdirSync(fake, { recursive: true }); writeFileSync(j
 const HOUSE = {
   build: { containerfile: 'house/Containerfile', context: 'house' },
   command: ['claude', '-p'],
-  secrets: { 'loom-token': { file: 'loom-token' }, 'github-token': { file: 'github-token' }, 'claude-oauth': { env: 'CLAUDE_CODE_OAUTH_TOKEN' } },
+  secrets: { 'loom-token': { file: 'loom-token' }, 'github-token': { file: 'github-token' }, 'anthropic-api-key': { env: 'ANTHROPIC_API_KEY' } },
   env: { ART_REPO: 'https://example.com/art.git' },
   mounts: { state: '/home/art/.local/state', nested: '/var/lib/containers', mirror: '/garage/git/art.git' },
   nested: true,
@@ -61,7 +62,7 @@ async function until(f, ms = 8000) {
 }
 
 function setAgent(body = {}) {
-  ok(api(env, fx, { caller: owner, path: 'set-agent', body: { agent: 'art', repo, nested: true, secrets: { 'github-token': 'gh-art', 'claude-oauth': 'claude-oauth-token' }, ...body } }));
+  ok(api(env, fx, { caller: owner, path: 'set-agent', body: { agent: 'art', repo, nested: true, secrets: { 'github-token': 'gh-art', 'anthropic-api-key': 'art-anthropic-key' }, ...body } }));
 }
 const up = (task = 'say hi') => ok(api(env, fx, { caller: { kind: 'agent', agent: 'art' }, path: 'up', body: { task } }));
 
@@ -72,7 +73,10 @@ beforeEach(() => {
   copyFileSync(join(here, 'fake-podman.mjs'), join(bin, 'podman'));
   chmodSync(join(bin, 'podman'), 0o755);
   fake = join(bin, 'podman-state');
-  env = { HOME: home, PATH: process.env.PATH, LOOM_BOX_HOME: join(home, 'state'), LOOM_BOX_DATA: join(home, 'data'), LOOM_BOX_LOCAL_NAME: 'one', LOOM_BOX_PODMAN: join(bin, 'podman'), SECRET_IN_BOX_ENV: 'never-in-a-house' };
+  env = { HOME: home, PATH: process.env.PATH, LOOM_BOX_HOME: join(home, 'state'), LOOM_BOX_DATA: join(home, 'data'), LOOM_BOX_LOCAL_NAME: 'one', LOOM_BOX_PODMAN: join(bin, 'podman'), SECRET_IN_BOX_ENV: 'never-in-a-house',
+    // No real harness CLI answers for this box's logins (a test of its own says what it reports).
+    LOOM_RUNTIME_CLAUDE: '/nonexistent/claude', LOOM_RUNTIME_CODEX: '/nonexistent/codex' };
+  env.XDG_RUNTIME_DIR = join(home, 'run');
   revoked = [];
   fx = { now: () => new Date(), mint: () => 'loom_house_token_aaaaaaaaaaaaaaaa', revoke: (l) => revoked.push(l), secret: (n) => `secret:${n}` };
   repo = join(home, 'art-repo');
@@ -93,7 +97,7 @@ test('a house is a container with exactly its own secrets, env and dirs, and not
   const { args, seen, stdin } = ran(h.id);
   assert.equal(stdin, 'say hi');
   assert.deepEqual(seen, {
-    'mount:loom-token': 'loom_house_token_aaaaaaaaaaaaaaaa', 'mount:github-token': 'secret:gh-art', 'env:CLAUDE_CODE_OAUTH_TOKEN': 'secret:claude-oauth-token',
+    'mount:loom-token': 'loom_house_token_aaaaaaaaaaaaaaaa', 'mount:github-token': 'secret:gh-art', 'env:ANTHROPIC_API_KEY': 'secret:art-anthropic-key',
   });
   const s = args.join(' ');
   for (const want of ['--rm', '--init', '--name loom-house-h-1', '--hostname art-house', '-i', ...NESTED_ARGS,
@@ -223,7 +227,7 @@ test('a house file that wants a secret its agent\'s houses don\'t get is refused
   const h = up();
   await r.tick();
   assert.equal(house(h.id).state, 'failed');
-  assert.match(house(h.id).log, /wants claude-oauth/);
+  assert.match(house(h.id).log, /wants anthropic-api-key/);
   assert.deepEqual(revoked, ['art · house h-1 on one']);
 });
 
@@ -462,4 +466,99 @@ test('a task house with a slot starts from it and leaves its own behind', async 
   assert.equal(ran(h.id).stateBefore, 'seeded;');
   const saved = ok(api(env, fx, { caller: owner, path: 'saved-state', body: { agent: 'art', name: 'tending', slot: true } }));
   assert.equal(saved.from, h.id, 'the house that ran left its state for the next');
+});
+
+test('a box reports its harness logins on its poll, runs the owner\'s login, and a house that wants a login gets the box\'s own', async () => {
+  let loggedIn = false;
+  const said = [];
+  const box = runner(env, client, { loomUrl: 'http://loom.test/mcp', log: () => {},
+    status: () => ({ claude: { installed: true, loggedIn, method: 'claude.ai', plan: 'max', account: 'claude-0123456789' }, codex: { installed: false, loggedIn: false } }),
+    login: (h, { say }) => { said.push(h); setTimeout(() => say({ state: 'waiting', link: 'https://claude.com/cai/oauth/authorize?x=1' }), 0); return { code(c) { said.push(`code ${c}`); loggedIn = true; say({ state: 'done' }); return true; }, cancel() {} }; } });
+  // A house that wants Claude's login, on a box that isn't logged in: refused, saying how to fix it.
+  agentRepo(repo, { ...HOUSE, harnesses: ['claude'] });
+  setAgent();
+  const h = up();
+  await box.tick();
+  await until(() => house(h.id).state === 'failed');
+  assert.match(house(h.id).log, /this box has no Claude login for art's houses: log it in from its page/);
+  assert.equal(ok(api(env, fx, { caller: owner, path: 'list', body: {} })).boxes.find((b) => b.id === 'one').harnesses.claude.loggedIn, false);
+  // The owner logs it in: the box runs the login, its link comes back, the code goes in.
+  const l = ok(api(env, fx, { caller: owner, path: 'login-start', body: { box: 'one', harness: 'claude' } }));
+  await box.tick();
+  await until(() => load(env).logins[l.id].state === 'waiting');
+  ok(api(env, fx, { caller: owner, path: 'login-code', body: { id: l.id, code: 'good-code#s1' } }));
+  await box.tick();
+  await until(() => load(env).logins[l.id].state === 'done');
+  assert.deepEqual(said, ['claude', 'code good-code#s1']);
+  assert.equal(load(env).boxes.one.harnesses.claude.loggedIn, true);
+  // Now the house starts with the box's login dir mounted, and its CLI pointed there.
+  const h2 = up();
+  await box.tick();
+  await until(() => house(h2.id).state === 'done');
+  const s = ran(h2.id).args.join(' ');
+  assert.match(s, new RegExp(`-v ${env.LOOM_BOX_DATA}/logins/claude:/run/loom/login/claude:rw,nosuid,nodev,noexec -e CLAUDE_SECURESTORAGE_CONFIG_DIR=/run/loom/login/claude`));
+  // A house planted things in the login dir: before the next house gets it, it's cut down to the credential file.
+  const { symlinkSync, existsSync: ex } = await import('node:fs');
+  const shared = join(env.LOOM_BOX_DATA, 'logins', 'claude');
+  symlinkSync('/etc/passwd', join(shared, 'planted'));
+  writeFileSync(join(shared, 'settings.json'), '{"hooks":{}}');
+  writeFileSync(join(shared, '.credentials.json'), '{}');
+  const h3 = up();
+  await box.tick();
+  await until(() => house(h3.id).state === 'done');
+  assert.deepEqual([ex(join(shared, 'planted')), ex(join(shared, 'settings.json')), ex(join(shared, '.credentials.json'))], [false, false, true]);
+  assert.equal(ex('/etc/passwd'), true, 'the link went, not what it pointed at');
+  // A credential file that's a symlink is refused: the house doesn't start on it.
+  rmSync(join(shared, '.credentials.json'));
+  symlinkSync('/etc/passwd', join(shared, '.credentials.json'));
+  const h4 = up();
+  await box.tick();
+  await until(() => house(h4.id).state === 'failed');
+  assert.match(house(h4.id).log, /login dir isn't safe to mount: \.credentials\.json is a symlink/);
+});
+
+test('a sentinel token in the box\'s credential files never shows in any argv, env, log line, call body, state.json or house file loom makes', async () => {
+  const SENTINEL = 'sk-ant-oat01-SENTINEL-must-never-leave-the-file-0000';
+  const { spawn: realSpawn, spawnSync: realSpawnSync } = await import('node:child_process');
+  const { harnessStatus, startLogin, loginDir } = await import('../src/logins.mjs');
+  const fakeCli = join(here, 'fake-login.mjs');
+  // Two fake CLIs (claude, codex) that log in and read their own credential files, as the real ones do.
+  const bin = join(env.HOME, 'clis');
+  mkdirSync(bin);
+  for (const h of ['claude', 'codex']) { writeFileSync(join(bin, h), `#!/bin/sh\nFAKE_LOGIN_AS=${h} exec "${process.execPath}" "${fakeCli}" "$@"\n`); chmodSync(join(bin, h), 0o755); }
+  // The fake podman runs them as the throwaway CLI container's (its cliBin), in the image of an agent the control plane names.
+  const cfgFile = join(fake, 'config.json');
+  mkdirSync(fake, { recursive: true });
+  writeFileSync(cfgFile, JSON.stringify({ ...(existsSync(cfgFile) ? JSON.parse(readFileSync(cfgFile, 'utf-8')) : {}), cliBin: bin }));
+  const benv = { ...env, FAKE_LOGIN_DEVICE_MS: '200' };
+  writeFileSync(join(loginDir(benv, 'claude'), '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: SENTINEL } }), { mode: 0o600 });
+  writeFileSync(join(loginDir(benv, 'codex'), 'auth.json'), JSON.stringify({ tokens: { access_token: SENTINEL } }), { mode: 0o600 });
+  // Everything loom hands anything: each spawn's argv and env, each log line, each call to the control plane.
+  const seen = [];
+  const note = (what, v) => seen.push(`${what} ${JSON.stringify(v)}`);
+  const run = (cmd, args, o = {}) => { note('spawnSync', [cmd, args, o.env, o.input]); return realSpawnSync(cmd, args, o); };
+  const spawnImpl = (cmd, args, o = {}) => { note('spawn', [cmd, args, o.env]); const c = realSpawn(cmd, args, o); const w = c.stdin.write.bind(c.stdin); c.stdin.write = (d, ...r) => { note('stdin', String(d)); return w(d, ...r); }; return c; };
+  const spied = { async call(path, body) { note(`call ${path}`, body); const out = await client.call(path, body); note(`answer ${path}`, out); return out; } };
+  const box = runner(benv, spied, { loomUrl: 'http://loom.test/mcp', log: (m) => note('log', m),
+    status: (agents) => harnessStatus(benv, { run, agents }), login: (h, o) => startLogin(benv, h, { ...o, spawnImpl, run, every: 100 }) });
+  // A status, a Codex login (device: it finishes by itself), and a house on the Claude login. art's image is the one
+  // the box runs its CLI in (art may use this box's logins).
+  agentRepo(repo, { ...HOUSE, harnesses: ['claude', 'codex'] });
+  setAgent();
+  await box.tick();
+  assert.equal(load(env).boxes.one.harnesses.claude.loggedIn, true);
+  const l = ok(api(env, fx, { caller: owner, path: 'login-start', body: { box: 'one', harness: 'codex' } }));
+  await box.tick();
+  await until(() => load(env).logins[l.id].state === 'done');
+  const h = up();
+  await box.tick();
+  await until(() => house(h.id).state === 'done');
+  // Sanity: the sentinel is where the CLI keeps it (the Codex one replaced by the fresh login), and loom's things were watched.
+  assert.equal(readFileSync(join(loginDir(benv, 'claude'), '.credentials.json'), 'utf-8').includes(SENTINEL), true);
+  assert.ok(seen.some((x) => x.startsWith('spawnSync')) && seen.some((x) => x.startsWith('spawn ')) && seen.some((x) => x.startsWith('call poll')));
+  const everything = [...seen, readFileSync(join(env.LOOM_BOX_HOME, 'state.json'), 'utf-8'), JSON.stringify(ran(h.id))];
+  const hd = join(env.LOOM_BOX_DATA, 'houses');
+  if (existsSync(hd)) for (const id of readdirSync(hd)) for (const f of readdirSync(join(hd, id))) { try { everything.push(readFileSync(join(hd, id, f), 'utf-8')); } catch { /* a dir */ } }
+  for (const x of everything) assert.equal(x.includes(SENTINEL), false, x.slice(0, 200));
+  assert.equal(everything.join('\n').includes('SENTINEL'), false);
 });
