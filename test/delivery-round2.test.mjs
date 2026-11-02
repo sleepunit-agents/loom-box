@@ -17,77 +17,7 @@ import { load, update } from '../src/state.mjs';
 import { cvOf, hasAge, here, pkg, testSealer, world } from './delivery-world.mjs';
 import { scratch } from './scratch.mjs';
 
-const until = async (f, ms = 5000) => { const end = Date.now() + ms; while (!(await f())) { if (Date.now() > end) throw new Error('timed out'); await new Promise((r) => setTimeout(r, 10)); } };
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-/** Every file under a dir, read: for "nothing of it is on disk in the clear". */
-function everything(dir) {
-  const out = [];
-  const walk = (d) => { for (const n of (() => { try { return readdirSync(d); } catch { return []; } })()) { const p = join(d, n); if (statSync(p).isDirectory()) walk(p); else out.push(readFileSync(p)); } };
-  walk(dir);
-  return Buffer.concat(out);
-}
-
-/** The control plane and one agent's house, in this process: a HouseRunner, and a body host with a local fake runner. */
-function houseWorld({ sealer, claimMs = 5000, warmMs = 5000 } = {}) {
-  const D = scratch('rt-r2-house-');
-  const env = { PATH: process.env.PATH, HOME: D, LOOM_HOME: join(D, 'loomhome'), LOOM_BOX_LOCAL_NAME: 'one', LOOM_BOX_HOME: join(D, 'state'), LOOM_BOX_DATA: join(D, 'data'), LOOM_RUNTIME_SCORECARDS: 'off' };
-  // The runtime's own key, as body-sync (through api()) opens what HouseRunner sealed.
-  sealer ??= ageSealer(env, join(env.LOOM_BOX_DATA, 'delivery'));
-  mkdirSync(env.LOOM_HOME, { recursive: true });
-  setAgent(env, { now: () => new Date() }, { agent: 'art', repo: 'https://example.com/art.git' });
-  update(env, (s) => { const k = Object.keys(s.boxes).find((x) => s.boxes[x].local); s.boxes[k].harnesses = { claude: { loggedIn: true } }; });
-  setModels(env, { list: [{ id: 'opus', harness: 'claude', family: 'anthropic' }], agent: 'art', prefer: ['opus'] });
-  const fed = [];
-  const ended = [];
-  const st = {};
-  let n = 0;
-  const local = {
-    harness: 'claude', roots: {}, startDelay: 0,
-    inbox: { pending: () => [], taken: () => [], close() {}, remove() {} },
-    async start() { if (local.startDelay) await sleep(local.startDelay); const id = `b000000${n++}`; st[id] = 'working'; return { id, harness: 'claude' }; },
-    status: (b) => st[b.id] ?? 'unknown', slotOf: (b) => ({ harness: 'claude', session: `s-${b.id}` }),
-    feed(b, m) { fed.push([b.id, m.id, m.text]); return { fed: true }; },
-    end(b) { ended.push(b.id); st[b.id] = 'ended'; },
-    sessionFiles: () => ({ keep: [], drop: [] }),
-  };
-  const hr = new HouseRunner(env, 'claude', { poll: 10, sealer, claimMs, warmMs });
-  let drop = () => false;
-  const stops = [];
-  // The house declares claude (its login's env is set); a test can take it away.
-  const houseEnv = { CLAUDE_SECURESTORAGE_CONFIG_DIR: '/run/loom/login/claude' };
-  const host = () => {
-    let stopped = false;
-    const client = async (p, b) => {
-      const r = await api(env, { now: () => new Date() }, { caller: { kind: 'agent', agent: 'art', house: 'h-1' }, path: p, body: b });
-      if (r.status !== 200) throw new Error(r.body.error);
-      if (drop(r.body)) throw new Error('the answer was lost on its way back');
-      return r.body;
-    };
-    const done = runBodyHost({ client, runner: () => local, env: houseEnv, sleep: () => sleep(10), beats: 100_000, idleS: 0, now: () => (stopped ? Infinity : Date.now()) });
-    stops.push(() => { stopped = true; return done; });
-    return done;
-  };
-  // A host leaves at once when told its bodies are another house's: how a test ends one.
-  const kill = async () => {
-    const h = hostOf(env, 'art');
-    writeFileSync(join(env.LOOM_BOX_DATA, 'delivery', 'hosts', 'art.json'), JSON.stringify({ ...h, house: 'h-999' }));
-    await sleep(80);
-    writeFileSync(join(env.LOOM_BOX_DATA, 'delivery', 'hosts', 'art.json'), JSON.stringify({ ...hostOf(env, 'art'), house: h.house }));
-  };
-  return { D, env, hr, local, fed, ended, host, kill, houseEnv, setDrop: (f) => { drop = f; }, sealer,
-    accounts: staticAccounts({ accounts: [{ name: 'max', provider: 'anthropic', harness: 'claude', kind: 'login', agents: ['art', 'mark', 'pip'], credentials: [{ kind: 'login', status: 'valid' }], usage: {} }] }) };
-}
-
-async function bodyInHouse(w) {
-  const starting = startBody(w.env, { agent: 'art', venue: 'slack', brief: 'hi' }, { runner: () => w.hr, accounts: w.accounts });
-  await until(() => load(w.env).houses['h-1']);
-  const host = w.host();
-  const b = await starting;
-  const body = { id: b.body.split(':')[1], agent: 'art', house: 'h-1', harness: 'claude' };
-  await until(() => w.hr.status(body) === 'working');
-  return { body, host };
-}
+import { bodyInHouse, everything, houseWorld, sleep, until } from './delivery-world.mjs';
 
 test('1. a follow-up handed to a house leaves the runtime only once the house says it took it: a lost answer loses nothing', { skip: !hasAge && 'age isn\'t installed' }, async () => {
   const w = houseWorld();
@@ -182,10 +112,11 @@ test('3. a session coming back in parts is never on disk in the clear, and a tra
   const env = { HOME: D, LOOM_BOX_DATA: join(D, 'data'), LOOM_BOX_HOME: join(D, 'state'), LOOM_BOX_LOCAL_NAME: 'one' };
   const hosts = join(env.LOOM_BOX_DATA, 'delivery', 'hosts');
   mkdirSync(hosts, { recursive: true });
-  writeFileSync(join(hosts, 'art.json'), JSON.stringify({ agent: 'art', house: 'h-1', req: {}, stop: { b0000000: { pack: true, at: Date.now() } }, inbox: {} }));
+  const { createHash } = await import('node:crypto');
+  writeFileSync(join(hosts, 'art.json'), JSON.stringify({ agent: 'art', house: 'h-1', hostHash: createHash('sha256').update('the-host-key').digest('hex'), req: {}, stop: { b0000000: { pack: true, at: Date.now() } }, inbox: {} }));
   const secret = Buffer.from(JSON.stringify([{ root: 'projects', rel: 'x.jsonl', data: Buffer.from('THE TRANSCRIPT, IN THE CLEAR').toString('base64') }])).toString('base64');
   const t0 = new Date('2026-11-02T12:00:00Z');
-  const r = bodySync(env, { kind: 'agent', agent: 'art', house: 'h-1' }, { report: { bodies: { b0000000: { harness: 'claude', status: 'ended' } }, done: {}, packed: { b0000000: { part: 0, parts: 2, data: secret.slice(0, 40) } } } }, { sealer: testSealer, now: () => t0 });
+  const r = bodySync(env, { kind: 'agent', agent: 'art', house: 'h-1' }, { hostKey: 'the-host-key', report: { bodies: { b0000000: { harness: 'claude', status: 'ended' } }, done: {}, packed: { b0000000: { part: 0, parts: 2, data: secret.slice(0, 40) } } } }, { sealer: testSealer, now: () => t0 });
   assert.deepEqual(r.acked, [['b0000000', 0]]);
   const disk = everything(hosts);
   assert.equal(disk.includes(Buffer.from(secret.slice(0, 40))), false, 'the part is sealed as it arrives');
@@ -266,18 +197,12 @@ test('6. a turn write whose answer was lost: its retry posts the same key and ge
 
 test('7. the runtime declares the relay venue (kind agent) in its loom block', async () => {
   assert.deepEqual(pkg.loom.venues, { relay: { label: 'Relay', kind: 'agent' } });
-  const dist = join(process.env.HOME, 'Code', 'loom', 'dist', 'cli', 'pieces-managed.js');
+  const dist = join(process.env.LOOM_DIST || join(process.env.HOME, 'Code', 'loom', 'dist'), 'cli', 'pieces-managed.js');
   if (existsSync(dist)) {
     const m = await import(dist);
     const r = m.parseLoomBlock(pkg.loom, 'runtime', Object.keys(pkg.bin));
     assert.notEqual(typeof r, 'string', r);
   }
-});
-
-test('8. no memory gate: only busy bodies make a message wait', async () => {
-  const w = world();
-  w.o.memAvailableMb = () => 10;
-  assert.equal((await deliver(w.env, w.msg('dm:M', 'hi'), w.o)).body, 'started');
 });
 
 test('9. a start whose claim wait runs out is stopped, should its house start it late: it never runs', { skip: !hasAge && 'age isn\'t installed' }, async () => {

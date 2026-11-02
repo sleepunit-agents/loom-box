@@ -23,12 +23,18 @@ export function houseHasLogin(env, harness) {
 
 export const SYNC_MS = 2000;
 export const IDLE_S = 600;
+/** A session going back that the runtime hasn't acknowledged in this long is dropped (and its files with it). */
+export const PACK_MS = 120_000;
 
 /**
  * `client(path, body)` reaches the runtime's piece API as this house; `runner(harness)` is a local runner here.
  * Resolves when the host leaves.
  */
-export async function runBodyHost({ client, runner, env = process.env, cwd = process.cwd(), now = () => Date.now(), sleep = (ms) => new Promise((r) => setTimeout(r, ms)), idleS = IDLE_S, beats = Infinity, log = () => {} }) {
+export async function runBodyHost({ client, runner, env = process.env, hostKey, cwd = process.cwd(), now = () => Date.now(), sleep = (ms) => new Promise((r) => setTimeout(r, ms)), idleS = IDLE_S, beats = Infinity, packMs = PACK_MS, log = () => {} }) {
+  // Its own key, in memory only: the boot key from its task, traded on its first sync for the host's key.
+  let key = hostKey;
+  // A body's environment is the house's, less what's the host's alone: its task (which carried the boot key).
+  const bodyEnv = Object.fromEntries(Object.entries(env).filter(([k]) => k !== 'HOUSE_TASK' && k !== 'LOOM_HOST_KEY'));
   const mine = new Map();   // id -> {harness}
   const done = {};          // rid -> {id} | {error}
   const packing = new Map(); // id -> {parts: [string], next}
@@ -47,15 +53,20 @@ export async function runBodyHost({ client, runner, env = process.env, cwd = pro
       bodies[id] = { harness: b.harness, status, ...(slot?.session ? { session: slot.session } : {}), feedable: !!r.inbox, pending };
     }
     const packed = {};
-    for (const [id, p] of packing) packed[id] = { part: p.next, parts: p.parts.length, data: p.parts[p.next] };
+    for (const [id, p] of [...packing]) {
+      // Nobody's taking it (its stop was dropped, the runtime moved on): given up, so the house can idle out.
+      if (now() - p.since > packMs) { packing.delete(id); mine.delete(id); log(`dropped ${id}'s session: nobody took it`); continue; }
+      packed[id] = { part: p.next, parts: p.parts.length, data: p.parts[p.next] };
+    }
     let got;
     const sent = acks;
-    try { got = await client('body-sync', { report: { bodies, done, packed, inboxAck: sent } }); } catch (e) { log(`sync failed: ${e.message}`); await sleep(SYNC_MS); continue; }
+    try { got = await client('body-sync', { hostKey: key, report: { bodies, done, packed, inboxAck: sent } }); } catch (e) { log(`sync failed: ${e.message}`); await sleep(SYNC_MS); continue; }
+    if (typeof got.hostKey === 'string') key = got.hostKey;
     // Answered: what it acknowledged is the runtime's to forget now. (A lost answer: they go again next beat.)
     if (acks === sent) acks = {};
     for (const [id, part] of got.acked ?? []) {
       const p = packing.get(id);
-      if (p && p.next === part) { p.next += 1; if (p.next >= p.parts.length) { packing.delete(id); mine.delete(id); } }
+      if (p && p.next === part) { p.next += 1; p.since = now(); if (p.next >= p.parts.length) { packing.delete(id); mine.delete(id); } }
     }
     if (got.exit) { log(`leaving: ${got.reason ?? 'the runtime says so'}`); return; }
     const req = got.req ?? {};
@@ -65,7 +76,7 @@ export async function runBodyHost({ client, runner, env = process.env, cwd = pro
       try {
         if (!houseHasLogin(env, q.harness)) throw new Error(`this house doesn't declare the ${q.harness} harness (its house file's "harnesses"), so it has no ${q.harness} login: add it there`);
         const r = runner(q.harness);
-        const o = { brief: q.brief, model: q.model, deny: q.deny ?? [], cwd, env: { ...env, ...(q.key ? { LOOM_BODY_KEY: q.key } : {}) } };
+        const o = { brief: q.brief, model: q.model, deny: q.deny ?? [], cwd, env: { ...bodyEnv, ...(q.key ? { LOOM_BODY_KEY: q.key } : {}) } };
         let written = [];
         let b;
         try {
@@ -92,9 +103,11 @@ export async function runBodyHost({ client, runner, env = process.env, cwd = pro
         const all = Buffer.from(JSON.stringify(files)).toString('base64');
         const parts = [];
         for (let i = 0; i < all.length || i === 0; i += PART_CHARS) parts.push(all.slice(i, i + PART_CHARS));
-        packing.set(id, { parts, next: 0 });
+        packing.set(id, { parts, next: 0, since: now() });
+      } else {
+        // A plain stop leaves nothing: its session's files go (only a pack keeps them, sealed, in a slot).
+        dropSession(r, (() => { try { return r.slotOf({ id }); } catch { return null; } })(), { id });
       }
-      // A plain stop keeps the session's files: a warm resume continues that session here.
     }
     // An ended body is reported once its stop is answered, then forgotten (unless its session is still going back).
     for (const [id, b] of mine) if (b.ended && !got.stop?.[id] && !packing.has(id) && bodies[id]?.status === 'ended') mine.delete(id);

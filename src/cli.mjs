@@ -48,9 +48,10 @@
 // Delivery (agent-runtime.md, section 5; the runtime's `delivery` offer, which core runs):
 //   loom runtime deliver < {source, id, agent, venue, place, label?, from, kind, at, text}   (core adds source)
 //                      the turn to core, then the conversation's body: {conversation, seq, body, reason?}
-//   loom runtime send --conversation <cv> --text <text|->              a body's message out, in its venue
+//   loom runtime send --conversation <cv> --text <text|->              a body's message out, in its venue: {accepted, ref}
+//                                                                        at once; a failed post comes back through its inbox
 //   loom runtime deliver tick [--conversation <cv>] | deliver run [--every <ms>] | deliver list [--json]
-//   loom runtime body-host [--piece <name>]       in an agent's house, as its task: the bodies delivery asks for
+//   loom runtime body-host [--piece <name>] --host-key <boot key>   in an agent's house, as its task: the bodies delivery asks for
 // Models and accounts (the owner's, on loom's machine):
 //   loom runtime models [--json]                                         the model list and each agent's settings
 //   loom runtime models set --json < {list?, agent?, allow?, prefer?}    change them
@@ -81,7 +82,7 @@ import { join } from 'node:path';
 import { readModels, resolveFor, setModels } from './models.mjs';
 import { endBody, feedBody, listBodies, resumeBody, startBody } from './bodies.mjs';
 import { PART_RAW, joinParts, partsOf } from './blobs.mjs';
-import { deliver, listConvs, send, tick } from './delivery.mjs';
+import { deliver, listConvs, post, send, tick } from './delivery.mjs';
 import { runBodyHost } from './bodyhost.mjs';
 import { runnerFor } from './runners.mjs';
 
@@ -343,16 +344,16 @@ async function main(argv, env) {
     case 'send': {
       // From a body in its house: through the piece API, as its own agent (its house's token), with its run's key.
       const msg = { conversation: flag(rest, '--conversation'), text: await textOf(rest, '--text'), key: env.LOOM_BODY_KEY };
-      const r = env.LOOM_URL && env.LOOM_TOKEN_FILE ? await pieceCall(env, flag(rest, '--piece'))('send', msg) : await send(env, msg);
+      const r = env.LOOM_URL && env.LOOM_TOKEN_FILE ? await pieceCall(env, flag(rest, '--piece'))('send', msg) : await send(env, msg, { detach: true });
       out(r);
-      if (!r.ok) process.exitCode = 1;
+      if (!r.accepted) process.exitCode = 1;
       return;
     }
     case 'body-host': {
       // In an agent's house, as its task (houserunner.mjs, hostTask): wake the bodies the runtime asks for, here.
       if (!env.LOOM_URL || !env.LOOM_TOKEN_FILE) throw new Fail('the body host runs in a house: it needs LOOM_URL and LOOM_TOKEN_FILE');
       const call = pieceCall(env, flag(rest, '--piece'));
-      await runBodyHost({ client: async (p, b) => { const r = await call(p, b); if (r.error) throw new Fail(r.error); return r; }, runner: (h) => runnerFor(h, env), env, log: (m) => process.stderr.write(`loom-runtime body-host: ${m}\n`), ...(flag(rest, '--beats') ? { beats: Number(flag(rest, '--beats')) } : {}) });
+      await runBodyHost({ client: async (p, b) => { const r = await call(p, b); if (r.error) throw new Fail(r.error); return r; }, runner: (h) => runnerFor(h, env), env, hostKey: flag(rest, '--host-key'), log: (m) => process.stderr.write(`loom-runtime body-host: ${m}\n`), ...(flag(rest, '--beats') ? { beats: Number(flag(rest, '--beats')) } : {}) });
       return;
     }
     case 'models': return models(rest, env, json);
@@ -462,6 +463,13 @@ async function delivery(rest, env, json) {
     let mem = new Map();
     if (rest.includes('--stdin')) { try { mem = new Map(Object.entries(JSON.parse((await readStdin()) || '{}')).filter(([, v]) => typeof v === 'string')); } catch { mem = new Map(); } }
     return tick(env, {}, flag(rest, '--conversation'), mem);
+  }
+  if (sub === 'post') {
+    // A body's accepted message, posted (delivery.mjs, post): its text on stdin, never a file or argv.
+    let m = {};
+    try { m = JSON.parse((await readStdin()) || '{}'); } catch { m = {}; }
+    if (typeof m.text !== 'string') throw new Fail('post takes {text, body?, run?} on stdin');
+    return out(await post(env, flag(rest, '--conversation'), flag(rest, '--ref'), m.text, { body: m.body, run: m.run }));
   }
   if (sub === 'run') {
     const every = Number(flag(rest, '--every')) || 5000;

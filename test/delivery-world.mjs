@@ -9,6 +9,13 @@ import { staticAccounts } from '../src/accounts.mjs';
 import { CoreError } from '../src/core.mjs';
 import { setModels } from '../src/models.mjs';
 import { RunnerError, inbox } from '../src/runners.mjs';
+import { readdirSync, statSync } from 'node:fs';
+import { startBody } from '../src/bodies.mjs';
+import { runBodyHost } from '../src/bodyhost.mjs';
+import { api, setAgent } from '../src/control.mjs';
+import { HouseRunner, hostOf } from '../src/houserunner.mjs';
+import { ageSealer } from '../src/sealed.mjs';
+import { load, update } from '../src/state.mjs';
 import { scratch } from './scratch.mjs';
 
 export const here = dirname(fileURLToPath(import.meta.url));
@@ -121,7 +128,7 @@ export function world(extra = {}, { inboxDir } = {}) {
   const clock = { now: () => new Date(t), advance: (ms) => { t += ms; } };
   const core = fakeCore(log, clock.now);
   const o = {
-    core, runner: () => runner, sealer: testSealer, now: clock.now, memAvailableMb: () => 8000, warn: () => {},
+    core, runner: () => runner, sealer: testSealer, now: clock.now, warn: () => {},
     accounts: staticAccounts({ accounts: [{ name: 'max', provider: 'anthropic', harness: 'claude', kind: 'login', agents: ['art', 'mark', 'pip'], credentials: [{ kind: 'login', status: 'valid' }], usage: {} }] }),
     venues: () => ({ slack: { kind: 'live', send: [process.execPath, join(here, 'fake-send.mjs')] }, relay: { kind: 'agent' } }),
   };
@@ -130,3 +137,82 @@ export function world(extra = {}, { inboxDir } = {}) {
   return { env, log, runner, core, clock, o, msg, kinds: () => log.map((l) => l[0]) };
 }
 
+
+export const until = async (f, ms = 5000) => { const end = Date.now() + ms; while (!(await f())) { if (Date.now() > end) throw new Error('timed out'); await new Promise((r) => setTimeout(r, 10)); } };
+export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** Every file under a dir, read: for "nothing of it is on disk in the clear". */
+export function everything(dir) {
+  const out = [];
+  const walk = (d) => { for (const n of (() => { try { return readdirSync(d); } catch { return []; } })()) { const p = join(d, n); if (statSync(p).isDirectory()) walk(p); else out.push(readFileSync(p)); } };
+  walk(dir);
+  return Buffer.concat(out);
+}
+
+/** The control plane and one agent's house, in this process: a HouseRunner, and a body host with a local fake runner. */
+export function houseWorld({ sealer, claimMs = 5000, warmMs = 5000 } = {}) {
+  const D = scratch('rt-r2-house-');
+  const env = { PATH: process.env.PATH, HOME: D, LOOM_HOME: join(D, 'loomhome'), LOOM_BOX_LOCAL_NAME: 'one', LOOM_BOX_HOME: join(D, 'state'), LOOM_BOX_DATA: join(D, 'data'), LOOM_RUNTIME_SCORECARDS: 'off' };
+  mkdirSync(env.LOOM_HOME, { recursive: true });
+  // The runtime's own key, as body-sync (through api()) opens what HouseRunner sealed.
+  sealer ??= ageSealer(env, join(env.LOOM_BOX_DATA, 'delivery'));
+  setAgent(env, { now: () => new Date() }, { agent: 'art', repo: 'https://example.com/art.git' });
+  update(env, (s) => { const k = Object.keys(s.boxes).find((x) => s.boxes[x].local); s.boxes[k].harnesses = { claude: { loggedIn: true } }; });
+  setModels(env, { list: [{ id: 'opus', harness: 'claude', family: 'anthropic' }], agent: 'art', prefer: ['opus'] });
+  const fed = [];
+  const ended = [];
+  const started = [];
+  const st = {};
+  let n = 0;
+  // Inside the house: a runner whose sessions are files (its "transcript"), so a test can see them sealed or gone.
+  const sess = join(D, 'house', 'sess');
+  mkdirSync(sess, { recursive: true });
+  const transcript = (id) => join(sess, `s-${id}.jsonl`);
+  const local = {
+    harness: 'claude', roots: { sess }, startDelay: 0, envs: {}, transcript,
+    inbox: { pending: () => [], taken: () => [], close() {}, remove() {} },
+    async start(o) { if (local.startDelay) await sleep(local.startDelay); const id = `b000000${n++}`; st[id] = 'working'; local.envs[id] = o.env; started.push(id); writeFileSync(transcript(id), `transcript of ${id}\n`); return { id, harness: 'claude' }; },
+    status: (b) => st[b.id] ?? 'unknown', slotOf: (b) => ({ harness: 'claude', session: `s-${b.id}` }),
+    feed(b, m) { fed.push([b.id, m.id, m.text]); return { fed: true }; },
+    end(b) { ended.push(b.id); st[b.id] = 'ended'; },
+    sessionFiles: (slot) => ({ keep: slot && existsSync(join(sess, `${slot.session}.jsonl`)) ? [{ root: 'sess', rel: `${slot.session}.jsonl` }] : [], drop: [] }),
+  };
+  const hr = new HouseRunner(env, 'claude', { poll: 10, sealer, claimMs, warmMs });
+  let drop = () => false;
+  let left = false;
+  // The house declares claude (its login's env is set); a test can take it away.
+  const houseEnv = { CLAUDE_SECURESTORAGE_CONFIG_DIR: '/run/loom/login/claude', HOUSE_TASK: 'the task', PATH: '/usr/bin' };
+  const host = ({ idleS = 0 } = {}) => {
+    const client = async (p, b) => {
+      const r = await api(env, { now: () => new Date() }, { caller: { kind: 'agent', agent: 'art', house: 'h-1' }, path: p, body: b });
+      if (r.status !== 200) throw new Error(r.body.error);
+      if (drop(r.body)) throw new Error('the answer was lost on its way back');
+      return r.body;
+    };
+    // The host's boot key is in its house's task (as the house runs it: `loom-runtime body-host … --host-key K`).
+    const hostKey = /--host-key ([0-9a-f]{48})/.exec(load(env).houses['h-1']?.task ?? '')?.[1];
+    const done = runBodyHost({ client, runner: () => local, env: houseEnv, hostKey, sleep: () => sleep(10), beats: 100_000, idleS, packMs: 2000 });
+    done.then(() => { left = true; });
+    return done;
+  };
+  // A host leaves at once when told its bodies are another house's: how a test ends one.
+  const kill = async () => {
+    const h = hostOf(env, 'art');
+    writeFileSync(join(env.LOOM_BOX_DATA, 'delivery', 'hosts', 'art.json'), JSON.stringify({ ...h, house: 'h-999' }));
+    await sleep(80);
+    writeFileSync(join(env.LOOM_BOX_DATA, 'delivery', 'hosts', 'art.json'), JSON.stringify({ ...hostOf(env, 'art'), house: h.house }));
+  };
+  return { D, env, hr, local, fed, ended, host, kill, houseEnv, setDrop: (f) => { drop = f; }, sealer, left: () => left,
+    get dropped() { return started.filter((id) => !existsSync(transcript(id))); },
+    accounts: staticAccounts({ accounts: [{ name: 'max', provider: 'anthropic', harness: 'claude', kind: 'login', agents: ['art', 'mark', 'pip'], credentials: [{ kind: 'login', status: 'valid' }], usage: {} }] }) };
+}
+
+export async function bodyInHouse(w, o = {}) {
+  const starting = startBody(w.env, { agent: 'art', venue: 'slack', brief: 'hi' }, { runner: () => w.hr, accounts: w.accounts });
+  await until(() => load(w.env).houses['h-1']);
+  const host = w.host(o);
+  const b = await starting;
+  const body = { id: b.body.split(':')[1], agent: 'art', house: 'h-1', harness: 'claude' };
+  await until(() => w.hr.status(body) === 'working');
+  return { body, host };
+}

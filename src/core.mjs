@@ -8,11 +8,11 @@
 // Both with the runtime's token (role `runtime`, LOOM_RUNTIME_TOKEN_FILE), at loom's URL (LOOM_RUNTIME_LOOM_URL, its
 // /mcp dropped). A refusal keeps core's status; anything else (no URL, no token, core down, a timeout) is a 503.
 //
-//   GET  /api/loom/venues              → {venues: [{name, kind, piece, send?: [argv]}]}
+//   GET  /api/loom/venues              → {venues: [{name, label, kind, piece, send?: [argv], orphaned?}]}  (loom#424)
 //                                      the venues registry, as core keeps it (conversations.md, "Venues"; agent-runtime.md,
 //                                      "Outbound"). A piece reads only its own store, so the runtime asks core, never the
 //                                      other pieces' files; a venue's send runs as core answered its argv.
-//                                      NOT YET IN CORE (being added beside this): coded to the agreed shape, in venues().
+// The turn write carries `key` ("<source>:<id>", loom#426): the same key and turn answer the first write.
 import { readFileSync } from 'node:fs';
 import { setting } from './piece.mjs';
 
@@ -62,7 +62,8 @@ export function venuesOf(raw) {
   for (const v of Array.isArray(raw?.venues) ? raw.venues : []) {
     if (!v || !VENUE.test(v.name ?? '') || !['live', 'scheduled', 'agent'].includes(v.kind)) continue;
     const send = Array.isArray(v.send) && v.send.length >= 1 && v.send.length <= 16 && v.send.every((a) => typeof a === 'string' && a && a.length <= 200) ? [...v.send] : undefined;
-    out[v.name] = { kind: v.kind, ...(typeof v.piece === 'string' ? { piece: v.piece } : {}), ...(send ? { send } : {}) };
+    // An orphaned venue (its piece removed) keeps its name and kind, and posts nowhere.
+    out[v.name] = { kind: v.kind, ...(typeof v.label === 'string' ? { label: v.label.slice(0, 40) } : {}), ...(typeof v.piece === 'string' ? { piece: v.piece } : {}), ...(send && v.orphaned !== true ? { send } : {}), ...(v.orphaned === true ? { orphaned: true } : {}) };
   }
   return out;
 }

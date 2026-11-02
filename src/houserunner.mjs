@@ -15,8 +15,8 @@
 // The host reaches it through the piece API, `body-sync`, as its house's own token (an agent caller with its house):
 // an agent's host sees only its own agent's record, and only the house the record names (or a live house of that
 // agent, adopted when the record names none).
-import { randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { LIVE, up } from './control.mjs';
 import { pieceName } from './piece.mjs';
@@ -57,16 +57,32 @@ function transit(sealer) {
   };
 }
 
-/** Partial part transfers older than an hour: gone (their parts are sealed, but a stopped transfer is never finished). */
-export function sweepParts(env, nowMs = Date.now()) {
-  const root = join(hostsDir(env), 'parts');
+/**
+ * Transfers nobody will finish or collect: part transfers older than an hour (their parts are sealed, but a stopped
+ * transfer never completes), and a session sent back that no pack() collected within the claim window (a pack that
+ * gave up waiting). No slot ever references a packed file: a slot is its own file, sealed again by delivery.
+ */
+export function sweepTransfers(env, nowMs = Date.now(), fileNowMs = Date.now()) {
   const ls = (d) => { try { return readdirSync(d); } catch { return []; } };
-  for (const a of ls(root)) for (const h of ls(join(root, a))) for (const id of ls(join(root, a, h))) {
-    const dir = join(root, a, h, id);
+  const parts = join(hostsDir(env), 'parts');
+  for (const a of ls(parts)) for (const h of ls(join(parts, a))) for (const id of ls(join(parts, a, h))) {
+    const dir = join(parts, a, h, id);
     const at = readJson(join(dir, 'at.json'));
     if (typeof at !== 'number' || nowMs - at >= PARTS_MS) rmSync(dir, { recursive: true, force: true });
   }
+  const packed = join(hostsDir(env), 'packed');
+  for (const a of ls(packed)) for (const h of ls(join(packed, a))) for (const f of ls(join(packed, a, h))) {
+    const p = join(packed, a, h, f);
+    // By its file's own time: a packed file is a file, and its clock is the disk's.
+    try { if (fileNowMs - statSync(p).mtimeMs >= 2 * CLAIM_MS) rmSync(p, { force: true }); } catch { /* gone */ }
+  }
 }
+
+// The body host's own credential (never a body's): its house's task carries a one-time boot key; its first sync trades
+// it for the host's key, held only in the host process's memory. A body in the house has its agent's token and its
+// run's key, and neither reaches body-sync.
+const keyHash = (k) => createHash('sha256').update(String(k)).digest('hex');
+const sameHash = (a, b) => typeof a === 'string' && typeof b === 'string' && a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
 const dataDir = (env) => env.LOOM_BOX_DATA || join(env.HOME || '', '.local', 'share', 'loom-box');
 const hostsDir = (env) => join(dataDir(env), 'delivery', 'hosts');
 const hostFile = (env, agent) => join(hostsDir(env), `${agent}.json`);
@@ -96,7 +112,7 @@ const houseLive = (env, id) => { try { return LIVE.has(load(env).houses[id]?.sta
 const fresh = (h, now) => !!h.report && now - h.report.at < HOST_STALE_MS && h.report.house === h.house;
 
 /** What a house runs as its task to be the agent's body host. */
-export const hostTask = (env) => `loom-runtime body-host --piece ${pieceName(env)}`;
+export const hostTask = (env, bootKey) => `loom-runtime body-host --piece ${pieceName(env)} --host-key ${bootKey}`;
 
 // ─── The host's sync (the piece API's `body-sync`) ─────────────────────────
 
@@ -136,9 +152,17 @@ export function bodySync(env, caller, body, o = {}) {
   const now = (o.now ?? (() => new Date()))().getTime();
   return hostLocked(env, () => {
     const h = loadHost(env, agent);
-    const live = houseLive(env, house);
-    if (!h.house && live && live.agent === agent) { h.house = house; h.req = {}; h.stop = {}; h.inbox = {}; h.claimed = {}; }
     if (h.house !== house) return { exit: true, reason: `${agent}'s bodies are ${h.house ?? 'nowhere'}'s now` };
+    // Only the body host, with its own key: never a body (an agent's token in the house is all a body has).
+    const given = keyHash(body?.hostKey ?? '');
+    let issued;
+    if (!(h.hostHash && sameHash(given, h.hostHash))) {
+      if (!(h.bootHash && sameHash(given, h.bootHash))) throw new StateError('body-sync takes the body host\'s own key: a body in the house has none', 403);
+      // The boot key, once: traded for the host's own key, which only the host process holds.
+      issued = randomBytes(24).toString('hex');
+      h.hostHash = keyHash(issued);
+      delete h.bootHash;
+    }
     const { bodies, done } = cleanReport(body?.report);
     // An id this house already gave one request is never another's (a second claim of the same body is refused).
     h.claimed ??= {};
@@ -162,7 +186,11 @@ export function bodySync(env, caller, body, o = {}) {
     // A packed session, in parts: each sealed as it comes (never on disk in the clear), then opened and sealed whole.
     const got = [];
     for (const [id, p] of Object.entries(body?.report?.packed ?? {}).slice(0, 8)) {
-      if (!BODY_ID.test(id) || !h.stop?.[id]?.pack || !Number.isSafeInteger(p?.part) || !Number.isSafeInteger(p?.parts) || p.parts < 1 || p.parts > 64 || p.part < 0 || p.part >= p.parts || typeof p.data !== 'string' || p.data.length > PART_CHARS) continue;
+      if (!BODY_ID.test(id) || !Number.isSafeInteger(p?.part) || !Number.isSafeInteger(p?.parts) || p.part < 0 || p.part >= p.parts) continue;
+      // A pack nobody's waiting for any more (its stop was dropped): its parts are acknowledged and thrown away, so its
+      // house finishes the transfer and can idle out.
+      if (!h.stop?.[id]?.pack) { got.push([id, p.part]); continue; }
+      if (!Number.isSafeInteger(p?.part) || !Number.isSafeInteger(p?.parts) || p.parts < 1 || p.parts > 64 || p.part < 0 || p.part >= p.parts || typeof p.data !== 'string' || p.data.length > PART_CHARS) continue;
       const dir = partDir(env, agent, house, id);
       let sealedPart;
       try { sealedPart = sealer.seal(Buffer.from(p.data)); } catch { continue; } // no key: not kept (and not acked)
@@ -194,7 +222,7 @@ export function bodySync(env, caller, body, o = {}) {
       inbox[id] = items.flatMap((x) => { try { return [{ id: x.key, text: t.open(x.sealed).toString('utf-8') }]; } catch { return []; } });
     }
     writeJson(hostFile(env, agent), h);
-    return { req, stop: h.stop ?? {}, inbox, acked: got };
+    return { req, stop: h.stop ?? {}, inbox, acked: got, ...(issued ? { hostKey: issued } : {}) };
   });
 }
 
@@ -232,9 +260,10 @@ export class HouseRunner {
         const s = load(this.env);
         const at = bodyBox(s, agent, this.harness, this.env);
         if (!at.box) throw new RunnerError(at.reason);
-        const r = this.up(this.env, { now: () => this.now() }, { kind: 'owner' }, { agent, box: at.box, task: hostTask(this.env) });
-        // A new house: what was asked of the last one (and what it claimed) isn't this one's.
-        hostLocked(this.env, () => { const x = loadHost(this.env, agent); x.house = r.id; delete x.report; x.req = {}; x.stop = {}; x.inbox = {}; x.claimed = {}; writeJson(hostFile(this.env, agent), x); });
+        const boot = randomBytes(24).toString('hex');
+        const r = this.up(this.env, { now: () => this.now() }, { kind: 'owner' }, { agent, box: at.box, task: hostTask(this.env, boot) });
+        // A new house: what was asked of the last one (and what it claimed) isn't this one's, nor is its host's key.
+        hostLocked(this.env, () => { const x = loadHost(this.env, agent); x.house = r.id; delete x.report; delete x.hostHash; x.bootHash = keyHash(boot); x.req = {}; x.stop = {}; x.inbox = {}; x.claimed = {}; writeJson(hostFile(this.env, agent), x); });
       }
       if (Date.now() > end) throw new RunnerError(`${agent}'s house ${h.house ?? ''} didn't start its body host in ${this.warmMs / 1000} s`);
       await sleep(this.poll);

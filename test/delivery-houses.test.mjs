@@ -26,6 +26,9 @@ const hasAge = spawnSync('age', ['--version']).status === 0;
 const lines = (f) => (existsSync(f) ? readFileSync(f, 'utf-8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []);
 const until = async (f, ms = 20_000) => { const end = Date.now() + ms; while (!f()) { if (Date.now() > end) throw new Error('timed out'); await new Promise((r) => setTimeout(r, 100)); } };
 
+/** A house's boot key, from its task (the host traded it for its own key on its first sync). */
+const bootOf = (env, house) => /--host-key ([0-9a-f]{48})/.exec(load(env).houses[house]?.task ?? '')?.[1];
+
 const TOKENS = { runtime: 'loom_runtime_test_token_xxxxxxxx', art: 'loom_house_art_test_token_xxxxxx', mark: 'loom_house_mark_test_token_xxxxx' };
 
 /** loom, standing in: core's routes as the runtime, and this piece's API as the caller each token is. */
@@ -83,6 +86,8 @@ test('a delivered body is a session in its agent\'s own house: placed, woken by 
   env.LOOM_RUNTIME_LOOM_URL = loom.url;
   const S = scratch('rt-houses-send-');
   process.env.FAKE_SEND = S;
+  // The post runs in a detached worker with the runtime's env: the stand-in adapter finds its dir there.
+  env.FAKE_SEND = S;
   // Art's house is how the owner set it; the box isn't logged in to Claude yet.
   setAgent(env, { now: () => new Date() }, { agent: 'art', repo: 'https://example.com/art.git' });
   const local = () => Object.keys(load(env).boxes).find((k) => load(env).boxes[k].local);
@@ -101,7 +106,8 @@ test('a delivered body is a session in its agent\'s own house: placed, woken by 
     assert.deepEqual([a.conversation, a.seq], [cvOf('art', 'slack', 'dm:U1'), 1]);
     await until(() => load(env).houses['h-1']);
     const house = load(env).houses['h-1'];
-    assert.deepEqual([house.agent, house.box, house.task], ['art', local(), 'loom-runtime body-host --piece box']);
+    assert.deepEqual([house.agent, house.box], ['art', local()]);
+    assert.match(house.task, /^loom-runtime body-host --piece box --host-key [0-9a-f]{48}$/, 'its task carries the host\'s one-time boot key');
 
     // The house: its own environment (its agent's token, its box's harness login), nothing of the runtime's.
     const H = join(D, 'house');
@@ -111,7 +117,7 @@ test('a delivered body is a session in its agent\'s own house: placed, woken by 
       // Its house file declares claude, so the box mounted its login (house.mjs): the login's env says where.
       CLAUDE_SECURESTORAGE_CONFIG_DIR: join(H, 'login-claude'),
       FAKE_HARNESS: H, LOOM_RUNTIME_CLAUDE: join(here, 'fake-claude.mjs'), LOOM_RUNTIME_CLAUDE_JOBS: join(H, 'jobs'), LOOM_RUNTIME_ACCOUNTS: 'none' };
-    const host = spawn(process.execPath, [cli, 'body-host', '--piece', 'box', '--beats', '60'], { env: houseEnv, cwd: join(H, 'work'), stdio: 'ignore' });
+    const host = spawn(process.execPath, [cli, 'body-host', '--piece', 'box', '--host-key', bootOf(env, 'h-1'), '--beats', '60'], { env: houseEnv, cwd: join(H, 'work'), stdio: 'ignore' });
     try {
       await until(() => loadConv(env, a.conversation)?.body);
       const c = loadConv(env, a.conversation);
@@ -131,9 +137,12 @@ test('a delivered body is a session in its agent\'s own house: placed, woken by 
       const bodyCli = { PATH: process.env.PATH, HOME: H, LOOM_URL: loom.url, LOOM_TOKEN_FILE: join(H, 'token'), LOOM_BODY_KEY: bodyEnv.key };
       const ok = await run(['send', '--conversation', a.conversation, '--piece', 'box', '--text', 'Yes, Thursday at 3.'], '', bodyCli, H);
       assert.equal(ok.status, 0, ok.stdout + ok.stderr);
-      assert.equal(JSON.parse(ok.stdout).ok, true);
+      assert.equal(JSON.parse(ok.stdout).accepted, true, 'accepted at once; posted by the runtime');
+      await until(() => loom.seen.some((x) => x.path === '/api/loom/conversations/turn' && x.body.kind === 'reply'));
       assert.deepEqual(lines(join(S, 'calls.log')).map((x) => [x.argv, x.text]), [[['--place', 'dm:U1', '--agent', 'art'], 'Yes, Thursday at 3.']]);
       const reply = loom.seen.filter((x) => x.path === '/api/loom/conversations/turn').at(-1).body;
+      // And the body's env never had the host's key (nor its task).
+      assert.equal(bodyEnv.names.includes('HOUSE_TASK') || bodyEnv.names.includes('LOOM_HOST_KEY'), false);
       assert.deepEqual([reply.kind, reply.outcome, reply.from, reply.run], ['reply', 'answered', { kind: 'agent', id: 'art' }, c.run]);
       // Another agent's house, even holding Art's body's key, can't speak in Art's conversation.
       writeFileSync(join(H, 'mark-token'), `${TOKENS.mark}\n`);
@@ -183,7 +192,7 @@ test('a house\'s body leaves its slot: its host packs the session in parts and s
   // The start asks for Art's house; the house (and so its host) comes up once it's been asked for.
   const starting = hr.start({ agent: 'art', brief: 'hi', model: 'opus', env: { LOOM_BODY_KEY: 'k1' } });
   await until(() => load(env).houses['h-1']);
-  const host = runBodyHost({ client, runner: () => local, env: { CLAUDE_SECURESTORAGE_CONFIG_DIR: '/run/loom/login/claude' }, sleep: () => new Promise((r) => setTimeout(r, 10)), beats: 3000, idleS: 0 });
+  const host = runBodyHost({ client, runner: () => local, env: { CLAUDE_SECURESTORAGE_CONFIG_DIR: '/run/loom/login/claude' }, hostKey: bootOf(env, 'h-1'), sleep: () => new Promise((r) => setTimeout(r, 10)), beats: 3000, idleS: 0 });
   try {
     const b = await starting;
     assert.equal(b.house, 'h-1');
@@ -220,7 +229,7 @@ test('a house is who its token says: one that names another house is refused, an
   const hostFor = (agent, house) => {
     const r = localRunner();
     const client = async (p, b) => { const x = await api(env, { now: () => new Date() }, { caller: { kind: 'agent', agent, house }, path: p, body: b }); if (x.status !== 200) throw new Error(x.body.error); return x.body; };
-    return runBodyHost({ client, runner: () => r, env: { CLAUDE_SECURESTORAGE_CONFIG_DIR: '/run/loom/login/claude' }, sleep: () => new Promise((res) => setTimeout(res, 10)), beats: 400, idleS: 0 });
+    return runBodyHost({ client, runner: () => r, env: { CLAUDE_SECURESTORAGE_CONFIG_DIR: '/run/loom/login/claude' }, hostKey: bootOf(env, house), sleep: () => new Promise((res) => setTimeout(res, 10)), beats: 400, idleS: 0 });
   };
   const hr = new HouseRunner(env, 'claude', { poll: 10 });
   const { startBody } = await import('../src/bodies.mjs');
@@ -249,7 +258,7 @@ test('a house is who its token says: one that names another house is refused, an
   assert.equal(JSON.stringify(hostOf(env, 'art').report.bodies), before, 'art\'s house\'s report stands');
   // A malformed id is never a record or a path.
   const { readdirSync } = await import('node:fs');
-  bodySync(env, { kind: 'agent', agent: 'art', house: 'h-1' }, { report: { bodies: { '../../x': { status: 'working' } }, done: {}, packed: { '../../x': { part: 0, parts: 1, data: 'AA' } } } });
+  assert.throws(() => bodySync(env, { kind: 'agent', agent: 'art', house: 'h-1' }, { report: { bodies: { '../../x': { status: 'working' } }, done: {}, packed: { '../../x': { part: 0, parts: 1, data: 'AA' } } } }), /the body host's own key/);
   assert.equal(readdirSync(join(env.LOOM_BOX_DATA, 'delivery', 'hosts')).some((n) => n.includes('x')), false);
   assert.equal(existsSync(join(env.LOOM_BOX_DATA, 'x.age')), false);
   // The same house reporting its body's id again, for another request: refused, art's first body untouched.

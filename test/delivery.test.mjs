@@ -76,14 +76,14 @@ test('2. delivery records first, and once; a body that fails to start leaves the
   assert.match(down.error, /ECONNREFUSED/);
   assert.equal(w.log.filter((l) => l[0] === 'start').length, 1);
   assert.equal(loadConv(w.env, cvOf('art', 'slack', 'dm:U2')), null);
-  // A turn core didn't answer may have landed: it's remembered as uncertain, and its retry looks for it (an audit
-  // write, as core has no lookup by source and id) before writing it again. This one never landed: written once.
+  // A turn core didn't answer may have landed: nothing's kept of the attempt, and the retry posts the same turn with
+  // the same key (core answers the first write if it landed). This one never landed: written once.
   w.core.down = false;
   const again = { ...w.msg('dm:U2', 'are you there?'), id: 'retry-me' };
   w.core.down = true;
   assert.equal((await deliver(w.env, again, w.o)).status, 503);
   const seenDir = join(deliveryDir(w.env), 'seen');
-  assert.ok(readdirSync(seenDir).map((n) => JSON.parse(readFileSync(join(seenDir, n), 'utf-8'))).some((x) => x.uncertain?.cv === cvOf('art', 'slack', 'dm:U2')));
+  assert.equal(readdirSync(seenDir).map((n) => readFileSync(join(seenDir, n), 'utf-8')).some((x) => x.includes('uncertain')), false);
   w.core.down = false;
   const turnsBefore = w.core.turns.length;
   assert.equal((await deliver(w.env, again, w.o)).body, 'started');
@@ -241,8 +241,10 @@ test('slots and waiting messages are sealed with age to the runtime\'s own key',
   assert.equal(slot.includes(Buffer.from('first secret')), false);
 });
 
-test('outbound: the venue\'s send (--place, --agent, the text on stdin), one retry, then the agent\'s turn', async () => {
+test('outbound: accepted at once; the venue\'s send (--place, --agent, the text on stdin), retried once if it says no, then the agent\'s turn', async () => {
   const w = world();
+  // send() accepts; the post it starts is what this test waits on.
+  const sendNow = async (b) => { let p; const r = await send(w.env, b, { ...w.o, onSend: (x) => { p = x; } }); return { ...r, post: p ? await p : null }; };
   const S = scratch('rt-send-');
   process.env.FAKE_SEND = S;
   const calls = () => (existsSync(join(S, 'calls.log')) ? readFileSync(join(S, 'calls.log'), 'utf-8').trim().split('\n').map((l) => JSON.parse(l)) : []);
@@ -254,26 +256,28 @@ test('outbound: the venue\'s send (--place, --agent, the text on stdin), one ret
   let sentBefore;
   w.core.turn = (t) => { sentBefore = calls().length; return turn(t); };
   const key = w.runner.envs[c.body.split(':')[1]].LOOM_BODY_KEY;
-  const ok = await send(w.env, { conversation: cv, text: 'Hi Loren!', key }, w.o);
+  const ok = await sendNow({ conversation: cv, text: 'Hi Loren!', key });
   w.core.turn = turn;
   assert.equal(sentBefore, 1);
-  assert.equal(ok.ok, true);
-  assert.match(ok.id, /^p-/);
+  assert.equal(ok.accepted, true);
+  assert.equal(ok.post.ok, true);
+  assert.match(ok.post.id, /^p-/);
   assert.deepEqual(calls()[0], { argv: ['--place', 'dm:U1', '--agent', 'art'], text: 'Hi Loren!' });
   const reply = w.core.turns.at(-1);
   assert.deepEqual({ ...reply, at: undefined }, { agent: 'art', venue: 'slack', place: 'dm:U1', at: undefined, from: { kind: 'agent', id: 'art' }, kind: 'reply', run: c.run, model: 'opus', harness: 'claude', outcome: 'answered', conversation: cv, seq: 2 });
   assert.deepEqual(w.core.audits.at(-1), { conversation: cv, seq: 2, text: 'Hi Loren!' });
   // One failure: retried once, and it went.
   writeFileSync(join(S, 'fail'), '1');
-  assert.equal((await send(w.env, { conversation: cv, text: 'again', key }, w.o)).ok, true);
+  assert.equal((await sendNow({ conversation: cv, text: 'again', key })).post.ok, true);
   assert.equal(calls().length, 3);
   assert.equal(w.core.turns.at(-1).outcome, 'answered');
-  // Two: the body is told why, and the turn says failed.
+  // Two: the turn says failed, and the body is told why, through its inbox.
   writeFileSync(join(S, 'fail'), '2');
-  const no = await send(w.env, { conversation: cv, text: 'and again', key }, w.o);
-  assert.deepEqual([no.ok, no.reason], [false, 'the bot has no access to that channel']);
+  const no = await sendNow({ conversation: cv, text: 'and again', key });
+  assert.deepEqual([no.accepted, no.post.ok, no.post.reason], [true, false, 'the bot has no access to that channel']);
   assert.equal(calls().length, 5);
   assert.equal(w.core.turns.at(-1).outcome, 'failed');
+  assert.ok(w.log.some((l) => l[0] === 'feed' && l[2] === `(couldn't post your message ${no.ref} in slack: the bot has no access to that channel)`));
   // A venue with no send: nothing posts, nothing is recorded.
   await deliver(w.env, { source: 'runtime', id: 'r-1', agent: 'art', venue: 'relay', place: 'mark', from: { kind: 'agent', id: 'mark' }, kind: 'message', at: w.clock.now().toISOString(), text: 'x' }, w.o);
   const turns = w.core.turns.length;
@@ -303,14 +307,14 @@ test('send answers only the body holding the conversation: another body, no key,
   assert.equal(existsSync(join(S, 'calls.log')), false);
   assert.equal(w.core.turns.length, turns);
   // Its own conversation: it goes.
-  assert.equal((await send(w.env, { conversation: B.conversation, text: 'hi', key: keyOf(B) }, w.o)).ok, true);
+  assert.equal((await send(w.env, { conversation: B.conversation, text: 'hi', key: keyOf(B) }, w.o)).accepted, true);
   // A resumed body has a new run and a new key: the old one no longer speaks.
   const old = keyOf(A);
   w.runner.finish(A.body);
   assert.equal((await deliver(w.env, w.msg('dm:A', 'again'), w.o)).body, 'resumed');
   const A2 = loadConv(w.env, A.conversation);
   assert.equal((await send(w.env, { conversation: A.conversation, text: 'stale', key: old }, w.o)).ok, false);
-  assert.equal((await send(w.env, { conversation: A.conversation, text: 'fresh', key: keyOf(A2) }, w.o)).ok, true);
+  assert.equal((await send(w.env, { conversation: A.conversation, text: 'fresh', key: keyOf(A2) }, w.o)).accepted, true);
   delete process.env.FAKE_SEND;
 });
 
@@ -518,7 +522,7 @@ test('B. placement is #49\'s rule: the agent\'s owner\'s box, may host it, logge
 
 test('A+B. with no box placed for it, a delivery\'s body is failed (and says why); the turn stands', async () => {
   const w = world();
-  const { runner: _r, memAvailableMb: _m, ...o } = w.o;
+  const { runner: _r, ...o } = w.o;
   const r = await deliver(w.env, w.msg('dm:P', 'hello'), o);
   assert.equal(r.body, 'failed');
   assert.match(r.reason, /no box owned by art's owner reports claude logged in/);
@@ -539,7 +543,7 @@ test('C. send as the piece API: only the conversation\'s own agent, with its bod
   const viaApi = (caller, body) => sendFn(w.env, body, { ...w.o, caller });
   assert.equal((await viaApi({ kind: 'agent', agent: 'mark' }, { conversation: c.conversation, text: 'x', key })).ok, false, 'another agent, even with the key');
   assert.equal((await viaApi({ kind: 'agent', agent: 'art' }, { conversation: c.conversation, text: 'x' })).ok, false, 'no key');
-  assert.equal((await viaApi({ kind: 'agent', agent: 'art' }, { conversation: c.conversation, text: 'hi Loren', key })).ok, true);
+  assert.equal((await viaApi({ kind: 'agent', agent: 'art' }, { conversation: c.conversation, text: 'hi Loren', key })).accepted, true);
   // api() itself: only an agent caller reaches send and body-sync.
   assert.equal((await api(w.env, fx, { caller: { kind: 'owner' }, path: 'send', body: {} })).status, 403);
   assert.equal((await api(w.env, fx, { caller: { kind: 'piece', subject: 'one' }, path: 'body-sync', body: {} })).status, 403);

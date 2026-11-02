@@ -30,7 +30,7 @@
 // Outbound (`send`): only the body holding the conversation, in its current run (LOOM_BODY_KEY), through the piece
 // API as its own agent. The venue's declared send argv, `--place <place> --agent <agent>`, the text on stdin, a time
 // limit, `{ok, id?}`, one retry; then the agent's turn (`reply`, outcome answered or failed) and its text, to core.
-import { spawn as nodeSpawn, spawnSync } from 'node:child_process';
+import { spawn as nodeSpawn } from 'node:child_process';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -39,7 +39,7 @@ import { fileURLToPath } from 'node:url';
 import { accountsFrom } from './accounts.mjs';
 import { endBody, readBody, resumeBody, startBody } from './bodies.mjs';
 import { CoreError, coreFrom } from './core.mjs';
-import { HouseRunner, sweepParts } from './houserunner.mjs';
+import { HouseRunner, sweepTransfers } from './houserunner.mjs';
 import { venueKind as kindOf } from './models.mjs';
 import { setting } from './piece.mjs';
 import { dropSession, packSession, restoreFiles } from './sessions.mjs';
@@ -61,9 +61,8 @@ export const WARM_IDLE_S = 600;
 export const MAX_CONTINUITY_DAYS = 14;
 /** Each venue kind's window, unless LOOM_RUNTIME_CONTINUITY says (bridges.md: a DM for weeks, a busy thread a day). */
 export const CONTINUITY_DAYS = { live: 14, scheduled: 1, agent: 3 };
-/** A send has this long (agent-runtime.md, "Outbound"); through the piece API, whose call is 15 s whole, less. */
+/** A send has this long (agent-runtime.md, "Outbound"): all of it, since it runs outside the body's own call. */
 export const SEND_MS = 15_000;
-export const SEND_VIA_API_MS = 6_000;
 /** A start or resume that's been "starting" this long, its process gone or not, is given up (a cold house is slow). */
 const STARTING_MS = 240_000;
 const OUTCOME_MS = 3_600_000;
@@ -169,7 +168,6 @@ export function depsOf(env, o = {}) {
     accounts: o.accounts ?? accountsFrom(env),
     fetchImpl: o.fetchImpl,
     venues: o.venues ?? (() => core.venues()),
-    run: o.run ?? spawnSync,
     sendMs: o.sendMs ?? SEND_MS,
     bodyEnv: (key) => bodyEnvOf(env, { key }),
     cwd: o.cwd ?? setting(env, 'BODY_CWD'),
@@ -197,6 +195,9 @@ export function parseDelivery(raw) {
   if (!str(raw.place, MAX_PLACE)) fail(`place is 1-${MAX_PLACE} characters`);
   if (raw.label !== undefined && !str(raw.label, MAX_LABEL, 0)) fail(`label is at most ${MAX_LABEL} characters`);
   if (!raw.from || typeof raw.from !== 'object' || Array.isArray(raw.from) || !FROM_KINDS.includes(raw.from.kind)) fail(`from is {kind: ${FROM_KINDS.join('|')}, …}`);
+  // Who a person is, against the gates, is t-1746's; one without a slug is malformed now.
+  if (raw.from.kind === 'person' && !(typeof raw.from.slug === 'string' && /^[a-z0-9]+(-[a-z0-9]+)*$/.test(raw.from.slug) && raw.from.slug.length <= 80)) fail('from {kind: person} names its slug');
+  if (raw.from.kind === 'agent' && !AGENT_NAME.test(raw.from.id ?? '')) fail('from {kind: agent} names its id');
   if (!KINDS.includes(raw.kind)) fail(`kind is ${KINDS.join(', ')}`);
   if (typeof raw.at !== 'string' || Number.isNaN(Date.parse(raw.at))) fail('at is an ISO-8601 time');
   if (!str(raw.text, MAX_TEXT)) fail(`text is 1-${MAX_TEXT} characters`);
@@ -226,40 +227,34 @@ export async function deliver(env, raw, o = {}) {
   }
 }
 
-/** Core's conversation id for a key (loom src/backends/conversations.ts, conversationId): known before core answers. */
-export const conversationIdOf = (agent, venue, place) => `cv-${createHash('sha256').update(`${agent}\0${venue}\0${place}`).digest('hex').slice(0, 12)}`;
-
-/** The seqs the runtime knows it wrote in a conversation (it's the only writer of its venues' turns), last 64. */
-const noteSeq = (c, seq) => { c.seqs = [...new Set([...(c.seqs ?? []), seq])].sort((a, b) => a - b).slice(-64); };
-
 async function deliverOnce(env, raw, o) {
   const d = depsOf(env, o);
   let m;
   try { m = parseDelivery(raw); } catch (e) { return { status: e.status ?? 400, error: e.message }; }
   const key = deliveryKey(m);
   const now = () => d.now().getTime();
-  const cvGuess = conversationIdOf(m.agent, m.venue, m.place);
 
-  // Once: the same (source, id) within 24 hours answers what the first call answered, and writes nothing. A call
-  // that wrote its turn and then died left the turn's seq here: its retry carries on from that turn, writing none.
-  // A turn write core didn't answer is `uncertain`: its retry posts the same turn with the same idempotency key, and
-  // core answers the first write's {conversation, seq} if it landed (loom: conversations/turn `key`).
+  // Once: the same (source, id) within 24 hours answers what the first call answered, and writes nothing; the same
+  // (source, id) with a different message is refused (409). A call that wrote its turn and then died left the turn's
+  // seq here: its retry carries on from that turn. One still being made answers 503: retry shortly.
+  const hash = createHash('sha256').update(JSON.stringify(m)).digest('hex');
   const first = locked(env, () => {
     const s = readJson(seenFile(env, key));
     const recent = s && now() - s.at < DAY_MS;
+    if (recent && s.hash && s.hash !== hash) return { other: true };
     const live = recent && alive(s.pid) && (s.pid !== process.pid || inFlight.has(key));
     if (recent && (s.answer || live)) return { wait: s };
-    writeJson(seenFile(env, key), { at: now(), pid: process.pid, ...(recent && s.turn ? { turn: s.turn } : {}), ...(recent && s.uncertain ? { uncertain: s.uncertain } : {}) });
-    return { resume: recent && s.turn ? s.turn : null, uncertain: recent && !s.turn ? s.uncertain ?? null : null };
+    writeJson(seenFile(env, key), { at: now(), pid: process.pid, hash, ...(recent && s.turn ? { turn: s.turn } : {}) });
+    return { resume: recent && s.turn ? s.turn : null };
   });
+  if (first.other) return { status: 409, error: `${m.source}'s message ${m.id} was delivered already, as another message` };
   if (first.wait) {
-    let answer = first.wait.answer;
-    for (let i = 0; !answer && i < 100; i++) { await sleep(50); answer = readJson(seenFile(env, key))?.answer; }
-    return answer ?? { status: 409, error: 'the same delivery is still being made' };
+    if (first.wait.answer) return first.wait.answer;
+    return { status: 503, error: 'the same delivery is still being made: retry in a few seconds', retryAfter: 2 };
   }
   inFlight.add(key);
   try {
-    const settle = (answer) => { locked(env, () => writeJson(seenFile(env, key), { at: now(), answer })); return answer; };
+    const settle = (answer) => { locked(env, () => writeJson(seenFile(env, key), { at: now(), hash, answer })); return answer; };
 
     // 1. The turn, first; a body sees nothing that isn't recorded.
     let turn = first.resume;
@@ -272,8 +267,9 @@ async function deliverOnce(env, raw, o) {
       } catch (e) {
         const definite = e instanceof CoreError && e.status < 500;
         // Refused (4xx, a 409 among them: never a match): nothing of it is this delivery's. Anything else (core down,
-        // a timeout) may have landed: kept as uncertain, and its retry posts the same key.
-        locked(env, () => (definite ? rmSync(seenFile(env, key), { force: true }) : writeJson(seenFile(env, key), { at: now(), uncertain: { cv: cvGuess } })));
+        // a timeout) may have landed: either way nothing's kept here, and a retry posts the same turn with the same
+        // key, so core answers the first write's {conversation, seq} if it did land (loom#426).
+        locked(env, () => rmSync(seenFile(env, key), { force: true }));
         if (definite && e.status === 409) return { status: 409, error: `core refused the turn: its key ${turnKey(m)} is another turn's (${e.message})` };
         return { status: definite ? e.status : 503, error: e.message };
       }
@@ -282,7 +278,7 @@ async function deliverOnce(env, raw, o) {
       }
     }
     // On record at once: a crash from here on, and the retry uses this turn.
-    locked(env, () => writeJson(seenFile(env, key), { at: now(), pid: process.pid, turn: { conversation: turn.conversation, seq: turn.seq } }));
+    locked(env, () => writeJson(seenFile(env, key), { at: now(), pid: process.pid, hash, turn: { conversation: turn.conversation, seq: turn.seq } }));
     o.afterTurn?.();
     // Its text, for review. A failed audit write leaves the turn standing without it (conversations.md); a retry's
     // second one is refused by core (409), which is fine.
@@ -298,7 +294,6 @@ async function deliverOnce(env, raw, o) {
     locked(env, () => {
       const c = loadConv(env, turn.conversation) ?? { conversation: turn.conversation, agent: m.agent, venue: m.venue, place: m.place, kind, queue: [], outcomes: {}, runs: 0, started: d.now().toISOString() };
       if (m.label !== undefined) c.label = m.label;
-      noteSeq(c, turn.seq);
       // A retry after a crash may find its message already queued (or already answered): never twice.
       if (!c.queue.some((x) => x.key === key) && !c.outcomes?.[key]) c.queue.push({ key, id: m.id, at: m.at, from: m.from, kind: m.kind, ...(sealed ? { sealed } : { mem: true }) });
       c.last = d.now().toISOString();
@@ -568,7 +563,7 @@ async function execute(env, op, d, mem) {
       saveConv(env, c);
       return true;
     });
-    if (!keep) { try { endBody(env, r.body, { runner: d.runner, now: d.now, bodyEnv: d.bodyEnv() }); } catch { /* gone */ } }
+    if (!keep) endAndForget(env, r.body, d);
   } catch (e) {
     for (const p of restored) rmSync(p, { recursive: true, force: true });
     locked(env, () => {
@@ -587,6 +582,21 @@ async function execute(env, op, d, mem) {
       saveConv(env, c);
     });
   }
+}
+
+/**
+ * A body ended with nothing kept: stopped, and its harness's session files deleted (in its house, the host does that
+ * on a plain stop). Every end either packs into a slot (retire) or comes here: none leaves a transcript behind.
+ */
+function endAndForget(env, ref, d) {
+  try {
+    const rec = readBody(env, ref);
+    const runner = d.runner(rec.harness);
+    const body = bodyOf(ref, rec);
+    const slot = (() => { try { return runner.slotOf(body) ?? rec.slot; } catch { return rec.slot; } })();
+    endBody(env, ref, { runner: d.runner, now: d.now, bodyEnv: d.bodyEnv() });
+    if (!runner.remote) dropSession(runner, slot, body);
+  } catch (e) { d.warn(`ending ${ref}: ${e.message}`); }
 }
 
 /**
@@ -682,8 +692,8 @@ export async function tick(env, o = {}, only, mem = new Map()) {
   const d = depsOf(env, o);
   if (only) await drain(env, only, d, mem);
   const now = d.now().getTime();
-  // A house's session coming back in parts that stopped coming: swept after an hour.
-  try { sweepParts(env, now); } catch (e) { d.warn(`sweeping part transfers: ${e.message}`); }
+  // Transfers from houses nobody will finish or collect (houserunner.mjs, sweepTransfers).
+  try { sweepTransfers(env, now, Date.now()); } catch (e) { d.warn(`sweeping transfers: ${e.message}`); }
   const warm = limitsOf(env).warmIdleS * 1000;
   const ops = [];
   locked(env, () => {
@@ -726,27 +736,43 @@ export async function tick(env, o = {}, only, mem = new Map()) {
 
 // ─── Outbound ───────────────────────────────────────────────────────────────
 
-/** One run of a venue's send: {ok, id?} or {ok: false, reason}. */
+/**
+ * One run of a venue's send, with the full time it has (15 s): {ok, id?}; {ok: false, answered: true, reason} when the
+ * adapter said no; {ok: false, answered: false, reason} when it didn't say (a timeout, a crash, no JSON), which may
+ * have posted all the same.
+ */
 function sendOnce(d, argv, c, text) {
-  const r = d.run(argv[0], [...argv.slice(1), '--place', c.place, '--agent', c.agent], { input: text, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: d.sendMs, maxBuffer: 1024 * 1024 });
-  if (r.error) return { ok: false, reason: r.error.code === 'ETIMEDOUT' ? `no answer in ${d.sendMs / 1000}s` : r.error.message };
-  let a;
-  try { a = JSON.parse((r.stdout || '').trim().split('\n').pop()); } catch { return { ok: false, reason: `its send answered no JSON (exit ${r.status})` }; }
-  if (a?.ok === true) return { ok: true, ...(typeof a.id === 'string' && a.id.length <= 200 ? { id: a.id } : {}) };
-  return { ok: false, reason: typeof a?.reason === 'string' ? a.reason.slice(0, 300) : `its send said no (exit ${r.status})` };
+  return new Promise((resolve) => {
+    let out = '';
+    let done = false;
+    const finish = (v) => { if (!done) { done = true; clearTimeout(timer); resolve(v); } };
+    let child;
+    try { child = nodeSpawn(argv[0], [...argv.slice(1), '--place', c.place, '--agent', c.agent], { stdio: ['pipe', 'pipe', 'ignore'] }); } catch (e) { return finish({ ok: false, answered: false, reason: e.message }); }
+    const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* gone */ } finish({ ok: false, answered: false, reason: `no answer in ${d.sendMs / 1000}s` }); }, d.sendMs);
+    child.on('error', (e) => finish({ ok: false, answered: false, reason: e.message }));
+    child.stdout.on('data', (x) => { if (out.length < 1024 * 1024) out += x; });
+    child.on('close', (status) => {
+      let a;
+      try { a = JSON.parse(out.trim().split('\n').pop()); } catch { return finish({ ok: false, answered: false, reason: `its send answered no JSON (exit ${status})` }); }
+      if (a?.ok === true) return finish({ ok: true, ...(typeof a.id === 'string' && a.id.length <= 200 ? { id: a.id } : {}) });
+      finish({ ok: false, answered: true, reason: typeof a?.reason === 'string' ? a.reason.slice(0, 300) : `its send said no (exit ${status})` });
+    });
+    child.stdin.on('error', () => {});
+    child.stdin.end(text);
+  });
 }
 
 /**
- * An agent's message out, in its conversation's venue: sent first (one retry), then its turn recorded with outcome
- * `answered`, or `failed` when the send failed twice; the answer is what the body is told. `o.caller`: who's asking
- * (the piece API's caller): an agent speaks only in its own conversations.
+ * An agent's message out, in its conversation's venue. Checked, then accepted at once ({accepted, ref}): the post runs
+ * with its full 15 s outside the body's own call, from a detached worker (the piece API) or here (`o.onSend` gets it).
+ * Errors before acceptance are {ok: false, reason}. `o.caller`: who's asking: an agent speaks only in its own
+ * conversations, and only the body holding it, in its current run (LOOM_BODY_KEY).
  */
 export async function send(env, { conversation, text, key }, o = {}) {
   const d = depsOf(env, o);
   const c = loadConv(env, conversation);
   if (!c) return { ok: false, reason: `no conversation ${conversation} here` };
   if (o.caller && (o.caller.kind !== 'agent' || o.caller.agent !== c.agent)) return { ok: false, reason: `only ${c.agent}'s own body speaks in ${conversation}` };
-  // Only the body holding this conversation now, in its current run, speaks in it (as its agent, to its place).
   const want = typeof c.sendKey === 'string' && /^[0-9a-f]{64}$/.test(c.sendKey) ? Buffer.from(c.sendKey, 'hex') : null;
   if (!want || !c.body || typeof key !== 'string' || !key || !timingSafeEqual(keyHash(key), want)) {
     return { ok: false, reason: `only the body holding ${conversation} speaks in it (its run's ${BODY_KEY} doesn't match)` };
@@ -754,20 +780,61 @@ export async function send(env, { conversation, text, key }, o = {}) {
   if (!str(text, MAX_TEXT)) return { ok: false, reason: `a message is 1-${MAX_TEXT} characters` };
   const v = await venueOf(d, c.venue);
   if (!v?.send) return { ok: false, reason: `venue ${c.venue} declares no send: nothing posts there` };
-  let r = sendOnce(d, v.send, c, text);
-  if (!r.ok) r = sendOnce(d, v.send, c, text);
+  const ref = `out-${randomBytes(6).toString('hex')}`;
+  const out = { body: c.body, run: c.run };
+  if (o.detach) (o.spawnSender ?? ((...a) => spawnSender(env, ...a)))(conversation, ref, text, out);
+  else { const p = post(env, conversation, ref, text, out, o).catch((e) => d.warn(`posting ${ref}: ${e.message}`)); o.onSend?.(p); }
+  return { accepted: true, ref, conversation: c.conversation };
+}
+
+/** `loom-runtime deliver post --conversation <cv> --ref <ref> --stdin`: the post, detached; its text on stdin, never a file. */
+function spawnSender(env, cv, ref, text, out) {
+  if (!CV.test(cv) || !/^out-[0-9a-f]{12}$/.test(ref)) fail('not a post', 500);
+  const cli = join(dirname(fileURLToPath(import.meta.url)), 'cli.mjs');
+  mkdirSync(deliveryDir(env), { recursive: true, mode: 0o700 });
+  const log = openSync(join(deliveryDir(env), 'worker.log'), 'a', 0o600);
+  const child = nodeSpawn(process.execPath, [cli, 'deliver', 'post', '--conversation', cv, '--ref', ref, '--stdin'], { env, detached: true, stdio: ['pipe', log, log] });
+  child.stdin.on('error', () => {});
+  child.stdin.end(JSON.stringify({ text, ...out }));
+  child.unref();
+}
+
+/**
+ * The post itself: the venue's send, retried once only when the adapter answered no (a timed-out post may have
+ * landed, so it's never posted twice), then the agent's turn (`reply`, answered or failed) and its text; a failure is
+ * told to the body that sent it, through its inbox (or, its turn over, as a message waiting for its next one).
+ */
+export async function post(env, conversation, ref, text, { body, run } = {}, o = {}) {
+  const d = depsOf(env, o);
+  const c = loadConv(env, conversation);
+  if (!c) return { ok: false, reason: `no conversation ${conversation} here` };
+  const v = await venueOf(d, c.venue);
+  let r = v?.send ? await sendOnce(d, v.send, c, text) : { ok: false, answered: true, reason: `venue ${c.venue} declares no send` };
+  if (!r.ok && r.answered && v?.send) r = await sendOnce(d, v.send, c, text);
   let rec = null;
-  try { rec = c.body ? readBody(env, c.body) : null; } catch { /* its body is gone: the turn says no model */ }
+  try { rec = body ? readBody(env, body) : null; } catch { /* its body is gone: the turn says no model */ }
   const turn = {
     agent: c.agent, venue: c.venue, place: c.place, at: d.now().toISOString(), from: { kind: 'agent', id: c.agent }, kind: 'reply',
-    run: c.run ?? newRun(), ...(rec?.model ? { model: rec.model } : {}), ...(rec?.harness ? { harness: rec.harness } : {}), outcome: r.ok ? 'answered' : 'failed',
+    run: run ?? c.run ?? newRun(), ...(rec?.model ? { model: rec.model } : {}), ...(rec?.harness ? { harness: rec.harness } : {}), outcome: r.ok ? 'answered' : 'failed',
   };
-  let seq;
   try {
-    ({ seq } = await d.core.turn(turn));
-    locked(env, () => { const x = loadConv(env, conversation); if (x) { noteSeq(x, seq); saveConv(env, x); } });
+    const { seq } = await d.core.turn(turn);
     try { await d.core.audit({ conversation: c.conversation, seq, text }); } catch (e) { d.warn(`the reply's turn stands without its audit text: ${e.message}`); }
-  } catch (e) { d.warn(`the reply went out but its turn wasn't recorded: ${e.message}`); }
+  } catch (e) { d.warn(`${ref} went out but its turn wasn't recorded: ${e.message}`); }
+  if (!r.ok) tellBody(env, conversation, body, `(couldn't post your message ${ref} in ${c.venue}: ${r.reason})`, d);
   locked(env, () => { const x = loadConv(env, conversation); if (x) { x.last = d.now().toISOString(); saveConv(env, x); } });
-  return { ...r, conversation: c.conversation, ...(seq ? { seq } : {}) };
+  return { ...r, ref };
+}
+
+/** A note for the body that sent something: into its inbox mid-turn, else waiting for its conversation's next body. */
+function tellBody(env, cv, ref, text, d) {
+  const id = `note-${randomBytes(6).toString('hex')}`;
+  try {
+    const rec = ref ? readBody(env, ref) : null;
+    if (rec && d.runner(rec.harness).feed(bodyOf(ref, rec), { id, text }).fed) return;
+  } catch { /* not fed */ }
+  try {
+    const sealed = d.sealer.seal(Buffer.from(text, 'utf-8')).toString('base64');
+    locked(env, () => { const c = loadConv(env, cv); if (c) { c.queue = [...(c.queue ?? []), { key: id, id, at: d.now().toISOString(), from: { kind: 'unknown' }, kind: 'message', sealed }]; saveConv(env, c); } });
+  } catch (e) { d.warn(`couldn't tell ${ref} of a failed post: ${e.message}`); }
 }

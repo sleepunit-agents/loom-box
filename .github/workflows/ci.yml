@@ -16,4 +16,15 @@ jobs:
       - run: git config --global user.email ci@example.com && git config --global user.name ci
       # The runtime's slots and bundle parts are age files: their tests run against the real thing.
       - run: sudo apt-get update -q && sudo apt-get install -y -q age
+      # loom at main, built, so the tests that check this piece against loom's own validators (contract.test: the
+      # page vocabulary; rename.test: the loom block) run here instead of being skipped.
+      - uses: actions/checkout@v4
+        with:
+          repository: sleepunit-agents/loom
+          ref: main
+          path: .loom
+      - run: npm ci --ignore-scripts --no-audit --no-fund && npx tsc
+        working-directory: .loom
       - run: npm test
+        env:
+          LOOM_DIST: ${{ github.workspace }}/.loom/dist
