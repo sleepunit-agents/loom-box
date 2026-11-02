@@ -23,6 +23,10 @@ import { containerName, missingSecrets, parseHouseFile, podmanSecret, runArgs, s
 import { PART_RAW, joinParts, partsOf } from './blobs.mjs';
 import { boxSessions } from './remote.mjs';
 import { sessionsBusy } from './busy.mjs';
+import { codexUsageOnBox, harnessStatus, LOGIN_HARNESSES, loginDir, startLogin } from './logins.mjs';
+
+/** How often a box asks its harness CLIs whether they're logged in (and at once after a login). */
+export const STATUS_MS = 5 * 60_000;
 
 export const POLL_MS = 15_000;
 const STOP_GRACE_MS = 30_000;
@@ -368,8 +372,37 @@ function rootless(env) {
  * house went. `client` is the control plane (remote over HTTP, or in-process
  * on loom's own machine); `loomUrl` is what a house is told loom is.
  */
-export function runner(env, client, { loomUrl, labels = [], log = (m) => process.stderr.write(`loom-box: ${m}\n`), hasSocket = (p) => existsSync(p), hasCdi = () => CDI_SPECS.some((p) => existsSync(p)), upgrade = maybeUpgrade }) {
+export function runner(env, client, { loomUrl, labels = [], log = (m) => process.stderr.write(`loom-box: ${m}\n`), hasSocket = (p) => existsSync(p), hasCdi = () => CDI_SPECS.some((p) => existsSync(p)), upgrade = maybeUpgrade,
+  status = () => harnessStatus(env), login = (h, o) => startLogin(env, h, o), codexUsage = () => codexUsageOnBox(env), clock = () => Date.now() }) {
   const houses = new Map(); // id -> { child, dir, stopAt? }
+  // The harness CLIs' own word on their logins, asked every STATUS_MS (and after a login), not every poll.
+  let harnesses = null;
+  let asked = 0;
+  const logins = new Map(); // login id -> the CLI's login under way
+  function harnessesNow(force) {
+    if (force || !harnesses || clock() - asked >= STATUS_MS) {
+      try { harnesses = status(); } catch (e) { log(`harness status: ${e.message}`); }
+      asked = clock();
+    }
+    return harnesses;
+  }
+  /** The owner's logins for this box: start the CLI's own, hand it a pasted code, or cancel it. */
+  function onLogins(want) {
+    for (const l of want ?? []) {
+      const have = logins.get(l.id);
+      if (l.state === 'cancel') { have?.cancel(); continue; }
+      if (have) { if (l.code) have.code(l.code); continue; }
+      if (l.state !== 'wanted' || !LOGIN_HARNESSES[l.harness]) continue;
+      log(`logging in ${l.harness} (the owner asked, from loom's page)`);
+      const report = (st) => {
+        if (st.state !== 'waiting') { logins.delete(l.id); log(`${l.harness} login: ${st.state}${st.error ? ` (${st.error})` : ''}`); }
+        const hs = st.state === 'waiting' ? undefined : harnessesNow(true);
+        client.call('login-report', { id: l.id, ...st, kind: LOGIN_HARNESSES[l.harness].kind, ...(hs ? { harnesses: hs } : {}) })
+          .catch((e) => log(`login-report ${l.id}: ${e.message}`));
+      };
+      try { logins.set(l.id, login(l.harness, { say: report })); } catch (e) { report({ state: 'failed', error: e.message }); }
+    }
+  }
   const sessions = boxSessions(env, client, { dataDir: dataDir(env), log });
 
   /** Everything a house leaves behind but its log. */
@@ -403,15 +436,15 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
       // Every house gets its own loom token; the rest are what the control plane chose.
       const given = { ...(claimed.secrets || {}), 'loom-token': claimed.token };
       const missing = missingSecrets(house, given);
-      if (missing.length) {
-        const why = missing.filter((n) => claimed.notIssued?.[n]).map((n) => `${n}: ${claimed.notIssued[n]}`);
-        throw new BoxError(why.length ? `the house file wants what couldn't be issued (${why.join('; ')})` : `the house file wants ${missing.join(', ')}, which ${h.agent}'s houses don't get`);
-      }
+      if (missing.length) throw new BoxError(`the house file wants ${missing.join(', ')}, which ${h.agent}'s houses don't get`);
+      // The box's own logins the house wants: each must be logged in here (the box's report, as of its claim).
+      const notIn = (house.logins ?? []).filter((l) => !(claimed.logins ?? []).includes(l));
+      if (notIn.length) throw new BoxError(`this box isn't logged in to ${notIn.map((l) => LOGIN_HARNESSES[l].label).join(' or ')}: log it in from its page (Boxes, Log in)`);
       if (house.nested && !rootless(env)) throw new BoxError('nested containers need rootless podman on the box');
       if (h.gpu && !claimed.gpu) throw new BoxError(`the house needs the GPU, and the owner hasn't allowed ${h.agent}'s houses a GPU (loom box agent ${h.agent} … --gpu, or the agent's page)`);
       if (h.gpu && !hasCdi()) throw new BoxError('the house needs the GPU, and this box has no NVIDIA CDI spec: run `sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml` (nvidia-container-toolkit) once, then try again');
       const tag = image(env, h, house, repo, logFd);
-      const dirs = { mirror };
+      const dirs = { mirror, logins: Object.fromEntries((house.logins ?? []).map((l) => [l, loginDir(env, l)])) };
       for (const d of ['state', 'nested']) { dirs[d] = pathJoin(dir, d); mkdirSync(dirs[d], { mode: 0o700 }); }
       if (h.service || h.slot) restoreState(dirs.state, await fetchState(client, h.id, claimed.state));
       // A session house: what attaching to it runs, for `loom box attach` on this box.
@@ -535,7 +568,11 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
     // Which remote sessions here are mid-turn (busy.mjs): loom shows it on the agents' cards (t-1624).
     let busy;
     try { busy = sessionsBusy(pathJoin(stateDir(env), 'session-cpu.json')); } catch { busy = undefined; }
-    const want = await client.call('poll', { facts: detectFacts(env, labels), ...(busy ? { sessions: busy } : {}) });
+    const hs = harnessesNow(false);
+    let cx = null;
+    try { cx = codexUsage(); } catch { cx = null; }
+    const want = await client.call('poll', { facts: detectFacts(env, labels), ...(busy ? { sessions: busy } : {}), ...(hs ? { harnesses: hs } : {}), ...(cx ? { usage: { codex: cx } } : {}) });
+    onLogins(want.logins);
     // The control plane thinks these are up here, but this box doesn't have them:
     // it restarted under them. Say so rather than leave them "running" forever.
     for (const id of want.active || []) {

@@ -9,7 +9,7 @@
 //     "task": "stdin",                              or "env" (HOUSE_TASK)
 //     "secrets": {                                  where each secret lands; the control
 //       "loom-token":   { "file": "loom-token" },   plane decides which ones it gets
-//       "claude-oauth": { "env": "CLAUDE_CODE_OAUTH_TOKEN" }
+//       "anthropic-api-key": { "env": "ANTHROPIC_API_KEY" }   an API key: a plain secret
 //     },
 //     "env": { "ART_REPO": "https://…" },           static, plain values
 //     "mounts": {                                   only the box's own per-house dirs:
@@ -17,6 +17,10 @@
 //       "nested": "/var/lib/containers",            this house's nested-container storage
 //       "mirror": "/garage/git/art.git"             the box's mirror of the repo, read-only
 //     },
+//     "logins": ["claude", "codex"],                 the box's own harness logins it uses (logins.mjs):
+//                                                   the box's login dir, mounted at /run/loom/login/<harness>,
+//                                                   and the env that points the house's CLI at it. A box
+//                                                   that isn't logged in to one won't start the house.
 //     "nested": true,                               wants the nested-container capabilities:
 //                                                   only if the owner allows it for this agent
 //     "hostname": "art-house",
@@ -33,6 +37,7 @@
 // HOUSE_ID and HOUSE_AGENT are always set; nothing from the box's own
 // environment or filesystem goes in.
 import { SECRET_NAME } from './state.mjs';
+import { LOGIN_HARNESSES, LOGIN_MOUNT } from './logins.mjs';
 
 export class HouseFileError extends Error {}
 
@@ -126,6 +131,15 @@ function runSpec(h, where, { task: allowTask }) {
     targets.add(target);
     mounts[kind] = target;
   }
+  const logins = [];
+  if (h.logins !== undefined) {
+    if (!Array.isArray(h.logins) || h.logins.length > 4) fail(`${where}logins is a list of harnesses, like ["claude", "codex"]`);
+    for (const l of h.logins) {
+      if (!LOGIN_HARNESSES[l] || logins.includes(l)) fail(`${where}logins: ${JSON.stringify(l)} isn't a harness the box logs in (${Object.keys(LOGIN_HARNESSES).join(', ')}), or it's listed twice`);
+      for (const k of Object.keys(LOGIN_HARNESSES[l].houseEnv(''))) if (k in env || envs.has(k)) fail(`${where}env ${k} is set by the ${l} login`);
+      logins.push(l);
+    }
+  }
   if (h.nested !== undefined && typeof h.nested !== 'boolean') fail(`${where}nested is true or false`);
   if (h.hostname !== undefined && !HOSTNAME.test(h.hostname)) fail(`${where}hostname is lowercase letters, digits and dashes`);
   const ports = [];
@@ -149,11 +163,11 @@ function runSpec(h, where, { task: allowTask }) {
       tailnets[name] = target;
     }
   }
-  return { command, task, secrets, env, mounts, nested: !!h.nested, hostname: h.hostname ?? null, ports, tailnets };
+  return { command, task, secrets, env, mounts, logins, nested: !!h.nested, hostname: h.hostname ?? null, ports, tailnets };
 }
 
 const SERVICE_NAME = /^[a-z][a-z0-9-]{0,39}$/;
-const RUN_KEYS = ['command', 'secrets', 'env', 'mounts', 'nested', 'hostname', 'ports', 'tailnets'];
+const RUN_KEYS = ['command', 'secrets', 'env', 'mounts', 'logins', 'nested', 'hostname', 'ports', 'tailnets'];
 
 /**
  * Validate a house file. Anything unexpected is refused, not ignored. A house
@@ -262,6 +276,14 @@ export function runArgs(house, { id, agent, loomUrl, task, service, session, ima
     const src = dirs[kind];
     if (!src) throw new HouseFileError(`no ${kind} dir for this house`);
     args.push('-v', `${src}:${target}${kind === 'mirror' ? ':ro' : ''}`);
+  }
+  // The box's own logins: the dir the box's CLI signed in to, read-write so the house's CLI refreshes it in place.
+  for (const l of house.logins ?? []) {
+    const src = dirs.logins?.[l];
+    if (!src) throw new HouseFileError(`this box isn't logged in to ${LOGIN_HARNESSES[l].label}`);
+    const at = `${LOGIN_MOUNT}/${l}`;
+    args.push('-v', `${src}:${at}`);
+    for (const [k, v] of Object.entries(LOGIN_HARNESSES[l].houseEnv(at))) args.push('-e', `${k}=${v}`);
   }
   args.push(image, ...(house.command ?? []));
   return args;

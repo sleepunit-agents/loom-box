@@ -13,14 +13,15 @@ import { AGENT_NAME, BOX_NAME, SECRET_NAME, StateError, load, localBoxName, next
 import { joinPoll, joinRequest } from './enroll.mjs';
 import { MAX_PARTS, PART_RAW, drop, partsOf, putPart, putWhole, readPart } from './blobs.mjs';
 import { parsePortGrant, parseTailnetGrant } from './house.mjs';
+import { CODE, LOGIN_NAMES } from './logins.mjs';
+import { boxOwner, membersOf, ownersAllow } from './owners.mjs';
 
 const TERMINAL = new Set(['done', 'failed', 'stopped', 'lost']);
 const LIVE = new Set(['wanted', 'starting', 'running', 'stopping']);
 /** How many claims in a row may fail before the house does. */
 export const MAX_CLAIM_TRIES = 5;
-/** A house secret that comes from the runtime's model accounts (accounts.mjs), not a fixed name. */
-// sub:<provider>[:<kind>]: a kind picks one kind of credential (sub:anthropic:session, a session login's view).
-const SUB_SOURCE = /^sub:(anthropic|openai)(?::(session))?$/;
+/** What the runtime used to issue from a subscriptions broker: gone (docs/model-accounts.md). A box logs in itself. */
+const SUB_SOURCE = /^sub:/;
 const FACT = /^[a-z][a-z0-9-]{0,31}(:[A-Za-z0-9._ +-]{1,64})?$/;
 const MAX_TASK = 8000;
 const MAX_LOG = 4000;
@@ -101,21 +102,28 @@ export function meets(facts, need) {
 /** What a box has: its own report plus the owner's labels for it. */
 export const factsOf = (b) => [...(b.facts || []), ...(b.labels || [])];
 
-export const mayHost = (box, agent) => !box.revoked && (box.mayHost === '*' || (Array.isArray(box.mayHost) && box.mayHost.includes(agent)));
+/**
+ * Whether a box may host an agent: the box's own grant (who it may host), and whose box it is (owners.mjs): an
+ * agent's work runs only on a box its owner owns, or one lent to it. `members` is the household's (membersOf).
+ */
+export const mayHost = (box, agent, members) => !box.revoked && (box.mayHost === '*' || (Array.isArray(box.mayHost) && box.mayHost.includes(agent)))
+  && ownersAllow(box, agent, members);
 
 /** The agent's primary: what the owner set, if that box is still usable, else the control plane's own box. */
 export function primaryOf(s, agent, env) {
   const p = s.primaries[agent];
-  if (p && s.boxes[p] && mayHost(s.boxes[p], agent)) return p;
+  if (p && s.boxes[p] && mayHost(s.boxes[p], agent, membersOf(env))) return p;
   return localBoxName(env);
 }
 
 /** Where a house goes, or a StateError saying why nowhere. */
 export function placeHouse(s, agent, { box, needs = [] }, env) {
-  const permitted = Object.entries(s.boxes).filter(([, b]) => mayHost(b, agent)).map(([n]) => n);
+  const members = membersOf(env);
+  const permitted = Object.entries(s.boxes).filter(([, b]) => mayHost(b, agent, members)).map(([n]) => n);
   if (box) {
     const id = resolveBox(s, box);
-    if (!mayHost(s.boxes[id], agent)) fail(`${boxNameOf(s, id)} may not host ${agent}`, 403);
+    if (!ownersAllow(s.boxes[id], agent, members)) fail(`${boxNameOf(s, id)} is ${boxOwner(s.boxes[id], members)}'s box, and ${agent} isn't their agent (a box's owner can lend it: box-lend)`, 403);
+    if (!mayHost(s.boxes[id], agent, members)) fail(`${boxNameOf(s, id)} may not host ${agent}`, 403);
     const missing = needs.filter((n) => !meets(factsOf(s.boxes[id]), n));
     if (missing.length) fail(`${boxNameOf(s, id)} doesn't have ${missing.join(', ')}`, 409);
     return id;
@@ -133,7 +141,10 @@ export function placeHouse(s, agent, { box, needs = [] }, env) {
     if (fits.length > 1) fail(`several boxes have ${needs.join(', ')}: ${fits.map((id) => boxLabelOf(s, id)).join(', ')}. Name one`, 409);
     return fits[0];
   }
-  return primaryOf(s, agent, env);
+  const primary = primaryOf(s, agent, env);
+  // The fallback primary is loom's own box: refused too when it isn't the agent's owner's.
+  if (!mayHost(s.boxes[primary] ?? { mayHost: '*' }, agent, members)) fail(`no box of ${agent}'s owner may host it: name one, or have a box lent to ${agent}`, 409);
+  return primary;
 }
 
 function str(v, what, max = 200) {
@@ -223,7 +234,7 @@ export function setPrimary(env, effects, { agent, box }) {
     if (!box || box === localBoxName(env)) { delete s.primaries[a]; return { agent: a, primary: localBoxName(env) }; }
     const id = resolveBox(s, box);
     if (s.boxes[id].local) { delete s.primaries[a]; return { agent: a, primary: id }; }
-    if (!mayHost(s.boxes[id], a)) fail(`${boxNameOf(s, id)} isn't a box that may host ${a}`, 409);
+    if (!mayHost(s.boxes[id], a, membersOf(env))) fail(`${boxNameOf(s, id)} isn't a box that may host ${a}`, 409);
     s.primaries[a] = id;
     return { agent: a, primary: id };
   });
@@ -253,8 +264,11 @@ export function setAgent(env, effects, { agent, repo, houseFile, nested, gpu, br
   let sec = secrets ?? {};
   if (typeof sec === 'string') sec = Object.fromEntries(sec.split(/[\s,]+/).filter(Boolean).map((p) => { const [k, v] = p.split('='); return [k, v ?? k]; }));
   if (typeof sec !== 'object' || Array.isArray(sec) || Object.keys(sec).length > 32
-      || !Object.entries(sec).every(([k, v]) => SECRET_NAME.test(k) && typeof v === 'string' && (SECRET_NAME.test(v) || SUB_SOURCE.test(v)))) {
-    fail('secrets map the name a house sees to a secrets-store name (github-token=github-art-e-fish-token), or to sub:<provider> (claude-oauth=sub:anthropic: the agent\'s subscription with room left)');
+      || !Object.entries(sec).every(([k, v]) => SECRET_NAME.test(k) && typeof v === 'string' && SECRET_NAME.test(v))) {
+    if (Object.values(sec).some((v) => typeof v === 'string' && SUB_SOURCE.test(v))) {
+      fail('sub:<provider> is gone: a box logs in to Claude or Codex itself (its page, Log in), and a house that wants the login says "logins" in its house file. An API key is a plain secret: anthropic-api-key=<store name>');
+    }
+    fail('secrets map the name a house sees to a secrets-store name (github-token=github-art-e-fish-token; an API key: anthropic-api-key=<store name>)');
   }
   let pt = ports ?? [];
   if (typeof pt === 'string') pt = pt.split(/[\s,]+/).filter(Boolean);
@@ -338,6 +352,7 @@ export function down(env, effects, caller, { id }) {
 
 export function list(env, caller) {
   const s = load(env);
+  const members = membersOf(env);
   const houses = Object.values(s.houses)
     .filter((h) => sees(caller, h.agent))
     .sort((x, y) => Number(y.id.slice(2)) - Number(x.id.slice(2)))
@@ -346,8 +361,9 @@ export function list(env, caller) {
   // Boxes are the household's: its owner sees them all, with their grants; anyone else, the live ones that may host their agents.
   const mine = caller.kind === 'agent' ? [caller.agent] : Array.isArray(caller.agents) ? caller.agents : null;
   const boxes = Object.entries(s.boxes)
-    .filter(([, b]) => householdOwner(caller) || (!b.revoked && mine?.some((a) => mayHost(b, a))))
-    .map(([id, b]) => ({ id, name: b.name ?? id, local: !!b.local, facts: factsOf(b), lastSeen: b.lastSeen, ...(householdOwner(caller) ? { mayHost: b.mayHost, revoked: b.revoked ?? null, created: b.created } : {}) }));
+    .filter(([, b]) => householdOwner(caller) || (!b.revoked && mine?.some((a) => mayHost(b, a, members))))
+    .map(([id, b]) => ({ id, name: b.name ?? id, local: !!b.local, facts: factsOf(b), lastSeen: b.lastSeen, harnesses: harnessesOf(b),
+      ...(householdOwner(caller) ? { mayHost: b.mayHost, owner: boxOwner(b, members), lentTo: b.lentTo ?? [], revoked: b.revoked ?? null, created: b.created } : {}) }));
   const primary = caller.kind === 'agent' ? primaryOf(s, caller.agent, env) : undefined;
   const services = Object.entries(s.services ?? {})
     .filter(([, v]) => sees(caller, v.agent))
@@ -367,11 +383,13 @@ function boxOf(s, caller) {
 }
 
 /** A box says who it is and what it has. Facts are its own report; labels are the owner's. */
-export function hello(env, effects, caller, { facts }) {
+export function hello(env, effects, caller, { facts, harnesses }) {
   const f = listOf(facts, 'facts', FACT, 32);
+  const hs = harnessReport(harnesses);
   return update(env, (s) => {
     const b = boxOf(s, caller);
     b.facts = f;
+    if (hs) b.harnesses = stamp(hs, now(effects));
     b.lastSeen = now(effects);
     b.joined ??= b.lastSeen;
     return { box: caller.subject, name: b.name ?? caller.subject, mayHost: b.mayHost };
@@ -381,14 +399,18 @@ export function hello(env, effects, caller, { facts }) {
 /** What this box should be running: houses to start, and houses to stop. */
 const SESSION_KEY = /^(box:[^\0]{1,120}|house:h-\d{1,9})$/;
 
-export function poll(env, effects, caller, { facts, sessions } = {}) {
+export function poll(env, effects, caller, { facts, sessions, harnesses, usage } = {}) {
   const f = facts === undefined ? null : listOf(facts, 'facts', FACT, 32);
+  const hs = harnessReport(harnesses);
+  const us = usageReport(usage);
   // Its remote sessions, working or idle, as the box sampled them: only well-formed keys, a few.
   const busy = sessions && typeof sessions === 'object' && !Array.isArray(sessions)
     ? Object.fromEntries(Object.entries(sessions).filter(([k, v]) => SESSION_KEY.test(k) && typeof v === 'boolean').slice(0, 20)) : null;
   return update(env, (s) => {
     const b = boxOf(s, caller);
     if (f) b.facts = f;
+    if (hs) b.harnesses = stamp(hs, now(effects));
+    for (const [h, r] of Object.entries(us ?? {})) (b.usage ??= {})[h] = r;
     // Only sessions this box runs: its houses, and the box sessions placed on it (it can't speak for another's).
     if (busy) {
       const ours = (k) => k.startsWith('house:') ? s.houses[k.slice(6)]?.box === caller.subject
@@ -399,8 +421,20 @@ export function poll(env, effects, caller, { facts, sessions } = {}) {
     // Boxes poll every few seconds: the natural place to finish any revoke that failed.
     retryRevokes(s, effects);
     const mine = Object.values(s.houses).filter((h) => h.box === caller.subject);
+    const members = membersOf(env);
+    expireLogins(s, effects);
     return {
-      start: mine.filter((h) => h.state === 'wanted' && mayHost(b, h.agent) && !(h.notBefore && Date.parse(h.notBefore) > Date.parse(now(effects)))).map((h) => {
+      // Logins the owner started from the box's page: the CLI's own login, run here (logins.mjs). A pasted code goes
+      // to the box once and is gone from loom's state.
+      logins: Object.values(s.logins ?? {}).filter((l) => l.box === caller.subject && (l.state === 'wanted' || l.code || l.state === 'cancel'))
+        .map((l) => {
+          const out = { id: l.id, harness: l.harness, state: l.state, ...(l.code ? { code: l.code } : {}) };
+          delete l.code;
+          if (l.state === 'wanted') l.state = 'starting';
+          if (l.state === 'cancel') l.state = 'failed';
+          return out;
+        }),
+      start: mine.filter((h) => h.state === 'wanted' && mayHost(b, h.agent, members) && !(h.notBefore && Date.parse(h.notBefore) > Date.parse(now(effects)))).map((h) => {
         const a = s.agents[h.agent] || {};
         return { id: h.id, agent: h.agent, task: h.task, service: h.service ?? null, slot: h.slot ?? null, session: !!h.session, repo: a.repo, houseFile: a.houseFile || 'house/house.json', branch: a.branch ?? null,
           // A house asked for with a GPU need gets the box's GPU (t-1616).
@@ -430,7 +464,7 @@ export function claim(env, effects, caller, { id }) {
     const h = s.houses[id];
     if (!h || h.box !== caller.subject) fail(`no house ${id} for this box`, 404);
     if (h.state !== 'wanted') fail(`house ${id} is ${h.state}, not waiting to start`, 409);
-    if (!mayHost(s.boxes[caller.subject], h.agent)) fail(`this box may not host ${h.agent}`, 403);
+    if (!mayHost(s.boxes[caller.subject], h.agent, membersOf(env))) fail(`this box may not host ${h.agent}`, 403);
     const a = s.agents[h.agent];
     if (!a) fail(`${h.agent} has no house config`, 409);
     const label = houseTokenLabel(h, boxNameOf(s, h.box));
@@ -454,38 +488,21 @@ export function claim(env, effects, caller, { id }) {
     }
     try {
       const secrets = {};
-      // A secret named `sub:<provider>` is what the accounts provider issues for
-      // the agent now (its first with room, house-safe); the house records which, by name.
-      const runsOn = {};
-      let notIssued;
       for (const [as, from] of Object.entries(a.secrets || {})) {
-        const sub = SUB_SOURCE.exec(from);
-        if (!sub) { secrets[as] = effects.secret(from); continue; }
-        let got;
-        try {
-          got = effects.issue(h.agent, sub[1], sub[2]);
-          if (!SECRET_NAME.test(got.name) || typeof got.value !== 'string' || !got.value) {
-            throw new StateError(`the accounts provider issued nothing usable for ${h.agent}'s ${sub[1]}${sub[2] ? ` ${sub[2]}` : ''}`, 500);
-          }
-        } catch (err) {
-          // A kind (sub:anthropic:session) is an extra only some of the agent's
-          // houses want, and the claim can't know which (the house file is read
-          // after it): left out, saying why, so only a house that wants it fails.
-          if (!sub[2]) throw err;
-          (notIssued ??= {})[as] = String(err.message).slice(0, 200);
-          continue;
-        }
-        runsOn[as] = got.name;
-        secrets[as] = got.value;
+        // A mapping from before the brokers went (sub:<provider>): nothing is issued; the house file's logins say
+        // which of the box's own logins it uses.
+        if (SUB_SOURCE.test(from)) continue;
+        secrets[as] = effects.secret(from);
       }
-      if (Object.keys(runsOn).length) h.runsOn = runsOn;
+      // Which of this box's logins are logged in, by harness: the box's own report.
+      const logins = Object.entries(s.boxes[caller.subject].harnesses ?? {}).filter(([, v]) => v.loggedIn).map(([k]) => k);
       const repoAuth = a.repoSecret ? effects.secret(a.repoSecret) : null;
       h.state = 'starting'; h.tokenLabel = label; h.updated = now(effects);
       const key = stateKeyOf(h);
       const saved = key ? stateMeta(env, s, key) : undefined;
       // The state itself comes after, a part at a time (state-part): just its shape here.
       const state = saved ? { bytes: saved.bytes, sha256: saved.sha256, parts: partsOf(saved.bytes) } : null;
-      return { id, agent: h.agent, token, secrets, ...(notIssued ? { notIssued } : {}), repoAuth, nested: !!a.nested, gpu: !!a.gpu, ports: (a.ports ?? []).map(parsePortGrant).filter(Boolean), tailnets: (a.tailnets ?? []).map(parseTailnetGrant).filter(Boolean), ...(h.service ? { service: h.service } : {}), ...(h.slot ? { slot: h.slot } : {}), ...(key ? { state } : {}) };
+      return { id, agent: h.agent, token, secrets, logins, repoAuth, nested: !!a.nested, gpu: !!a.gpu, ports: (a.ports ?? []).map(parsePortGrant).filter(Boolean), tailnets: (a.tailnets ?? []).map(parseTailnetGrant).filter(Boolean), ...(h.service ? { service: h.service } : {}), ...(h.slot ? { slot: h.slot } : {}), ...(key ? { state } : {}) };
     } catch (err) {
       // The house stays waiting; the token it was about to get goes (or is queued to).
       revokeOrQueue(s, effects, label);
@@ -819,12 +836,185 @@ export function remoteReport(env, effects, caller, { agent, state, url, error })
   });
 }
 
+// ------------------------------------------------------------- model logins (docs/model-accounts.md)
+//
+// A box reports which harnesses it has and whether each is logged in (the CLI's own status command); the owner
+// logs a box in from its page, which runs the CLI's own login on that box (logins.mjs). Only states, a link and a
+// one-time code pass through here; no credential does.
+
+const ACCOUNT = /^[a-z]+-[0-9a-f]{10}$/;
+const LOGIN_ID = /^l-[0-9a-f]{12}$/;
+const LOGIN_TTL_MS = 20 * 60_000;
+const WINDOW = /^[0-9]+[hd](_[a-z0-9]+)?$/;
+const word = (v, max = 40) => (typeof v === 'string' && /^[A-Za-z0-9 ._()+-]{1,80}$/.test(v) ? v.slice(0, max) : undefined);
+const epoch = (v) => (typeof v === 'number' && Number.isFinite(v) && v > 0 && v < 1e11 ? Math.floor(v) : undefined);
+
+/** A box's harness report, checked: {claude: {installed, loggedIn, method?, plan?, account?}, …}, or null. */
+function harnessReport(v) {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
+  const out = {};
+  for (const h of LOGIN_NAMES) {
+    const r = v[h];
+    if (!r || typeof r !== 'object') continue;
+    out[h] = { installed: !!r.installed, loggedIn: !!r.installed && !!r.loggedIn,
+      ...(word(r.method) ? { method: word(r.method) } : {}), ...(word(r.plan) ? { plan: word(r.plan) } : {}),
+      ...(typeof r.account === 'string' && ACCOUNT.test(r.account) ? { account: r.account } : {}) };
+  }
+  return out;
+}
+const stamp = (hs, at) => Object.fromEntries(Object.entries(hs).map(([k, v]) => [k, { ...v, checked: at }]));
+
+/** A usage reading, checked: {windows: {"7d": 0.6}, resets: {"7d": epoch}, checked: epoch, plan?, limited?}, or null. */
+function readingOf(r) {
+  if (!r || typeof r !== 'object') return null;
+  const windows = {}, resets = {};
+  for (const [w, x] of Object.entries(r.windows && typeof r.windows === 'object' ? r.windows : {}).slice(0, 8)) {
+    if (WINDOW.test(w) && typeof x === 'number' && x >= 0 && x <= 1) windows[w] = x;
+  }
+  for (const [w, x] of Object.entries(r.resets && typeof r.resets === 'object' ? r.resets : {}).slice(0, 8)) if (WINDOW.test(w) && epoch(x)) resets[w] = epoch(x);
+  if (!Object.keys(windows).length) return null;
+  return { windows, resets, checked: epoch(r.checked) ?? Math.floor(Date.now() / 1000), ...(word(r.plan) ? { plan: word(r.plan) } : {}), ...(r.limited ? { limited: true } : {}) };
+}
+function usageReport(v) {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
+  const out = {};
+  for (const h of LOGIN_NAMES) { const r = readingOf(v[h]); if (r) out[h] = r; }
+  return out;
+}
+
+/** A box's harnesses, for a list: states only. */
+export const harnessesOf = (b) => Object.fromEntries(Object.entries(b.harnesses ?? {}).map(([k, v]) => [k, { installed: !!v.installed, loggedIn: !!v.loggedIn, ...(v.method ? { method: v.method } : {}), ...(v.plan ? { plan: v.plan } : {}), ...(v.account ? { account: v.account } : {}), ...(v.checked ? { checked: v.checked } : {}) }]));
+
+/** A login nobody finished goes, and so does a finished one after a while. */
+function expireLogins(s, effects) {
+  const t = Date.parse(now(effects));
+  for (const [id, l] of Object.entries(s.logins ?? {})) {
+    const age = t - Date.parse(l.updated ?? l.created);
+    if (age > LOGIN_TTL_MS) {
+      if (['done', 'failed'].includes(l.state)) delete s.logins[id];
+      else { l.state = 'failed'; l.error = 'No sign-in in time; start again.'; delete l.code; l.updated = now(effects); }
+    }
+  }
+}
+
+/** The owner starts a login on a box: the box runs the CLI's own login there on its next poll. */
+export function loginStart(env, effects, { box, harness }) {
+  if (!LOGIN_NAMES.includes(harness)) fail(`harness is one of ${LOGIN_NAMES.join(', ')}`);
+  return update(env, (s) => {
+    const id = resolveBox(s, box);
+    const b = s.boxes[id];
+    if (b.revoked) fail(`${boxNameOf(s, id)} is revoked`, 409);
+    if (b.harnesses && b.harnesses[harness] && !b.harnesses[harness].installed) fail(`${boxNameOf(s, id)} doesn't have ${harness} installed`, 409);
+    s.logins ??= {};
+    expireLogins(s, effects);
+    for (const l of Object.values(s.logins)) {
+      if (l.box === id && l.harness === harness && !['done', 'failed'].includes(l.state)) return { id: l.id, box: id, harness, state: l.state, again: true };
+    }
+    const lid = `l-${randomBytes(6).toString('hex')}`;
+    s.logins[lid] = { id: lid, box: id, harness, state: 'wanted', created: now(effects), updated: now(effects) };
+    return { id: lid, box: id, harness, state: 'wanted' };
+  });
+}
+
+/** The owner pastes the code the provider's page showed: it waits here for the box's next poll, then it's gone. */
+export function loginCode(env, effects, { id, code }) {
+  const c = typeof code === 'string' ? code.trim() : '';
+  if (!CODE.test(c)) fail('That doesn\'t look like the code the sign-in page showed.');
+  return update(env, (s) => {
+    const l = s.logins?.[id];
+    if (!LOGIN_ID.test(id ?? '') || !l) fail('That sign-in is gone; start again.', 404);
+    if (l.state !== 'waiting' || l.kind !== 'paste-code') fail(`That sign-in isn't waiting for a code (it's ${l.state}).`, 409);
+    l.code = c; l.state = 'checking'; l.updated = now(effects);
+    return { id, state: l.state };
+  });
+}
+
+export function loginCancel(env, effects, { id }) {
+  return update(env, (s) => {
+    const l = s.logins?.[id];
+    if (!l) fail('That sign-in is gone.', 404);
+    if (!['done', 'failed'].includes(l.state)) { l.state = 'cancel'; delete l.code; l.updated = now(effects); }
+    return { id, state: l.state };
+  });
+}
+
+/** One login, for the page: never its code. */
+export function loginView(env, id) {
+  const l = load(env).logins?.[id];
+  if (!l) return null;
+  const { code: _c, ...rest } = l;
+  return rest;
+}
+
+/** The box says how a login is going: its link (and a device code), then done or failed. */
+export function loginReport(env, effects, caller, { id, state, link, userCode, kind, error, harnesses }) {
+  if (!['waiting', 'done', 'failed'].includes(state)) fail('a login is waiting, done or failed');
+  if (link !== undefined && !(typeof link === 'string' && /^https:\/\/(claude\.com|claude\.ai|auth\.openai\.com)\/\S{1,2000}$/.test(link))) fail('not a sign-in link');
+  if (userCode !== undefined && !(typeof userCode === 'string' && /^[A-Z0-9]{4}-[A-Z0-9]{4,5}$/.test(userCode))) fail('not a device code');
+  const hs = harnessReport(harnesses);
+  return update(env, (s) => {
+    const b = boxOf(s, caller);
+    const l = s.logins?.[id];
+    if (!l || l.box !== caller.subject) fail(`no login ${id} for this box`, 404);
+    if (hs) b.harnesses = stamp(hs, now(effects));
+    if (['done', 'failed'].includes(l.state)) return { ok: true };
+    l.state = state; l.updated = now(effects);
+    if (link) l.link = link;
+    if (userCode) l.userCode = userCode;
+    if (kind === 'paste-code' || kind === 'device') l.kind = kind;
+    if (state === 'failed') { l.error = String(error ?? 'it didn\'t work').slice(0, 300); delete l.code; }
+    if (state !== 'waiting') delete l.link;
+    return { ok: true };
+  });
+}
+
+/** A box's owner lends it to another member's agents (by name), or takes it back (an empty list). */
+export function lendBox(env, effects, { name, agents }) {
+  const list = listOf(agents, 'agents', AGENT_NAME, 40);
+  return update(env, (s) => {
+    const id = resolveBox(s, name);
+    if (list.length) s.boxes[id].lentTo = list; else delete s.boxes[id].lentTo;
+    return { box: id, name: boxNameOf(s, id), lentTo: list };
+  });
+}
+
+/** Whose a box is: a member (owners.mjs). Boxes from before owners are the first household owner's. */
+export function setBoxOwner(env, effects, { name, owner }) {
+  const members = membersOf(env);
+  if (!members.some((m) => m.person === owner)) fail(`${owner} isn't a member of this household`);
+  return update(env, (s) => {
+    const id = resolveBox(s, name);
+    s.boxes[id].owner = owner;
+    return { box: id, name: boxNameOf(s, id), owner };
+  });
+}
+
+/**
+ * A house tells the runtime how full its account is, from its own harness's run output (logins.mjs: Claude Code's
+ * rate_limit_event, Codex's token_count): recorded on the house's box, for that harness's login there.
+ */
+export function usage(env, effects, caller, { harness, reading }) {
+  if (caller.kind !== 'agent' || !caller.house) fail('usage comes from a house', 403);
+  if (!LOGIN_NAMES.includes(harness)) fail(`harness is one of ${LOGIN_NAMES.join(', ')}`);
+  const r = readingOf(reading);
+  if (!r) fail('a reading is {windows: {"7d": 0.6}, resets?, checked?}');
+  return update(env, (s) => {
+    const h = s.houses[caller.house];
+    if (!h || h.agent !== caller.agent || !['starting', 'running'].includes(h.state)) fail('no such house running', 404);
+    const b = s.boxes[h.box];
+    if (!b) fail('the house\'s box is gone', 404);
+    (b.usage ??= {})[harness] = r;
+    return { ok: true, box: h.box };
+  });
+}
+
 const OWNER_ONLY = {
   'add-box': addBox, 'revoke-box': revokeBox, 'may-host': setMayHost, 'set-primary': setPrimary, 'set-agent': setAgent,
   'seed-state': seedState, 'saved-state': (env, _fx, b) => savedState(env, b),
   'remote-up': remoteUp, 'remote-down': remoteDown,
+  'login-start': loginStart, 'login-code': loginCode, 'login-cancel': loginCancel, 'box-lend': lendBox, 'box-owner': setBoxOwner,
 };
-const BOX_ONLY = { hello, poll, claim, report, 'save-state': saveState, 'state-part': statePart, 'remote-report': remoteReport };
+const BOX_ONLY = { hello, poll, claim, report, 'save-state': saveState, 'state-part': statePart, 'remote-report': remoteReport, 'login-report': loginReport };
 
 /** One API call, as loom's piece API hands it over: {caller, path, body} → {status, body}. */
 export function api(env, effects, { caller, path, body }) {
@@ -846,6 +1036,7 @@ export function api(env, effects, { caller, path, body }) {
     if (path === 'up') return { status: 200, body: up(env, effects, caller, b) };
     if (path === 'down') return { status: 200, body: down(env, effects, caller, b) };
     if (path === 'list' || path === '') return { status: 200, body: list(env, caller) };
+    if (path === 'usage') return { status: 200, body: usage(env, effects, caller, b) };
     if (path === 'service-up') return { status: 200, body: serviceUp(env, effects, caller, b) };
     if (path === 'service-down') return { status: 200, body: serviceDown(env, effects, caller, b) };
     if (path === 'service-move') return { status: 200, body: serviceMove(env, effects, caller, b) };

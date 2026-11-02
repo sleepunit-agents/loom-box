@@ -8,7 +8,9 @@ import { join } from 'node:path';
 import { StateError, load, localBoxName, stateDir } from './state.mjs';
 import { sessionsBusy } from './busy.mjs';
 import { allowJoin, blockAllJoins, blockJoin, pendingJoins } from './enroll.mjs';
-import { addBox, boxLabelOf, factsOf, list, primaryOf, remoteDown, remoteUp, revokeBox, serviceDown, serviceMove, serviceRestart, serviceUp, setAgent, setMayHost, setPrimary, up, down, LIVE } from './control.mjs';
+import { addBox, boxLabelOf, factsOf, lendBox, list, loginCancel, loginCode, loginStart, loginView, primaryOf, remoteDown, remoteUp, revokeBox, serviceDown, serviceMove, serviceRestart, serviceUp, setAgent, setBoxOwner, setMayHost, setPrimary, up, down, LIVE } from './control.mjs';
+import { LOGIN_HARNESSES } from './logins.mjs';
+import { stateAccounts } from './accounts.mjs';
 
 const OWNER = { kind: 'owner' };
 const ago = (iso, nowMs = Date.now()) => {
@@ -376,10 +378,16 @@ function boxesPage(env, nowMs) {
       blocks: [
         { type: 'form', title: `Who ${b.label} may host`, action: 'may-host', submit: 'Save', hidden: { name: b.id },
           fields: [{ name: 'may_host', label: 'Agents', kind: 'text', value: mayHostText(b.mayHost), hint: '"anyone", or agent names separated by commas' }] },
+        { type: 'form', title: `Whose ${b.label} is`, action: 'box-owner', submit: 'Save', hidden: { name: b.id },
+          fields: [{ name: 'owner', label: 'Owner', kind: 'text', value: b.owner ?? '', hint: 'a member; an agent\'s work runs only on its owner\'s boxes' }] },
+        { type: 'form', title: `Lend ${b.label}`, action: 'box-lend', submit: 'Save', hidden: { name: b.id },
+          fields: [{ name: 'agents', label: 'Other members\' agents', kind: 'text', value: (b.lentTo ?? []).join(', '), hint: 'agent names, or empty: their work runs on this box and its logins' }] },
         { type: 'buttons', items: [{ action: 'revoke-box', label: `Revoke ${b.label}`, tone: 'danger', fields: { name: b.id } }] },
       ],
     })),
   ] });
+
+  sections.push(loginsSection(env, s, live_boxes, nowMs));
 
   // Each agent's houses, services and sessions are its own (its Houses tab): here, a link each.
   if (agents.length) {
@@ -411,6 +419,62 @@ function boxesPage(env, nowMs) {
   sections.push({ id: 'new-agent', side: true, title: '', blocks: [
     { type: 'details', summary: 'Give an agent a house', blocks: [agentForm('', null)] }] });
   return { title: 'Boxes', intro: `${live_boxes.length} box${live_boxes.length === 1 ? '' : 'es'}, ${live.length} house${live.length === 1 ? '' : 's'} up${waiting ? ' or waiting' : ''}. A house is an agent's container, started for a task.`, sections };
+}
+
+/**
+ * Model logins (docs/model-accounts.md): each box's harnesses, logged in or not, with a button that runs the CLI's
+ * own login on that box; and the accounts those logins make, with how full each is.
+ */
+function loginsSection(env, s, boxes, nowMs) {
+  const items = [];
+  for (const b of boxes) {
+    for (const [h, def] of Object.entries(LOGIN_HARNESSES)) {
+      const st = b.harnesses?.[h];
+      const where = `${b.label} · ${def.label}`;
+      if (!st) { items.push({ text: where, meta: 'not reported yet', tone: 'muted' }); continue; }
+      if (!st.installed) { items.push({ text: where, meta: `${def.bin} isn't installed there`, tone: 'muted' }); continue; }
+      const under = Object.values(s.logins ?? {}).find((l) => l.box === b.id && l.harness === h && !['done', 'failed'].includes(l.state));
+      items.push({ text: where, meta: st.loggedIn ? `logged in${st.plan ? `, ${st.plan}` : ''}${st.method ? ` (${st.method})` : ''}` : 'not logged in', tone: st.loggedIn ? 'ok' : 'warn',
+        ...(under ? { page: `login:${under.id}`, badge: 'signing in' }
+          : { act: { action: 'login-start', label: st.loggedIn ? `Log in ${def.label} again` : `Log in ${def.label}`, ...(st.loggedIn ? {} : { tone: 'primary' }), fields: { box: b.id, harness: h } } }) });
+    }
+  }
+  let accounts = [];
+  try { accounts = stateAccounts(env, { now: () => nowMs }).list().accounts; } catch { accounts = []; }
+  const pct = (v) => `${Math.round(v * 100)}%`;
+  return { id: 'logins', title: 'Model logins', blocks: [
+    { type: 'text', tone: 'muted', text: 'Each box signs in to Claude and Codex itself, with its owner\'s own subscription: Log in runs the CLI\'s own login on that box. loom never sees the login.' },
+    items.length ? { type: 'list', items } : { type: 'text', tone: 'muted', text: 'No box has reported its harnesses yet.' },
+    ...(accounts.length ? [{ type: 'details', summary: 'Accounts', meta: `${accounts.length}`, blocks: [{ type: 'list', items: accounts.map((a) => {
+      const w = Object.entries(a.usage).filter(([k]) => !k.startsWith('reset_') && k !== 'checked');
+      return { text: a.label, meta: `${w.length ? w.map(([k, v]) => `${k} ${pct(v)}`).join(', ') : 'usage not read yet'}${a.boxes.length ? ` · on ${a.boxes.map((id) => boxLabelOf(s, id)).join(', ')}` : ''} · for ${a.agents.join(', ') || 'no agent'}` };
+    }) }] }] : []),
+  ] };
+}
+
+/** One login under way: the provider's link, and where to paste its code (Claude) or the code to enter (Codex). */
+function loginPage(env, id) {
+  const l = loginView(env, id);
+  if (!l) return { title: 'Not found', sections: [] };
+  const def = LOGIN_HARNESSES[l.harness];
+  const where = boxLabelOf(load(env), l.box);
+  const blocks = [];
+  if (l.state === 'wanted' || l.state === 'starting') blocks.push({ type: 'text', tone: 'muted', text: `${where} is starting ${def.label}'s own login; reload in a few seconds.` });
+  else if (l.state === 'checking') blocks.push({ type: 'text', tone: 'muted', text: `${where}'s ${def.bin} is checking the code; reload in a moment.` });
+  else if (l.state === 'waiting') {
+    blocks.push({ type: 'link', text: `Sign in to ${def.label}`, href: l.link });
+    if (l.kind === 'paste-code') {
+      blocks.push({ type: 'form', action: 'login-code', submit: 'Finish', hidden: { id }, note: `Paste the code the sign-in page shows. It goes to ${def.bin} on ${where}, once.`,
+        fields: [{ name: 'code', label: 'Code', kind: 'secret', required: true }] });
+    } else {
+      if (l.userCode) blocks.push({ type: 'kv', items: [{ label: 'Code to enter', value: l.userCode }] });
+      blocks.push({ type: 'text', tone: 'muted', text: 'This finishes by itself once you\'ve signed in; reload to see.' });
+    }
+  } else if (l.state === 'done') blocks.push({ type: 'callout', tone: 'ok', text: `${where} is logged in to ${def.label}. Its own ${def.bin} keeps the login and refreshes it; houses there that ask for it use it.` });
+  else blocks.push({ type: 'callout', tone: 'bad', text: l.error || 'It didn\'t work.' });
+  if (!['done', 'failed'].includes(l.state)) blocks.push({ type: 'buttons', items: [{ action: 'login-cancel', label: 'Cancel', tone: 'danger', fields: { id } }] });
+  blocks.push({ type: 'link', text: 'Back', page: '' });
+  return { title: `Log ${where} in to ${def.label}`, sections: [{ id: 'login', title: 'Sign-in', blocks }] };
 }
 
 /** One box session: how it is, and its link once it has one. */
@@ -577,6 +641,7 @@ export function page(env, { path, caller: c }, nowMs = Date.now()) {
   if (Array.isArray(caller.agents)) return path === '' || path === undefined ? agentOwnerPage(env, caller, nowMs) : { title: 'Not found', sections: [] };
   if (path === '' || path === undefined) return boxesPage(env, nowMs);
   if (path === 'agents') return agentsPage(env);
+  if (typeof path === 'string' && /^login:l-[0-9a-f]{12}$/.test(path)) return loginPage(env, path.slice(6));
   return { title: 'Not found', sections: [] };
 }
 
@@ -632,6 +697,14 @@ export function act(env, effects, { action, fields: raw = {}, caller: c }, publi
       case 'block-all-joins': { const r = blockAllJoins(env, effects); return { ok: true, message: `Blocked ${r.blocked} waiting request${r.blocked === 1 ? '' : 's'}.`, page: '' }; }
       case 'revoke-box': { const r = revokeBox(env, effects, fields); return { ok: true, message: `Revoked ${r.name}. Its houses lost their tokens.`, page: '' }; }
       case 'may-host': { const r = setMayHost(env, effects, fields); return { ok: true, message: `Saved who ${r.name} may host.`, page: '' }; }
+      case 'box-owner': { const r = setBoxOwner(env, effects, fields); return { ok: true, message: `${r.name} is ${r.owner}'s.`, page: '' }; }
+      case 'box-lend': { const r = lendBox(env, effects, fields); return { ok: true, message: r.lentTo.length ? `${r.name} is lent to ${r.lentTo.join(', ')}.` : `${r.name} is lent to no one.`, page: '' }; }
+      case 'login-start': {
+        const r = loginStart(env, effects, fields);
+        return { ok: true, message: `${label(r.box)} is starting ${LOGIN_HARNESSES[r.harness].label}'s own login; its link shows here in a few seconds.`, page: `login:${r.id}` };
+      }
+      case 'login-code': { loginCode(env, effects, fields); return { ok: true, message: 'The code is on its way to the box; reload in a moment.', page: `login:${fields.id}` }; }
+      case 'login-cancel': { loginCancel(env, effects, fields); return { ok: true, message: 'Cancelled.', page: '' }; }
       case 'set-primary': { const r = setPrimary(env, effects, fields); return { ok: true, message: `${r.agent}'s primary is ${label(r.primary)}.`, page: '' }; }
       case 'set-agent': { const r = setAgent(env, effects, fields); return { ok: true, message: `Saved ${r.agent}'s house.`, page: '' }; }
       case 'up': {

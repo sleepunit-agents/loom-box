@@ -48,7 +48,12 @@
 //   loom runtime models [--json]                                         the model list and each agent's settings
 //   loom runtime models set --json < {list?, agent?, allow?, prefer?}    change them
 //   loom runtime models resolve --agent a --venue v [--venue-kind k] [--prefer m]...   which model, and why
-//   loom runtime accounts [--json] | accounts usage [--json]           the accounts provider's accounts, and usage
+//   loom runtime accounts [--json] | accounts usage [--json]           the accounts the boxes report, and their usage
+//   loom runtime logins [--json]                                       each box's harnesses: installed, logged in
+//   loom runtime login <box> claude|codex                              log a box in (its CLI's own login; prints the link)
+// From a house (its loom token):
+//   loom runtime usage report --harness claude|codex < output.jsonl    how full its account is, from the harness's run
+//                                                                      output (stream-json, or a Codex rollout)
 // For loom (the piece contract):
 //   loom runtime ui --json | ui page --json | ui act --json | api --json
 //   loom runtime bundle export | bundle import [--force]       its part of loom's bundle
@@ -64,6 +69,7 @@ import { localBoxName, renameLocal, stateDir } from './state.mjs';
 import { exportPart, importPart } from './bundle.mjs';
 import { pieceName, setting } from './piece.mjs';
 import { accountsFrom } from './accounts.mjs';
+import { lastRateLimit } from './logins.mjs';
 import { readModels, resolveFor, setModels } from './models.mjs';
 import { endBody, feedBody, listBodies, resumeBody, startBody } from './bodies.mjs';
 import { PART_RAW, joinParts, partsOf } from './blobs.mjs';
@@ -315,14 +321,38 @@ async function main(argv, env) {
       if (rest[0] === 'usage') {
         const u = a.usage();
         if (json) return out(u);
-        for (const x of u) process.stdout.write(`${x.account} (${x.provider}): ${Object.entries(x.windows).map(([w, v]) => `${w} ${Math.round(v * 100)}%`).join(', ') || 'not read'}${x.room ? '' : ' — out of room'}\n`);
+        for (const x of u) process.stdout.write(`${x.label} (${x.provider}): ${Object.entries(x.windows).map(([w, v]) => `${w} ${Math.round(v * 100)}%`).join(', ') || 'not read yet'}${x.room ? '' : ' — out of room'}\n`);
         return;
       }
       const l = a.list();
       if (json) return out(l);
-      for (const x of l.accounts) process.stdout.write(`${x.name}  ${x.provider} ${x.plan}  ${x.credentials.map((c) => `${c.kind} ${c.status}`).join(', ')}\n`);
-      for (const [agent, order] of Object.entries(l.assign)) process.stdout.write(`${agent} runs on: ${order.join(' → ')}\n`);
+      if (!l.accounts.length) process.stdout.write('no accounts: no box is logged in to a harness, and no agent has an API key\n');
+      for (const x of l.accounts) process.stdout.write(`${x.label}  ${x.kind}${x.boxes.length ? `  on ${x.boxes.join(', ')}` : ''}  for ${x.agents.join(', ') || 'no agent'}\n`);
       return;
+    }
+    case 'logins': {
+      const r = list(env, { kind: 'owner' });
+      if (json) return out(r.boxes.filter((b) => !b.revoked).map((b) => ({ id: b.id, name: b.name, owner: b.owner, harnesses: b.harnesses })));
+      for (const b of r.boxes.filter((x) => !x.revoked)) {
+        const hs = Object.entries(b.harnesses ?? {});
+        process.stdout.write(`${b.name}${b.id !== b.name ? ` [${b.id}]` : ''}: ${hs.length ? hs.map(([h, v]) => `${h} ${!v.installed ? 'not installed' : v.loggedIn ? `logged in (${v.method ?? '?'}${v.plan ? `, ${v.plan}` : ''})` : 'not logged in'}`).join('; ') : 'no report yet'}\n`);
+      }
+      return;
+    }
+    case 'login': {
+      const [box, harness] = rest;
+      if (!box || !harness) throw new Fail('usage: loom runtime login <box> claude|codex', 2);
+      const call = ownerOrRemote(env);
+      const st = await call('login-start', { box, harness });
+      process.stderr.write(`login ${st.id}: the box runs ${harness}'s own login on its next poll; its link shows on the box's page.\n`);
+      return out(st);
+    }
+    case 'usage': {
+      const h = flag(rest, '--harness');
+      if (rest[0] !== 'report' || !h) throw new Fail('usage: loom runtime usage report --harness claude|codex < output.jsonl', 2);
+      const reading = lastRateLimit(h, await readStdin());
+      if (!reading) { process.stderr.write('no rate-limit reading in that output\n'); return; }
+      return out(await ownerOrRemote(env)('usage', { harness: h, reading: { ...reading, checked: Math.floor(Date.now() / 1000) } }));
     }
     case undefined: case '-h': case '--help': case 'help':
       process.stdout.write(USAGE);

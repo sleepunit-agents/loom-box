@@ -24,6 +24,7 @@ import { randomBytes } from 'node:crypto';
 import { joinLoom, runner } from '../src/box.mjs';
 import { HouseFileError, NESTED_ARGS, parseHouseFile } from '../src/house.mjs';
 import { scratch } from './scratch.mjs';
+import { load } from '../src/state.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 let env, fx, revoked, repo, client, r, fake;
@@ -37,7 +38,7 @@ const podmanCfg = (c) => { mkdirSync(fake, { recursive: true }); writeFileSync(j
 const HOUSE = {
   build: { containerfile: 'house/Containerfile', context: 'house' },
   command: ['claude', '-p'],
-  secrets: { 'loom-token': { file: 'loom-token' }, 'github-token': { file: 'github-token' }, 'claude-oauth': { env: 'CLAUDE_CODE_OAUTH_TOKEN' } },
+  secrets: { 'loom-token': { file: 'loom-token' }, 'github-token': { file: 'github-token' }, 'anthropic-api-key': { env: 'ANTHROPIC_API_KEY' } },
   env: { ART_REPO: 'https://example.com/art.git' },
   mounts: { state: '/home/art/.local/state', nested: '/var/lib/containers', mirror: '/garage/git/art.git' },
   nested: true,
@@ -61,7 +62,7 @@ async function until(f, ms = 8000) {
 }
 
 function setAgent(body = {}) {
-  ok(api(env, fx, { caller: owner, path: 'set-agent', body: { agent: 'art', repo, nested: true, secrets: { 'github-token': 'gh-art', 'claude-oauth': 'claude-oauth-token' }, ...body } }));
+  ok(api(env, fx, { caller: owner, path: 'set-agent', body: { agent: 'art', repo, nested: true, secrets: { 'github-token': 'gh-art', 'anthropic-api-key': 'art-anthropic-key' }, ...body } }));
 }
 const up = (task = 'say hi') => ok(api(env, fx, { caller: { kind: 'agent', agent: 'art' }, path: 'up', body: { task } }));
 
@@ -72,7 +73,9 @@ beforeEach(() => {
   copyFileSync(join(here, 'fake-podman.mjs'), join(bin, 'podman'));
   chmodSync(join(bin, 'podman'), 0o755);
   fake = join(bin, 'podman-state');
-  env = { HOME: home, PATH: process.env.PATH, LOOM_BOX_HOME: join(home, 'state'), LOOM_BOX_DATA: join(home, 'data'), LOOM_BOX_LOCAL_NAME: 'one', LOOM_BOX_PODMAN: join(bin, 'podman'), SECRET_IN_BOX_ENV: 'never-in-a-house' };
+  env = { HOME: home, PATH: process.env.PATH, LOOM_BOX_HOME: join(home, 'state'), LOOM_BOX_DATA: join(home, 'data'), LOOM_BOX_LOCAL_NAME: 'one', LOOM_BOX_PODMAN: join(bin, 'podman'), SECRET_IN_BOX_ENV: 'never-in-a-house',
+    // No real harness CLI answers for this box's logins (a test of its own says what it reports).
+    LOOM_RUNTIME_CLAUDE: '/nonexistent/claude', LOOM_RUNTIME_CODEX: '/nonexistent/codex' };
   revoked = [];
   fx = { now: () => new Date(), mint: () => 'loom_house_token_aaaaaaaaaaaaaaaa', revoke: (l) => revoked.push(l), secret: (n) => `secret:${n}` };
   repo = join(home, 'art-repo');
@@ -93,7 +96,7 @@ test('a house is a container with exactly its own secrets, env and dirs, and not
   const { args, seen, stdin } = ran(h.id);
   assert.equal(stdin, 'say hi');
   assert.deepEqual(seen, {
-    'mount:loom-token': 'loom_house_token_aaaaaaaaaaaaaaaa', 'mount:github-token': 'secret:gh-art', 'env:CLAUDE_CODE_OAUTH_TOKEN': 'secret:claude-oauth-token',
+    'mount:loom-token': 'loom_house_token_aaaaaaaaaaaaaaaa', 'mount:github-token': 'secret:gh-art', 'env:ANTHROPIC_API_KEY': 'secret:art-anthropic-key',
   });
   const s = args.join(' ');
   for (const want of ['--rm', '--init', '--name loom-house-h-1', '--hostname art-house', '-i', ...NESTED_ARGS,
@@ -223,7 +226,7 @@ test('a house file that wants a secret its agent\'s houses don\'t get is refused
   const h = up();
   await r.tick();
   assert.equal(house(h.id).state, 'failed');
-  assert.match(house(h.id).log, /wants claude-oauth/);
+  assert.match(house(h.id).log, /wants anthropic-api-key/);
   assert.deepEqual(revoked, ['art · house h-1 on one']);
 });
 
@@ -462,4 +465,35 @@ test('a task house with a slot starts from it and leaves its own behind', async 
   assert.equal(ran(h.id).stateBefore, 'seeded;');
   const saved = ok(api(env, fx, { caller: owner, path: 'saved-state', body: { agent: 'art', name: 'tending', slot: true } }));
   assert.equal(saved.from, h.id, 'the house that ran left its state for the next');
+});
+
+test('a box reports its harness logins on its poll, runs the owner\'s login, and a house that wants a login gets the box\'s own', async () => {
+  let loggedIn = false;
+  const said = [];
+  const box = runner(env, client, { loomUrl: 'http://loom.test/mcp', log: () => {},
+    status: () => ({ claude: { installed: true, loggedIn, method: 'claude.ai', plan: 'max', account: 'claude-0123456789' }, codex: { installed: false, loggedIn: false } }),
+    login: (h, { say }) => { said.push(h); setTimeout(() => say({ state: 'waiting', link: 'https://claude.com/cai/oauth/authorize?x=1' }), 0); return { code(c) { said.push(`code ${c}`); loggedIn = true; say({ state: 'done' }); return true; }, cancel() {} }; } });
+  // A house that wants Claude's login, on a box that isn't logged in: refused, saying how to fix it.
+  agentRepo(repo, { ...HOUSE, logins: ['claude'] });
+  setAgent();
+  const h = up();
+  await box.tick();
+  await until(() => house(h.id).state === 'failed');
+  assert.match(house(h.id).log, /this box isn't logged in to Claude: log it in from its page/);
+  assert.equal(ok(api(env, fx, { caller: owner, path: 'list', body: {} })).boxes.find((b) => b.id === 'one').harnesses.claude.loggedIn, false);
+  // The owner logs it in: the box runs the login, its link comes back, the code goes in.
+  const l = ok(api(env, fx, { caller: owner, path: 'login-start', body: { box: 'one', harness: 'claude' } }));
+  await box.tick();
+  await until(() => load(env).logins[l.id].state === 'waiting');
+  ok(api(env, fx, { caller: owner, path: 'login-code', body: { id: l.id, code: 'good-code#s1' } }));
+  await box.tick();
+  await until(() => load(env).logins[l.id].state === 'done');
+  assert.deepEqual(said, ['claude', 'code good-code#s1']);
+  assert.equal(load(env).boxes.one.harnesses.claude.loggedIn, true);
+  // Now the house starts with the box's login dir mounted, and its CLI pointed there.
+  const h2 = up();
+  await box.tick();
+  await until(() => house(h2.id).state === 'done');
+  const s = ran(h2.id).args.join(' ');
+  assert.match(s, new RegExp(`-v ${env.LOOM_BOX_DATA}/logins/claude:/run/loom/login/claude -e CLAUDE_SECURESTORAGE_CONFIG_DIR=/run/loom/login/claude`));
 });

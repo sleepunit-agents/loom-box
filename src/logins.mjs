@@ -1,0 +1,271 @@
+// A box's model logins (docs/model-accounts.md): which harnesses this box has, and whether each is logged in, from
+// the harness CLI's own status command; signing one in with the CLI's own login; and how full its account is, read
+// from what the harness writes about its own runs.
+//
+// The rule this module keeps: the CLI owns its login. Each box signs itself in, into a login dir of its own
+// (<data>/logins/<harness>, 0700), by running the CLI's own login command there. The CLI writes its credentials
+// into that dir and refreshes them itself. Nothing here reads, copies, refreshes or sends a credential; a house that
+// asks for a login (house file "logins") gets that dir mounted, and its own copy of the same CLI uses it. A login
+// never leaves its box.
+//
+// What the box reports up (control.mjs, poll): per harness {installed, loggedIn, method, plan, account}, where
+// `account` is a short hash of what the status command says identifies the account (Claude: orgId and email), so
+// boxes signed in to one account share its quota. The email itself never leaves the box.
+import { spawn, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+
+export class LoginError extends Error {}
+
+/** Where a house sees its box's login dir. */
+export const LOGIN_MOUNT = '/run/loom/login';
+
+/**
+ * The harnesses a box can sign in. For each: its CLI, the CLI's own status and login commands, the env that points
+ * the CLI at the box's login dir, and the env a house gets so its CLI uses the mounted dir.
+ *   claude  `claude auth login --claudeai`: prints a link; the provider's page shows a code to paste back.
+ *           CLAUDE_SECURESTORAGE_CONFIG_DIR is where Claude Code keeps its credentials, apart from its config, so a
+ *           house keeps its own settings and uses the box's login.
+ *   codex   `codex login --device-auth`: prints a link and a code to enter there; it finishes by itself.
+ *           CODEX_HOME is the whole of Codex's home (its config, sessions and auth).
+ */
+export const LOGIN_HARNESSES = {
+  claude: {
+    label: 'Claude', provider: 'anthropic', bin: 'claude', kind: 'paste-code',
+    status: ['auth', 'status', '--json'], login: ['auth', 'login', '--claudeai'],
+    boxEnv: (dir) => ({ CLAUDE_CONFIG_DIR: dir, CLAUDE_SECURESTORAGE_CONFIG_DIR: dir }),
+    houseEnv: (at) => ({ CLAUDE_SECURESTORAGE_CONFIG_DIR: at }),
+    link: /https:\/\/claude\.(?:com|ai)\/\S*oauth\/authorize\?\S+/,
+  },
+  codex: {
+    label: 'Codex', provider: 'openai', bin: 'codex', kind: 'device',
+    status: ['login', 'status'], login: ['login', '--device-auth'],
+    boxEnv: (dir) => ({ CODEX_HOME: dir }),
+    houseEnv: (at) => ({ CODEX_HOME: at }),
+    link: /https:\/\/auth\.openai\.com\/\S+/,
+    userCode: /\b[A-Z0-9]{4}-[A-Z0-9]{4,5}\b/,
+  },
+};
+export const LOGIN_NAMES = Object.keys(LOGIN_HARNESSES);
+
+const dataDir = (env) => env.LOOM_BOX_DATA || join(env.HOME || homedir(), '.local', 'share', 'loom-box');
+
+/** A harness's login dir on this box, made 0700 if it isn't there. */
+export function loginDir(env, harness) {
+  if (!LOGIN_HARNESSES[harness]) throw new LoginError(`no harness ${JSON.stringify(harness)} to log in`);
+  const d = join(dataDir(env), 'logins', harness);
+  mkdirSync(d, { recursive: true, mode: 0o700 });
+  chmodSync(d, 0o700);
+  return d;
+}
+
+const binOf = (env, harness) => env[`LOOM_RUNTIME_${harness.toUpperCase()}`] || LOGIN_HARNESSES[harness].bin;
+const cliEnv = (env, harness) => ({ ...env, ...LOGIN_HARNESSES[harness].boxEnv(loginDir(env, harness)), NO_COLOR: '1', BROWSER: '/bin/false' });
+
+/** A short, stable name for an account: a hash, so two boxes on one account match without its email leaving either. */
+export const accountKey = (harness, ...parts) => `${harness}-${createHash('sha256').update(parts.join('\0')).digest('hex').slice(0, 10)}`;
+
+/** `claude auth status --json`, cut down to what the runtime keeps. */
+export function parseClaudeStatus(stdout) {
+  let d;
+  try { d = JSON.parse(stdout); } catch { return { loggedIn: false, error: 'claude auth status said something that isn\'t JSON' }; }
+  if (!d?.loggedIn) return { loggedIn: false };
+  const out = { loggedIn: true, method: typeof d.authMethod === 'string' ? d.authMethod.slice(0, 40) : 'unknown' };
+  if (typeof d.subscriptionType === 'string' && d.subscriptionType) out.plan = d.subscriptionType.slice(0, 40);
+  if (d.orgId || d.email) out.account = accountKey('claude', d.orgId ?? '', d.email ?? '');
+  return out;
+}
+
+/** `codex login status`: "Logged in using ChatGPT", "Logged in using an API key…", or "Not logged in" (exit 1). */
+export function parseCodexStatus(stdout, status) {
+  const t = String(stdout ?? '').trim();
+  const m = /^Logged in using (.+)$/m.exec(t);
+  if (status !== 0 || !m) return { loggedIn: false };
+  return { loggedIn: true, method: /chatgpt/i.test(m[1]) ? 'chatgpt' : /api key/i.test(m[1]) ? 'api-key' : m[1].slice(0, 40) };
+}
+
+/** What this box has: each harness, installed or not, and its login's state, from the CLI's own status command. */
+export function harnessStatus(env = process.env, { run = spawnSync } = {}) {
+  const out = {};
+  for (const [h, def] of Object.entries(LOGIN_HARNESSES)) {
+    const bin = binOf(env, h);
+    if (run('sh', ['-c', 'command -v "$1"', 'sh', bin], { env, stdio: 'ignore' }).status !== 0) { out[h] = { installed: false, loggedIn: false }; continue; }
+    const r = run(bin, def.status, { env: cliEnv(env, h), encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000 });
+    if (r.error) { out[h] = { installed: true, loggedIn: false, error: `${bin}: ${r.error.message}`.slice(0, 120) }; continue; }
+    // codex prints its status on stderr in some versions: read both.
+    const st = h === 'claude' ? parseClaudeStatus(r.stdout) : parseCodexStatus(`${r.stdout ?? ''}\n${r.stderr ?? ''}`, r.status);
+    out[h] = { installed: true, ...st };
+  }
+  return out;
+}
+
+// ------------------------------------------------------------------ usage, from the harness's own run output
+
+const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+const WINDOW_OF = { five_hour: '5h', seven_day: '7d', seven_day_opus: '7d_opus', seven_day_sonnet: '7d_sonnet' };
+
+/**
+ * Claude Code's stream-json `rate_limit_event` (claude -p --output-format stream-json --verbose), as Claude Code
+ * 2.1.316 writes it:
+ *   {"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1793660400,"rateLimitType":"seven_day",
+ *    "unifiedWindows":{"seven_day":{"utilization":0.63,"resetsAt":1793660400,"status":"allowed"}}, …}}
+ * → {windows: {"7d": 0.63}, resets: {"7d": 1793660400}, limited?}. Null if it isn't one.
+ */
+export function claudeRateLimit(event) {
+  const info = event?.type === 'rate_limit_event' ? event.rate_limit_info : null;
+  if (!info || typeof info !== 'object') return null;
+  const windows = {}, resets = {};
+  for (const [k, w] of Object.entries(info.unifiedWindows && typeof info.unifiedWindows === 'object' ? info.unifiedWindows : {})) {
+    const name = WINDOW_OF[k];
+    if (!name || !w || typeof w !== 'object') continue;
+    if (num(w.utilization) !== undefined) windows[name] = Math.max(0, Math.min(1, w.utilization));
+    if (num(w.resetsAt) !== undefined) resets[name] = w.resetsAt;
+  }
+  // The window the event is about, when it carries no unifiedWindows entry for it: rejected means full.
+  const about = WINDOW_OF[info.rateLimitType];
+  if (about && windows[about] === undefined && info.status === 'rejected') windows[about] = 1;
+  if (about && resets[about] === undefined && num(info.resetsAt) !== undefined) resets[about] = info.resetsAt;
+  if (!Object.keys(windows).length && !Object.keys(resets).length) return null;
+  return { windows, resets, ...(info.status === 'rejected' ? { limited: true } : {}) };
+}
+
+/**
+ * Codex's `token_count` event, in the session rollout Codex writes under $CODEX_HOME/sessions (codex-cli 0.162.1;
+ * `codex exec --json` doesn't carry it on stdout):
+ *   {"type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":0.0,
+ *    "window_minutes":10080,"resets_at":1793779679},"secondary":null,"plan_type":"pro", …}}}
+ * → {windows: {"7d": 0}, resets: {"7d": 1793779679}, plan?}. Null if it isn't one.
+ */
+export function codexRateLimit(event) {
+  const p = event?.type === 'event_msg' ? event.payload : event;
+  const rl = p?.type === 'token_count' ? p.rate_limits : null;
+  if (!rl || typeof rl !== 'object') return null;
+  const windows = {}, resets = {};
+  for (const w of [rl.primary, rl.secondary]) {
+    if (!w || typeof w !== 'object' || num(w.window_minutes) === undefined) continue;
+    const m = w.window_minutes;
+    const name = m % 1440 === 0 ? `${m / 1440}d` : m % 60 === 0 ? `${m / 60}h` : null;
+    if (!name) continue;
+    if (num(w.used_percent) !== undefined) windows[name] = Math.max(0, Math.min(1, w.used_percent / 100));
+    if (num(w.resets_at) !== undefined) resets[name] = w.resets_at;
+  }
+  if (!Object.keys(windows).length) return null;
+  return { windows, resets, ...(typeof rl.plan_type === 'string' ? { plan: rl.plan_type.slice(0, 40) } : {}), ...(rl.rate_limit_reached_type ? { limited: true } : {}) };
+}
+
+/** The last reading in some lines of a harness's output (JSONL), or null. */
+export function lastRateLimit(harness, text) {
+  const read = harness === 'claude' ? claudeRateLimit : codexRateLimit;
+  let last = null;
+  for (const line of String(text ?? '').split('\n')) {
+    if (!line.includes('rate')) continue;
+    try { last = read(JSON.parse(line)) ?? last; } catch { /* not JSON */ }
+  }
+  return last;
+}
+
+/**
+ * The newest Codex reading on this box: the box's own login dir is the CODEX_HOME its houses use, so their rollouts
+ * land here. Only the newest few files of the last two days are read, and only their rate-limit lines.
+ */
+export function codexUsageOnBox(env, { now = Date.now() } = {}) {
+  const root = join(dataDir(env), 'logins', 'codex', 'sessions');
+  if (!existsSync(root)) return null;
+  const files = [];
+  for (const back of [0, 1]) {
+    const d = new Date(now - back * 86400_000);
+    const day = join(root, String(d.getUTCFullYear()), String(d.getUTCMonth() + 1).padStart(2, '0'), String(d.getUTCDate()).padStart(2, '0'));
+    try { for (const f of readdirSync(day)) if (f.endsWith('.jsonl')) files.push(join(day, f)); } catch { /* no such day */ }
+  }
+  const newest = files.map((f) => ({ f, t: statSync(f).mtimeMs })).sort((a, b) => b.t - a.t).slice(0, 3);
+  for (const { f, t } of newest) {
+    let text;
+    try { text = readFileSync(f, 'utf-8'); } catch { continue; }
+    const got = lastRateLimit('codex', text);
+    if (got) return { ...got, checked: Math.floor(t / 1000) };
+  }
+  return null;
+}
+
+// ------------------------------------------------------------------ signing in, with the CLI's own login
+
+const ANSI = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;?]*[A-Za-z]|\x1b[()][A-Za-z0-9]/g;
+export const CODE = /^[A-Za-z0-9#_.\-]{8,400}$/;
+const LOGIN_MS = 15 * 60_000;
+
+/**
+ * One login on this box: the CLI's own login command, in a pty (`script`, util-linux) so it prints its prompt, with
+ * the box's login dir as its home. It reports, through `say`: {state: 'waiting', link, userCode?}, then
+ * {state: 'done'} once the CLI's status says logged in, or {state: 'failed', error}. `code(text)` hands the
+ * owner's pasted code to the CLI's stdin. What the CLI prints is only scanned for its link and code; none of it is
+ * kept, and nothing the CLI writes into its login dir is read.
+ */
+export function startLogin(env, harness, { say, spawnImpl = spawn, status = () => harnessStatus(env)[harness], every = 3000, until = LOGIN_MS } = {}) {
+  const def = LOGIN_HARNESSES[harness];
+  if (!def) throw new LoginError(`no harness ${JSON.stringify(harness)} to log in`);
+  const bin = binOf(env, harness);
+  const q = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
+  // A wide terminal, so the link comes out on one line.
+  const cmd = `stty cols 2000 rows 50 2>/dev/null; exec ${[bin, ...def.login].map(q).join(' ')}`;
+  const child = spawnImpl('script', ['-qfec', cmd, '/dev/null'], { env: cliEnv(env, harness), stdio: ['pipe', 'pipe', 'pipe'] });
+  let out = '';
+  let over = false;
+  let reported = false;
+  let timer;
+  const finish = (st) => {
+    if (over) return;
+    over = true;
+    clearInterval(timer);
+    try { child.kill('SIGTERM'); } catch { /* gone */ }
+    say(st);
+  };
+  const onData = (b) => {
+    if (over) return;
+    out = (out + b.toString()).slice(-20000);
+    const clean = out.replace(ANSI, '');
+    if (!reported) {
+      const link = def.link.exec(clean)?.[0];
+      if (!link) return;
+      const userCode = def.userCode ? def.userCode.exec(clean.slice(clean.indexOf(link)))?.[0] : undefined;
+      if (def.userCode && !userCode) return;
+      reported = true;
+      say({ state: 'waiting', link, ...(userCode ? { userCode } : {}) });
+    }
+  };
+  child.stdout?.on('data', onData);
+  child.stderr?.on('data', onData);
+  child.stdin?.on('error', () => {});
+  child.on('error', (e) => finish({ state: 'failed', error: `couldn't run ${bin}'s login: ${e.message}`.slice(0, 200) }));
+  child.on('exit', () => {
+    // The CLI ended: logged in, or not.
+    setTimeout(() => {
+      if (over) return;
+      const st = status();
+      finish(st?.loggedIn ? { state: 'done' } : { state: 'failed', error: reported ? `${def.label}'s login ended without logging in` : `${def.label}'s login gave no link` });
+    }, 500);
+  });
+  const started = Date.now();
+  timer = setInterval(() => {
+    if (over) return;
+    if (Date.now() - started > until) return finish({ state: 'failed', error: 'No sign-in in 15 minutes; start again.' });
+    if (reported && def.kind === 'device') {
+      const st = status();
+      if (st?.loggedIn) finish({ state: 'done' });
+    }
+  }, every);
+  return {
+    code(text) {
+      if (over || def.kind !== 'paste-code') return false;
+      const c = String(text ?? '').trim();
+      if (!CODE.test(c)) return false;
+      // The code, then Enter on its own: a TUI can take text and a newline in one write as a paste.
+      child.stdin.write(c);
+      setTimeout(() => { if (!over) child.stdin.write('\r'); }, 500);
+      return true;
+    },
+    cancel() { finish({ state: 'failed', error: 'cancelled' }); },
+    get over() { return over; },
+  };
+}

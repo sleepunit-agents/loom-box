@@ -3,7 +3,7 @@
 loom's **runtime piece** ([loom docs/specs/agent-runtime.md](https://github.com/sleepunit-agents/loom/blob/main/docs/specs/agent-runtime.md)): the layer that lets an agent run. It holds:
 
 - **Boxes and houses** ([runtime.md](https://github.com/sleepunit-agents/loom/blob/main/docs/specs/runtime.md)). A **box** is a machine you keep: wunder, the 5090 box, a laptop, a Thor. You enroll it once. A **house** is one agent's container on a box, built fresh from the agent's repo for one task, then thrown away. **It's not a scheduler.** A house goes to the box you name, or to the one permitted box that has what it needs, or to the agent's primary. If that doesn't come down to exactly one box, it says why and starts nothing.
-- **Model accounts**, through an accounts provider ([below](#model-accounts)).
+- **Model accounts**: each box signs in to Claude and Codex itself, with its owner's own subscription, and the accounts are what the boxes report ([docs/model-accounts.md](docs/model-accounts.md)).
 - **Runners**: one interface over the harnesses a body runs in, Claude Code and Codex.
 - **Model choice**: one resolver that picks the model for a body.
 
@@ -17,7 +17,7 @@ On loom's own machine, which is the control plane and the first box:
 loom pieces install box        # the box piece, from loom's catalog
 # How an agent's house is made: its repo (whose house file describes the container), which secrets it gets.
 loom box agent art --repo https://github.com/sleepunit-agents/art.git \
-  --repo-secret github-art-e-fish-token --secret github-token=github-art-e-fish-token --secret claude-oauth=claude-oauth-token --nested
+  --repo-secret github-art-e-fish-token --secret github-token=github-art-e-fish-token --nested
 loom box run --local          # as a user service: runs houses here
 ```
 
@@ -266,15 +266,15 @@ The resolver, in order:
 
 ## Model accounts
 
-The household's model accounts (sign-ins, usage, and a credential issued into a house as `sub:<provider>`) are held through an **accounts provider**. This package defines the interface and carries no provider's sign-in code:
+**Read [docs/model-accounts.md](docs/model-accounts.md).** In short: each box signs in to the real `claude` and `codex` with its owner's own subscription, from the box's page (**Log in Claude**, **Log in Codex**: the CLI's own login, run on that box). The box reports, from the CLIs' own status commands, which harnesses it has and whether each is logged in. The accounts are a view of those reports: boxes on one account share it. Usage comes from the harness's own run output. loom never reads, stores, copies, refreshes or issues a model token, and never calls a provider's API. An API key is a plain secret (`anthropic-api-key`, `openai-api-key`). An agent's work runs only on boxes its owner owns, or ones lent to it.
 
-| | |
-|---|---|
-| `list()` | the accounts, by name: provider, plan, each credential's kind and status, usage windows; and each agent's order |
-| `usage()` | each account's windows, when they reset, and whether it has room |
-| `issue(agent, provider, kind?)` | what one of the agent's houses runs on now: the value, and which account and credential |
+```bash
+loom runtime logins                         # each box: claude/codex installed, logged in, plan
+loom runtime login <box> claude|codex       # the CLI's own login on that box; its link shows on the page
+loom runtime accounts [usage] [--json]      # the accounts the boxes' reports make, and how full each is
+```
 
-A household plugs its own in as a command, `LOOM_RUNTIME_ACCOUNTS` (a JSON argv, or `none`). Unset, it's `["loom", "subscriptions"]`. The command answers two verbs: `accounts --json` (the list on stdout: `{v: 1, accounts, assign}`) and `issue <agent> <provider> [--kind k]` (the value on stdout, `issued <account>/<credential>` on stderr). Whatever else a provider's list carries is dropped, so a credential's value or where it's kept never reaches the runtime's answers. `loom runtime accounts [usage] [--json]` shows them.
+`LOOM_RUNTIME_ACCOUNTS=none` turns quota reading off.
 
 ## Asking for a house
 
@@ -303,9 +303,9 @@ As the owner on loom's machine, add `--agent <name>`. From a body anywhere, with
   "task": "stdin",
   "secrets": {
     "loom-token":   { "file": "loom-token" },
-    "github-token": { "file": "github-token" },
-    "claude-oauth": { "env": "CLAUDE_CODE_OAUTH_TOKEN" }
+    "github-token": { "file": "github-token" }
   },
+  "logins": ["claude"],
   "env": { "ART_REPO": "https://github.com/sleepunit-agents/art.git" },
   "mounts": { "state": "/home/art/.local/state", "nested": "/var/lib/containers", "mirror": "/garage/git/art.git" },
   "nested": true,
@@ -316,6 +316,7 @@ As the owner on loom's machine, add `--agent <name>`. From a body anywhere, with
 - **The image** is built from the repo's Containerfile and cached by the git tree of its build context, so an unchanged house reuses it.
 - **Secrets** become the house's own podman secrets: a file under `/run/secrets/`, or an env var. `loom-token` is always there: an `agent:<agent>` token for this house only. The rest are the ones the control plane gives this agent's houses. The house file only says where each one lands; it can't ask for more.
 - **Mounts** are only the box's own per-house dirs: `state` (thrown away after), `nested` (the house's own nested-container storage) and `mirror` (the box's mirror of the repo, read-only). There are no host paths, and nothing of the box's environment or home goes in.
+- **Logins** (`"logins": ["claude", "codex"]`) are the box's own harness logins ([docs/model-accounts.md](docs/model-accounts.md)): the box's login dir, mounted read-write at `/run/loom/login/<harness>`, with `CLAUDE_SECURESTORAGE_CONFIG_DIR` or `CODEX_HOME` set so the house's CLI uses it and refreshes it in place. The house's user must be root inside the container (rootless podman makes that the box's user), so it can use the box's files. A box not logged in to one doesn't start the house.
 - **Env** gets `LOOM_URL`, `HOUSE_ID` and `HOUSE_AGENT`, plus the house file's own plain values. The task arrives on stdin, or as `HOUSE_TASK`.
 - **Ports** (`"ports": ["7401", "127.0.0.1:4747"]`, the same number inside and out) are published on the box only if the owner allows each one for that agent (`loom box agent <agent> --port 7401`, or the agents page). A service with a web side (a chat pane, an app) needs one; when it moves to another box, whatever routes to it has to follow.
 - **Nested containers** (`"nested": true`: the extra capabilities Art's tank needs, still rootless) run only if the owner allows them for that agent (`loom box agent <agent> --nested`, or the agents page). The house file can only ask.
@@ -334,12 +335,17 @@ A box never reads loom's stores, and loom never reaches into a box. The box poll
 | `report` | a box | how a house is going; ending one revokes its token |
 | `up`, `down`, `list` | owner, agent | ask for, stop and see houses (an agent only its own) |
 | `add-box`, `revoke-box`, `may-host`, `set-primary`, `set-agent` | owner | enrollment and config |
+| `login-report` | a box | how an owner's login on it is going: the CLI's link and device code, then done or failed |
+| `login-start`, `login-code`, `login-cancel` | owner | log a box in with the CLI's own login; the pasted code goes to the box once |
+| `box-owner`, `box-lend` | owner | whose a box is, and which other members' agents it's lent to |
+| `usage` | a house | how full its account is, from its harness's run output |
 
 `<piece>` is the name loom runs it under: `box`, or `runtime` once it's installed by its new name. A box remembers the name it joined under (`piece` in its `box.json`), and one that joined before the rename keeps calling `/api/box/`, which its `piece:box/<id>` credential names.
 
 ## Threat model
 
 - **A box holds what it's given, while it's given it.** It only gets secrets for a house assigned to it, once, at claim time, and only the ones named in that agent's house config. That config lives on the control plane, so a box can't widen it. The secrets sit in the house's 0600 files until the house ends.
+- **A box's model logins stay on it.** The CLI writes and refreshes them in the box's login dir (0700); a house that asks for them gets that dir, not a copy, and nothing of them goes to loom. A compromised house that was given a login can use it while it runs, as anything on that box could.
 - **A compromised box** gets the agents it may host, for the houses it's given, with the secrets those houses get. It can't read memory, read knowledge, use the page or touch other boxes. Revoking it (on the page, or with `loom box revoke`) revokes its credential and every live house token it holds.
 - **A body can't fetch secrets.** A house's token is an ordinary `agent:<name>` token. It reaches MCP and the CLI as that agent, and the secrets piece won't hand a value to a body. Only the box fetched them, for the house.
 - **A box only runs containers.** The agent's code runs inside its container, which is rootless podman with no host home, no box env and only its own dirs and secrets. The agent's Containerfile builds under podman too. So a house can't read the box's credential, the box's files, or (on loom's own machine) the household. Nested containers widen what the container may do inside its own user namespace, which is why the owner has to allow them per agent.
@@ -352,4 +358,4 @@ A box never reads loom's stores, and loom never reaches into a box. The box poll
 npm test
 ```
 
-They pin runtime.md's list: a box refuses an agent it may not host; a need nobody has fails and names itself; nothing else picks a box; a box credential gets only box calls; a revoked box gets nothing and its houses' tokens go with it; secrets go once, to the house's box; with nothing enrolled, everything goes to loom's own machine. There's also a house run end to end against a real git repo. And agent-runtime.md's: model choice (test 4, `test/models.test.mjs`), the runner interface against stand-in harnesses (`test/runners.test.mjs`), the accounts seam (`test/accounts.test.mjs`), and the rename (`test/rename.test.mjs`).
+They pin runtime.md's list: a box refuses an agent it may not host; a need nobody has fails and names itself; nothing else picks a box; a box credential gets only box calls; a revoked box gets nothing and its houses' tokens go with it; secrets go once, to the house's box; with nothing enrolled, everything goes to loom's own machine. There's also a house run end to end against a real git repo. And agent-runtime.md's: model choice (test 4, `test/models.test.mjs`), the runner interface against stand-in harnesses (`test/runners.test.mjs`), model logins and the accounts view, and that the package holds no credential (`test/accounts.test.mjs`), and the rename (`test/rename.test.mjs`).

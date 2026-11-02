@@ -33,8 +33,8 @@
       },
       {
         "name": "LOOM_RUNTIME_ACCOUNTS",
-        "label": "The accounts provider",
-        "hint": "the command that holds the household's model accounts, as a JSON argv (default [\"loom\", \"subscriptions\"]), or none"
+        "label": "Model accounts",
+        "hint": "unset: the accounts the boxes' logins report (docs/model-accounts.md); none: don't read quota"
       },
       {
         "name": "LOOM_RUNTIME_TOKEN_FILE",

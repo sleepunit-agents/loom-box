@@ -148,7 +148,7 @@ test('a body is asked of the runtime: it picks the model, starts it through the 
   setModels(env, { list: [{ id: 'opus', harness: 'claude', family: 'anthropic' }, { id: 'gpt', harness: 'codex', family: 'openai' }], agent: 'art', prefer: ['opus'] });
   const seen = [];
   const runners = { claude: fakeRunner('claude', seen), codex: fakeRunner('codex', seen) };
-  const acct = (name, provider, usage = {}) => ({ name, provider, credentials: [{ kind: 'k', status: 'valid' }], usage });
+  const acct = (name, provider, usage = {}) => ({ name, provider, harness: provider === 'anthropic' ? 'claude' : 'codex', kind: 'login', agents: ['art'], credentials: [{ kind: 'login', status: 'valid' }], usage });
   const o = { runner: (h) => runners[h], accounts: staticAccounts({ accounts: [acct('max', 'anthropic', { '7d': 0.99 }), acct('pro', 'openai')] }), now: () => new Date('2026-11-02T12:00:00Z') };
   // opus is preferred but out of quota: the body runs on gpt, through the codex runner.
   const b = await startBody(env, { agent: 'art', brief: 'the wake', venue: 'wake', place: 'schedule:reflect' }, o);
