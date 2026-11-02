@@ -19,6 +19,30 @@ function alive(name) {
   try { process.kill(Number(readFileSync(join(D, 'runs', `${name}.pid`), 'utf-8')), 0); return true; } catch { return false; }
 }
 
+// The box's own CLI runs (logins.mjs, cliRunArgs): a throwaway container with the shared login dir its one mount.
+// Emulated here on the host, with the mount's path mapped to its source and the container's /tmp to a fresh dir, and
+// the image's CLIs from config.json's cliBin. (Mount semantics, symlinks resolving inside the container, need real
+// podman: test/accounts.test.mjs has that test.)
+if (args[0] === 'images') {
+  for (const i of cfg().images ?? ['localhost/loom-house-art:abc 2026-11-01 10:00:00 +0000 UTC']) console.log(i);
+  process.exit(0);
+}
+if (args[0] === 'run' && args.includes('--entrypoint')) {
+  const vols = args.filter((a, i) => args[i - 1] === '-v');
+  if (vols.length !== 1) { console.error(`fake podman: a CLI run mounts exactly one dir, not ${vols.length}`); process.exit(125); }
+  const [src, at] = vols[0].split(':');
+  const tmp = join(D, 'cli-tmp', String(process.pid));
+  mkdirSync(tmp, { recursive: true });
+  const map = (s) => s.split(at).join(src).split('/tmp/cli').join(join(tmp, 'cli'));
+  // Only the image's CLIs (cliBin) and the base system: never a real claude or codex the test machine has.
+  const env = { PATH: `${cfg().cliBin ?? ''}:/usr/bin:/bin`, HOME: tmp };
+  args.forEach((a, i) => { if (args[i - 1] === '-e') { const k = a.slice(0, a.indexOf('=')); env[k] = map(a.slice(a.indexOf('=') + 1)); } });
+  const script = map(args[args.indexOf('-c') + 1]);
+  const { spawnSync } = await import('node:child_process');
+  const r = spawnSync('sh', ['-c', script], { env, stdio: 'inherit' });
+  rmSync(tmp, { recursive: true, force: true });
+  process.exit(r.status ?? 1);
+}
 switch (`${args[0]} ${args[1] ?? ''}`) {
   case 'image exists': process.exit(existsSync(join(D, 'images', safe(args[2]))) ? 0 : 1);
   case 'info --format': console.log('true'); process.exit(0);

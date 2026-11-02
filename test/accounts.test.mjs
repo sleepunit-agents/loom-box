@@ -3,7 +3,8 @@
 // The runtime never reads, refreshes, copies or issues a credential, and never calls a provider's API.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync, writeFileSync, mkdirSync, utimesSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { chmodSync, copyFileSync, readFileSync, readdirSync, writeFileSync, mkdirSync, utimesSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { accountsFrom, deriveAccounts, hasRoom, noAccounts, usageOf } from '../src/accounts.mjs';
@@ -131,17 +132,37 @@ test('a box\'s login state is the CLI\'s own status: states and a hash, never th
   assert.deepEqual(parseCodexStatus('Not logged in\n', 1), { loggedIn: false });
 });
 
-function fakeBox(as) {
-  const env = { ...process.env, HOME: scratch('rt-login-'), FAKE_LOGIN_AS: as, FAKE_LOGIN_DEVICE_MS: '300' };
+// A box whose container runtime is the fake podman, emulating the throwaway CLI container with the fake CLIs as the
+// image's (only `only`'s, when it's named: the other isn't installed in the image).
+function fakeBox(only) {
+  const env = { ...process.env, HOME: scratch('rt-login-'), FAKE_LOGIN_DEVICE_MS: '300', LOOM_RUNTIME_LOGIN_IMAGE: 'fake:clis' };
   env.LOOM_BOX_DATA = join(env.HOME, 'data');
-  env[`LOOM_RUNTIME_${as.toUpperCase()}`] = FAKE;
+  const bin = join(env.HOME, 'bin'), cli = join(env.HOME, 'clis');
+  mkdirSync(join(bin, 'podman-state'), { recursive: true });
+  mkdirSync(cli);
+  copyFileSync(join(here, 'fake-podman.mjs'), join(bin, 'podman'));
+  chmodSync(join(bin, 'podman'), 0o755);
+  for (const h of ['claude', 'codex']) {
+    if (only && only !== h) continue;
+    writeFileSync(join(cli, h), `#!/bin/sh\nFAKE_LOGIN_AS=${h} FAKE_LOGIN_DEVICE_MS=300 exec "${process.execPath}" "${FAKE}" "$@"\n`);
+    chmodSync(join(cli, h), 0o755);
+  }
+  writeFileSync(join(bin, 'podman-state', 'config.json'), JSON.stringify({ cliBin: cli }));
+  env.LOOM_BOX_PODMAN = join(bin, 'podman');
   return env;
 }
 const waitFor = async (f, ms = 8000) => { const end = Date.now() + ms; while (Date.now() < end) { const v = f(); if (v) return v; await new Promise((r) => setTimeout(r, 50)); } return f(); };
 
 test('logging a box in to Claude runs the CLI\'s own login there: its link to the owner, the pasted code to its stdin, and it writes its own login', async () => {
   const env = fakeBox('claude');
-  const st = () => harnessStatus({ ...env, LOOM_RUNTIME_CODEX: '/nonexistent/codex' });
+  const st = () => harnessStatus(env);
+  // Each run is a throwaway container: the shared dir its only mount, no network for a status.
+  const { cliRunArgs } = await import('../src/logins.mjs');
+  const a = cliRunArgs(env, 'claude', 'status', 'img');
+  assert.deepEqual(a.filter((x, i) => a[i - 1] === '-v'), [`${loginDir(env, 'claude')}:/run/loom/login/claude:rw,nosuid,nodev,noexec`]);
+  assert.deepEqual([a.includes('--rm'), a[a.indexOf('--network') + 1], a.includes('--cap-drop'), a.includes('-t')], [true, 'none', true, false]);
+  const b = cliRunArgs(env, 'claude', 'login', 'img');
+  assert.deepEqual([b.includes('--network'), b.includes('-t'), b.filter((x, i) => b[i - 1] === '-v').length], [false, true, 1]);
   assert.deepEqual(st().claude, { installed: true, loggedIn: false });
   assert.deepEqual(st().codex, { installed: false, loggedIn: false });
   const said = [];
@@ -152,8 +173,7 @@ test('logging a box in to Claude runs the CLI\'s own login there: its link to th
   assert.equal(l.code('good-code#s1'), true);
   const done = await waitFor(() => said.find((x) => x.state !== 'waiting'));
   assert.deepEqual(done, { state: 'done' });
-  // The CLI wrote its login into the box's own login dir; the status now says so.
-  // ... in the box's own CLI home, and its credential file (only that) moved to the shared dir the houses use.
+  // The CLI wrote its login straight into the shared dir (its secure-storage dir); the status now says so.
   assert.deepEqual(readdirSync(loginDir(env, 'claude')), ['.credentials.json']);
   assert.equal(st().claude.loggedIn, true);
   assert.match(st().claude.account, /^claude-[0-9a-f]{10}$/);
@@ -166,11 +186,10 @@ test('logging a box in to Codex: the device link and code to the owner, and it f
   const done = await waitFor(() => said.find((x) => x.state !== 'waiting'));
   assert.deepEqual(said[0], { state: 'waiting', link: 'https://auth.openai.com/codex/device', userCode: 'ABCD-EFGH1' });
   assert.deepEqual(done, { state: 'done' });
-  // Its new auth file was renamed into the shared dir; the box's private home links to it.
-  const { lstatSync: ls, readlinkSync } = await import('node:fs');
-  const { cliHome } = await import('../src/logins.mjs');
+  // Its new auth file was renamed into the shared dir, inside the container.
+  const { lstatSync: ls } = await import('node:fs');
+  assert.deepEqual(readdirSync(loginDir(env, 'codex')), ['auth.json']);
   assert.equal(ls(join(loginDir(env, 'codex'), 'auth.json')).isFile(), true);
-  assert.equal(readlinkSync(join(cliHome(env, 'codex'), 'auth.json')), join(loginDir(env, 'codex'), 'auth.json'));
   assert.deepEqual(harnessStatus(env).codex, { installed: true, loggedIn: true, method: 'chatgpt' });
 });
 
@@ -267,4 +286,58 @@ test('the runtime holds no credential: no token endpoint, refresh, client id, pr
       assert.equal(m.test(text), false, `${f} matches ${m}`);
     }
   }
+});
+
+// Real podman: what the box's own CLI run can reach is only what's mounted, so a symlink a house plants resolves in
+// the throwaway container, never on the box. Skipped where podman can't run a container (or build the tiny image).
+const realPodman = spawnSync('podman', ['info', '--format', '{{.Host.Security.Rootless}}'], { encoding: 'utf-8', timeout: 20_000 }).status === 0
+  && spawnSync('sh', ['-c', 'command -v script'], { stdio: 'ignore' }).status === 0;
+
+test('in a real container: a planted symlink to a box file is never read or written by the box\'s own status or login', { skip: !realPodman && 'no podman here' }, async (t) => {
+  const { spawnSync: s } = await import('node:child_process');
+  const { statSync, symlinkSync, rmSync } = await import('node:fs');
+  const { cliStatus } = await import('../src/logins.mjs');
+  const ctx = scratch('rt-img-');
+  // The tiny image's CLIs: they read and write their credential file, as the real ones do.
+  writeFileSync(join(ctx, 'claude'), `#!/bin/sh
+f="$CLAUDE_SECURESTORAGE_CONFIG_DIR/.credentials.json"
+case "$*" in
+  "auth status --json") cat "$f" >/dev/null 2>&1 && ok=true || ok=false; echo refreshed >> "$f" 2>/dev/null; echo "{\\"loggedIn\\": $ok, \\"authMethod\\": \\"claude.ai\\"}";;
+  "auth login --claudeai") echo "https://claude.com/cai/oauth/authorize?code=true&state=s1"; printf 'Paste code here if prompted > '; read c; echo '{"new":1}' > "$f"; cat "$f" >/dev/null; exit 0;;
+esac
+`);
+  writeFileSync(join(ctx, 'Containerfile'), 'FROM docker.io/library/alpine:3.20\nCOPY claude /usr/local/bin/claude\nRUN chmod 755 /usr/local/bin/claude\n');
+  const tag = 'localhost/loom-runtime-test-cli:1';
+  const b = s('podman', ['build', '-q', '-t', tag, ctx], { encoding: 'utf-8', timeout: 300_000 });
+  if (b.status !== 0) { t.skip(`couldn't build the test image: ${(b.stderr || '').trim().split('\n').pop()}`); return; }
+  const env = { ...process.env, LOOM_BOX_DATA: join(ctx, 'data'), LOOM_RUNTIME_LOGIN_IMAGE: tag };
+  const sentinel = join(ctx, 'box-secret');
+  writeFileSync(sentinel, 'the box\'s own file\n');
+  const before = statSync(sentinel);
+  const shared = loginDir(env, 'claude');
+  // A house swapped the credential file for a link to the box's file, after the box's lstat (so the CLI runs on it).
+  symlinkSync(sentinel, join(shared, '.credentials.json'));
+  const st = cliStatus(env, 'claude', tag);
+  assert.equal(st.loggedIn, false, 'the link pointed at nothing inside the container');
+  // A login whose credential file becomes that link while it waits: its write lands in the container, not the box.
+  rmSync(join(shared, '.credentials.json'));
+  const said = [];
+  const l = startLogin(env, 'claude', { say: (x) => said.push(x), status: () => ({ loggedIn: false }), every: 100 });
+  await waitFor(() => said.find((x) => x.state === 'waiting'), 60_000);
+  symlinkSync(sentinel, join(shared, '.credentials.json'));
+  l.code('good-code#s1');
+  await waitFor(() => said.find((x) => x.state !== 'waiting'), 60_000);
+  const after = statSync(sentinel);
+  assert.equal(readFileSync(sentinel, 'utf-8'), 'the box\'s own file\n');
+  assert.equal(after.mtimeMs, before.mtimeMs);
+  assert.equal(after.size, before.size);
+  // The control: with no link, the same login's write lands in the shared dir (so the code got there, and it wrote).
+  rmSync(join(shared, '.credentials.json'));
+  const said2 = [];
+  const l2 = startLogin(env, 'claude', { say: (x) => said2.push(x), status: () => ({ loggedIn: false }), every: 100 });
+  await waitFor(() => said2.find((x) => x.state === 'waiting'), 60_000);
+  l2.code('good-code#s1');
+  await waitFor(() => said2.find((x) => x.state !== 'waiting'), 60_000);
+  assert.equal(readFileSync(join(shared, '.credentials.json'), 'utf-8').trim(), '{"new":1}');
+  s('podman', ['rmi', '-f', tag], { stdio: 'ignore' });
 });

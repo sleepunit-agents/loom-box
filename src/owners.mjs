@@ -56,8 +56,12 @@ export function loginsOf(a, agent, members) {
  * won't give.
  */
 export function mayUseLogin(box, agentCfg, agent, harness, members) {
-  return !box?.revoked && !!box?.harnesses?.[harness]?.loggedIn && !box.harnesses[harness].unhealthy
-    && ownsBox(box, agent, members) && loginsOf(agentCfg, agent, members).includes(harness);
+  return !!box?.harnesses?.[harness]?.loggedIn && !box.harnesses[harness].unhealthy && mayHaveLogin(box, agentCfg, agent, harness, members);
+}
+
+/** The same, before the box is logged in: whether the agent would get this box's login for the harness. */
+export function mayHaveLogin(box, agentCfg, agent, harness, members) {
+  return !box?.revoked && ownsBox(box, agent, members) && loginsOf(agentCfg, agent, members).includes(harness);
 }
 
 /** Whether a box runs this agent's work: its owner owns the agent, or lent it the box by name. */

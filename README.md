@@ -274,7 +274,7 @@ loom runtime login <box> claude|codex       # the CLI's own login on that box; i
 loom runtime accounts [usage] [--json]      # the accounts the boxes' reports make, and how full each is
 ```
 
-`LOOM_RUNTIME_ACCOUNTS=none` turns quota reading off. A login's pasted code crosses the box's channel to loom, so log a box in only over HTTPS or the tailnet; a box joined over plain HTTP elsewhere refuses to run a login.
+`LOOM_RUNTIME_ACCOUNTS=none` turns quota reading off. The box runs its own `claude`/`codex` status and login only in a throwaway container (podman), with the shared login dir its only mount: a box without a container runtime can't offer logins. A login's pasted code crosses the box's channel to loom, so log a box in only over HTTPS or the tailnet; a box joined over plain HTTP elsewhere refuses to run a login.
 
 ## Asking for a house
 

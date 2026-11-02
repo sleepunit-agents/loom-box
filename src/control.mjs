@@ -16,7 +16,7 @@ import { joinPoll, joinRequest } from './enroll.mjs';
 import { MAX_PARTS, PART_RAW, drop, partsOf, putPart, putWhole, readPart } from './blobs.mjs';
 import { parsePortGrant, parseTailnetGrant } from './house.mjs';
 import { CODE, LOGIN_NAMES } from './logins.mjs';
-import { boxOwner, mayUseLogin, membersOf, ownersAllow } from './owners.mjs';
+import { boxOwner, mayHaveLogin, mayUseLogin, membersOf, ownersAllow } from './owners.mjs';
 
 const TERMINAL = new Set(['done', 'failed', 'stopped', 'lost']);
 const LIVE = new Set(['wanted', 'starting', 'running', 'stopping']);
@@ -450,6 +450,8 @@ export function poll(env, effects, caller, { facts, sessions, harnesses, usage }
           if (l.state === 'cancel') l.state = 'failed';
           return out;
         }),
+      // Which agents may use each of this box's logins: the box runs its CLI in one of their images (logins.mjs).
+      loginAgents: Object.fromEntries(LOGIN_NAMES.map((k) => [k, Object.keys(s.agents).filter((ag) => mayHaveLogin(b, s.agents[ag], ag, k, members))])),
       start: mine.filter((h) => h.state === 'wanted' && mayHost(b, h.agent, members) && !(h.notBefore && Date.parse(h.notBefore) > Date.parse(now(effects)))).map((h) => {
         const a = s.agents[h.agent] || {};
         return { id: h.id, agent: h.agent, task: h.task, service: h.service ?? null, slot: h.slot ?? null, session: !!h.session, repo: a.repo, houseFile: a.houseFile || 'house/house.json', branch: a.branch ?? null,

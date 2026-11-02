@@ -30,6 +30,9 @@ to those binaries. It does not log in for them.
   box's owner and that hash, salted with a secret of the household's own, so
   one owner's box can't merge into another owner's account. Bodies and agent
   owners see only a label ("Claude Max (jonathan's)"), never the key.
+  (A status check runs in a fresh container, so Claude's org and account come
+  only from what the CLI can tell offline. Where it can't, a box's login is an
+  account of its own.)
   A box knows a login exists only because the CLI's status says so. loom never
   opens a credential file.
 - **Houses use their box's login.** A house file that says
@@ -74,30 +77,44 @@ mount breaks the CLI's own refresh. So the login dir is mounted read-write
 (`nosuid,nodev,noexec`), and what's narrowed is who gets it: only the harnesses
 a house runs, only on its agent's owner's own box, only with the owner's grant.
 
-**The box keeps its own CLI home.** A house can write the shared login dir, so
-anything it plants there (a Codex `config.toml` with a `notify` command, Claude
-settings with hooks) would run on the box if the box ran a CLI with that dir as
-its home. Checking first can't make that safe, because the dir can change
-between the check and the run. So the box runs its own `claude` / `codex`
-(status, login) with a private home of its own
-(`~/.local/share/loom-box/cli-home/<harness>`, 0700, never mounted) as home,
-config and working dir. Nothing is copied:
+**The box runs its own CLI in a throwaway container.** A house can write the
+shared login dir. It could plant a Codex `config.toml` with a `notify` command,
+or swap the credential file for a symlink to one of the box's files between any
+check the box makes and the CLI's open. A CLI running on the box would then run
+that command, or read and write through that link as the box's user. So the box
+never runs `claude` / `codex` itself. Its status checks and logins each run in
+a `podman run --rm` container:
 
-- **Claude:** `CLAUDE_CONFIG_DIR` is the private home, and
-  `CLAUDE_SECURESTORAGE_CONFIG_DIR` is the shared dir. The CLI reads and writes
-  its credential there in place, and never reads settings or hooks from it.
-  Checked with Claude Code 2.1.316: a run with that split fired none of the 14
-  hooks in the secure-storage dir's `settings.json`, and the same run without
-  the split fired 9.
-- **Codex:** `CODEX_HOME` is the private home. Its `auth.json` is a symlink to
-  the shared one, so `codex login status` reads the houses' current login; it
-  doesn't write the file (codex-cli 0.162.1, checked). A login runs with no link
-  there. Its new `auth.json` is then renamed into the shared dir (rename(2): never
-  opened) and linked again.
+- The shared login dir is the only mount, at the path houses use (`rw,nosuid,nodev,noexec`).
+- Config and home are the container's own: a tmpfs plus its own overlay, gone when it ends.
+- It runs with no capabilities and `no-new-privileges`. A status check gets no network; a login gets the network it needs to reach the provider.
 
-Before every use, the box lstats the shared credential file. It must be a plain
-file of the box's user, or the box doesn't use that login, and its page shows
-it as unhealthy. Before each mount, the shared dir is cut down to that file and
+Any symlink therefore resolves inside the container, where nothing of the box's
+is. The box process itself never opens a path in the shared dir.
+
+- **Claude:** `CLAUDE_CONFIG_DIR` is the container's tmpfs, and
+  `CLAUDE_SECURESTORAGE_CONFIG_DIR` is the mounted dir. The CLI reads and
+  writes its credential there in place, and never reads settings or hooks from
+  it. Checked with Claude Code 2.1.316: a run with that split fired none of the
+  14 hooks in the secure-storage dir's `settings.json`, and the same run without
+  the split fired 9. `claude auth status` works offline.
+- **Codex:** `CODEX_HOME` is the container's tmpfs. For a status check, its
+  `auth.json` is a link (made in the container) to the mounted file;
+  `codex login status` doesn't write it (codex-cli 0.162.1, checked). A login
+  runs in the container's own home, and its new `auth.json` is then put in the
+  mounted dir by a rename, inside the container.
+- **The image** is one that has both CLIs. It's `LOOM_RUNTIME_LOGIN_IMAGE` if
+  the box's owner set one. Otherwise it's the newest house image built on this
+  box for an agent that may use that login (its owner owns the box and granted
+  it). That agent's houses get the login anyway, so its image sees nothing new.
+  A box with no container runtime, or no such image yet, can't offer logins,
+  and its page says why. A first house of the agent builds the image, even when
+  it then can't start for want of a login.
+
+Before every use, the box lstats the shared credential file (it never opens
+it). It must be a plain file of the box's user, or the box doesn't use that
+login, and its page shows it as unhealthy. The lstat is for reporting only;
+the container is what keeps a swapped link off the box. Before each mount, the shared dir is cut down to that file and
 the CLI's own temp and lock files beside it.
 
 **What that leaves open.** An agent in a house that has its owner's login can

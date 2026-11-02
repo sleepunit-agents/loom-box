@@ -3,9 +3,9 @@
 // from what the harness writes about its own runs.
 //
 // The rule this module keeps: the CLI owns its login. Each box signs itself in by running the CLI's own login
-// command with a home of the box's own (<data>/cli-home/<harness>, 0700, never mounted) for its config. Its
-// credential lives in the shared login dir (<data>/logins/<harness>) that houses get, where every CLI on the box
-// (the box's and the houses') reads and refreshes it in place. loom never opens it. Nothing here reads, copies, refreshes or sends a credential; a house that
+// command in a throwaway container (cliRunArgs) whose only mount is the shared login dir (<data>/logins/<harness>)
+// that houses get. Every CLI (the box's, in its containers, and the houses') reads and refreshes the credential
+// there in place. loom never opens it, and never runs a CLI on the box itself. Nothing here reads, copies, refreshes or sends a credential; a house that
 // runs a harness (house file "harnesses") gets that dir mounted, and its own copy of the same CLI uses it. A login
 // never leaves its box.
 //
@@ -14,7 +14,7 @@
 // boxes signed in to one account share its quota. The email itself never leaves the box.
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readSync, renameSync, rmSync, symlinkSync } from 'node:fs';
+import { chmodSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -40,20 +40,12 @@ export const LOGIN_HARNESSES = {
   claude: {
     label: 'Claude', provider: 'anthropic', bin: 'claude', kind: 'paste-code',
     status: ['auth', 'status', '--json'], login: ['auth', 'login', '--claudeai'],
-    // On the box: its config (settings, hooks) in the box's private home; its credential in the shared dir, which
-    // the CLI reads and writes in place itself. Settings in the secure-storage dir aren't read (Claude Code
-    // 2.1.316, checked 2026-11-02: with CLAUDE_CONFIG_DIR empty and ~/.claude as the secure-storage dir, a run
-    // logged in and fired 0 of ~/.claude/settings.json's hooks; without the split, 9).
-    boxEnv: (home, shared) => ({ CLAUDE_CONFIG_DIR: home, CLAUDE_SECURESTORAGE_CONFIG_DIR: shared }),
     houseEnv: (at) => ({ CLAUDE_SECURESTORAGE_CONFIG_DIR: at }),
     link: /https:\/\/claude\.(?:com|ai)\/\S*oauth\/authorize\?\S+/,
   },
   codex: {
     label: 'Codex', provider: 'openai', bin: 'codex', kind: 'device',
     status: ['login', 'status'], login: ['login', '--device-auth'],
-    // On the box: its whole home private; its auth file a symlink to the shared one (codex login status doesn't
-    // write it: codex-cli 0.162.1, checked 2026-11-02 through a symlink and on a plain file).
-    boxEnv: (home) => ({ CODEX_HOME: home }),
     houseEnv: (at) => ({ LOOM_LOGIN_CODEX: at }),
     link: /https:\/\/auth\.openai\.com\/\S+/,
     userCode: /\b[A-Z0-9]{4}-[A-Z0-9]{4,5}\b/,
@@ -75,7 +67,7 @@ export function loginDir(env, harness) {
 /**
  * Whether a shared login dir is fit to mount again (after pruneLoginDir): every entry a plain file or directory (no
  * symlink, device, fifo or socket), owned by the box's user, with no setuid or setgid bit. Returns why not, or null.
- * lstat only: nothing followed. The box never runs a CLI in this dir (cliHome), so this guards the next house.
+ * lstat only: nothing followed. The box never runs a CLI on this dir outside a container, so this guards the next house.
  */
 export function checkLoginDir(dir, { uid = process.getuid?.(), max = 5000 } = {}) {
   const S_ISUID = 0o4000, S_ISGID = 0o2000;
@@ -99,20 +91,6 @@ export function checkLoginDir(dir, { uid = process.getuid?.(), max = 5000 } = {}
 }
 
 /**
- * The box's own CLI home for a harness: <data>/cli-home/<harness>, 0700, never mounted into a house. The box runs a
- * harness CLI (status, login) only with this as its home and config, never with the shared login dir: a house can
- * write the shared dir, and a config.toml or settings file planted there (Codex's `notify`, Claude's hooks) would
- * run on the box. Checking the dir first can't make that safe (it can change between the check and the run).
- */
-export function cliHome(env, harness) {
-  if (!LOGIN_HARNESSES[harness]) throw new LoginError(`no harness ${JSON.stringify(harness)}`);
-  const d = join(dataDir(env), 'cli-home', harness);
-  mkdirSync(d, { recursive: true, mode: 0o700 });
-  chmodSync(d, 0o700);
-  return d;
-}
-
-/**
  * The credential file each CLI owns, in the shared login dir. loom never opens it: the CLI reads and writes it in
  * place, the box only lstats it (a regular file of the box's user) and, after a Codex login, renames the CLI's new
  * one into place. Anything else in the shared dir (beyond it and the CLI's own temp or lock files beside it, which
@@ -130,9 +108,6 @@ export function pruneLoginDir(dir, harness) {
   return checkLoginDir(dir);
 }
 
-const binOf = (env, harness) => env[`LOOM_RUNTIME_${harness.toUpperCase()}`] || LOGIN_HARNESSES[harness].bin;
-const cliEnv = (env, harness) => ({ ...env, ...LOGIN_HARNESSES[harness].boxEnv(cliHome(env, harness), loginDir(env, harness)), NO_COLOR: '1', BROWSER: '/bin/false' });
-
 /** Why the shared credential file can't be used (lstat only: never opened), or null; 'absent' if there's none. */
 export function credentialState(env, harness, { uid = process.getuid?.() } = {}) {
   let st;
@@ -144,12 +119,65 @@ export function credentialState(env, harness, { uid = process.getuid?.() } = {})
   return null;
 }
 
-/** Codex's private home: its auth file a symlink to the shared one, when there is one (never a copy). */
-function linkCodexAuth(env) {
-  const at = join(cliHome(env, 'codex'), CRED_FILE.codex);
-  rmSync(at, { force: true });
-  if (credentialState(env, 'codex') === null) symlinkSync(join(loginDir(env, 'codex'), CRED_FILE.codex), at);
+// ------------------------------------------------------------------ the CLI, run in a throwaway container
+
+/**
+ * The box runs a harness CLI (status, login) only inside a throwaway container, never on the box itself: a house
+ * that has the login can swap anything in the shared dir (the credential file for a symlink) between any check the
+ * box makes and the CLI's open, and a CLI running on the box would then read or write wherever the link points. In
+ * a container the shared dir is the only thing mounted, so any link resolves inside it, and nothing of the box's is
+ * there to reach. The box process itself never opens a path in the shared dir: it lstats the credential file to say
+ * whether the login is healthy, and cuts the dir down before a mount (pruneLoginDir). Config and home are the
+ * container's own (a tmpfs, and its own overlay, gone with --rm). Status runs with no network; a login with the
+ * network it needs to reach the provider. A box with no container runtime can't offer logins.
+ *
+ * The image is one that has the CLIs: LOOM_RUNTIME_LOGIN_IMAGE if the box's owner set one, else the newest house
+ * image built on this box for an agent the control plane says may use that login (its owner owns this box, and
+ * granted it): that agent's houses get the login anyway, so its image sees nothing new.
+ */
+const AT = (h) => `${LOGIN_MOUNT}/${h}`;
+const CONTAINER_SCRIPTS = {
+  claude: {
+    env: { CLAUDE_CONFIG_DIR: '/tmp/cli/.claude', CLAUDE_SECURESTORAGE_CONFIG_DIR: AT('claude') },
+    status: 'command -v claude >/dev/null 2>&1 || exit 99; mkdir -p /tmp/cli/.claude; cd /tmp/cli; exec claude auth status --json',
+    login: 'command -v claude >/dev/null 2>&1 || exit 99; mkdir -p /tmp/cli/.claude; cd /tmp/cli; stty cols 2000 rows 50 2>/dev/null; exec claude auth login --claudeai',
+  },
+  codex: {
+    env: { CODEX_HOME: '/tmp/cli/.codex' },
+    // Status: the shared auth file, linked into the container's own Codex home (the link resolves in the container).
+    status: `command -v codex >/dev/null 2>&1 || exit 99; mkdir -p "$CODEX_HOME"; ln -s ${AT('codex')}/auth.json "$CODEX_HOME/auth.json"; cd /tmp/cli; exec codex login status`,
+    // Login: in the container's own home, then its new auth file put in the shared dir by rename (inside the container).
+    login: `command -v codex >/dev/null 2>&1 || exit 99; mkdir -p "$CODEX_HOME"; cd /tmp/cli; stty cols 2000 rows 50 2>/dev/null; codex login --device-auth || exit $?; `
+      + `rm -f ${AT('codex')}/auth.json.loom-new && cp "$CODEX_HOME/auth.json" ${AT('codex')}/auth.json.loom-new && chmod 600 ${AT('codex')}/auth.json.loom-new && mv -f ${AT('codex')}/auth.json.loom-new ${AT('codex')}/auth.json`,
+  },
+};
+export const podmanBin = (env) => env.LOOM_BOX_PODMAN || 'podman';
+
+/** The image a box runs a harness's CLI in, or null (with why). `agents` are the ones that may use the login here. */
+export function loginImage(env, agents = [], { run = spawnSync } = {}) {
+  const set = env.LOOM_RUNTIME_LOGIN_IMAGE;
+  if (set) return { image: set };
+  const r = run(podmanBin(env), ['images', '--format', '{{.Repository}}:{{.Tag}} {{.CreatedAt}}'], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000 });
+  if (r.error || r.status !== 0) return { image: null, why: 'this box has no container runtime it can run (podman), so it can\'t offer logins' };
+  const want = new Set(agents.map((a) => `loom-house-${a}`));
+  const imgs = (r.stdout || '').split('\n').map((l) => l.trim()).filter(Boolean).map((l) => { const [ref, ...at] = l.split(' '); return { ref, at: Date.parse(at.slice(0, 2).join(' ')) || 0 }; })
+    .filter((x) => want.has(x.ref.replace(/^localhost\//, '').split(':')[0])).sort((a, b) => b.at - a.at);
+  if (!imgs.length) return { image: null, why: 'no house image of an agent granted this login is built on this box yet (start one of its houses once, or set LOOM_RUNTIME_LOGIN_IMAGE)' };
+  return { image: imgs[0].ref };
 }
+
+/** The exact `podman run` arguments for one box-side CLI run: the shared dir the only mount. */
+export function cliRunArgs(env, harness, what, image) {
+  const def = CONTAINER_SCRIPTS[harness];
+  const login = what === 'login';
+  return ['run', '--rm', ...(login ? ['-i', '-t'] : []), '--user', '0:0', '--cap-drop', 'all', '--security-opt', 'no-new-privileges',
+    ...(login ? [] : ['--network', 'none']), '--tmpfs', '/tmp:rw,nosuid,nodev,size=64m',
+    ...Object.entries({ ...def.env, NO_COLOR: '1', BROWSER: '/bin/false' }).flatMap(([k, v]) => ['-e', `${k}=${v}`]),
+    '-v', `${loginDir(env, harness)}:${AT(harness)}:rw,nosuid,nodev,noexec`,
+    '--entrypoint', 'sh', image, '-c', login ? def.login : def.status];
+}
+
+const podEnv = (env) => ({ PATH: env.PATH, HOME: env.HOME, ...(env.XDG_RUNTIME_DIR ? { XDG_RUNTIME_DIR: env.XDG_RUNTIME_DIR } : {}) });
 
 /** A short, stable name for an account: a hash, so two boxes on one account match without its email leaving either. */
 export const accountKey = (harness, ...parts) => `${harness}-${createHash('sha256').update(parts.join('\0')).digest('hex').slice(0, 10)}`;
@@ -173,32 +201,30 @@ export function parseCodexStatus(stdout, status) {
   return { loggedIn: true, method: /chatgpt/i.test(m[1]) ? 'chatgpt' : /api key/i.test(m[1]) ? 'api-key' : m[1].slice(0, 40) };
 }
 
-/** One harness's status, as its CLI says it, run with the box's private home as its home and working dir. */
-function statusIn(env, h, run) {
-  const def = LOGIN_HARNESSES[h];
-  const bin = binOf(env, h);
-  const r = run(bin, def.status, { env: cliEnv(env, h), cwd: cliHome(env, h), encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000 });
-  if (r.error) return { installed: true, loggedIn: false, error: `${bin}: ${r.error.message}`.slice(0, 120) };
+/** One harness's status, as its CLI says it, run in a throwaway container. */
+export function cliStatus(env, h, image, run = spawnSync) {
+  const r = run(podmanBin(env), cliRunArgs(env, h, 'status', image), { env: podEnv(env), encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 90_000 });
+  if (r.error) return { installed: false, loggedIn: false, unhealthy: `can't run a container: ${r.error.message}`.slice(0, 120) };
+  if (r.status === 99) return { installed: false, loggedIn: false };
   // codex prints its status on stderr in some versions: read both. Only these parsed states are kept.
   return { installed: true, ...(h === 'claude' ? parseClaudeStatus(r.stdout) : parseCodexStatus(`${r.stdout ?? ''}\n${r.stderr ?? ''}`, r.status)) };
 }
 
 /**
- * What this box has: each harness, installed or not, and its login's state, from the CLI's own status command. The
- * CLI runs with the box's private home (cliHome) for its config, and finds its credential where the houses' CLIs
- * keep it refreshed: Claude's secure-storage dir is the shared dir; Codex's auth file is a symlink to the shared
- * one. A credential file there that isn't a plain file of the box's user (a symlink a house planted) is refused,
- * and that login reported unhealthy. loom never opens the file: a box knows a login exists only from the CLI.
+ * What this box has: each harness, installed or not (in the image it runs logins in), and its login's state, from
+ * the CLI's own status command, run in a throwaway container with the shared login dir its only mount. A
+ * credential file there that isn't a plain file of the box's user (a symlink a house planted) is reported
+ * unhealthy, and the CLI isn't run on it. `agents` says, per harness, which agents may use the login here (the
+ * control plane's answer), to pick the image. loom never opens the credential file.
  */
-export function harnessStatus(env = process.env, { run = spawnSync } = {}) {
+export function harnessStatus(env = process.env, { run = spawnSync, agents = {} } = {}) {
   const out = {};
   for (const h of Object.keys(LOGIN_HARNESSES)) {
-    const bin = binOf(env, h);
-    if (run('sh', ['-c', 'command -v "$1"', 'sh', bin], { env, stdio: 'ignore' }).status !== 0) { out[h] = { installed: false, loggedIn: false }; continue; }
+    const img = loginImage(env, agents[h] ?? [], { run });
+    if (!img.image) { out[h] = { installed: false, loggedIn: false, unhealthy: img.why }; continue; }
     const bad = credentialState(env, h);
     if (bad && bad !== 'absent') { out[h] = { installed: true, loggedIn: false, unhealthy: bad.slice(0, 120) }; continue; }
-    if (h === 'codex') linkCodexAuth(env);
-    out[h] = statusIn(env, h, run);
+    out[h] = cliStatus(env, h, img.image, run);
   }
   return out;
 }
@@ -342,42 +368,26 @@ export const CODE = /^[A-Za-z0-9#_.\-]{8,400}$/;
 const LOGIN_MS = 15 * 60_000;
 
 /**
- * One login on this box: the CLI's own login command, in a pty (`script`, util-linux) so it prints its prompt, with
- * the box's own CLI home (cliHome) as its home, never the shared dir. It reports, through `say`: {state: 'waiting', link, userCode?}, then
+ * One login on this box: the CLI's own login command, in a throwaway container (cliRunArgs), in a pty (`script`,
+ * util-linux) so it prints its prompt. It reports, through `say`: {state: 'waiting', link, userCode?}, then
  * {state: 'done'} once the CLI's status says logged in, or {state: 'failed', error}. `code(text)` hands the
  * owner's pasted code to the CLI's stdin. What the CLI prints is only scanned for its link and code; none of it is
  * kept, and loom never opens the credential file it writes.
  */
-const defaultLoginStatus = Symbol('status');
-export function startLogin(env, harness, { say: tell, spawnImpl = spawn, status: given, every = 3000, until = LOGIN_MS } = {}) {
-  let status = given ?? defaultLoginStatus;
+export function startLogin(env, harness, { say, spawnImpl = spawn, status, every = 3000, until = LOGIN_MS, agents = [], run = spawnSync } = {}) {
   const def = LOGIN_HARNESSES[harness];
   if (!def) throw new LoginError(`no harness ${JSON.stringify(harness)} to log in`);
-  const bin = binOf(env, harness);
-  // The login runs with the box's private home. Claude writes its new credential straight into the shared dir (its
-  // secure-storage dir). Codex logs in with no link in its home, then its new auth file is renamed into the shared
-  // dir (rename(2): never opened) and linked again. A credential file there that isn't a plain file is refused first.
+  // In a throwaway container (cliRunArgs), with a pty from `script` here so the CLI prints its prompt. Claude writes
+  // its new credential straight into the shared dir (its secure-storage dir); Codex's is renamed in, in the container.
+  const img = loginImage(env, agents, { run });
+  if (!img.image) throw new LoginError(img.why);
   const bad = credentialState(env, harness);
   if (bad && bad !== 'absent') throw new LoginError(`the ${def.label} login dir isn't safe to use: ${bad}`);
-  const mine = cliHome(env, harness);
-  if (harness === 'codex') rmSync(join(mine, CRED_FILE.codex), { force: true });
-  const say = (st) => {
-    if (st.state !== 'done' || harness !== 'codex') return tell(st);
-    const fresh = join(mine, CRED_FILE.codex);
-    try {
-      const s = lstatSync(fresh);
-      if (!s.isFile()) throw new LoginError(`codex's new ${CRED_FILE.codex} isn't a regular file`);
-      renameSync(fresh, join(loginDir(env, 'codex'), CRED_FILE.codex));
-      linkCodexAuth(env);
-    } catch (e) { return tell({ state: 'failed', error: `logged in, but the login couldn't be put where the houses use it: ${e.message}` }); }
-    return tell(st);
-  };
-  // A status mid-login reads the private home as it is (for Codex, no link yet: that's where the new login is).
+  status ??= () => cliStatus(env, harness, img.image, run);
+  const bin = podmanBin(env);
   const q = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
-  // A wide terminal, so the link comes out on one line.
-  const cmd = `stty cols 2000 rows 50 2>/dev/null; exec ${[bin, ...def.login].map(q).join(' ')}`;
-  if (status === defaultLoginStatus) status = () => statusIn(env, harness, spawnSync);
-  const child = spawnImpl('script', ['-qfec', cmd, '/dev/null'], { env: cliEnv(env, harness), cwd: mine, stdio: ['pipe', 'pipe', 'pipe'] });
+  const cmd = [bin, ...cliRunArgs(env, harness, 'login', img.image)].map(q).join(' ');
+  const child = spawnImpl('script', ['-qfec', cmd, '/dev/null'], { env: podEnv(env), stdio: ['pipe', 'pipe', 'pipe'] });
   let out = '';
   let over = false;
   let reported = false;

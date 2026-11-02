@@ -373,15 +373,18 @@ function rootless(env) {
  * on loom's own machine); `loomUrl` is what a house is told loom is.
  */
 export function runner(env, client, { loomUrl, labels = [], log = (m) => process.stderr.write(`loom-box: ${m}\n`), hasSocket = (p) => existsSync(p), hasCdi = () => CDI_SPECS.some((p) => existsSync(p)), upgrade = maybeUpgrade,
-  status = () => harnessStatus(env), login = (h, o) => startLogin(env, h, o), codexUsage = () => null, clock = () => Date.now(), secureChannel = true }) {
+  status = (agents) => harnessStatus(env, { agents }), login = (h, o) => startLogin(env, h, o), codexUsage = () => null, clock = () => Date.now(), secureChannel = true }) {
   const houses = new Map(); // id -> { child, dir, stopAt? }
   // The harness CLIs' own word on their logins, asked every STATUS_MS (and after a login), not every poll.
   let harnesses = null;
   let asked = 0;
   const logins = new Map(); // login id -> the CLI's login under way
+  let loginAgents = null; // per harness, the agents the control plane says may use this box's login (its last poll)
   function harnessesNow(force) {
+    // Not before the first poll: the CLI runs in an image of an agent the control plane names.
+    if (!loginAgents) return harnesses;
     if (force || !harnesses || clock() - asked >= STATUS_MS) {
-      try { harnesses = status(); } catch (e) { log(`harness status: ${e.message}`); }
+      try { harnesses = status(loginAgents); } catch (e) { log(`harness status: ${e.message}`); }
       asked = clock();
     }
     return harnesses;
@@ -405,7 +408,7 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
         client.call('login-report', { id: l.id, ...st, kind: LOGIN_HARNESSES[l.harness].kind, ...(hs ? { harnesses: hs } : {}) })
           .catch((e) => log(`login-report ${l.id}: ${e.message}`));
       };
-      try { logins.set(l.id, login(l.harness, { say: report })); } catch (e) { report({ state: 'failed', error: e.message }); }
+      try { logins.set(l.id, login(l.harness, { say: report, agents: loginAgents?.[l.harness] ?? [] })); } catch (e) { report({ state: 'failed', error: e.message }); }
     }
   }
   const sessions = boxSessions(env, client, { dataDir: dataDir(env), log });
@@ -442,13 +445,14 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
       const given = { ...(claimed.secrets || {}), 'loom-token': claimed.token };
       const missing = missingSecrets(house, given);
       if (missing.length) throw new BoxError(`the house file wants ${missing.join(', ')}, which ${h.agent}'s houses don't get`);
-      // The box's own logins the house wants: each must be logged in here (the box's report, as of its claim).
-      const notIn = (house.logins ?? []).filter((l) => !(claimed.logins ?? []).includes(l));
-      if (notIn.length) throw new BoxError(`this box has no ${notIn.map((l) => LOGIN_HARNESSES[l].label).join(' or ')} login for ${h.agent}'s houses: log it in from its page (Boxes, Log in), on a box ${h.agent}'s owner owns, with the login granted to ${h.agent}`);
       if (house.nested && !rootless(env)) throw new BoxError('nested containers need rootless podman on the box');
       if (h.gpu && !claimed.gpu) throw new BoxError(`the house needs the GPU, and the owner hasn't allowed ${h.agent}'s houses a GPU (loom box agent ${h.agent} … --gpu, or the agent's page)`);
       if (h.gpu && !hasCdi()) throw new BoxError('the house needs the GPU, and this box has no NVIDIA CDI spec: run `sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml` (nvidia-container-toolkit) once, then try again');
       const tag = image(env, h, house, repo, logFd);
+      // The box's own logins the house wants: each must be logged in here (the box's report, as of its claim). Checked
+      // after the image is built, so a first house leaves an image the box can run its own login in (logins.mjs).
+      const notIn = (house.logins ?? []).filter((l) => !(claimed.logins ?? []).includes(l));
+      if (notIn.length) throw new BoxError(`this box has no ${notIn.map((l) => LOGIN_HARNESSES[l].label).join(' or ')} login for ${h.agent}'s houses: log it in from its page (Boxes, Log in), on a box ${h.agent}'s owner owns, with the login granted to ${h.agent}`);
       // Only the logins the claim names (logged in here, granted, and this box its agent's owner's): checked above,
       // and again here, so nothing else of the box's is ever mounted.
       const dirs = { mirror, logins: Object.fromEntries((house.logins ?? []).filter((l) => (claimed.logins ?? []).includes(l)).map((l) => {
@@ -584,6 +588,12 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
     let cx = null;
     try { cx = codexUsage(); } catch { cx = null; }
     const want = await client.call('poll', { facts: detectFacts(env, labels), ...(busy ? { sessions: busy } : {}), ...(hs ? { harnesses: hs } : {}), ...(cx ? { usage: { codex: cx } } : {}) });
+    if (want.loginAgents) {
+      const first = !loginAgents;
+      loginAgents = want.loginAgents;
+      // The first poll told the box whose images it may run its CLI in: ask the CLI now, not in five minutes.
+      if (first) { const hs2 = harnessesNow(true); if (hs2) await client.call('poll', { harnesses: hs2 }).catch((e) => log(`poll: ${e.message}`)); }
+    }
     onLogins(want.logins);
     // The control plane thinks these are up here, but this box doesn't have them:
     // it restarted under them. Say so rather than leave them "running" forever.

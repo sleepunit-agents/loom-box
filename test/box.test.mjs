@@ -521,12 +521,16 @@ test('a sentinel token in the box\'s credential files never shows in any argv, e
   const SENTINEL = 'sk-ant-oat01-SENTINEL-must-never-leave-the-file-0000';
   const { spawn: realSpawn, spawnSync: realSpawnSync } = await import('node:child_process');
   const { harnessStatus, startLogin, loginDir } = await import('../src/logins.mjs');
-  const fake = join(here, 'fake-login.mjs');
+  const fakeCli = join(here, 'fake-login.mjs');
   // Two fake CLIs (claude, codex) that log in and read their own credential files, as the real ones do.
   const bin = join(env.HOME, 'clis');
   mkdirSync(bin);
-  for (const h of ['claude', 'codex']) { writeFileSync(join(bin, h), `#!/bin/sh\nFAKE_LOGIN_AS=${h} exec "${process.execPath}" "${fake}" "$@"\n`); chmodSync(join(bin, h), 0o755); }
-  const benv = { ...env, PATH: `${bin}:${env.PATH}`, LOOM_RUNTIME_CLAUDE: join(bin, 'claude'), LOOM_RUNTIME_CODEX: join(bin, 'codex'), FAKE_LOGIN_DEVICE_MS: '200' };
+  for (const h of ['claude', 'codex']) { writeFileSync(join(bin, h), `#!/bin/sh\nFAKE_LOGIN_AS=${h} exec "${process.execPath}" "${fakeCli}" "$@"\n`); chmodSync(join(bin, h), 0o755); }
+  // The fake podman runs them as the throwaway CLI container's (its cliBin), in the image of an agent the control plane names.
+  const cfgFile = join(fake, 'config.json');
+  mkdirSync(fake, { recursive: true });
+  writeFileSync(cfgFile, JSON.stringify({ ...(existsSync(cfgFile) ? JSON.parse(readFileSync(cfgFile, 'utf-8')) : {}), cliBin: bin }));
+  const benv = { ...env, FAKE_LOGIN_DEVICE_MS: '200' };
   writeFileSync(join(loginDir(benv, 'claude'), '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: SENTINEL } }), { mode: 0o600 });
   writeFileSync(join(loginDir(benv, 'codex'), 'auth.json'), JSON.stringify({ tokens: { access_token: SENTINEL } }), { mode: 0o600 });
   // Everything loom hands anything: each spawn's argv and env, each log line, each call to the control plane.
@@ -536,15 +540,16 @@ test('a sentinel token in the box\'s credential files never shows in any argv, e
   const spawnImpl = (cmd, args, o = {}) => { note('spawn', [cmd, args, o.env]); const c = realSpawn(cmd, args, o); const w = c.stdin.write.bind(c.stdin); c.stdin.write = (d, ...r) => { note('stdin', String(d)); return w(d, ...r); }; return c; };
   const spied = { async call(path, body) { note(`call ${path}`, body); const out = await client.call(path, body); note(`answer ${path}`, out); return out; } };
   const box = runner(benv, spied, { loomUrl: 'http://loom.test/mcp', log: (m) => note('log', m),
-    status: () => harnessStatus(benv, { run }), login: (h, o) => startLogin(benv, h, { ...o, spawnImpl, every: 100 }) });
-  // A status, a Codex login (device: it finishes by itself), and a house on the Claude login.
+    status: (agents) => harnessStatus(benv, { run, agents }), login: (h, o) => startLogin(benv, h, { ...o, spawnImpl, run, every: 100 }) });
+  // A status, a Codex login (device: it finishes by itself), and a house on the Claude login. art's image is the one
+  // the box runs its CLI in (art may use this box's logins).
+  agentRepo(repo, { ...HOUSE, harnesses: ['claude', 'codex'] });
+  setAgent();
   await box.tick();
   assert.equal(load(env).boxes.one.harnesses.claude.loggedIn, true);
   const l = ok(api(env, fx, { caller: owner, path: 'login-start', body: { box: 'one', harness: 'codex' } }));
   await box.tick();
   await until(() => load(env).logins[l.id].state === 'done');
-  agentRepo(repo, { ...HOUSE, harnesses: ['claude', 'codex'] });
-  setAgent();
   const h = up();
   await box.tick();
   await until(() => house(h.id).state === 'done');
