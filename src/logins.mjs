@@ -2,9 +2,10 @@
 // the harness CLI's own status command; signing one in with the CLI's own login; and how full its account is, read
 // from what the harness writes about its own runs.
 //
-// The rule this module keeps: the CLI owns its login. Each box signs itself in, into a login dir of its own
-// (<data>/logins/<harness>, 0700), by running the CLI's own login command there. The CLI writes its credentials
-// into that dir and refreshes them itself. Nothing here reads, copies, refreshes or sends a credential; a house that
+// The rule this module keeps: the CLI owns its login. Each box signs itself in by running the CLI's own login
+// command in a home of the box's own (<data>/cli-home/<harness>, 0700, never mounted). Its credential file, and
+// only that, then moves (unread) to the shared login dir (<data>/logins/<harness>) that houses get, where the
+// houses' CLIs refresh it in place; it moves back into the box's home before the box asks the CLI's status. Nothing here reads, copies, refreshes or sends a credential; a house that
 // runs a harness (house file "harnesses") gets that dir mounted, and its own copy of the same CLI uses it. A login
 // never leaves its box.
 //
@@ -13,7 +14,8 @@
 // boxes signed in to one account share its quota. The email itself never leaves the box.
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readSync } from 'node:fs';
+import { chmodSync, closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readSync, renameSync, rmSync, writeSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -66,9 +68,9 @@ export function loginDir(env, harness) {
 }
 
 /**
- * Whether a login dir is safe for the box to use: a house can write it, so before anything on the box runs the CLI
- * on it, or mounts it again, every entry must be a plain file or directory (no symlink, device, fifo or socket),
- * owned by the box's user, with no setuid or setgid bit. Returns why not, or null. lstat only: nothing followed.
+ * Whether a shared login dir is fit to mount again (after pruneLoginDir): every entry a plain file or directory (no
+ * symlink, device, fifo or socket), owned by the box's user, with no setuid or setgid bit. Returns why not, or null.
+ * lstat only: nothing followed. The box never runs a CLI in this dir (cliHome), so this guards the next house.
  */
 export function checkLoginDir(dir, { uid = process.getuid?.(), max = 5000 } = {}) {
   const S_ISUID = 0o4000, S_ISGID = 0o2000;
@@ -91,8 +93,80 @@ export function checkLoginDir(dir, { uid = process.getuid?.(), max = 5000 } = {}
   return walk(dir, '');
 }
 
+/**
+ * The box's own CLI home for a harness: <data>/cli-home/<harness>, 0700, never mounted into a house. The box runs a
+ * harness CLI (status, login) only with this as its home and config, never with the shared login dir: a house can
+ * write the shared dir, and a config.toml or settings file planted there (Codex's `notify`, Claude's hooks) would
+ * run on the box. Checking the dir first can't make that safe (it can change between the check and the run).
+ */
+export function cliHome(env, harness) {
+  if (!LOGIN_HARNESSES[harness]) throw new LoginError(`no harness ${JSON.stringify(harness)}`);
+  const d = join(dataDir(env), 'cli-home', harness);
+  mkdirSync(d, { recursive: true, mode: 0o700 });
+  chmodSync(d, 0o700);
+  return d;
+}
+
+/**
+ * The one file that crosses between the box's CLI home and the shared login dir: the credential file each CLI owns
+ * and writes itself. It only moves (moveCredential); its values are never read. Anything else in the shared dir
+ * (beyond this file and the CLI's own temp or lock files beside it, which start with its name) is removed before
+ * the dir is mounted again (pruneLoginDir).
+ */
+export const CRED_FILE = { claude: '.credentials.json', codex: 'auth.json' };
+export const CRED_MAX = 64 * 1024;
+
+/**
+ * Move a harness's credential file from one dir to the other: opened without following a symlink, a regular file of
+ * the box's user, at most CRED_MAX bytes, JSON; written beside the target as a temp file and renamed over it. The
+ * bytes are copied as they are; nothing in them is looked at. Returns 'moved', 'same' (already identical) or
+ * 'absent' (no file at the source); throws a LoginError for anything else.
+ */
+export function moveCredential(harness, from, to, { uid = process.getuid?.() } = {}) {
+  const name = CRED_FILE[harness];
+  const read = (dir, must) => {
+    let fd;
+    try { fd = openSync(join(dir, name), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch (e) {
+      if (e.code === 'ENOENT' && !must) return null;
+      throw new LoginError(e.code === 'ELOOP' ? `${name} is a symlink` : `${name}: ${e.code ?? e.message}`);
+    }
+    try {
+      const st = fstatSync(fd);
+      if (!st.isFile()) throw new LoginError(`${name} isn't a regular file`);
+      if (uid !== undefined && st.uid !== uid) throw new LoginError(`${name} isn't owned by the box's user`);
+      if (st.size > CRED_MAX) throw new LoginError(`${name} is bigger than ${CRED_MAX} bytes`);
+      const buf = Buffer.alloc(st.size);
+      let got = 0;
+      while (got < st.size) { const r = readSync(fd, buf, got, st.size - got, got); if (r <= 0) break; got += r; }
+      return buf.subarray(0, got);
+    } finally { closeSync(fd); }
+  };
+  const bytes = read(from, false);
+  if (!bytes) return 'absent';
+  try { const v = JSON.parse(bytes.toString('utf-8')); if (!v || typeof v !== 'object') throw new Error(); } catch { throw new LoginError(`${name} isn't JSON`); }
+  let there = null;
+  try { there = read(to, false); } catch { there = null; }
+  if (there && there.equals(bytes)) return 'same';
+  const tmp = join(to, `${name}.loom-${randomBytes(6).toString('hex')}.tmp`);
+  const fd = openSync(tmp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+  try { writeSync(fd, bytes); fsyncSync(fd); } finally { closeSync(fd); }
+  renameSync(tmp, join(to, name));
+  return 'moved';
+}
+
+/** The shared login dir, down to its allowlist (the credential file, and the CLI's own temp and lock files beside it); then checked. */
+export function pruneLoginDir(dir, harness) {
+  const name = CRED_FILE[harness];
+  for (const n of readdirSync(dir)) {
+    if (n === name || (n.startsWith(`${name}.`) && n.length < name.length + 64)) continue;
+    // rmSync removes a symlink itself, never what it points at.
+    rmSync(join(dir, n), { recursive: true, force: true });
+  }
+  return checkLoginDir(dir);
+}
+
 const binOf = (env, harness) => env[`LOOM_RUNTIME_${harness.toUpperCase()}`] || LOGIN_HARNESSES[harness].bin;
-const cliEnv = (env, harness) => ({ ...env, ...LOGIN_HARNESSES[harness].boxEnv(loginDir(env, harness)), NO_COLOR: '1', BROWSER: '/bin/false' });
+const cliEnv = (env, harness) => ({ ...env, ...LOGIN_HARNESSES[harness].boxEnv(cliHome(env, harness)), NO_COLOR: '1', BROWSER: '/bin/false' });
 
 /** A short, stable name for an account: a hash, so two boxes on one account match without its email leaving either. */
 export const accountKey = (harness, ...parts) => `${harness}-${createHash('sha256').update(parts.join('\0')).digest('hex').slice(0, 10)}`;
@@ -116,20 +190,31 @@ export function parseCodexStatus(stdout, status) {
   return { loggedIn: true, method: /chatgpt/i.test(m[1]) ? 'chatgpt' : /api key/i.test(m[1]) ? 'api-key' : m[1].slice(0, 40) };
 }
 
-/** What this box has: each harness, installed or not, and its login's state, from the CLI's own status command. */
+/** One harness's status, as its CLI says it, run in the box's own CLI home (no sync). */
+function statusIn(env, h, run) {
+  const def = LOGIN_HARNESSES[h];
+  const bin = binOf(env, h);
+  const r = run(bin, def.status, { env: cliEnv(env, h), encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000 });
+  if (r.error) return { installed: true, loggedIn: false, error: `${bin}: ${r.error.message}`.slice(0, 120) };
+  // codex prints its status on stderr in some versions: read both.
+  return { installed: true, ...(h === 'claude' ? parseClaudeStatus(r.stdout) : parseCodexStatus(`${r.stdout ?? ''}\n${r.stderr ?? ''}`, r.status)) };
+}
+
+/**
+ * What this box has: each harness, installed or not, and its login's state, from the CLI's own status command, run
+ * in the box's own CLI home. The credential the houses have been refreshing is moved in from the shared dir first,
+ * and moved back if the status run refreshed it. A credential file there that isn't a plain file (a symlink a house
+ * planted) is refused, and that login reported unhealthy.
+ */
 export function harnessStatus(env = process.env, { run = spawnSync } = {}) {
   const out = {};
-  for (const [h, def] of Object.entries(LOGIN_HARNESSES)) {
+  for (const h of Object.keys(LOGIN_HARNESSES)) {
     const bin = binOf(env, h);
     if (run('sh', ['-c', 'command -v "$1"', 'sh', bin], { env, stdio: 'ignore' }).status !== 0) { out[h] = { installed: false, loggedIn: false }; continue; }
-    // Nothing runs on a login dir a house may have planted something in: that login is reported unhealthy.
-    const bad = checkLoginDir(loginDir(env, h));
-    if (bad) { out[h] = { installed: true, loggedIn: false, unhealthy: bad.slice(0, 120) }; continue; }
-    const r = run(bin, def.status, { env: cliEnv(env, h), encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000 });
-    if (r.error) { out[h] = { installed: true, loggedIn: false, error: `${bin}: ${r.error.message}`.slice(0, 120) }; continue; }
-    // codex prints its status on stderr in some versions: read both.
-    const st = h === 'claude' ? parseClaudeStatus(r.stdout) : parseCodexStatus(`${r.stdout ?? ''}\n${r.stderr ?? ''}`, r.status);
-    out[h] = { installed: true, ...st };
+    const shared = loginDir(env, h), mine = cliHome(env, h);
+    try { moveCredential(h, shared, mine); } catch (e) { out[h] = { installed: true, loggedIn: false, unhealthy: String(e.message).slice(0, 120) }; continue; }
+    out[h] = statusIn(env, h, run);
+    try { moveCredential(h, mine, shared); } catch { /* the next status says so */ }
   }
   return out;
 }
@@ -200,12 +285,13 @@ export function lastRateLimit(harness, text) {
 }
 
 /**
- * The newest Codex reading in a Codex home's session rollouts: the box's own login dir (its own codex runs, and a
- * house that chose to run with CODEX_HOME there), or, with `root`, a house's own ~/.codex
- * (`loom runtime usage report --harness codex` with nothing on stdin). Only the newest few files of the last two
+ * The newest Codex reading in a Codex home's session rollouts (`root`): a house's own ~/.codex/sessions
+ * (`loom runtime usage report --harness codex` with nothing on stdin). The box's shared login dir holds no
+ * sessions (only the credential file), so the box has none of its own to read. Only the newest few files of the last two
  * days are read, and only their ends.
  */
-export function codexUsageOnBox(env, { now = Date.now(), root = join(dataDir(env), 'logins', 'codex', 'sessions') } = {}) {
+export function codexUsageOnBox(env, { now = Date.now(), root } = {}) {
+  if (!root) return null;
   if (!existsSync(root)) return null;
   const files = [];
   for (const back of [0, 1]) {
@@ -258,17 +344,26 @@ const LOGIN_MS = 15 * 60_000;
 
 /**
  * One login on this box: the CLI's own login command, in a pty (`script`, util-linux) so it prints its prompt, with
- * the box's login dir as its home. It reports, through `say`: {state: 'waiting', link, userCode?}, then
+ * the box's own CLI home (cliHome) as its home, never the shared dir. It reports, through `say`: {state: 'waiting', link, userCode?}, then
  * {state: 'done'} once the CLI's status says logged in, or {state: 'failed', error}. `code(text)` hands the
  * owner's pasted code to the CLI's stdin. What the CLI prints is only scanned for its link and code; none of it is
- * kept, and nothing the CLI writes into its login dir is read.
+ * kept, and the credential file it writes is only moved, never read.
  */
-export function startLogin(env, harness, { say, spawnImpl = spawn, status = () => harnessStatus(env)[harness], every = 3000, until = LOGIN_MS } = {}) {
+export function startLogin(env, harness, { say: tell, spawnImpl = spawn, status = () => statusIn(env, harness, spawnSync), every = 3000, until = LOGIN_MS } = {}) {
   const def = LOGIN_HARNESSES[harness];
   if (!def) throw new LoginError(`no harness ${JSON.stringify(harness)} to log in`);
   const bin = binOf(env, harness);
-  const bad = checkLoginDir(loginDir(env, harness));
-  if (bad) throw new LoginError(`the ${def.label} login dir isn't safe to use: ${bad}`);
+  // The login runs in the box's own CLI home; once it's done, its credential file moves to the shared dir the
+  // houses use. A credential file there that isn't a plain file is refused before anything runs.
+  const shared = loginDir(env, harness), mine = cliHome(env, harness);
+  let planted = false;
+  try { planted = !lstatSync(join(shared, CRED_FILE[harness])).isFile(); } catch { planted = false; }
+  if (planted) throw new LoginError(`the ${def.label} login dir isn't safe to use: ${CRED_FILE[harness]} isn't a regular file`);
+  const say = (st) => {
+    if (st.state !== 'done') return tell(st);
+    try { moveCredential(harness, mine, shared); } catch (e) { return tell({ state: 'failed', error: `logged in, but the login couldn't be handed to the houses: ${e.message}` }); }
+    return tell(st);
+  };
   const q = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
   // A wide terminal, so the link comes out on one line.
   const cmd = `stty cols 2000 rows 50 2>/dev/null; exec ${[bin, ...def.login].map(q).join(' ')}`;

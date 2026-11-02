@@ -14,7 +14,7 @@
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -496,11 +496,22 @@ test('a box reports its harness logins on its poll, runs the owner\'s login, and
   await until(() => house(h2.id).state === 'done');
   const s = ran(h2.id).args.join(' ');
   assert.match(s, new RegExp(`-v ${env.LOOM_BOX_DATA}/logins/claude:/run/loom/login/claude:rw,nosuid,nodev,noexec -e CLAUDE_SECURESTORAGE_CONFIG_DIR=/run/loom/login/claude`));
-  // A house planted a symlink in the login dir: the next house isn't given it.
-  const { symlinkSync } = await import('node:fs');
-  symlinkSync('/etc/passwd', join(env.LOOM_BOX_DATA, 'logins', 'claude', 'planted'));
+  // A house planted things in the login dir: before the next house gets it, it's cut down to the credential file.
+  const { symlinkSync, existsSync: ex } = await import('node:fs');
+  const shared = join(env.LOOM_BOX_DATA, 'logins', 'claude');
+  symlinkSync('/etc/passwd', join(shared, 'planted'));
+  writeFileSync(join(shared, 'settings.json'), '{"hooks":{}}');
+  writeFileSync(join(shared, '.credentials.json'), '{}');
   const h3 = up();
   await box.tick();
-  await until(() => house(h3.id).state === 'failed');
-  assert.match(house(h3.id).log, /login dir isn't safe to mount: planted is a symlink/);
+  await until(() => house(h3.id).state === 'done');
+  assert.deepEqual([ex(join(shared, 'planted')), ex(join(shared, 'settings.json')), ex(join(shared, '.credentials.json'))], [false, false, true]);
+  assert.equal(ex('/etc/passwd'), true, 'the link went, not what it pointed at');
+  // A credential file that's a symlink is refused: the house doesn't start on it.
+  rmSync(join(shared, '.credentials.json'));
+  symlinkSync('/etc/passwd', join(shared, '.credentials.json'));
+  const h4 = up();
+  await box.tick();
+  await until(() => house(h4.id).state === 'failed');
+  assert.match(house(h4.id).log, /login dir isn't safe to mount: \.credentials\.json is a symlink/);
 });

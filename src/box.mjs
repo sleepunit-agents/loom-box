@@ -23,7 +23,7 @@ import { containerName, missingSecrets, parseHouseFile, podmanSecret, runArgs, s
 import { PART_RAW, joinParts, partsOf } from './blobs.mjs';
 import { boxSessions } from './remote.mjs';
 import { sessionsBusy } from './busy.mjs';
-import { checkLoginDir, codexUsageOnBox, harnessStatus, LOGIN_HARNESSES, loginDir, startLogin } from './logins.mjs';
+import { harnessStatus, LOGIN_HARNESSES, loginDir, pruneLoginDir, startLogin } from './logins.mjs';
 
 /** How often a box asks its harness CLIs whether they're logged in (and at once after a login). */
 export const STATUS_MS = 5 * 60_000;
@@ -373,7 +373,7 @@ function rootless(env) {
  * on loom's own machine); `loomUrl` is what a house is told loom is.
  */
 export function runner(env, client, { loomUrl, labels = [], log = (m) => process.stderr.write(`loom-box: ${m}\n`), hasSocket = (p) => existsSync(p), hasCdi = () => CDI_SPECS.some((p) => existsSync(p)), upgrade = maybeUpgrade,
-  status = () => harnessStatus(env), login = (h, o) => startLogin(env, h, o), codexUsage = () => codexUsageOnBox(env), clock = () => Date.now() }) {
+  status = () => harnessStatus(env), login = (h, o) => startLogin(env, h, o), codexUsage = () => null, clock = () => Date.now() }) {
   const houses = new Map(); // id -> { child, dir, stopAt? }
   // The harness CLIs' own word on their logins, asked every STATUS_MS (and after a login), not every poll.
   let harnesses = null;
@@ -447,8 +447,8 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
       // Only the logins the claim names (logged in here, granted, and this box its agent's owner's): checked above,
       // and again here, so nothing else of the box's is ever mounted.
       const dirs = { mirror, logins: Object.fromEntries((house.logins ?? []).filter((l) => (claimed.logins ?? []).includes(l)).map((l) => {
-        // A house can write a login dir: before it's mounted again, nothing planted in it (logins.mjs).
-        const bad = checkLoginDir(loginDir(env, l));
+        // A house can write a login dir: before it's mounted again, it's cut down to its allowlist and checked (logins.mjs).
+        const bad = pruneLoginDir(loginDir(env, l), l);
         if (bad) throw new BoxError(`this box's ${LOGIN_HARNESSES[l].label} login dir isn't safe to mount: ${bad}`);
         return [l, loginDir(env, l)];
       })) };

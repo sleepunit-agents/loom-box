@@ -57,11 +57,21 @@ mount breaks the CLI's own refresh. So the login dir is mounted read-write
 (`nosuid,nodev,noexec`), and what's narrowed is who gets it: only the harnesses
 a house runs, only on its agent's owner's own box, only with the owner's grant.
 
-**Nothing planted.** A house can write the login dir. So before the box runs a
-CLI on it (status, login) or mounts it again, it walks the dir. Every entry must
-be a plain file or directory owned by the box's user, with no symlink, device
-or setuid bit. If anything else is in it, the box doesn't use that login, and
-its page shows it as unhealthy until someone cleans the dir.
+**The box keeps its own CLI home.** A house can write the shared login dir, so
+anything it plants there (a Codex `config.toml` with a `notify` command, Claude
+settings with hooks) would run on the box if the box ran a CLI there. Checking
+first can't make that safe, because the dir can change between the check and
+the run. So the box runs its own `claude` / `codex` (status, login) only in a
+private home of its own (`~/.local/share/loom-box/cli-home/<harness>`, 0700,
+never mounted). The one thing that crosses between that home and the shared
+dir is the CLI's own credential file (`.credentials.json` for Claude,
+`auth.json` for Codex). It's moved, never read: opened without following
+symlinks, a regular file of the box's user, at most 64 KB, JSON, written
+atomically on the other side. It goes to the shared dir after a login, and comes
+back before a status check. Before each mount, the shared dir is cut down to that
+file and the CLI's own temp and lock files beside it. If the credential file is
+a symlink or anything but a plain file, the box doesn't use that login, and its
+page shows it as unhealthy.
 
 **What that leaves open.** An agent in a house that has its owner's login can
 read the login file. It's the owner's own agent, on the owner's own box, using

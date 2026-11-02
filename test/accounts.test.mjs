@@ -32,17 +32,19 @@ test('usage, from the harness\'s own run output: Claude Code\'s rate_limit_event
   assert.equal(lastRateLimit('codex', stream), null);
 });
 
-test('a box reads Codex\'s usage from the rollouts its houses leave in its own login dir', () => {
+test('Codex\'s usage, from a house\'s own session rollouts (its CODEX_HOME)', () => {
   const env = { HOME: scratch('rt-cx-'), LOOM_BOX_DATA: '' };
   env.LOOM_BOX_DATA = join(env.HOME, 'data');
   const now = Date.parse('2026-11-02T18:40:00Z');
-  assert.equal(codexUsageOnBox(env, { now }), null);
-  const day = join(loginDir(env, 'codex'), 'sessions', '2026', '11', '02');
+  const root = join(env.HOME, '.codex', 'sessions');
+  assert.equal(codexUsageOnBox(env, { now, root }), null);
+  assert.equal(codexUsageOnBox(env, { now }), null, 'no root: the box has no sessions of its own');
+  const day = join(root, '2026', '11', '02');
   mkdirSync(day, { recursive: true });
   writeFileSync(join(day, 'rollout-old.jsonl'), `${CODEX_EVENT.replace('12.5', '99.0')}\n`);
   utimesSync(join(day, 'rollout-old.jsonl'), new Date(now - 60_000), new Date(now - 60_000));
   writeFileSync(join(day, 'rollout-new.jsonl'), `{"type":"session_meta"}\n${CODEX_EVENT}\n`);
-  const got = codexUsageOnBox(env, { now });
+  const got = codexUsageOnBox(env, { now, root });
   assert.equal(got.windows['7d'], 0.125);
   assert.equal(typeof got.checked, 'number');
 });
@@ -53,49 +55,76 @@ test('a rollout is read only if it\'s a regular file, never through a symlink, a
   const env = { HOME: scratch('rt-cx2-') };
   env.LOOM_BOX_DATA = join(env.HOME, 'data');
   const now = Date.parse('2026-11-02T18:40:00Z');
-  const day = join(loginDir(env, 'codex'), 'sessions', '2026', '11', '02');
+  const root = join(env.HOME, '.codex', 'sessions');
+  const day = join(root, '2026', '11', '02');
   mkdirSync(day, { recursive: true });
   // A symlink a house left, pointing at something of the box's: not followed.
   const outside = join(env.HOME, 'box-secret.jsonl');
   writeFileSync(outside, `${CODEX_EVENT}\n`);
   symlinkSync(outside, join(day, 'rollout-link.jsonl'));
-  assert.equal(codexUsageOnBox(env, { now }), null);
+  assert.equal(codexUsageOnBox(env, { now, root }), null);
   assert.equal(tailOf(join(day, 'rollout-link.jsonl')), null);
   // A huge file: only its end is read, and its reading (at the end) is still found.
   const big = join(day, 'rollout-big.jsonl');
   writeFileSync(big, `${'{"type":"x","pad":"'.padEnd(1000, 'p')}"}\n`.repeat(3000) + `${CODEX_EVENT}\n`);
   const tail = tailOf(big);
   assert.ok(Buffer.byteLength(tail) <= TAIL_BYTES);
-  assert.equal(codexUsageOnBox(env, { now }).windows['7d'], 0.125);
+  assert.equal(codexUsageOnBox(env, { now, root }).windows['7d'], 0.125);
   // A directory named like a rollout isn't read.
   mkdirSync(join(day, 'rollout-dir.jsonl'));
   assert.equal(tailOf(join(day, 'rollout-dir.jsonl')), null);
 });
 
-test('a login dir with anything planted in it is refused: the box reports it unhealthy, won\'t log in there, and won\'t mount it', async () => {
+test('the box never runs a CLI in the shared login dir: a planted config.toml with a notify command never runs, during status or login', async () => {
+  const env = fakeBox('codex');
+  const shared = loginDir(env, 'codex');
+  const ran = join(env.HOME, 'notify-ran');
+  writeFileSync(join(shared, 'config.toml'), `notify = "touch ${ran}"\n`);
+  // The fake CLI runs its home's notify, as Codex does: the box's own home has none.
+  harnessStatus(env);
+  const said = [];
+  startLogin(env, 'codex', { say: (x) => said.push(x), every: 100 });
+  await waitFor(() => said.find((x) => x.state !== 'waiting'));
+  harnessStatus(env);
+  const { existsSync: ex } = await import('node:fs');
+  assert.equal(ex(ran), false, 'the planted notify never ran on the box');
+  assert.equal(said.at(-1).state, 'done');
+  // The login landed in the shared dir as the credential file; the planted config is cut away before a mount.
+  const { pruneLoginDir } = await import('../src/logins.mjs');
+  assert.equal(pruneLoginDir(shared, 'codex'), null);
+  assert.deepEqual(readdirSync(shared), ['auth.json']);
+});
+
+test('a credential file is only moved: a symlinked one is refused, an oversize or non-JSON one too, and the box reports that login unhealthy', async () => {
   const { symlinkSync, chmodSync: ch } = await import('node:fs');
-  const { checkLoginDir } = await import('../src/logins.mjs');
-  const env = fakeBox('claude');
-  const dir = loginDir(env, 'claude');
-  assert.equal(checkLoginDir(dir), null);
-  writeFileSync(join(dir, '.credentials.example'), '{}');
-  assert.equal(checkLoginDir(dir), null);
-  // A house planted a symlink (to something of the box's).
-  symlinkSync('/etc/passwd', join(dir, 'planted'));
-  assert.match(checkLoginDir(dir), /planted is a symlink/);
-  const st = harnessStatus(env).claude;
-  assert.deepEqual([st.loggedIn, st.unhealthy], [false, 'planted is a symlink']);
-  assert.throws(() => startLogin(env, 'claude', { say: () => {} }), /isn't safe to use: planted is a symlink/);
-  // A setuid file, and a directory deep down with a symlink in it.
-  const env2 = fakeBox('claude');
-  const d2 = loginDir(env2, 'claude');
-  writeFileSync(join(d2, 'x'), '');
-  ch(join(d2, 'x'), 0o4755);
-  assert.match(checkLoginDir(d2), /x has a setuid or setgid bit/);
-  ch(join(d2, 'x'), 0o600);
-  mkdirSync(join(d2, 'a', 'b'), { recursive: true });
-  symlinkSync('/', join(d2, 'a', 'b', 'up'));
-  assert.match(checkLoginDir(d2), /a\/b\/up is a symlink/);
+  const { CRED_MAX, checkLoginDir, cliHome, moveCredential } = await import('../src/logins.mjs');
+  const env = fakeBox('codex');
+  const shared = loginDir(env, 'codex'), mine = cliHome(env, 'codex');
+  assert.equal(moveCredential('codex', shared, mine), 'absent');
+  writeFileSync(join(shared, 'auth.json'), '{"a":1}');
+  assert.equal(moveCredential('codex', shared, mine), 'moved');
+  assert.equal(moveCredential('codex', shared, mine), 'same');
+  assert.equal(readFileSync(join(mine, 'auth.json'), 'utf-8'), '{"a":1}');
+  // A symlinked auth.json (to something of the box's): refused, never followed.
+  const outside = join(env.HOME, 'box-file.json');
+  writeFileSync(outside, '{"box":1}');
+  const { rmSync } = await import('node:fs');
+  rmSync(join(shared, 'auth.json'));
+  symlinkSync(outside, join(shared, 'auth.json'));
+  assert.throws(() => moveCredential('codex', shared, mine), /auth\.json is a symlink/);
+  const st = harnessStatus(env).codex;
+  assert.deepEqual([st.loggedIn, st.unhealthy], [false, 'auth.json is a symlink']);
+  assert.throws(() => startLogin(env, 'codex', { say: () => {} }), /isn't safe to use: auth\.json isn't a regular file/);
+  rmSync(join(shared, 'auth.json'));
+  writeFileSync(join(shared, 'auth.json'), 'x'.repeat(CRED_MAX + 1));
+  assert.throws(() => moveCredential('codex', shared, mine), /bigger than/);
+  writeFileSync(join(shared, 'auth.json'), 'not json');
+  assert.throws(() => moveCredential('codex', shared, mine), /isn't JSON/);
+  // checkLoginDir still refuses a setuid file or a deep symlink, after a prune keeps only allowlisted names.
+  writeFileSync(join(shared, 'auth.json'), '{}');
+  writeFileSync(join(shared, 'auth.json.lock'), '');
+  ch(join(shared, 'auth.json.lock'), 0o4755);
+  assert.match(checkLoginDir(shared), /auth\.json\.lock has a setuid or setgid bit/);
 });
 
 test('a box\'s login state is the CLI\'s own status: states and a hash, never the email', () => {
@@ -131,7 +160,8 @@ test('logging a box in to Claude runs the CLI\'s own login there: its link to th
   const done = await waitFor(() => said.find((x) => x.state !== 'waiting'));
   assert.deepEqual(done, { state: 'done' });
   // The CLI wrote its login into the box's own login dir; the status now says so.
-  assert.deepEqual(readdirSync(loginDir(env, 'claude')).includes('logged-in'), true);
+  // ... in the box's own CLI home, and its credential file (only that) moved to the shared dir the houses use.
+  assert.deepEqual(readdirSync(loginDir(env, 'claude')), ['.credentials.json']);
   assert.equal(st().claude.loggedIn, true);
   assert.match(st().claude.account, /^claude-[0-9a-f]{10}$/);
 });
@@ -216,6 +246,10 @@ test('the runtime holds no credential: no token endpoint, refresh, client id, pr
     /\.credentials\.json/, /auth\.json/, /api\.anthropic\.com/, /api\.openai\.com/, /oauth\/usage/, /CLAUDE_CODE_OAUTH_TOKEN=/, /x-app/i, /claude-cli/];
   for (const f of readdirSync(src)) {
     const text = readFileSync(join(src, f), 'utf-8');
-    for (const m of markers) assert.equal(m.test(text), false, `${f} matches ${m}`);
+    for (const m of markers) {
+      // logins.mjs names the two credential files, to move them unread between the box's CLI home and the shared dir.
+      if (f === 'logins.mjs' && (String(m) === String(/\.credentials\.json/) || String(m) === String(/auth\.json/))) continue;
+      assert.equal(m.test(text), false, `${f} matches ${m}`);
+    }
   }
 });

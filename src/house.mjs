@@ -288,7 +288,8 @@ export function runArgs(house, { id, agent, loomUrl, task, service, session, ima
   // the providers' terms rule out (docs/model-accounts.md). Not read-only either: that breaks the CLI's own refresh.
   // So the mount stays read-write, and who gets it is narrowed instead: only the harnesses the house runs, only
   // the agent's owner's own box, only with the owner's grant (control.mjs, claim). nosuid,nodev,noexec: nothing in
-  // it runs. The box checks the dir before each use (logins.mjs, checkLoginDir): a house can write it. The control plane only lets a house
+  // it runs. A house can write the dir, so before each mount the box cuts it down to the credential file (logins.mjs,
+  // pruneLoginDir), and it never runs a CLI there itself (cliHome). The control plane only lets a house
   // have it when its agent's owner owns this box and has granted the agent that login (control.mjs, claim), and
   // the box mounts only the logins its claim names (box.mjs). Nothing else of the box's goes in.
   for (const l of house.logins ?? []) {
