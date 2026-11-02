@@ -54,6 +54,8 @@ function houseWorld({ sealer, claimMs = 5000, warmMs = 5000 } = {}) {
   const hr = new HouseRunner(env, 'claude', { poll: 10, sealer, claimMs, warmMs });
   let drop = () => false;
   const stops = [];
+  // The house declares claude (its login's env is set); a test can take it away.
+  const houseEnv = { CLAUDE_SECURESTORAGE_CONFIG_DIR: '/run/loom/login/claude' };
   const host = () => {
     let stopped = false;
     const client = async (p, b) => {
@@ -62,7 +64,7 @@ function houseWorld({ sealer, claimMs = 5000, warmMs = 5000 } = {}) {
       if (drop(r.body)) throw new Error('the answer was lost on its way back');
       return r.body;
     };
-    const done = runBodyHost({ client, runner: () => local, sleep: () => sleep(10), beats: 100_000, idleS: 0, now: () => (stopped ? Infinity : Date.now()) });
+    const done = runBodyHost({ client, runner: () => local, env: houseEnv, sleep: () => sleep(10), beats: 100_000, idleS: 0, now: () => (stopped ? Infinity : Date.now()) });
     stops.push(() => { stopped = true; return done; });
     return done;
   };
@@ -73,8 +75,8 @@ function houseWorld({ sealer, claimMs = 5000, warmMs = 5000 } = {}) {
     await sleep(80);
     writeFileSync(join(env.LOOM_BOX_DATA, 'delivery', 'hosts', 'art.json'), JSON.stringify({ ...hostOf(env, 'art'), house: h.house }));
   };
-  return { D, env, hr, local, fed, ended, host, kill, setDrop: (f) => { drop = f; }, sealer,
-    accounts: staticAccounts({ accounts: [{ name: 'max', provider: 'anthropic', credentials: [{ kind: 'k', status: 'valid' }], usage: {} }] }) };
+  return { D, env, hr, local, fed, ended, host, kill, houseEnv, setDrop: (f) => { drop = f; }, sealer,
+    accounts: staticAccounts({ accounts: [{ name: 'max', provider: 'anthropic', harness: 'claude', kind: 'login', agents: ['art', 'mark', 'pip'], credentials: [{ kind: 'login', status: 'valid' }], usage: {} }] }) };
 }
 
 async function bodyInHouse(w) {
@@ -234,9 +236,9 @@ test('5. without age, the body is still reached from a detached worker (its text
   assert.ok(Date.now() - t1 < 500);
 });
 
-test('6. a turn write that timed out may have landed: the retry finds it (by its audit entry) instead of writing it twice', async () => {
+test('6. a turn write whose answer was lost: its retry posts the same key and gets the same turn; a 409 is a refusal, never a match', async () => {
   const w = world();
-  // Core writes the turn, then the answer never comes back.
+  // Core writes the turn, then its answer never comes back.
   const turn = w.core.turn;
   let landed = 0;
   w.core.turn = async (t) => { const r = await turn(t); if (landed++ === 0) throw new CoreError('core didn\'t answer conversations/turn: no answer in 5s', 503); return r; };
@@ -246,15 +248,20 @@ test('6. a turn write that timed out may have landed: the retry finds it (by its
   assert.equal(w.core.turns.length, 1);
   const again = await deliver(w.env, m, w.o);
   assert.deepEqual([again.seq, again.body], [1, 'started']);
-  assert.equal(w.core.turns.length, 1, 'no second turn');
-  assert.deepEqual(w.core.audits.map((a) => [a.seq, a.text]), [[1, 'did it land?']], 'its text, once, on the turn that landed');
-  // One that really didn't land: the retry writes it.
-  w.core.down = true;
-  const m2 = w.msg('dm:T', 'this one didn\'t');
-  assert.equal((await deliver(w.env, m2, w.o)).status, 503);
-  w.core.down = false;
-  assert.equal((await deliver(w.env, m2, w.o)).seq, 2);
-  assert.equal(w.core.turns.length, 2);
+  assert.equal(w.core.turns.length, 1, 'one turn, under its key');
+  assert.equal(w.core.turns[0].key, `test-source:${m.id}`);
+  assert.deepEqual(w.core.audits.map((a) => [a.seq, a.text]), [[1, 'did it land?']]);
+  w.core.turn = turn;
+  // A key that's another turn's (the same source and id, a different message): refused, nothing reaches a body.
+  w.clock.advance(25 * 3600_000);
+  await tick(w.env, w.o);
+  w.clock.advance(-2 * 3600_000);
+  const starts = w.log.filter((l) => l[0] === 'start').length;
+  const clash = await deliver(w.env, { ...m, place: 'dm:Other' }, w.o);
+  assert.equal(clash.status, 409);
+  assert.match(clash.error, /is another turn's/);
+  assert.equal(w.log.filter((l) => l[0] === 'start').length, starts);
+  assert.equal(loadConv(w.env, cvOf('art', 'slack', 'dm:Other')), null);
 });
 
 test('7. the runtime declares the relay venue (kind agent) in its loom block', async () => {
@@ -297,4 +304,14 @@ test('10. a warm resume that fails leaves no transcript in the clear: the old se
   assert.equal(r.body, 'started');
   assert.equal(existsSync(tr), false, 'its transcript isn\'t left on disk');
   assert.equal(everything(deliveryDir(w.env)).includes(Buffer.from('transcript of')), false);
+});
+
+test('a body\'s house must declare the harness it runs: one that didn\'t has no login, and its body fails saying so', { skip: !hasAge && 'age isn\'t installed' }, async () => {
+  const w = houseWorld();
+  delete w.houseEnv.CLAUDE_SECURESTORAGE_CONFIG_DIR;
+  const starting = startBody(w.env, { agent: 'art', venue: 'slack', brief: 'hi' }, { runner: () => w.hr, accounts: w.accounts });
+  await until(() => load(w.env).houses['h-1']);
+  w.host();
+  await assert.rejects(starting, /this house doesn't declare the claude harness \(its house file's "harnesses"\)/);
+  await w.kill();
 });

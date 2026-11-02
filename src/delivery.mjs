@@ -204,6 +204,9 @@ export function parseDelivery(raw) {
   return { ...raw };
 }
 
+/** Its turn's idempotency key in core: `<source>:<id>` (loom: conversations/turn `key`). */
+export const turnKey = (m) => `${m.source}:${m.id}`;
+
 /** A delivery's key: (source piece, id), as one opaque name. */
 export const deliveryKey = (m) => createHash('sha256').update(`${m.source}\0${m.id}`).digest('hex').slice(0, 32);
 
@@ -229,26 +232,6 @@ export const conversationIdOf = (agent, venue, place) => `cv-${createHash('sha25
 /** The seqs the runtime knows it wrote in a conversation (it's the only writer of its venues' turns), last 64. */
 const noteSeq = (c, seq) => { c.seqs = [...new Set([...(c.seqs ?? []), seq])].sort((a, b) => a - b).slice(-64); };
 
-/**
- * A turn write that may have landed (core didn't answer): is it there? Core has no lookup by (source, id), so this asks
- * with what it does have: an audit write for the seqs after the last one the runtime knew of, in order. A seq with no
- * turn answers 404 (so none after it is the one); one that's there takes this message's text (200), or already has
- * text (409). That turn is this message's: the runtime is its venue's only writer, so a seq it didn't record is the
- * one whose answer was lost. Another writer's turn (403) is skipped.
- */
-async function findLanded(d, u, text, known) {
-  for (let seq = (u.before ?? 0) + 1, i = 0; i < 16; seq++, i++) {
-    if (known.includes(seq)) continue;
-    try { await d.core.audit({ conversation: u.cv, seq, text }); return { conversation: u.cv, seq }; } catch (e) {
-      if (e?.status === 409) return { conversation: u.cv, seq };
-      if (e?.status === 404) return null;
-      if (e?.status === 403) continue;
-      throw e;
-    }
-  }
-  return null;
-}
-
 async function deliverOnce(env, raw, o) {
   const d = depsOf(env, o);
   let m;
@@ -259,7 +242,8 @@ async function deliverOnce(env, raw, o) {
 
   // Once: the same (source, id) within 24 hours answers what the first call answered, and writes nothing. A call
   // that wrote its turn and then died left the turn's seq here: its retry carries on from that turn, writing none.
-  // A turn write core didn't answer is `uncertain`: its retry looks for it before writing again (findLanded).
+  // A turn write core didn't answer is `uncertain`: its retry posts the same turn with the same idempotency key, and
+  // core answers the first write's {conversation, seq} if it landed (loom: conversations/turn `key`).
   const first = locked(env, () => {
     const s = readJson(seenFile(env, key));
     const recent = s && now() - s.at < DAY_MS;
@@ -279,21 +263,18 @@ async function deliverOnce(env, raw, o) {
 
     // 1. The turn, first; a body sees nothing that isn't recorded.
     let turn = first.resume;
-    let audited = false;
-    if (!turn && first.uncertain) {
-      try { turn = await findLanded(d, first.uncertain, m.text, loadConv(env, cvGuess)?.seqs ?? []); } catch (e) {
-        return { status: 503, error: `couldn't tell whether this message's turn is in core: ${e.message}` };
-      }
-      audited = !!turn;
-    }
     if (!turn) {
-      const before = Math.max(0, ...(loadConv(env, cvGuess)?.seqs ?? []), first.uncertain?.before ?? 0);
       try {
-        turn = await d.core.turn({ agent: m.agent, venue: m.venue, place: m.place, at: m.at, from: m.from, kind: m.kind, ...(m.label !== undefined ? { label: m.label } : {}) });
+        // Its idempotency key (source:id): the same key and turn answer the first write's {conversation, seq}, so a
+        // retry after a lost answer writes nothing new; the same key with another turn is refused (409). Needs a core
+        // with turn keys: an older one refuses the unknown key (400), and so does this, whole.
+        turn = await d.core.turn({ key: turnKey(m), agent: m.agent, venue: m.venue, place: m.place, at: m.at, from: m.from, kind: m.kind, ...(m.label !== undefined ? { label: m.label } : {}) });
       } catch (e) {
         const definite = e instanceof CoreError && e.status < 500;
-        // Refused (4xx): nothing was written. Anything else (core down, a timeout) may have landed: kept as uncertain.
-        locked(env, () => (definite ? rmSync(seenFile(env, key), { force: true }) : writeJson(seenFile(env, key), { at: now(), uncertain: { cv: cvGuess, before } })));
+        // Refused (4xx, a 409 among them: never a match): nothing of it is this delivery's. Anything else (core down,
+        // a timeout) may have landed: kept as uncertain, and its retry posts the same key.
+        locked(env, () => (definite ? rmSync(seenFile(env, key), { force: true }) : writeJson(seenFile(env, key), { at: now(), uncertain: { cv: cvGuess } })));
+        if (definite && e.status === 409) return { status: 409, error: `core refused the turn: its key ${turnKey(m)} is another turn's (${e.message})` };
         return { status: definite ? e.status : 503, error: e.message };
       }
       if (!CV.test(turn?.conversation ?? '') || !Number.isSafeInteger(turn?.seq) || turn.seq < 1) {
@@ -305,7 +286,7 @@ async function deliverOnce(env, raw, o) {
     o.afterTurn?.();
     // Its text, for review. A failed audit write leaves the turn standing without it (conversations.md); a retry's
     // second one is refused by core (409), which is fine.
-    if (!audited) { try { await d.core.audit({ conversation: turn.conversation, seq: turn.seq, text: m.text }); } catch (e) { if (e?.status !== 409) d.warn(`the turn stands without its audit text: ${e.message}`); } }
+    try { await d.core.audit({ conversation: turn.conversation, seq: turn.seq, text: m.text }); } catch (e) { if (e?.status !== 409) d.warn(`the turn stands without its audit text: ${e.message}`); }
 
     // 2. The body. The message joins its conversation's queue (sealed; without age, only in memory, on its way to
     // the worker), and the queue is drained: from a detached worker (the CLI), or here; never waited on past 2 s.

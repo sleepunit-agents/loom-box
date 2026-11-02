@@ -1,10 +1,9 @@
 // What the runtime does outside its own state, on the control plane: mint and
 // revoke loom tokens (through loom's own CLI, so core keeps the only token
-// store), read a secret for a house (through the secrets piece, host side), and
-// issue a model credential for one (through the runtime's accounts provider).
-// Values only ever travel on pipes, never in argv.
+// store), and read a secret for a house (through the secrets piece, host side).
+// Values only ever travel on pipes, never in argv. No model credential passes
+// through here: each box logs in itself (docs/model-accounts.md).
 import { spawnSync } from 'node:child_process';
-import { accountsFrom } from './accounts.mjs';
 
 // 60s: on 2026-10-30 a `loom token create` on a box at load 120+ outran 20s and was killed after writing its token.
 function run(cmd, args, env, what) {
@@ -17,7 +16,6 @@ function run(cmd, args, env, what) {
 export function realEffects(env = process.env) {
   const loom = env.LOOM_BOX_LOOM || 'loom';
   const secrets = env.LOOM_BOX_SECRETS || 'loom-secrets';
-  let accounts;
   return {
     now: () => new Date(),
     /** `loom token create <role flags> --label <label>`: the token is its stdout, alone. */
@@ -27,15 +25,6 @@ export function realEffects(env = process.env) {
       return token;
     },
     revoke(label) { run(loom, ['token', 'revoke', label], env, 'revoking a token'); },
-    /**
-     * What an agent's next house runs on, for a provider: the runtime's accounts provider issues it (accounts.mjs):
-     * the agent's first account with room left, made safe for a house; a kind, as 'session', picks one kind of
-     * credential. {name, value}, the value on a pipe; the name is which credential.
-     */
-    issue(agent, provider, kind) {
-      const got = (accounts ??= accountsFrom(env)).issue(agent, provider, kind);
-      return { name: got.name, value: got.value };
-    },
     /** The control plane is the host side, so it may pass the secrets piece's body gate. */
     secret(name) {
       return run(secrets, ['get', name, '--reveal'], { ...env, LOOM_SECRETS_ALLOW_GET: '1' }, `reading secret ${name}`);

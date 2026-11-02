@@ -13,8 +13,9 @@ import { scratch } from './scratch.mjs';
 
 const A = { id: 'model-a', harness: 'claude', family: 'anthropic' };
 const B = { id: 'model-b', harness: 'codex', family: 'openai' };
-const acct = (name, provider, usage = {}) => ({ name, provider, credentials: [{ kind: 'long-lived', status: 'valid' }], usage });
-const both = (ua = {}, ub = {}) => ({ accounts: [acct('home-max', 'anthropic', ua), acct('home-pro', 'openai', ub)], assign: {} });
+// An account as the boxes' reports make it (accounts.mjs): its harness, and the agents it may work for.
+const acct = (name, provider, usage = {}, agents = ['art', 'mark']) => ({ name, provider, harness: provider === 'anthropic' ? 'claude' : 'codex', kind: 'login', agents, credentials: [{ kind: 'login', status: 'valid' }], usage });
+const both = (ua = {}, ub = {}) => ({ accounts: [acct('home-max', 'anthropic', ua), acct('home-pro', 'openai', ub)] });
 const row = (model, kind, value, n = 10, day = '2026-11-01') => ({ day, model, family: model === 'model-a' ? 'anthropic' : 'openai', harness: 'x', kind, measure: 'graded', value, n, same_family: false });
 const pick = (o) => resolveModel({ agent: 'art', kind: 'live', models: [A, B], settings: { prefer: ['model-a'] }, accounts: both(), ...o });
 
@@ -59,8 +60,8 @@ test('the preference: this body\'s, then the agent\'s, then the list\'s order', 
   assert.equal(pick({ settings: {}, models: [B, A] }).model, 'model-b');
 });
 
-test('quota is per agent and per model: its own accounts, in its order, and a model-scoped window', () => {
-  const accounts = { accounts: [acct('home-max', 'anthropic', { '7d': 0.99 }), acct('work-max', 'anthropic', { '7d': 0.2, '7d_opus': 0.99 })], assign: { art: ['home-max'], mark: ['work-max'] } };
+test('quota is per agent and per model: the accounts that may do its work, and a model-scoped window', () => {
+  const accounts = { accounts: [acct('home-max', 'anthropic', { '7d': 0.99 }, ['art']), acct('work-max', 'anthropic', { '7d': 0.2, '7d_opus': 0.99 }, ['mark'])] };
   const opus = { id: 'opus', harness: 'claude', family: 'anthropic', window: '7d_opus' };
   const sonnet = { id: 'sonnet', harness: 'claude', family: 'anthropic' };
   const r = (agent) => resolveModel({ agent, kind: 'live', models: [opus, sonnet], accounts });
@@ -69,16 +70,18 @@ test('quota is per agent and per model: its own accounts, in its order, and a mo
   // mark's work-max has room, but not in opus's own window: sonnet, on work-max.
   assert.deepEqual([r('mark').model, r('mark').account], ['sonnet', 'work-max']);
   // An expired login is no room at all.
-  const expired = { accounts: [{ ...acct('x', 'anthropic'), credentials: [{ kind: 'long-lived', status: 'expired' }] }], assign: {} };
+  const expired = { accounts: [{ ...acct('x', 'anthropic'), credentials: [{ kind: 'login', status: 'expired' }] }] };
+  // A Codex login doesn't run a Claude model: no claude account for it, nothing.
+  assert.throws(() => resolveModel({ agent: 'art', kind: 'live', models: [sonnet], accounts: { accounts: [acct('pro', 'anthropic', {}, ['art'])].map((a) => ({ ...a, harness: 'codex' })) } }), /no box of art's owner is logged in to claude/);
   assert.throws(() => resolveModel({ agent: 'art', kind: 'live', models: [sonnet], accounts: expired }), /no model is left/);
 });
 
 test('a local model needs no account; unreadable accounts fail open, and say so', () => {
   const local = { id: 'qwen-coder', harness: 'codex', family: 'local:wunder' };
-  assert.equal(resolveModel({ agent: 'art', kind: 'live', models: [A, local], accounts: { accounts: [], assign: {} } }).model, 'qwen-coder');
+  assert.equal(resolveModel({ agent: 'art', kind: 'live', models: [A, local], accounts: { accounts: [] } }).model, 'qwen-coder');
   const r = resolveModel({ agent: 'art', kind: 'live', models: [A], accounts: null });
   assert.equal(r.model, 'model-a');
-  assert.match(r.why.join('\n'), /quota not checked: no account list/);
+  assert.match(r.why.join('\n'), /quota not checked: no box reports here/);
 });
 
 test('a scorecard counts only with enough graded samples in the window, weighted by n', () => {

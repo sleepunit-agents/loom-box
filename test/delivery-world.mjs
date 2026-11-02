@@ -67,16 +67,28 @@ export function fakeRunner(log, root, harness = 'claude', { inboxDir } = {}) {
 }
 
 /** Core's conversation and audit writes, recorded into `log`: seq per conversation, as core assigns it. */
-export function fakeCore(log) {
+export function fakeCore(log, now = () => new Date()) {
   const seqs = {};
+  const keys = new Map();
   const c = {
     turns: [], audits: [], down: false, auditDown: false,
     async turn(t) {
       if (c.down) throw new CoreError('core didn\'t answer conversations/turn: connect ECONNREFUSED', 503);
+      // Its idempotency key, as core's turn route has it: the same key and turn answer the first write; the same key
+      // with another turn is refused. Kept 24 hours.
+      if (t.key !== undefined) {
+        const { key, ...rest } = t;
+        const had = keys.get(key);
+        if (had && now().getTime() - had.at < 86_400_000) {
+          if (had.turn !== JSON.stringify(rest)) throw new CoreError(`core refused conversations/turn: key ${key} is another turn's`, 409);
+          return had.answer;
+        }
+      }
       const cv = cvOf(t.agent, t.venue, t.place);
       const seq = (seqs[cv] = (seqs[cv] ?? 0) + 1);
       c.turns.push({ ...t, conversation: cv, seq });
       log.push(['turn', cv, seq, t.kind]);
+      if (t.key !== undefined) { const { key, ...rest } = t; keys.set(key, { at: now().getTime(), turn: JSON.stringify(rest), answer: { conversation: cv, seq } }); }
       return { conversation: cv, seq };
     },
     async audit(a) {
@@ -105,12 +117,12 @@ export function world(extra = {}, { inboxDir } = {}) {
   setModels(env, { agent: 'mark', prefer: ['opus'] });
   const log = [];
   const runner = fakeRunner(log, HOME, 'claude', { inboxDir: inboxDir ? join(HOME, 'inbox') : undefined });
-  const core = fakeCore(log);
   let t = Date.parse('2026-11-02T12:00:00Z');
   const clock = { now: () => new Date(t), advance: (ms) => { t += ms; } };
+  const core = fakeCore(log, clock.now);
   const o = {
     core, runner: () => runner, sealer: testSealer, now: clock.now, memAvailableMb: () => 8000, warn: () => {},
-    accounts: staticAccounts({ accounts: [{ name: 'max', provider: 'anthropic', credentials: [{ kind: 'k', status: 'valid' }], usage: {} }] }),
+    accounts: staticAccounts({ accounts: [{ name: 'max', provider: 'anthropic', harness: 'claude', kind: 'login', agents: ['art', 'mark', 'pip'], credentials: [{ kind: 'login', status: 'valid' }], usage: {} }] }),
     venues: () => ({ slack: { kind: 'live', send: [process.execPath, join(here, 'fake-send.mjs')] }, relay: { kind: 'agent' } }),
   };
   let n = 0;

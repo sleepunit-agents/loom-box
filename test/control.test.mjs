@@ -7,7 +7,7 @@
 //  - with nothing enrolled, every agent's primary is loom's own machine.
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, statSync } from 'node:fs';
+import { mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MAX_CLAIM_TRIES, api, meets } from '../src/control.mjs';
@@ -29,6 +29,7 @@ const ok = (r) => { assert.equal(r.status, 200, JSON.stringify(r.body)); return 
 beforeEach(() => {
   env = { HOME: scratch('loom-box-'), LOOM_BOX_LOCAL_NAME: 'one' };
   env.LOOM_BOX_HOME = join(env.HOME, 'state');
+  env.XDG_RUNTIME_DIR = join(env.HOME, 'run');
   minted = []; revoked = [];
   let n = 0;
   fx = {
@@ -328,32 +329,149 @@ test('a session house needs no task, and its box is told it\'s one', () => {
   assert.equal(ok(call(box(t.box), 'poll')).start.find((x) => x.id === t.id).session, false);
 });
 
-test('a secret from sub:<provider> is the agent\'s subscription with room left, picked at claim and recorded', () => {
-  const picks = [];
-  fx.issue = (agent, provider, kind) => { picks.push([agent, provider, kind]); return { name: 'claude-spare', value: 'value-of-claude-spare' }; };
-  ok(call(owner, 'set-agent', { agent: 'art', repo: 'https://x/art.git', secrets: { 'claude-oauth': 'sub:anthropic', 'claude-credentials.json': 'sub:anthropic:session', 'github-token': 'gh-art' } }));
-  assert.equal(call(owner, 'set-agent', { agent: 'art', repo: 'https://x/art.git', secrets: { x: 'sub:anthropic:other' } }).status, 400);
-  assert.equal(call(owner, 'set-agent', { agent: 'art', repo: 'https://x/art.git', secrets: { x: 'sub:nobody' } }).status, 400);
+test('nothing issues a model credential: sub:<provider> is refused, an old one is skipped, and a claim says which logins the box has', () => {
+  const r = call(owner, 'set-agent', { agent: 'art', repo: 'https://x/art.git', secrets: { 'claude-oauth': 'sub:anthropic' } });
+  assert.equal(r.status, 400);
+  assert.match(r.body.error, /sub:<provider> is gone: a box logs in/);
+  // An API key is a plain secret.
+  ok(call(owner, 'set-agent', { agent: 'art', repo: 'https://x/art.git', secrets: { 'anthropic-api-key': 'art-anthropic-key', 'github-token': 'gh-art' } }));
+  // A household whose state still maps sub:… (from before) gets nothing for it, and nothing fails.
+  const p = join(env.LOOM_BOX_HOME, 'state.json');
+  const s = JSON.parse(readFileSync(p, 'utf-8'));
+  s.agents.art.secrets['claude-oauth'] = 'sub:anthropic';
+  writeFileSync(p, JSON.stringify(s), { mode: 0o600 });
+  ok(call(box('one'), 'poll', { harnesses: { claude: { installed: true, loggedIn: true, method: 'claude.ai', plan: 'max', account: 'claude-0123456789' }, codex: { installed: true, loggedIn: false } } }));
   const h = ok(call(art, 'up', { task: 't' }));
   ok(call(box(h.box), 'poll'));
   const c = ok(call(box(h.box), 'claim', { id: h.id }));
-  assert.deepEqual(picks, [['art', 'anthropic', undefined], ['art', 'anthropic', 'session']]);
-  assert.equal(c.secrets['claude-oauth'], 'value-of-claude-spare');
-  assert.equal(c.secrets['github-token'], 'value-of-gh-art');
-  assert.deepEqual(ok(call(owner, 'list')).houses.find((x) => x.id === h.id).runsOn, { 'claude-oauth': 'claude-spare', 'claude-credentials.json': 'claude-spare' });
-  // A kind that can't be issued is left out, saying why; the rest still come.
-  fx.issue = (agent, provider, kind) => { if (kind) throw new Error('no anthropic session subscription for art'); return { name: 'claude-spare', value: 'v' }; };
-  const h3 = ok(call(art, 'up', { task: 't3' }));
-  ok(call(box(h3.box), 'poll'));
-  const c3 = ok(call(box(h3.box), 'claim', { id: h3.id }));
-  assert.equal(c3.secrets['claude-oauth'], 'v');
-  assert.equal('claude-credentials.json' in c3.secrets, false);
-  assert.match(c3.notIssued['claude-credentials.json'], /no anthropic session subscription/);
-  // A pick that isn't a secret's name is refused, not passed on.
-  fx.issue = () => ({ name: 'not a name!', value: 'x' });
-  const h2 = ok(call(art, 'up', { task: 't2' }));
-  ok(call(box(h2.box), 'poll'));
-  assert.equal(call(box(h2.box), 'claim', { id: h2.id }).status, 500);
+  assert.deepEqual(Object.keys(c.secrets).sort(), ['anthropic-api-key', 'github-token']);
+  assert.deepEqual(c.logins, ['claude']);
+});
+
+test('a box reports its harnesses; the owner logs it in from its page: the box runs the CLI\'s login, the link comes back, the pasted code goes to the box once', async () => {
+  // What a box says: states only. Anything else it sends (an email, a token) is dropped.
+  ok(call(box('one'), 'poll', { harnesses: { claude: { installed: true, loggedIn: false, email: 'j@example.com', token: 'sk-x' }, codex: { installed: false, loggedIn: true } } }));
+  const listed = ok(call(owner, 'list')).boxes.find((b) => b.id === 'one').harnesses;
+  assert.deepEqual(listed, { claude: { installed: true, loggedIn: false, checked: '2026-10-25T03:00:00.000Z' }, codex: { installed: false, loggedIn: false, checked: '2026-10-25T03:00:00.000Z' } });
+  assert.equal(JSON.stringify(load(env).boxes.one).includes('example.com'), false);
+  // Codex isn't installed there: no login for it.
+  assert.equal(call(owner, 'login-start', { box: 'one', harness: 'codex' }).status, 409);
+  const l = ok(call(owner, 'login-start', { box: 'one', harness: 'claude' }));
+  assert.match(l.id, /^l-[0-9a-f]{12}$/);
+  // Asking again while one is under way is the same login.
+  assert.equal(ok(call(owner, 'login-start', { box: 'one', harness: 'claude' })).id, l.id);
+  // Only an owner starts one; a box only reports on its own.
+  assert.equal(call(art, 'login-start', { box: 'one', harness: 'claude' }).status, 403);
+  assert.deepEqual(ok(call(box('one'), 'poll')).logins, [{ id: l.id, harness: 'claude', state: 'wanted' }]);
+  assert.deepEqual(ok(call(box('one'), 'poll')).logins, []);
+  // A code before the link is up is refused; the link isn't any URL.
+  assert.equal(call(owner, 'login-code', { id: l.id, code: 'abcdefgh#state123' }).status, 409);
+  assert.equal(call(box('one'), 'login-report', { id: l.id, state: 'waiting', link: 'https://evil.example/x' }).status, 400);
+  const link = 'https://claude.com/cai/oauth/authorize?code=true&client_id=x';
+  ok(call(box('one'), 'login-report', { id: l.id, state: 'waiting', link, kind: 'paste-code' }));
+  assert.equal(call(owner, 'login-code', { id: l.id, code: 'no' }).status, 400);
+  // The page shows the provider's link and asks for the code; it never shows one back.
+  const { page } = await import('../src/ui.mjs');
+  const lp = JSON.stringify(page(env, { path: `login:${l.id}` }));
+  assert.match(lp, /Sign in to Claude/);
+  assert.equal(lp.includes(link), true);
+  // Not for an agent's tab, nor an agent owner: 403, and no link.
+  for (const [e2, c2] of [[{ ...env, LOOM_SCOPE: 'art' }, undefined], [env, { kind: 'owner', who: 'loren', agents: ['art'] }]]) {
+    const p2 = page(e2, { path: `login:${l.id}`, caller: c2 });
+    assert.equal(p2.status, 403);
+    assert.equal(JSON.stringify(p2).includes(link), false);
+  }
+  ok(call(owner, 'login-code', { id: l.id, code: 'abcdefgh#state123' }));
+  assert.equal(JSON.stringify(page(env, { path: `login:${l.id}` })).includes('abcdefgh#state123'), false);
+  // The code never goes into state.json: it waits in the runtime dir (0600), reaches the box once, and is gone.
+  assert.equal(readFileSync(join(env.LOOM_BOX_HOME, 'state.json'), 'utf-8').includes('abcdefgh#state123'), false);
+  assert.equal(statSync(join(env.XDG_RUNTIME_DIR, 'loom-runtime-codes', l.id)).mode & 0o777, 0o600);
+  assert.deepEqual(ok(call(box('one'), 'poll')).logins, [{ id: l.id, harness: 'claude', state: 'checking', code: 'abcdefgh#state123' }]);
+  assert.equal(readFileSync(join(env.LOOM_BOX_HOME, 'state.json'), 'utf-8').includes('abcdefgh#state123'), false);
+  assert.throws(() => statSync(join(env.XDG_RUNTIME_DIR, 'loom-runtime-codes', l.id)));
+  assert.deepEqual(ok(call(box('one'), 'poll')).logins, []);
+  ok(call(box('one'), 'login-report', { id: l.id, state: 'done', harnesses: { claude: { installed: true, loggedIn: true, method: 'claude.ai', plan: 'max', account: 'claude-0123456789' } } }));
+  assert.equal(load(env).logins[l.id].state, 'done');
+  assert.equal(load(env).logins[l.id].link, undefined);
+  assert.equal(load(env).boxes.one.harnesses.claude.loggedIn, true);
+});
+
+test('usage comes from a house\'s own run output, onto its box\'s login; the accounts are a view of the boxes\' reports', async () => {
+  const { stateAccounts } = await import('../src/accounts.mjs');
+  const hs = { claude: { installed: true, loggedIn: true, method: 'claude.ai', plan: 'max', account: 'claude-0123456789' }, codex: { installed: true, loggedIn: true, method: 'chatgpt' } };
+  // fx's clock is 2026-10-25T03:00:00Z, 1792897200.
+  ok(call(box('one'), 'poll', { harnesses: hs, usage: { codex: { windows: { '7d': 0.25 }, resets: { '7d': 1793300000 }, checked: 1792890000, plan: 'pro' } } }));
+  // art's houses may have the box's Claude login, not its Codex one (the owner's grant).
+  ok(call(owner, 'set-agent', { agent: 'art', repo: 'https://github.com/x/art.git', secrets: { 'github-token': 'gh-art' }, logins: 'claude' }));
+  const h = ok(call(art, 'up', { task: 't' }));
+  // Only from a house, and only a running one.
+  assert.equal(call(art, 'usage', { harness: 'claude', reading: { windows: { '7d': 0.5 } } }).status, 403);
+  const house = { ...art, house: h.id };
+  assert.equal(call(house, 'usage', { harness: 'claude', reading: { windows: { '7d': 0.5 } } }).status, 404);
+  ok(call(box('one'), 'poll'));
+  assert.deepEqual(ok(call(box('one'), 'claim', { id: h.id })).logins, ['claude']);
+  // A house can't speak for a login it wasn't given.
+  const notMine = call(house, 'usage', { harness: 'codex', reading: { windows: { '7d': 0.9 } } });
+  assert.equal(notMine.status, 403);
+  assert.match(notMine.body.error, /wasn't given the box's codex login/);
+  assert.equal(call(house, 'usage', { harness: 'claude', reading: { windows: { '7d': 'x' } } }).status, 400);
+  // Values are clamped: utilization to 0..1, a reset only within 8 days, a check time no later than now.
+  ok(call(house, 'usage', { harness: 'claude', reading: { windows: { '7d': 0.63, '5h': 7 }, resets: { '7d': 1793300000, '5h': 1899999999 }, checked: 1999999999 } }));
+  assert.deepEqual(load(env).boxes.one.usage.claude.house, { windows: { '7d': 0.63, '5h': 1 }, resets: { '7d': 1793300000 }, checked: 1792897200, source: 'house', house: h.id });
+  const a = stateAccounts(env, { now: () => Date.parse('2026-10-25T03:00:00Z') }).list().accounts;
+  // Keys are the box owner's, salted; the label is all a body sees. art was granted Claude only: Codex's account isn't offered to it.
+  assert.deepEqual(a.map((x) => [x.harness, x.label, x.boxes, x.agents]), [
+    ['claude', 'Claude Max (owner\'s)', ['one'], ['art', 'mark']],
+    ['codex', 'Codex Pro (owner\'s)', ['one'], ['mark']],
+  ]);
+  assert.match(a[0].name, /^owner:claude-[0-9a-f]{10}$/);
+  assert.equal(JSON.stringify(a).includes('0123456789'), false);
+  // An agent caller sees no account hash in the list.
+  assert.equal(JSON.stringify(ok(call(art, 'list')).boxes).includes('0123456789'), false);
+  assert.equal(JSON.stringify(ok(call(owner, 'list')).boxes).includes('0123456789'), true);
+  assert.deepEqual(a[0].usage, { '7d': 0.63, '5h': 1, reset_7d: 1793300000, checked: 1792897200 });
+  assert.deepEqual([a[0].usageFrom, a[1].usageFrom], ['house', 'box']);
+  // 5h is full: no room on that account.
+  const { hasRoom } = await import('../src/accounts.mjs');
+  assert.equal(hasRoom(a[0]), false);
+  assert.equal(hasRoom(a[1]), true);
+});
+
+test('an agent\'s work runs only on its owner\'s boxes: member B\'s agent never lands on member A\'s box, and is offered no model when B has no logged-in box', async () => {
+  const { writeFileSync: w, mkdirSync: md } = await import('node:fs');
+  const { resolveFor } = await import('../src/models.mjs');
+  const { stateAccounts } = await import('../src/accounts.mjs');
+  env.LOOM_HOME = join(env.HOME, 'loom');
+  md(env.LOOM_HOME, { recursive: true });
+  w(join(env.LOOM_HOME, 'household.json'), JSON.stringify({ v: 1, agents: ['art', 'mark', 'pond-bot'], members: [{ person: 'jonathan', role: 'owner', agents: '*' }, { person: 'loren', role: 'owner', agents: ['pond-bot'] }] }));
+  ok(call(owner, 'set-agent', { agent: 'pond-bot', repo: 'https://x/pond-bot.git' }));
+  // loom's own box (one) is jonathan's: the first household owner's. A box of loren's.
+  const lb = ok(call(owner, 'add-box', { name: 'loren-rig' }));
+  ok(call(owner, 'box-owner', { name: lb.box, owner: 'loren' }));
+  assert.equal(call(owner, 'box-owner', { name: lb.box, owner: 'nobody' }).status, 400);
+  // pond-bot is loren's: never on jonathan's box, named or not.
+  const named = call(owner, 'up', { agent: 'pond-bot', box: 'one', task: 't' });
+  assert.equal(named.status, 403);
+  assert.match(named.body.error, /jonathan's box, and pond-bot isn't their agent/);
+  assert.equal(call(owner, 'up', { agent: 'pond-bot', task: 't' }).status, 409);
+  assert.equal(call(owner, 'set-primary', { agent: 'pond-bot', box: 'one' }).status, 200, 'loom\'s own box: setPrimary clears to it');
+  ok(call(owner, 'set-primary', { agent: 'pond-bot', box: lb.box }));
+  assert.equal(ok(call(owner, 'up', { agent: 'pond-bot', task: 't' })).box, lb.box);
+  // art is jonathan's: never on loren's box.
+  assert.equal(call(owner, 'up', { agent: 'art', box: 'loren-rig', task: 't' }).status, 403);
+  // Models: jonathan's box is logged in to Claude; loren's to nothing. pond-bot is offered nothing.
+  ok(call(box('one'), 'poll', { harnesses: { claude: { installed: true, loggedIn: true, plan: 'max', account: 'claude-0123456789' } } }));
+  const accounts = stateAccounts(env, { now: () => Date.parse('2026-10-25T03:00:00Z') });
+  const models = { ...env, LOOM_RUNTIME_SCORECARDS: 'off' };
+  assert.equal((await resolveFor(models, { agent: 'art', venue: 'wake', accounts })).harness, 'claude');
+  await assert.rejects(resolveFor(models, { agent: 'pond-bot', venue: 'wake', accounts }), (e) => e.status === 409 && /no box of pond-bot's owner is logged in to claude/.test(e.message));
+  // Lent by name, jonathan's box takes pond-bot's work, but never on jonathan's login: nothing is offered for it,
+  // as the claim won't mount it (one rule for both: owners.mjs, mayUseLogin).
+  ok(call(owner, 'box-lend', { name: 'one', agents: 'pond-bot' }));
+  assert.equal(ok(call(owner, 'up', { agent: 'pond-bot', box: 'one', task: 't' })).box, 'one');
+  await assert.rejects(resolveFor(models, { agent: 'pond-bot', venue: 'wake', accounts }), (e) => e.status === 409);
+  ok(call(owner, 'box-lend', { name: 'one', agents: '' }));
+  assert.equal(call(owner, 'up', { agent: 'pond-bot', box: 'one', task: 't' }).status, 403);
 });
 
 test('a house that can\'t be claimed fails after a few tries, saying why, instead of waiting forever', () => {
@@ -455,4 +573,82 @@ test("an agent owner (loom docs/specs/owners.md) sees and runs only their agents
   assert.equal(call(loren, 'service-up', { agent: 'art', name: 'discord' }).status, 403);
   ok(call(jonathan, 'add-box', { name: 'thor' }));
   assert.equal(ok(call(jonathan, 'list')).houses.length, 2);
+});
+
+test('a house gets the box\'s logins only on a box its agent\'s owner owns, and only those granted; a box\'s own usage reading beats a house\'s', async () => {
+  const { writeFileSync: w, mkdirSync: md } = await import('node:fs');
+  const { stateAccounts } = await import('../src/accounts.mjs');
+  env.LOOM_HOME = join(env.HOME, 'loom');
+  md(env.LOOM_HOME, { recursive: true });
+  w(join(env.LOOM_HOME, 'household.json'), JSON.stringify({ v: 1, members: [{ person: 'jonathan', agents: '*' }, { person: 'loren', agents: ['pond-bot'] }] }));
+  ok(call(owner, 'set-agent', { agent: 'pond-bot', repo: 'https://x/pond-bot.git' }));
+  const hs = { claude: { installed: true, loggedIn: true, account: 'claude-0123456789' }, codex: { installed: true, loggedIn: true } };
+  ok(call(box('one'), 'poll', { harnesses: hs }));
+  const claimOf = (agent) => {
+    const h = ok(call(owner, 'up', { agent, box: 'one', task: 't' }));
+    ok(call(box('one'), 'poll'));
+    return ok(call(box('one'), 'claim', { id: h.id }));
+  };
+  // jonathan's own agent, on jonathan's box: both logins, by default.
+  assert.deepEqual(claimOf('art').logins, ['claude', 'codex']);
+  // loren's agent, on jonathan's box lent to it: it may run there, but never on jonathan's login.
+  ok(call(owner, 'box-lend', { name: 'one', agents: 'pond-bot' }));
+  assert.deepEqual(claimOf('pond-bot').logins, []);
+  // On loren's own box, loren's agent's logins are off until granted.
+  const lb = ok(call(owner, 'add-box', { name: 'loren-rig' }));
+  ok(call(owner, 'box-owner', { name: lb.box, owner: 'loren' }));
+  const rig = { kind: 'piece', subject: lb.box };
+  ok(call(rig, 'poll', { harnesses: hs }));
+  const onRig = () => { const h = ok(call(owner, 'up', { agent: 'pond-bot', box: lb.box, task: 't' })); ok(call(rig, 'poll')); return ok(call(rig, 'claim', { id: h.id })).logins; };
+  assert.deepEqual(onRig(), []);
+  ok(call(owner, 'set-agent', { agent: 'pond-bot', repo: 'https://x/pond-bot.git', logins: 'codex' }));
+  assert.deepEqual(onRig(), ['codex']);
+  assert.equal(call(owner, 'set-agent', { agent: 'pond-bot', repo: 'https://x/pond-bot.git', logins: 'gemini' }).status, 400);
+  // A house's reading and the box's own: the account shows the box's.
+  const h = ok(call(owner, 'up', { agent: 'art', box: 'one', task: 't' }));
+  ok(call(box('one'), 'poll'));
+  ok(call(box('one'), 'claim', { id: h.id }));
+  ok(call({ ...art, house: h.id }, 'usage', { harness: 'codex', reading: { windows: { '7d': 0.9 } } }));
+  const codexOf = () => stateAccounts(env, { now: () => Date.parse('2026-10-25T03:00:00Z') }).list().accounts.find((x) => x.harness === 'codex' && x.boxes.includes('one'));
+  assert.deepEqual([codexOf().usage['7d'], codexOf().usageFrom], [0.9, 'house']);
+  ok(call(box('one'), 'poll', { usage: { codex: { windows: { '7d': 0.2 }, checked: 1792890000 } } }));
+  assert.deepEqual([codexOf().usage['7d'], codexOf().usageFrom], [0.2, 'box']);
+});
+
+test('a pasted code expires after 10 minutes unclaimed, and isn\'t taken at all without a runtime dir', async () => {
+  const { utimesSync } = await import('node:fs');
+  ok(call(box('one'), 'poll', { harnesses: { claude: { installed: true, loggedIn: false } } }));
+  const l = ok(call(owner, 'login-start', { box: 'one', harness: 'claude' }));
+  ok(call(box('one'), 'poll'));
+  ok(call(box('one'), 'login-report', { id: l.id, state: 'waiting', link: 'https://claude.com/cai/oauth/authorize?x=1', kind: 'paste-code' }));
+  ok(call(owner, 'login-code', { id: l.id, code: 'abcdefgh#state123' }));
+  const f = join(env.XDG_RUNTIME_DIR, 'loom-runtime-codes', l.id);
+  const old = new Date(Date.now() - 11 * 60_000);
+  utimesSync(f, old, old);
+  fx.now = () => new Date();
+  assert.deepEqual(ok(call(box('one'), 'poll')).logins, [{ id: l.id, harness: 'claude', state: 'failed' }]);
+  assert.match(load(env).logins[l.id].error, /expired/);
+  // No runtime dir: no code is taken (it would have nowhere to wait but state.json).
+  const l2 = ok(call(owner, 'login-start', { box: 'one', harness: 'claude' }));
+  ok(call(box('one'), 'poll'));
+  ok(call(box('one'), 'login-report', { id: l2.id, state: 'waiting', link: 'https://claude.com/cai/oauth/authorize?x=2', kind: 'paste-code' }));
+  delete env.XDG_RUNTIME_DIR;
+  assert.equal(call(owner, 'login-code', { id: l2.id, code: 'abcdefgh#state456' }).status, 409);
+});
+
+test('a box polling loom over plain HTTP outside the tailnet won\'t run a login', async () => {
+  const { secureLoomUrl } = await import('../src/logins.mjs');
+  for (const [u, yes] of [['https://loom.example.com', true], ['http://100.79.56.125:8787', true], ['http://loom.tail1234.ts.net:8787', true], ['http://127.0.0.1:8787', true],
+    ['http://192.168.6.30:8787', false], ['http://100.200.1.1:8787', false], ['http://loom.example.com', false], ['ftp://x', false]]) assert.equal(secureLoomUrl(u), yes, u);
+  const { runner } = await import('../src/box.mjs');
+  const started = [];
+  const client = { async call(path, body) { const r = api(env, fx, { caller: box('one'), path, body }); if (r.status !== 200) throw new Error(r.body.error); return r.body; } };
+  const r = runner({ ...env, LOOM_BOX_DATA: join(env.HOME, 'data') }, client, { loomUrl: 'http://192.168.6.30:8787/mcp', log: () => {}, secureChannel: false,
+    status: () => ({ claude: { installed: true, loggedIn: false } }), login: (h) => { started.push(h); return { code() {}, cancel() {} }; }, upgrade: () => null });
+  const l = ok(call(owner, 'login-start', { box: 'one', harness: 'claude' }));
+  await r.tick();
+  await new Promise((res) => setTimeout(res, 50));
+  assert.deepEqual(started, []);
+  assert.equal(load(env).logins[l.id].state, 'failed');
+  assert.match(load(env).logins[l.id].error, /plain HTTP, outside the tailnet/);
 });

@@ -108,6 +108,8 @@ test('a delivered body is a session in its agent\'s own house: placed, woken by 
     mkdirSync(join(H, 'work'), { recursive: true });
     writeFileSync(join(H, 'token'), `${TOKENS.art}\n`);
     const houseEnv = { PATH: process.env.PATH, HOME: H, LOOM_URL: loom.url, LOOM_TOKEN_FILE: join(H, 'token'), HOUSE_ID: 'h-1', HOUSE_AGENT: 'art',
+      // Its house file declares claude, so the box mounted its login (house.mjs): the login's env says where.
+      CLAUDE_SECURESTORAGE_CONFIG_DIR: join(H, 'login-claude'),
       FAKE_HARNESS: H, LOOM_RUNTIME_CLAUDE: join(here, 'fake-claude.mjs'), LOOM_RUNTIME_CLAUDE_JOBS: join(H, 'jobs'), LOOM_RUNTIME_ACCOUNTS: 'none' };
     const host = spawn(process.execPath, [cli, 'body-host', '--piece', 'box', '--beats', '60'], { env: houseEnv, cwd: join(H, 'work'), stdio: 'ignore' });
     try {
@@ -181,7 +183,7 @@ test('a house\'s body leaves its slot: its host packs the session in parts and s
   // The start asks for Art's house; the house (and so its host) comes up once it's been asked for.
   const starting = hr.start({ agent: 'art', brief: 'hi', model: 'opus', env: { LOOM_BODY_KEY: 'k1' } });
   await until(() => load(env).houses['h-1']);
-  const host = runBodyHost({ client, runner: () => local, sleep: () => new Promise((r) => setTimeout(r, 10)), beats: 3000, idleS: 0 });
+  const host = runBodyHost({ client, runner: () => local, env: { CLAUDE_SECURESTORAGE_CONFIG_DIR: '/run/loom/login/claude' }, sleep: () => new Promise((r) => setTimeout(r, 10)), beats: 3000, idleS: 0 });
   try {
     const b = await starting;
     assert.equal(b.house, 'h-1');
@@ -218,7 +220,7 @@ test('a house is who its token says: one that names another house is refused, an
   const hostFor = (agent, house) => {
     const r = localRunner();
     const client = async (p, b) => { const x = await api(env, { now: () => new Date() }, { caller: { kind: 'agent', agent, house }, path: p, body: b }); if (x.status !== 200) throw new Error(x.body.error); return x.body; };
-    return runBodyHost({ client, runner: () => r, sleep: () => new Promise((res) => setTimeout(res, 10)), beats: 400, idleS: 0 });
+    return runBodyHost({ client, runner: () => r, env: { CLAUDE_SECURESTORAGE_CONFIG_DIR: '/run/loom/login/claude' }, sleep: () => new Promise((res) => setTimeout(res, 10)), beats: 400, idleS: 0 });
   };
   const hr = new HouseRunner(env, 'claude', { poll: 10 });
   const { startBody } = await import('../src/bodies.mjs');
@@ -227,7 +229,7 @@ test('a house is who its token says: one that names another house is refused, an
   env.LOOM_RUNTIME_SCORECARDS = 'off';
   setModels(env, { list: [{ id: 'opus', harness: 'claude', family: 'anthropic' }], agent: 'art', prefer: ['opus'] });
   setModels(env, { agent: 'mark', prefer: ['opus'] });
-  const o = { runner: () => hr, accounts: staticAccounts({ accounts: [{ name: 'max', provider: 'anthropic', credentials: [{ kind: 'k', status: 'valid' }], usage: {} }] }) };
+  const o = { runner: () => hr, accounts: staticAccounts({ accounts: [{ name: 'max', provider: 'anthropic', harness: 'claude', kind: 'login', agents: ['art', 'mark', 'pip'], credentials: [{ kind: 'login', status: 'valid' }], usage: {} }] }) };
   const artStart = startBody(env, { agent: 'art', venue: 'slack', brief: 'hi art' }, o);
   await until(() => load(env).houses['h-1']);
   const artHost = hostFor('art', 'h-1');

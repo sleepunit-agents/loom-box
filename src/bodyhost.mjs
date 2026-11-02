@@ -10,6 +10,16 @@
 import { rmSync } from 'node:fs';
 import { packSession, dropSession, restoreFiles } from './sessions.mjs';
 import { PART_CHARS } from './houserunner.mjs';
+import { LOGIN_HARNESSES } from './logins.mjs';
+
+/**
+ * Whether this house has its box's login for a harness: the box sets the login's env only for the harnesses the house
+ * file declares (house.mjs, "harnesses"). A body on a harness the house didn't declare would run with no login.
+ */
+export function houseHasLogin(env, harness) {
+  const def = LOGIN_HARNESSES[harness];
+  return !!def && Object.keys(def.houseEnv('')).every((k) => typeof env[k] === 'string' && env[k] !== '');
+}
 
 export const SYNC_MS = 2000;
 export const IDLE_S = 600;
@@ -53,6 +63,7 @@ export async function runBodyHost({ client, runner, env = process.env, cwd = pro
     for (const [rid, q] of Object.entries(req)) {
       if (done[rid]) continue;
       try {
+        if (!houseHasLogin(env, q.harness)) throw new Error(`this house doesn't declare the ${q.harness} harness (its house file's "harnesses"), so it has no ${q.harness} login: add it there`);
         const r = runner(q.harness);
         const o = { brief: q.brief, model: q.model, deny: q.deny ?? [], cwd, env: { ...env, ...(q.key ? { LOOM_BODY_KEY: q.key } : {}) } };
         let written = [];

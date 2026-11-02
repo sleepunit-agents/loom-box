@@ -66,7 +66,7 @@ test('2. delivery records first, and once; a body that fails to start leaves the
   const w = world();
   await deliver(w.env, w.msg('dm:U1', 'hello'), w.o);
   assert.deepEqual(w.kinds(), ['turn', 'audit', 'start'], 'the turn and its text are in core before any body sees it');
-  assert.deepEqual(w.core.turns[0], { agent: 'art', venue: 'slack', place: 'dm:U1', at: '2026-11-02T12:00:00.000Z', from: { kind: 'person', slug: 'loren' }, kind: 'message', label: 'Loren (dm:U1)', conversation: cvOf('art', 'slack', 'dm:U1'), seq: 1 });
+  assert.deepEqual(w.core.turns[0], { key: 'test-source:m-1', agent: 'art', venue: 'slack', place: 'dm:U1', at: '2026-11-02T12:00:00.000Z', from: { kind: 'person', slug: 'loren' }, kind: 'message', label: 'Loren (dm:U1)', conversation: cvOf('art', 'slack', 'dm:U1'), seq: 1 });
   assert.deepEqual(w.core.audits[0], { conversation: cvOf('art', 'slack', 'dm:U1'), seq: 1, text: 'hello' });
 
   // Core can't take the turn: a 5xx, and nothing reaches a body.
@@ -490,25 +490,30 @@ test('L. the runtime key: its pub is derived again from it, a first use can\'t r
   assert.throws(() => ageSealer(process.env, race).open(blob), /didn't decrypt/);
 });
 
-test('B. placement: only a box owned by the agent\'s owner (or lent to it), that may host it, with the harness logged in', () => {
+test('B. placement is #49\'s rule: the agent\'s owner\'s box, may host it, logged in to the harness, with the login granted', () => {
   const HOME = scratch('rt-place-');
   const env = { HOME, LOOM_HOME: join(HOME, 'loom'), LOOM_BOX_LOCAL_NAME: 'one' };
   mkdirSync(env.LOOM_HOME);
   writeFileSync(join(env.LOOM_HOME, 'household.json'), JSON.stringify({ members: [{ person: 'jonathan', agents: '*' }, { person: 'loren', agents: ['pip'] }] }));
-  const s = { primaries: {}, boxes: {
+  const s = { primaries: {}, agents: { art: {}, pip: { logins: ['claude'] } }, boxes: {
     one: { local: true, mayHost: '*', owner: 'jonathan', harnesses: { claude: { loggedIn: false } } },
     thor: { mayHost: '*', owner: 'jonathan', harnesses: { claude: { loggedIn: true }, codex: { loggedIn: false } } },
     lorens: { mayHost: '*', owner: 'loren', harnesses: { claude: { loggedIn: true } } },
   } };
   assert.deepEqual(bodyBox(s, 'art', 'claude', env), { box: 'thor' });
   assert.match(bodyBox(s, 'art', 'codex', env).reason, /no box owned by art's owner reports codex logged in/);
-  assert.deepEqual(bodyBox(s, 'pip', 'claude', env), { box: 'lorens' }, 'loren\'s agent, on loren\'s box');
+  assert.deepEqual(bodyBox(s, 'pip', 'claude', env), { box: 'lorens' }, 'loren\'s agent, on loren\'s box, with the login loren granted it');
+  s.agents.pip.logins = [];
+  assert.match(bodyBox(s, 'pip', 'claude', env).reason, /no box/, 'no grant, no login, no body');
+  s.agents.pip.logins = ['claude'];
+  s.boxes.lorens.harnesses.claude.unhealthy = 'its refresh failed';
+  assert.match(bodyBox(s, 'pip', 'claude', env).reason, /no box/, 'an unhealthy login runs nothing');
+  delete s.boxes.lorens.harnesses.claude.unhealthy;
   s.boxes.lorens.harnesses.claude.loggedIn = false;
-  assert.match(bodyBox(s, 'pip', 'claude', env).reason, /no box/, 'never on jonathan\'s box');
   s.boxes.thor.lentTo = ['pip'];
-  assert.deepEqual(bodyBox(s, 'pip', 'claude', env), { box: 'thor' }, 'lent to it by name');
-  s.boxes.thor.mayHost = ['art'];
-  assert.match(bodyBox(s, 'pip', 'claude', env).reason, /no box/);
+  assert.match(bodyBox(s, 'pip', 'claude', env).reason, /no box/, 'a box lent to it hosts it, but its owner\'s login isn\'t lent with it');
+  s.boxes.thor.mayHost = ['pip'];
+  assert.match(bodyBox(s, 'art', 'claude', env).reason, /no box/, 'thor may host only pip now');
 });
 
 test('A+B. with no box placed for it, a delivery\'s body is failed (and says why); the turn stands', async () => {
