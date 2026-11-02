@@ -15,7 +15,7 @@ import { AGENT_NAME, BOX_NAME, SECRET_NAME, StateError, load, localBoxName, next
 import { joinPoll, joinRequest } from './enroll.mjs';
 import { MAX_PARTS, PART_RAW, drop, partsOf, putPart, putWhole, readPart } from './blobs.mjs';
 import { parsePortGrant, parseTailnetGrant } from './house.mjs';
-import { CODE, LOGIN_NAMES } from './logins.mjs';
+import { CODE, LOGIN_NAMES, scrubCliOutput } from './logins.mjs';
 import { boxOwner, mayHaveLogin, mayUseLogin, membersOf, ownersAllow } from './owners.mjs';
 
 const TERMINAL = new Set(['done', 'failed', 'stopped', 'lost']);
@@ -373,7 +373,7 @@ export function list(env, caller) {
   const boxes = Object.entries(s.boxes)
     .filter(([, b]) => householdOwner(caller) || (!b.revoked && mine?.some((a) => mayHost(b, a, members))))
     .map(([id, b]) => ({ id, name: b.name ?? id, local: !!b.local, facts: factsOf(b), lastSeen: b.lastSeen, harnesses: harnessesOf(b, householdOwner(caller)),
-      ...(householdOwner(caller) ? { mayHost: b.mayHost, owner: boxOwner(b, members), lentTo: b.lentTo ?? [], revoked: b.revoked ?? null, created: b.created } : {}) }));
+      ...(householdOwner(caller) ? { runtime: b.runtime ?? null, mayHost: b.mayHost, owner: boxOwner(b, members), lentTo: b.lentTo ?? [], revoked: b.revoked ?? null, created: b.created } : {}) }));
   const primary = caller.kind === 'agent' ? primaryOf(s, caller.agent, env) : undefined;
   const services = Object.entries(s.services ?? {})
     .filter(([, v]) => sees(caller, v.agent))
@@ -409,8 +409,10 @@ export function hello(env, effects, caller, { facts, harnesses }) {
 /** What this box should be running: houses to start, and houses to stop. */
 const SESSION_KEY = /^(box:[^\0]{1,120}|house:h-\d{1,9})$/;
 
-export function poll(env, effects, caller, { facts, sessions, harnesses, usage } = {}) {
+export function poll(env, effects, caller, { facts, sessions, harnesses, usage, loginsRunning, runtime } = {}) {
   const f = facts === undefined ? null : listOf(facts, 'facts', FACT, 32);
+  const running = runningReport(loginsRunning);
+  const rt = runtimeReport(runtime);
   const hs = harnessReport(harnesses);
   const us = usageReport(usage, Math.floor(Date.parse(now(effects)) / 1000));
   // Its remote sessions, working or idle, as the box sampled them: only well-formed keys, a few.
@@ -431,11 +433,16 @@ export function poll(env, effects, caller, { facts, sessions, harnesses, usage }
       b.sessions = { at: now(effects), busy: Object.fromEntries(Object.entries(busy).filter(([k]) => ours(k))) };
     }
     b.lastSeen = now(effects);
+    if (rt) b.runtime = { ...rt, at: now(effects) };
     // Boxes poll every few seconds: the natural place to finish any revoke that failed.
     retryRevokes(s, effects);
     const mine = Object.values(s.houses).filter((h) => h.box === caller.subject);
     const members = membersOf(env);
     expireLogins(s, effects);
+    // A login handed to this box that its runner doesn't have any more (it restarted, or lost it): failed, saying why.
+    if (running) { b.loginRun = running.run; settleLogins(s, effects, caller.subject, running); }
+    const upgradeNow = !!b.upgradeNow;
+    delete b.upgradeNow;
     return {
       // Logins the owner started from the box's page: the CLI's own login, run here (logins.mjs). A pasted code goes
       // to the box once and is gone from loom's state.
@@ -446,7 +453,7 @@ export function poll(env, effects, caller, { facts, sessions, harnesses, usage }
           if (l.codeWaiting && !code) { l.state = 'failed'; l.error = 'The code expired before the box took it; start again.'; }
           delete l.codeWaiting;
           const out = { id: l.id, harness: l.harness, state: l.state, ...(code ? { code } : {}) };
-          if (l.state === 'wanted') l.state = 'starting';
+          if (l.state === 'wanted') { l.state = 'starting'; l.updated = now(effects); if (running) l.run = running.run; }
           if (l.state === 'cancel') l.state = 'failed';
           return out;
         }),
@@ -466,6 +473,8 @@ export function poll(env, effects, caller, { facts, sessions, harnesses, usage }
         .map(([agent, r]) => ({ agent, dir: r.dir, name: r.name, want: r.want, state: r.state })),
       // The loom-box loom runs (version.mjs): a box on another one installs this one.
       ...(ownCommit() ? { version: ownCommit() } : {}),
+      // The owner pressed "Update now": the box tries at once, past its retry wait (vetted the same).
+      ...(upgradeNow ? { upgradeNow: true } : {}),
     };
   });
 }
@@ -944,15 +953,75 @@ function usageReport(v, nowS) {
 /** A box's harnesses, for a list: states only. */
 export const harnessesOf = (b, full = false) => Object.fromEntries(Object.entries(b.harnesses ?? {}).map(([k, v]) => [k, { installed: !!v.installed, loggedIn: !!v.loggedIn, ...(v.unhealthy ? { unhealthy: v.unhealthy } : {}), ...(v.method ? { method: v.method } : {}), ...(v.plan ? { plan: v.plan } : {}), ...(full && v.account ? { account: v.account } : {}), ...(v.checked ? { checked: v.checked } : {}) }]));
 
+/** A box's list of the logins its runner has: {run, ids}, checked; null from a box that doesn't say. */
+function runningReport(v) {
+  if (!v || typeof v !== 'object' || typeof v.run !== 'string' || !/^[0-9a-f]{6,32}$/.test(v.run) || !Array.isArray(v.ids)) return null;
+  return { run: v.run, ids: v.ids.filter((x) => typeof x === 'string' && LOGIN_ID.test(x)).slice(0, 20) };
+}
+
+const UPGRADE_STATES = new Set(['installing', 'refused', 'failed', 'done']);
+const COMMIT_RE = /^[0-9a-f]{40}$/;
+const isoOf = (v) => (typeof v === 'string' && v.length < 40 && Number.isFinite(Date.parse(v)) ? new Date(Date.parse(v)).toISOString() : undefined);
+const lineOf = (v, max) => (typeof v === 'string' ? v.replace(/[^\n\x20-\x7e]/g, '?').slice(0, max) : undefined);
+/** A box's word on its own runtime (version.mjs): its commit, the piece it's installed as, its last upgrade. */
+function runtimeReport(v) {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
+  const out = {};
+  if (COMMIT_RE.test(v.commit ?? '')) out.commit = v.commit;
+  if (typeof v.piece === 'string' && /^[a-z][a-z0-9-]{0,39}$/.test(v.piece)) out.piece = v.piece;
+  const u = v.upgrade;
+  if (u && typeof u === 'object' && COMMIT_RE.test(u.commit ?? '') && UPGRADE_STATES.has(u.state)) {
+    out.upgrade = { commit: u.commit, state: u.state, ...(COMMIT_RE.test(u.from ?? '') ? { from: u.from } : {}),
+      ...(isoOf(u.at) ? { at: isoOf(u.at) } : {}), ...(isoOf(u.retryAt) ? { retryAt: isoOf(u.retryAt) } : {}),
+      ...(lineOf(u.error, 300) ? { error: lineOf(u.error, 300) } : {}), ...(lineOf(u.detail, 600) ? { detail: lineOf(u.detail, 600) } : {}),
+      ...(u.swapped && typeof u.swapped === 'object' ? { swapped: true } : {}) };
+  }
+  return out;
+}
+
+/** The owner's "Update now": the box tries loom's runtime commit on its next poll, past its retry wait. */
+export function boxUpdateNow(env, effects, { name }) {
+  return update(env, (s) => {
+    const id = resolveBox(s, name);
+    if (s.boxes[id].revoked) fail(`${boxNameOf(s, id)} is revoked`, 409);
+    s.boxes[id].upgradeNow = true;
+    return { box: id, name: boxNameOf(s, id) };
+  });
+}
+
+/** A login under way on a box: the box has it (or will), and it isn't over. */
+const UNDER_WAY = new Set(['starting', 'waiting', 'checking']);
+const LOGIN_REASON = {
+  restarted: 'the runtime restarted during the sign-in; start again',
+  lost: 'the box isn\'t running this sign-in any more (its sign-in process ended without a word); start again',
+  quiet: (box) => `${box} stopped answering during the sign-in; start again`,
+};
+const fail_ = (l, error, effects) => { l.state = 'failed'; l.error = error; delete l.codeWaiting; delete l.link; l.updated = now(effects); };
+/**
+ * A box's runner says which logins it has. One loom handed to it that it doesn't have is over: handed to an
+ * earlier runner (the box restarted), or lost. Only one handed out at an earlier poll is judged (one handed out by
+ * this poll is started after it).
+ */
+function settleLogins(s, effects, box, running) {
+  for (const l of Object.values(s.logins ?? {})) {
+    if (l.box !== box || !UNDER_WAY.has(l.state) || !l.run) continue;
+    if (l.run !== running.run) fail_(l, LOGIN_REASON.restarted, effects);
+    else if (!running.ids.includes(l.id)) fail_(l, LOGIN_REASON.lost, effects);
+  }
+}
+
+/** A box's own sign-in gives up after 15 minutes (logins.mjs); loom a minute after, in case the box never said. */
+const LOGIN_GIVE_UP_MS = 16 * 60_000;
+/** A box handed a login that hasn't polled in this long isn't running it. */
+const LOGIN_QUIET_MS = 2 * 60_000;
 /** A login nobody finished goes, and so does a finished one after a while. */
 function expireLogins(s, effects) {
   const t = Date.parse(now(effects));
   for (const [id, l] of Object.entries(s.logins ?? {})) {
-    const age = t - Date.parse(l.updated ?? l.created);
-    if (age > LOGIN_TTL_MS) {
-      if (['done', 'failed'].includes(l.state)) delete s.logins[id];
-      else { l.state = 'failed'; l.error = 'No sign-in in time; start again.'; l.updated = now(effects); }
-    }
+    if (['done', 'failed'].includes(l.state)) { if (t - Date.parse(l.updated ?? l.created) > LOGIN_TTL_MS) delete s.logins[id]; continue; }
+    if (t - Date.parse(l.created) > LOGIN_GIVE_UP_MS) fail_(l, 'No sign-in in time; start again.', effects);
+    else if (UNDER_WAY.has(l.state) && s.boxes[l.box]?.lastSeen && t - Date.parse(s.boxes[l.box].lastSeen) > LOGIN_QUIET_MS) fail_(l, LOGIN_REASON.quiet(boxNameOf(s, l.box)), effects);
+    else if (l.state === 'cancel' && t - Date.parse(l.updated ?? l.created) > LOGIN_QUIET_MS) fail_(l, 'Cancelled.', effects);
   }
 }
 
@@ -966,6 +1035,8 @@ export function loginStart(env, effects, { box, harness }) {
     if (b.harnesses && b.harnesses[harness] && !b.harnesses[harness].installed) fail(`${boxNameOf(s, id)} doesn't have ${harness} installed`, 409);
     s.logins ??= {};
     expireLogins(s, effects);
+    // One under way is the same login (two clicks, two tabs). One the box doesn't have any more was failed above
+    // (expireLogins) or at its last poll (settleLogins), so "Log in" always gets a live one.
     for (const l of Object.values(s.logins)) {
       if (l.box === id && l.harness === harness && !['done', 'failed'].includes(l.state)) return { id: l.id, box: id, harness, state: l.state, again: true };
     }
@@ -1012,7 +1083,7 @@ export function loginView(env, id) {
 }
 
 /** The box says how a login is going: its link (and a device code), then done or failed. */
-export function loginReport(env, effects, caller, { id, state, link, userCode, kind, error, harnesses }) {
+export function loginReport(env, effects, caller, { id, state, link, userCode, kind, error, detail, exit, harnesses }) {
   if (!['waiting', 'done', 'failed'].includes(state)) fail('a login is waiting, done or failed');
   if (link !== undefined && !(typeof link === 'string' && /^https:\/\/(claude\.com|claude\.ai|auth\.openai\.com)\/\S{1,2000}$/.test(link))) fail('not a sign-in link');
   if (userCode !== undefined && !(typeof userCode === 'string' && /^[A-Z0-9]{4}-[A-Z0-9]{4,5}$/.test(userCode))) fail('not a device code');
@@ -1027,7 +1098,20 @@ export function loginReport(env, effects, caller, { id, state, link, userCode, k
     if (link) l.link = link;
     if (userCode) l.userCode = userCode;
     if (kind === 'paste-code' || kind === 'device') l.kind = kind;
-    if (state === 'failed') { l.error = String(error ?? 'it didn\'t work').slice(0, 300); delete l.codeWaiting; dropCode(env, id); }
+    if (state === 'failed') {
+      l.error = String(error ?? 'it didn\'t work').replace(/[^\x20-\x7e]/g, '?').slice(0, 300);
+      // The CLI's last lines, scrubbed on the box (logins.mjs) and again here: what a person can check.
+      const d = typeof detail === 'string' ? scrubCliOutput(detail).slice(-600) : '';
+      if (d.trim()) l.detail = d; else delete l.detail;
+      if (Number.isInteger(exit) && exit >= -1 && exit < 1000) l.exit = exit;
+      delete l.codeWaiting; dropCode(env, id);
+    }
+    // Logged in: what the CLI's status says it is, for the page's "✓ Claude logged in (claude.ai, Max)".
+    if (state === 'done') {
+      const st = (hs ?? b.harnesses ?? {})[l.harness];
+      if (st?.method) l.method = st.method;
+      if (st?.plan) l.plan = st.plan;
+    }
     if (state !== 'waiting') delete l.link;
     return { ok: true };
   });
@@ -1079,7 +1163,7 @@ const OWNER_ONLY = {
   'add-box': addBox, 'revoke-box': revokeBox, 'may-host': setMayHost, 'set-primary': setPrimary, 'set-agent': setAgent,
   'seed-state': seedState, 'saved-state': (env, _fx, b) => savedState(env, b),
   'remote-up': remoteUp, 'remote-down': remoteDown,
-  'login-start': loginStart, 'login-code': loginCode, 'login-cancel': loginCancel, 'box-lend': lendBox, 'box-owner': setBoxOwner,
+  'login-start': loginStart, 'login-code': loginCode, 'login-cancel': loginCancel, 'box-lend': lendBox, 'box-owner': setBoxOwner, 'box-update-now': boxUpdateNow,
 };
 const BOX_ONLY = { hello, poll, claim, report, 'save-state': saveState, 'state-part': statePart, 'remote-report': remoteReport, 'login-report': loginReport };
 

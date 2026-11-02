@@ -59,6 +59,7 @@
 //   loom runtime accounts [--json] | accounts usage [--json]           the accounts the boxes report, and their usage
 //   loom runtime logins [--json]                                       each box's harnesses: installed, logged in
 //   loom runtime login <box> claude|codex                              log a box in (its CLI's own login; prints the link)
+//   loom runtime carry-settings [--from box --to runtime]             after swapping the old box piece by hand: its settings, renamed
 // From a house (its loom token):
 //   loom runtime usage report --harness claude|codex < output.jsonl    how full its account is, from the harness's run
 //                                                                      output (stream-json, or a Codex rollout)
@@ -85,6 +86,7 @@ import { PART_RAW, joinParts, partsOf } from './blobs.mjs';
 import { deliver, listConvs, post, send, tick } from './delivery.mjs';
 import { runBodyHost } from './bodyhost.mjs';
 import { runnerFor } from './runners.mjs';
+import { applyUpgrade, carrySettings } from './version.mjs';
 
 /**
  * Whether this box's houses should outlive it: LOOM_BOX_ON_EXIT=keep|stop says so; else it's whether the systemd
@@ -290,6 +292,21 @@ async function main(argv, env) {
       process.stdout.write(`Joined as ${hi.name ?? hi.box} (${hi.box}). Run \`loom box run\` (or its user service) to start taking houses.\n`);
       return;
     }
+    case 'upgrade-apply': {
+      // The detached unit maybeUpgrade starts (version.mjs): the install, or the box→runtime swap.
+      const r = applyUpgrade({ commit: flag(rest, '--commit'), from: flag(rest, '--from'), repo: flag(rest, '--repo') || undefined,
+        piece: flag(rest, '--piece'), target: flag(rest, '--target'), env, stateDir: stateDir(env) });
+      out(r);
+      if (r.state !== 'done') throw new Fail(r.error, 1);
+      return;
+    }
+    case 'carry-settings': {
+      // After swapping the old box piece for runtime by hand: its settings, under the new names (version.mjs).
+      const r = carrySettings(env, { from: flag(rest, '--from') || 'box', to: flag(rest, '--to') || 'runtime' });
+      if (r.error) throw new Fail(r.error, 1);
+      process.stdout.write(`carried ${r.carried} setting${r.carried === 1 ? '' : 's'} from ${flag(rest, '--from') || 'box'} to ${flag(rest, '--to') || 'runtime'}\n`);
+      return;
+    }
     case 'run': {
       const mode = runMode(env, rest.includes('--local'));
       if (mode === 'unjoined') {
@@ -326,8 +343,9 @@ async function main(argv, env) {
         if (stopping) return;
         if (keepsHousesOnExit(env)) {
           process.stderr.write(`loom-box: SIGTERM: leaving ${r.houses.size} house(s) running; the next start adopts them\n`);
-          stopping = Promise.resolve();
-          process.exit(0);
+          // A sign-in under way doesn't outlive this process: loom is told why, and its container stopped.
+          stopping = r.endLogins().finally(() => process.exit(0));
+          return;
         }
         process.stderr.write(`loom-box: SIGTERM: stopping ${r.houses.size} house(s) before exit\n`);
         stopping = r.shutdown().then(() => process.exit(0));

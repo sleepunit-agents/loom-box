@@ -16,6 +16,22 @@ to those binaries. It does not log in for them.
   finishes by itself. The CLI then writes its own login into the box's login dir
   (`~/.local/share/loom-box/logins/<harness>`), and refreshes it itself from then
   on. `loom runtime login <box> claude|codex` starts the same from a terminal.
+- **The sign-in page keeps up by itself.** While the box starts the CLI, checks
+  a pasted code, or waits for a device sign-in, the page says so beside a
+  spinner and reloads itself (loom core's page `refresh`). It then shows
+  "✓ Claude logged in (claude.ai, Max)", or why the login didn't work, with
+  **Try again**. A failure keeps the CLI's last few lines and its exit status.
+  Anything in them that looks like a code or a token is cut out first: the text
+  after `code=` or "token", any long base64-like string, and the pasted code
+  itself.
+- **Log in always starts something that's alive.** The box tells loom which
+  sign-ins its runner has going. A sign-in handed to an earlier runner (the
+  runtime restarted) or one the runner lost is marked failed with the reason,
+  and **Log in** starts a fresh one. So is one older than 16 minutes, or one on
+  a box that stopped polling. A runner that goes down tells loom first ("the
+  runtime restarted during the sign-in; start again") and stops its sign-in
+  containers. A runner that starts removes any sign-in container left behind,
+  found by their `loom.cli` label.
 - **The pasted code.** It's never written to loom's state. It waits in the
   user's runtime dir (`$XDG_RUNTIME_DIR`, a tmpfs) for the box's next poll,
   goes to the CLI's stdin on that box once, and is deleted. A code nobody picks

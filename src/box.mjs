@@ -10,7 +10,8 @@
 // gave it), its own state and nested-container dirs, and the repo mirror
 // read-only. No agent code runs on the box itself. When it ends, its secrets,
 // clone and dirs go.
-import { maybeUpgrade } from './version.mjs';
+import { lastUpgrade, maybeUpgrade, ownCommit, ownPiece } from './version.mjs';
+import { randomBytes } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { gunzipSync } from 'node:zlib';
 import { pieceName } from './piece.mjs';
@@ -23,7 +24,7 @@ import { containerName, missingSecrets, parseHouseFile, podmanSecret, runArgs, s
 import { PART_RAW, joinParts, partsOf } from './blobs.mjs';
 import { boxSessions } from './remote.mjs';
 import { sessionsBusy } from './busy.mjs';
-import { harnessStatus, LOGIN_HARNESSES, loginDir, pruneLoginDir, startLogin } from './logins.mjs';
+import { harnessStatus, LOGIN_HARNESSES, loginDir, pruneLoginDir, startLogin, sweepCliContainers } from './logins.mjs';
 
 /** How often a box asks its harness CLIs whether they're logged in (and at once after a login). */
 export const STATUS_MS = 5 * 60_000;
@@ -373,8 +374,13 @@ function rootless(env) {
  * on loom's own machine); `loomUrl` is what a house is told loom is.
  */
 export function runner(env, client, { loomUrl, labels = [], log = (m) => process.stderr.write(`loom-box: ${m}\n`), hasSocket = (p) => existsSync(p), hasCdi = () => CDI_SPECS.some((p) => existsSync(p)), upgrade = maybeUpgrade,
-  status = (agents) => harnessStatus(env, { agents }), login = (h, o) => startLogin(env, h, o), codexUsage = () => null, clock = () => Date.now(), secureChannel = true }) {
+  status = (agents) => harnessStatus(env, { agents }), login = (h, o) => startLogin(env, h, o), codexUsage = () => null, clock = () => Date.now(), secureChannel = true,
+  sweep = () => sweepCliContainers(env), runtime = () => ({ commit: ownCommit(), piece: ownPiece() }) }) {
   const houses = new Map(); // id -> { child, dir, stopAt? }
+  // This runner, as the control plane tells it from one before it: a login handed to another run is one a restart
+  // dropped (control.mjs, settleLogins).
+  const run = randomBytes(6).toString('hex');
+  let swept = false;
   // The harness CLIs' own word on their logins, asked every STATUS_MS (and after a login), not every poll.
   let harnesses = null;
   let asked = 0;
@@ -394,7 +400,7 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
     for (const l of want ?? []) {
       const have = logins.get(l.id);
       if (l.state === 'cancel') { have?.cancel(); continue; }
-      if (have) { if (l.code) have.code(l.code); continue; }
+      if (have) { if (l.code) have.code?.(l.code); continue; }
       if (l.state !== 'wanted' || !LOGIN_HARNESSES[l.harness]) continue;
       // A pasted code would cross this box's channel to loom: not over plain HTTP outside the tailnet.
       if (!secureChannel) {
@@ -403,12 +409,16 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
       }
       log(`logging in ${l.harness} (the owner asked, from loom's page)`);
       const report = (st) => {
-        if (st.state !== 'waiting') { logins.delete(l.id); log(`${l.harness} login: ${st.state}${st.error ? ` (${st.error})` : ''}`); }
-        const hs = st.state === 'waiting' ? undefined : harnessesNow(true);
-        client.call('login-report', { id: l.id, ...st, kind: LOGIN_HARNESSES[l.harness].kind, ...(hs ? { harnesses: hs } : {}) })
-          .catch((e) => log(`login-report ${l.id}: ${e.message}`));
+        const last = st.state !== 'waiting';
+        if (last) log(`${l.harness} login: ${st.state}${st.error ? ` (${st.error})` : ''}`);
+        const hs = last ? harnessesNow(true) : undefined;
+        // Still this box's until its last word has landed: a poll between would say it's gone (control.mjs).
+        return client.call('login-report', { id: l.id, ...st, kind: LOGIN_HARNESSES[l.harness].kind, ...(hs ? { harnesses: hs } : {}) })
+          .catch((e) => log(`login-report ${l.id}: ${e.message}`))
+          .finally(() => { if (last) logins.delete(l.id); });
       };
-      try { logins.set(l.id, login(l.harness, { say: report, agents: loginAgents?.[l.harness] ?? [] })); } catch (e) { report({ state: 'failed', error: e.message }); }
+      logins.set(l.id, { starting: true });
+      try { logins.set(l.id, login(l.harness, { say: report, agents: loginAgents?.[l.harness] ?? [], id: l.id })); } catch (e) { report({ state: 'failed', error: e.message }); }
     }
   }
   const sessions = boxSessions(env, client, { dataDir: dataDir(env), log });
@@ -574,7 +584,23 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
    * A little past every house's own grace period, in case the last one's
    * SIGKILL fallback is still landing.
    */
+  /**
+   * This runner going (a restart, an update): no login outlives it (its pty goes with it), so each one under way
+   * is cancelled, its container stopped, and loom told why, before the process ends.
+   */
+  async function endLogins(why = 'the runtime restarted during the sign-in; start again') {
+    const ending = [];
+    for (const [id, l] of logins) {
+      if (!l.cancel || l.over) continue;
+      ending.push(id);
+      l.cancel(why);
+    }
+    const until = Date.now() + 5_000;
+    while (ending.some((id) => logins.has(id)) && Date.now() < until) await new Promise((res) => setTimeout(res, 50));
+  }
+
   async function shutdown() {
+    await endLogins();
     for (const id of houses.keys()) stop(id);
     const until = Date.now() + STOP_GRACE_MS + 5_000;
     while (houses.size && Date.now() < until) await new Promise((res) => setTimeout(res, 200));
@@ -584,10 +610,17 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
     // Which remote sessions here are mid-turn (busy.mjs): loom shows it on the agents' cards (t-1624).
     let busy;
     try { busy = sessionsBusy(pathJoin(stateDir(env), 'session-cpu.json')); } catch { busy = undefined; }
+    // A runner before this one may have left a login's container behind (it died mid-sign-in): those go, once.
+    if (!swept) { swept = true; try { const gone = sweep(); if (gone?.length) log(`stopped ${gone.length} sign-in container(s) a runner before this one left`); } catch (e) { log(`sweep: ${e.message}`); } }
     const hs = harnessesNow(false);
     let cx = null;
     try { cx = codexUsage(); } catch { cx = null; }
-    const want = await client.call('poll', { facts: detectFacts(env, labels), ...(busy ? { sessions: busy } : {}), ...(hs ? { harnesses: hs } : {}), ...(cx ? { usage: { codex: cx } } : {}) });
+    // Which runtime this box runs, and how its last upgrade went (version.mjs): the box's page shows both.
+    let rt = null;
+    try { const r = runtime(); rt = { ...(r.commit ? { commit: r.commit } : {}), ...(r.piece ? { piece: r.piece } : {}) }; const u = lastUpgrade(stateDir(env), clock()); if (u) rt.upgrade = u; } catch { rt = null; }
+    const want = await client.call('poll', { facts: detectFacts(env, labels), ...(busy ? { sessions: busy } : {}), ...(hs ? { harnesses: hs } : {}), ...(cx ? { usage: { codex: cx } } : {}),
+      // The logins this runner has going: one loom handed out that isn't here was lost (control.mjs, settleLogins).
+      loginsRunning: { run, ids: [...logins.keys()] }, ...(rt ? { runtime: rt } : {}) });
     if (want.loginAgents) {
       const first = !loginAgents;
       loginAgents = want.loginAgents;
@@ -628,13 +661,13 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
     await sessions(want.remotes);
     // On another loom-box than loom's: install that one, between house starts (version.mjs).
     try {
-      const did = upgrade({ want: want.version, starting: (want.start || []).length > 0, env, stateDir: stateDir(env) });
+      const did = upgrade({ want: want.version, starting: (want.start || []).length > 0, env, stateDir: stateDir(env), now: !!want.upgradeNow });
       if (did) log(did);
     } catch (e) { log(`upgrade: ${e.message}`); }
     return want;
   }
 
-  return { tick, stop, houses, shutdown };
+  return { tick, stop, houses, shutdown, endLogins, run };
 }
 
 export { dataDir };

@@ -166,11 +166,20 @@ export function loginImage(env, agents = [], { run = spawnSync } = {}) {
   return { image: imgs[0].ref };
 }
 
+/**
+ * The label on every container a box runs a CLI in, so a box that starts again finds the ones a runner before it
+ * left behind (a restart mid-login: the `script` that held the login's pty died, its container didn't) and stops
+ * them (sweepCliContainers).
+ */
+export const CLI_LABEL = 'loom.cli';
+/** A login's container is named after its login id, so the box can stop it by name. */
+export const loginContainer = (id) => `loom-login-${id}`;
+
 /** The exact `podman run` arguments for one box-side CLI run: the shared dir the only mount. */
-export function cliRunArgs(env, harness, what, image) {
+export function cliRunArgs(env, harness, what, image, { name } = {}) {
   const def = CONTAINER_SCRIPTS[harness];
   const login = what === 'login';
-  return ['run', '--rm', ...(login ? ['-i', '-t'] : []), '--user', '0:0', '--cap-drop', 'all', '--security-opt', 'no-new-privileges',
+  return ['run', '--rm', ...(login ? ['-i', '-t'] : []), '--label', `${CLI_LABEL}=${what}`, ...(name ? ['--name', name] : []), '--user', '0:0', '--cap-drop', 'all', '--security-opt', 'no-new-privileges',
     ...(login ? [] : ['--network', 'none']), '--tmpfs', '/tmp:rw,nosuid,nodev,size=64m',
     ...Object.entries({ ...def.env, NO_COLOR: '1', BROWSER: '/bin/false' }).flatMap(([k, v]) => ['-e', `${k}=${v}`]),
     '-v', `${loginDir(env, harness)}:${AT(harness)}:rw,nosuid,nodev,noexec`,
@@ -365,7 +374,66 @@ export function secureLoomUrl(url) {
 
 const ANSI = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;?]*[A-Za-z]|\x1b[()][A-Za-z0-9]/g;
 export const CODE = /^[A-Za-z0-9#_.\-]{8,400}$/;
-const LOGIN_MS = 15 * 60_000;
+/** How long a box gives one sign-in before it gives up. The control plane gives up a minute later (control.mjs). */
+export const LOGIN_MS = 15 * 60_000;
+
+/**
+ * Every container a CLI ran in that's still here (sweepCliContainers): a box starting again stops what a runner
+ * before it left, since no login survives its runner (the code would go to a pty nobody holds). Returns their names.
+ */
+export function sweepCliContainers(env, { run = spawnSync, keep = [] } = {}) {
+  const r = run(podmanBin(env), ['ps', '-a', '--filter', `label=${CLI_LABEL}`, '--format', '{{.Names}}'], { env: podEnv(env), encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000 });
+  if (r.error || r.status !== 0) return [];
+  const names = String(r.stdout ?? '').split('\n').map((x) => x.trim()).filter((x) => /^[A-Za-z0-9_.-]{1,128}$/.test(x) && !keep.includes(x));
+  if (names.length) run(podmanBin(env), ['rm', '-f', '-t', '2', ...names], { env: podEnv(env), stdio: 'ignore', timeout: 60_000 });
+  return names;
+}
+
+/**
+ * What a CLI printed, safe to show the owner: no code, token or credential. Everything after `code=`, any word
+ * after "token", "secret", "key", "password" or "bearer", any long base64-ish run (20+ chars, or 12+ with a digit),
+ * and each string in `also` (the code that was pasted) become […]. Control characters go.
+ */
+export function scrubCliOutput(text, also = []) {
+  let t = String(text ?? '').replace(ANSI, '').replace(/\r\n?/g, '\n').replace(/[^\n\x20-\x7e]/g, '');
+  for (const a of also) if (a && a.length >= 4) t = t.split(a).join('[…]');
+  t = t.replace(/(code=)[^\s&]*/gi, '$1[…]')
+    .replace(/\b(token|secret|password|bearer|api[_ -]?key|key)(["':= ]+)[^\s"',}]+/gi, '$1$2[…]');
+  // Word by word: a link keeps its address but not its query; anything else long and base64-ish goes.
+  return t.split(/(\s+)/).map((w) => {
+    const u = /^(https?:\/\/[^?\s]*)\?\S*$/.exec(w);
+    if (u) return `${u[1]}?[…]`;
+    if (/^https?:\/\//.test(w)) return w;
+    return w.replace(/[A-Za-z0-9+/_=.#-]{20,}/g, '[…]').replace(/(?=[A-Za-z0-9+/_=#-]*\d)(?=[A-Za-z0-9+/_=#-]*[A-Za-z])[A-Za-z0-9+/_=#-]{12,}/g, '[…]');
+  }).join('');
+}
+
+/** The last few non-empty lines a CLI printed, scrubbed (scrubCliOutput), at most 600 characters. */
+export function cliTail(text, also = [], lines = 6) {
+  const all = scrubCliOutput(text, also).split('\n').map((l) => l.trimEnd()).filter((l) => l.trim());
+  return all.slice(-lines).join('\n').slice(-600);
+}
+
+/**
+ * One line a person can act on, for a login that ended without logging in: from the CLI's exit status and what it
+ * printed. `stage` is how far it got: 'link' (no sign-in link yet), 'waiting' (the owner signing in), 'code' (a
+ * pasted code given to it).
+ */
+export function whyLoginFailed(harness, { exit, out = '', stage = 'waiting' } = {}) {
+  const def = LOGIN_HARNESSES[harness];
+  const who = def.provider === 'anthropic' ? 'Anthropic' : 'OpenAI';
+  const o = String(out);
+  if (exit === 99) return `${def.bin} isn't installed in the image this box signs in with.`;
+  if (/ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ECONNRESET|ETIMEDOUT|getaddrinfo|network (?:is )?unreachable|could not resolve/i.test(o)) return `The box couldn't reach ${who}: check its network, then try again.`;
+  if (/invalid[ _-]?(?:code|grant)|code (?:is )?(?:invalid|expired)|expired (?:code|authorization)|authorization (?:code )?(?:failed|invalid)|OAuth error|bad request/i.test(o)) {
+    return `${who} didn't accept that code. It may have expired, or been copied in part: try again, and paste the whole code.`;
+  }
+  if (/access[ _]denied|denied|cancel+ed by user/i.test(o)) return `The sign-in was turned down at ${who}'s page.`;
+  if (/expired|timed? ?out/i.test(o)) return `The sign-in expired before it finished: try again, and finish within a few minutes.`;
+  if (stage === 'link') return `${def.label}'s login stopped before it gave a sign-in link${exit !== undefined && exit !== null ? ` (exit ${exit})` : ''}.`;
+  if (stage === 'code') return `${def.label}'s login ended after the code without logging in${exit !== undefined && exit !== null ? ` (exit ${exit})` : ''}.`;
+  return `${def.label}'s login ended without logging in${exit !== undefined && exit !== null ? ` (exit ${exit})` : ''}.`;
+}
 
 /**
  * One login on this box: the CLI's own login command, in a throwaway container (cliRunArgs), in a pty (`script`,
@@ -374,7 +442,7 @@ const LOGIN_MS = 15 * 60_000;
  * owner's pasted code to the CLI's stdin. What the CLI prints is only scanned for its link and code; none of it is
  * kept, and loom never opens the credential file it writes.
  */
-export function startLogin(env, harness, { say, spawnImpl = spawn, status, every = 3000, until = LOGIN_MS, agents = [], run = spawnSync } = {}) {
+export function startLogin(env, harness, { say, spawnImpl = spawn, status, every = 3000, until = LOGIN_MS, agents = [], run = spawnSync, id } = {}) {
   const def = LOGIN_HARNESSES[harness];
   if (!def) throw new LoginError(`no harness ${JSON.stringify(harness)} to log in`);
   // In a throwaway container (cliRunArgs), with a pty from `script` here so the CLI prints its prompt. Claude writes
@@ -386,17 +454,23 @@ export function startLogin(env, harness, { say, spawnImpl = spawn, status, every
   status ??= () => cliStatus(env, harness, img.image, run);
   const bin = podmanBin(env);
   const q = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
-  const cmd = [bin, ...cliRunArgs(env, harness, 'login', img.image)].map(q).join(' ');
+  const name = id ? loginContainer(id) : undefined;
+  const cmd = [bin, ...cliRunArgs(env, harness, 'login', img.image, { name })].map(q).join(' ');
   const child = spawnImpl('script', ['-qfec', cmd, '/dev/null'], { env: podEnv(env), stdio: ['pipe', 'pipe', 'pipe'] });
   let out = '';
   let over = false;
   let reported = false;
+  let pasted = null;
   let timer;
+  // What a failure carries: one line for a person (error), and the CLI's last lines, scrubbed (detail), and its exit.
+  const failed = (error, exit) => ({ state: 'failed', error, ...(cliTail(out, pasted ? [pasted] : []) ? { detail: cliTail(out, pasted ? [pasted] : []) } : {}), ...(Number.isInteger(exit) ? { exit } : {}) });
   const finish = (st) => {
     if (over) return;
     over = true;
     clearInterval(timer);
     try { child.kill('SIGTERM'); } catch { /* gone */ }
+    // `script` going doesn't always take podman's container with it: stop it by name.
+    if (name) { try { run(bin, ['rm', '-f', '-t', '2', name], { env: podEnv(env), stdio: 'ignore', timeout: 30_000 }); } catch { /* gone */ } }
     say(st);
   };
   const onData = (b) => {
@@ -416,18 +490,19 @@ export function startLogin(env, harness, { say, spawnImpl = spawn, status, every
   child.stderr?.on('data', onData);
   child.stdin?.on('error', () => {});
   child.on('error', (e) => finish({ state: 'failed', error: `couldn't run ${bin}'s login: ${e.message}`.slice(0, 200) }));
-  child.on('exit', () => {
+  child.on('exit', (code) => {
     // The CLI ended: logged in, or not.
     setTimeout(() => {
       if (over) return;
       const st = status();
-      finish(st?.loggedIn ? { state: 'done' } : { state: 'failed', error: reported ? `${def.label}'s login ended without logging in` : `${def.label}'s login gave no link` });
+      if (st?.loggedIn) return finish({ state: 'done' });
+      finish(failed(whyLoginFailed(harness, { exit: code, out: out.replace(ANSI, ''), stage: !reported ? 'link' : pasted ? 'code' : 'waiting' }), code));
     }, 500);
   });
   const started = Date.now();
   timer = setInterval(() => {
     if (over) return;
-    if (Date.now() - started > until) return finish({ state: 'failed', error: 'No sign-in in 15 minutes; start again.' });
+    if (Date.now() - started > until) return finish(failed(`No sign-in in ${Math.round(until / 60_000)} minutes; start again.`));
     if (reported && def.kind === 'device') {
       const st = status();
       if (st?.loggedIn) finish({ state: 'done' });
@@ -439,11 +514,12 @@ export function startLogin(env, harness, { say, spawnImpl = spawn, status, every
       const c = String(text ?? '').trim();
       if (!CODE.test(c)) return false;
       // The code, then Enter on its own: a TUI can take text and a newline in one write as a paste.
+      pasted = c;
       child.stdin.write(c);
       setTimeout(() => { if (!over) child.stdin.write('\r'); }, 500);
       return true;
     },
-    cancel() { finish({ state: 'failed', error: 'cancelled' }); },
+    cancel(why = 'Cancelled.') { finish({ state: 'failed', error: why }); },
     get over() { return over; },
   };
 }

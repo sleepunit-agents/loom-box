@@ -229,6 +229,14 @@ Without the spec, the house fails, and its log names that command.
 | the box never shows as seen | the URL from step 3 isn't reachable from this machine |
 | `this box may not host <agent>` | on the Boxes page, open the box and set who it may host |
 
+### Keeping it up to date
+
+A box installs the runtime commit loom runs by itself: canonical `main` only,
+forward only. Its card shows its commit next to loom's, "updating…" while it's
+behind, and why an update failed and when it'll try again, with **Update now**.
+A box still on the old `box` piece shows the one line to run on it once.
+See [docs/upgrading.md](docs/upgrading.md).
+
 ## Bodies
 
 Whoever needs a body asks the runtime for one, on the machine the body runs on:
