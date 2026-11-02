@@ -86,7 +86,7 @@ import { PART_RAW, joinParts, partsOf } from './blobs.mjs';
 import { deliver, listConvs, post, send, tick } from './delivery.mjs';
 import { runBodyHost } from './bodyhost.mjs';
 import { runnerFor } from './runners.mjs';
-import { applyUpgrade, carrySettings } from './version.mjs';
+import { applyUpgrade, carrySettings, loadCarried, recoverUpgrade } from './version.mjs';
 
 /**
  * Whether this box's houses should outlive it: LOOM_BOX_ON_EXIT=keep|stop says so; else it's whether the systemd
@@ -293,6 +293,13 @@ async function main(argv, env) {
       return;
     }
     case 'upgrade-apply': {
+      // The recovery timer's run: a swap that stopped part-way, finished or rolled back (version.mjs).
+      if (rest.includes('--recover')) {
+        const r = recoverUpgrade({ env, stateDir: stateDir(env) });
+        out(r ?? { state: 'nothing to recover' });
+        if (r && r.state === 'rolling-back') throw new Fail(r.error, 1);
+        return;
+      }
       // The detached unit maybeUpgrade starts (version.mjs): the install, or the box→runtime swap.
       const r = applyUpgrade({ commit: flag(rest, '--commit'), from: flag(rest, '--from'), repo: flag(rest, '--repo') || undefined,
         piece: flag(rest, '--piece'), target: flag(rest, '--target'), env, stateDir: stateDir(env) });
@@ -304,7 +311,7 @@ async function main(argv, env) {
       // After swapping the old box piece for runtime by hand: its settings, under the new names (version.mjs).
       const r = carrySettings(env, { from: flag(rest, '--from') || 'box', to: flag(rest, '--to') || 'runtime' });
       if (r.error) throw new Fail(r.error, 1);
-      process.stdout.write(`carried ${r.carried} setting${r.carried === 1 ? '' : 's'} from ${flag(rest, '--from') || 'box'} to ${flag(rest, '--to') || 'runtime'}\n`);
+      process.stdout.write(`carried ${r.carried} setting${r.carried === 1 ? '' : 's'} from ${flag(rest, '--from') || 'box'} to ${flag(rest, '--to') || 'runtime'} (${r.declared} also under the new names)\n`);
       return;
     }
     case 'run': {
@@ -578,6 +585,8 @@ process.stdout.on('error', (e) => { if (e.code === 'EPIPE') process.exit(0); thr
 
 const isMain = (() => { try { return realpathSync(process.argv[1]) === fileURLToPath(import.meta.url); } catch { return false; } })();
 if (isMain) {
+  // A runtime swapped in for the old box piece: the old piece's settings it carried (version.mjs, carried.env).
+  loadCarried(process.env);
   main(process.argv.slice(2), process.env).then(
     () => {},
     (err) => {

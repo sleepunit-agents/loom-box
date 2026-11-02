@@ -611,7 +611,13 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
     let busy;
     try { busy = sessionsBusy(pathJoin(stateDir(env), 'session-cpu.json')); } catch { busy = undefined; }
     // A runner before this one may have left a login's container behind (it died mid-sign-in): those go, once.
-    if (!swept) { swept = true; try { const gone = sweep(); if (gone?.length) log(`stopped ${gone.length} sign-in container(s) a runner before this one left`); } catch (e) { log(`sweep: ${e.message}`); } }
+    // Tried again each tick until podman answers once (null: it didn't).
+    if (!swept) {
+      let gone = null;
+      try { gone = sweep(); } catch (e) { log(`sweep: ${e.message}`); }
+      if (Array.isArray(gone)) { swept = true; if (gone.length) log(`stopped ${gone.length} sign-in container(s) a runner before this one left`); }
+      else log('sweep: podman couldn\'t list the sign-in containers a runner before this one may have left; trying again next poll');
+    }
     const hs = harnessesNow(false);
     let cx = null;
     try { cx = codexUsage(); } catch { cx = null; }
@@ -661,7 +667,8 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
     await sessions(want.remotes);
     // On another loom-box than loom's: install that one, between house starts (version.mjs).
     try {
-      const did = upgrade({ want: want.version, starting: (want.start || []).length > 0, env, stateDir: stateDir(env), now: !!want.upgradeNow });
+      // Update now: the owner's token, carried into the attempt's record so loom knows it started (and stops asking).
+      const did = upgrade({ want: want.version, starting: (want.start || []).length > 0, env, stateDir: stateDir(env), now: typeof want.upgradeNow === 'string' ? want.upgradeNow : false });
       if (did) log(did);
     } catch (e) { log(`upgrade: ${e.message}`); }
     return want;

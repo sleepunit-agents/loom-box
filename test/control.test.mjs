@@ -372,17 +372,17 @@ test('a box reports its harnesses; the owner logs it in from its page: the box r
   assert.equal(call(owner, 'login-code', { id: l.id, code: 'no' }).status, 400);
   // The page shows the provider's link and asks for the code; it never shows one back.
   const { page } = await import('../src/ui.mjs');
-  const lp = JSON.stringify(page(env, { path: `login/${l.id}` }));
+  const lp = JSON.stringify(page(env, { path: `login/${l.id}` }, Date.parse('2026-10-25T03:00:00Z')));
   assert.match(lp, /Open Anthropic's sign-in page/);
   assert.equal(lp.includes(link), true);
   // Not for an agent's tab, nor an agent owner: 403, and no link.
   for (const [e2, c2] of [[{ ...env, LOOM_SCOPE: 'art' }, undefined], [env, { kind: 'owner', who: 'loren', agents: ['art'] }]]) {
-    const p2 = page(e2, { path: `login/${l.id}`, caller: c2 });
+    const p2 = page(e2, { path: `login/${l.id}`, caller: c2 }, Date.parse('2026-10-25T03:00:00Z'));
     assert.equal(p2.status, 403);
     assert.equal(JSON.stringify(p2).includes(link), false);
   }
   ok(call(owner, 'login-code', { id: l.id, code: 'abcdefgh#state123' }));
-  assert.equal(JSON.stringify(page(env, { path: `login/${l.id}` })).includes('abcdefgh#state123'), false);
+  assert.equal(JSON.stringify(page(env, { path: `login/${l.id}` }, Date.parse('2026-10-25T03:00:00Z'))).includes('abcdefgh#state123'), false);
   // The code never goes into state.json: it waits in the runtime dir (0600), reaches the box once, and is gone.
   assert.equal(readFileSync(join(env.LOOM_BOX_HOME, 'state.json'), 'utf-8').includes('abcdefgh#state123'), false);
   assert.equal(statSync(join(env.XDG_RUNTIME_DIR, 'loom-runtime-codes', l.id)).mode & 0o777, 0o600);

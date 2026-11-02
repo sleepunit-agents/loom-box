@@ -27,10 +27,17 @@ Boxes → the box's card → **Runtime**:
 - **up to date with loom's**: the box runs loom's commit.
 - **updating…**: the box is behind and an install is under way, or about to
   start on its next poll.
+- **putting the box piece back…**: a swap failed and is rolling back. The
+  recovery timer has it.
 - **the update didn't work: <why> · tries again in 5h**: the last attempt
   failed or the commit was refused. **What the install said** shows the
   install's last lines. **Update now** skips the wait, and the box tries again
   on its next poll. The vetting is the same: canonical `main`, forward only.
+  loom keeps asking until the box's record says an attempt started. A box that
+  can't start yet (a house is starting, upgrades are off) logs why. Only the
+  box's owner can press it.
+- **loom's version unknown**: loom runs a dev checkout, so there's no commit to
+  compare against and nothing to press.
 - **too old to say which**: the box runs a version from before boxes reported
   their commit. It's most likely still the old `box` piece (see below).
 
@@ -44,17 +51,37 @@ installed side by side, because both ship the `loom-box` bin.
 
 **A box on this version or later swaps the pieces by itself.** When it's
 installed as `box` and told to install a commit whose package is `runtime`, its
-upgrade unit does the following:
+upgrade unit (`loom-runtime upgrade-apply`) does the following, and it can
+recover from any step:
 
-1. Removes `box`. loom keeps that piece's `settings.json` and its data. The
-   box's own state is in `~/.config/loom-box`, outside the piece, and that
-   stays too.
-2. Installs `runtime` at the commit.
-3. Copies the settings across under their new names (`LOOM_BOX_*` becomes
-   `LOOM_RUNTIME_*`), but only the ones `runtime` declares.
+1. **Keeps a copy** of the running version's package in
+   `~/.config/loom-box/upgrade-keep/<old commit>`, outside the piece home that
+   `remove` empties. A rollback then installs from `path:` with no network.
+2. **Arms a recovery timer**: `systemd-run --user --on-active=10min` running
+   `upgrade-apply --recover`. If the unit dies mid-swap (OOM, a reboot), the
+   timer carries on from the last step recorded in `upgrade.json`. It finishes
+   the swap, or rolls it back, and re-arms itself until one of those is done.
+   The successful path stops the timer.
+3. **Writes each step** to `upgrade.json` before taking it: `removing`,
+   `installing`, `rolling-back`, then `done` or `failed`.
+4. **Removes `box`.** loom keeps that piece's `settings.json` and its data. The
+   box's own state is in `~/.config/loom-box`, or wherever `LOOM_BOX_DATA` and
+   `LOOM_BOX_HOME` point, outside the piece.
+5. **Installs `runtime`** at the commit.
+6. **Carries every setting.** Each old setting is kept under its own name in
+   `pieces/runtime/carried.env`, which the runtime loads when it starts. Names
+   loom already sets win, and the code still reads `LOOM_BOX_*`, so
+   `LOOM_BOX_DATA`, where all of a box's state lives, carries too. Each setting
+   `runtime` declares also gets its `LOOM_RUNTIME_*` copy through
+   `loom pieces set`. Settings don't go into loom's settings store or
+   `service.env`: the store refuses names a piece doesn't declare, and loom
+   rewrites `service.env` from the store on every install and `set`.
 
-If step 2 fails, the unit puts `box` back at the commit the box was on, and
-that picks up its kept settings. The page shows why the install failed.
+If step 5 fails, the kept copy goes back in from `path:`, then the old commit
+from GitHub if that fails too. If both fail, the timer tries again in 10
+minutes, and the page says so along with the command to run by hand. A commit
+whose `package.json` can't be read is refused before anything changes: the box
+can't tell which piece it installs as.
 
 **A box still on an older version can't do the swap itself**, since the code
 that does it is new. Its page says "This box is on the old box piece" and shows
@@ -64,7 +91,8 @@ this one line to run once on that box. The line has loom's commit filled in:
 loom pieces remove box && loom pieces install --from github:sleepunit-agents/loom-box#<loom's runtime commit> --yes && loom runtime carry-settings
 ```
 
-`loom runtime carry-settings` copies `pieces/box/settings.json` to `runtime`,
-under the new names. If the install fails, put the old piece back with
+`loom runtime carry-settings` carries `pieces/box/settings.json` to `runtime`
+the same way as step 6: every setting into `carried.env`, and the declared ones
+under their new names. If the install fails, put the old piece back with
 `loom pieces install --from github:sleepunit-agents/loom-box#<its old commit> --yes`.
 Its settings were kept. From then on, the box updates itself.

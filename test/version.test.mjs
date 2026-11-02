@@ -2,9 +2,11 @@
 // and the box → runtime swap.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { applyUpgrade, carriedSettings, lastUpgrade, maybeUpgrade, ownCommit, ownPiece, packagePiece, swapCommand, vetCommit, INSTALL_STALE_MS, UPGRADE_RETRY_MS } from '../src/version.mjs';
+import { applyUpgrade, carriedSettings, lastUpgrade, loadCarried, maybeUpgrade, ownCommit, ownPiece, packagePiece, recoverUpgrade, swapCommand, vetCommit, INSTALL_STALE_MS, UPGRADE_RETRY_MS } from '../src/version.mjs';
+import { spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { scratch } from './scratch.mjs';
 
 const A = 'a'.repeat(40), B = 'b'.repeat(40);
@@ -67,23 +69,29 @@ test('an install the unit never finished reads as failed, saying so; a record fr
   assert.equal(lastUpgrade(stateDir, t0).state, 'installing');
 });
 
-test('"Update now" clears the retry wait (the vetting stays), but never starts a second install over one under way', () => {
+test('"Update now" clears the retry wait (the vetting stays), carries its token into the record, and says why when it can\'t start', () => {
   const stateDir = scratch('loom-box-v-');
   const t0 = Date.parse('2026-10-28T12:00:00Z');
   let vetted = 0;
   const runs = [];
-  const o = { want: B, mine: A, piece: 'runtime', stateDir, env: {}, spawn: (c, a) => { runs.push(a); return { status: 0 }; }, vet: () => { vetted++; return null; } };
+  const vet = (_r, _w, _m, _run, out) => { vetted++; out.piece = 'runtime'; return null; };
+  const o = { want: B, mine: A, piece: 'runtime', stateDir, env: {}, spawn: (c, a) => { runs.push(a); return { status: 0 }; }, vet };
   writeFileSync(join(stateDir, 'upgrade.json'), JSON.stringify({ commit: B, from: A, at: new Date(t0).toISOString(), state: 'failed', error: 'loom pieces install failed (exit 1)', retryAt: new Date(t0 + UPGRADE_RETRY_MS).toISOString() }));
   assert.equal(maybeUpgrade({ ...o, nowMs: t0 + 60_000 }), null, 'inside the wait');
-  assert.match(maybeUpgrade({ ...o, nowMs: t0 + 60_000, now: true }), /installing/);
-  assert.deepEqual([vetted, runs.length, record(stateDir).state], [1, 1, 'installing']);
-  assert.equal(maybeUpgrade({ ...o, nowMs: t0 + 120_000, now: true }), null, 'one under way: not again');
-  // A refusal on vetting holds with "now" too: the box doesn't trust the commit any more for being asked twice.
-  const d2 = scratch('loom-box-v-');
-  assert.match(maybeUpgrade({ ...o, stateDir: d2, now: true, vet: () => 'not on main' }), /not installing/);
+  // Can't start yet: it says why, and nothing is tried (loom keeps asking until an attempt carries the token).
+  assert.equal(maybeUpgrade({ ...o, nowMs: t0 + 60_000, now: 'a1b2c3d4e5f6', starting: true }), 'update now waits: a house is starting; it tries after');
+  assert.equal(maybeUpgrade({ ...o, nowMs: t0 + 60_000, now: 'a1b2c3d4e5f6', env: { LOOM_BOX_UPGRADE: 'off' } }), 'update now waits: upgrades are off on this box (LOOM_BOX_UPGRADE=off)');
+  assert.equal(maybeUpgrade({ ...o, nowMs: t0 + 60_000, now: 'a1b2c3d4e5f6', want: undefined }), 'update now waits: loom names no runtime commit (it runs a dev checkout)');
+  assert.equal(runs.length, 0);
+  assert.match(maybeUpgrade({ ...o, nowMs: t0 + 60_000, now: 'a1b2c3d4e5f6' }), /installing/);
+  assert.deepEqual([vetted, runs.length, record(stateDir).state, record(stateDir).now], [1, 1, 'installing', 'a1b2c3d4e5f6']);
+  assert.match(maybeUpgrade({ ...o, nowMs: t0 + 120_000, now: 'ffffffffffff' }), /update now waits: an upgrade to bbbbbbb is under way/);
+  assert.equal(runs.length, 1, 'never a second install over one under way');
+  // A refusal on vetting holds with "now" too.
+  assert.match(maybeUpgrade({ ...o, stateDir: scratch('loom-box-v-'), now: 'a1b2c3d4e5f6', vet: () => 'not on main' }), /not installing/);
 });
 
-test('vetting asks git: on main, not behind, and reads what the commit installs as', () => {
+test('vetting asks git: on main, not behind, and reads what the commit installs as; a package.json it can\'t read is a refusal', () => {
   const calls = [];
   const run = (cmd, args) => { calls.push(args.slice(2).join(' ')); return args[2] === 'show' ? { status: 0, stdout: JSON.stringify({ loom: { name: 'runtime' } }) } : { status: 0 }; };
   const out = {};
@@ -97,18 +105,54 @@ test('vetting asks git: on main, not behind, and reads what the commit installs 
     const notForward = (cmd, args) => ({ status: args[2] === 'merge-base' && args[4] === A ? code : 0 });
     assert.match(vetCommit('o/r', B, A, notForward), /rollback is done by hand/, String(code));
   }
+  // Before, an unreadable package.json fell back to a plain install, which is the bin clash on a renamed package.
+  const noShow = (cmd, args) => (args[2] === 'show' ? { status: 128, stdout: '' } : { status: 0 });
+  assert.equal(vetCommit('o/r', B, A, noShow), `couldn't read bbbbbbb's package.json, so can't tell which piece it installs as`);
+  const noName = (cmd, args) => (args[2] === 'show' ? { status: 0, stdout: '{"name":"x"}' } : { status: 0 });
+  assert.match(vetCommit('o/r', B, A, noName), /doesn't say which piece it installs as/);
 });
 
-/** A stand-in `loom`: records each call, and fails the ones `fails` names (by their argv, joined). */
-function fakeLoom(home, fails = []) {
+test('vetting with real git, against a local bare repo as the remote', () => {
+  const root = scratch('loom-box-git-');
+  const git = (cwd, ...args) => { const r = spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { cwd, encoding: 'utf-8' }); assert.equal(r.status, 0, r.stderr); return r.stdout.trim(); };
+  const src = join(root, 'src');
+  mkdirSync(src);
+  git(src, 'init', '-q', '-b', 'main');
+  writeFileSync(join(src, 'package.json'), JSON.stringify({ name: 'loom-box', bin: { 'loom-box': 'x' } }));
+  git(src, 'add', '.'); git(src, 'commit', '-qm', 'box');
+  const old = git(src, 'rev-parse', 'HEAD');
+  writeFileSync(join(src, 'package.json'), JSON.stringify({ name: 'loom-runtime', bin: { 'loom-runtime': 'x', 'loom-box': 'x' }, loom: { name: 'runtime' } }));
+  git(src, 'add', '.'); git(src, 'commit', '-qm', 'runtime');
+  const renamed = git(src, 'rev-parse', 'HEAD');
+  git(src, 'checkout', '-qb', 'side', old);
+  writeFileSync(join(src, 'f'), 'x'); git(src, 'add', '.'); git(src, 'commit', '-qm', 'side');
+  const side = git(src, 'rev-parse', 'HEAD');
+  git(root, 'clone', '-q', '--bare', src, 'bare.git');
+  const url = `file://${join(root, 'bare.git')}`;
+  const out = {};
+  assert.equal(vetCommit('o/r', renamed, old, spawnSync, out, url), null);
+  assert.equal(out.piece, 'runtime');
+  assert.match(vetCommit('o/r', old, renamed, spawnSync, {}, url), /rollback is done by hand/);
+  assert.match(vetCommit('o/r', side, old, spawnSync, {}, url), /isn't on o\/r's main/);
+});
+
+/**
+ * A stand-in `loom` (and systemd-run, systemctl), keeping what's installed as loom does: pieces/<name>/piece.json.
+ * `fails` lists argv prefixes that exit 1; `dies` ones that throw, as a unit killed mid-step would stop.
+ */
+function fakeLoom(home, { fails = [], dies = [] } = {}) {
   const calls = [];
+  const rec = (name, r) => { mkdirSync(join(home, 'pieces', name), { recursive: true }); writeFileSync(join(home, 'pieces', name, 'piece.json'), JSON.stringify(r)); };
   const run = (bin, args) => {
-    calls.push(args.join(' '));
-    if (fails.some((f) => args.join(' ').startsWith(f))) return { status: 1, stdout: '', stderr: 'npm ERR! EEXIST: file already exists, bin loom-box\nnpm ERR! token=npm_SECRET0123456789abcdefghij' };
-    // A successful install of runtime: loom writes its piece.json, with the settings it declares.
-    if (args[0] === 'pieces' && args[1] === 'install' && args[3].endsWith(B)) {
-      mkdirSync(join(home, 'pieces', 'runtime'), { recursive: true });
-      writeFileSync(join(home, 'pieces', 'runtime', 'piece.json'), JSON.stringify({ loom: { settings: [{ name: 'LOOM_RUNTIME_LOOM_URL' }, { name: 'LOOM_RUNTIME_PUBLIC_URL' }] } }));
+    const line = args.join(' ');
+    calls.push(bin === 'systemd-run' || bin === 'systemctl' ? `${bin} ${line}` : line);
+    if (dies.some((f) => line.startsWith(f))) throw new Error('killed');
+    if (fails.some((f) => line.startsWith(f))) return { status: 1, stdout: '', stderr: 'npm ERR! EEXIST: file already exists, bin loom-box\nnpm ERR! token=npm_SECRET0123456789abcdefghij' };
+    if (bin !== 'loom' && !bin.endsWith('/loom')) return { status: 0 };
+    if (args[0] === 'pieces' && args[1] === 'remove') rmSync(join(home, 'pieces', args[2], 'piece.json'), { force: true });
+    if (args[0] === 'pieces' && args[1] === 'install') {
+      if (args[3].endsWith(B)) rec('runtime', { commit: B, loom: { settings: [{ name: 'LOOM_RUNTIME_LOOM_URL' }, { name: 'LOOM_RUNTIME_PUBLIC_URL' }] } });
+      else rec('box', { commit: A, source: args[3] });
     }
     return { status: 0, stdout: 'ok', stderr: '' };
   };
@@ -117,50 +161,119 @@ function fakeLoom(home, fails = []) {
 function oldBox() {
   const home = scratch('loom-home-');
   mkdirSync(join(home, 'pieces', 'box'), { recursive: true });
-  writeFileSync(join(home, 'pieces', 'box', 'settings.json'), JSON.stringify({ LOOM_BOX_LOOM_URL: 'https://loom.example.ts.net/mcp', LOOM_BOX_PUBLIC_URL: 'https://loom.example', LOOM_BOX_GONE: 'x' }));
-  return home;
+  writeFileSync(join(home, 'pieces', 'box', 'piece.json'), JSON.stringify({ commit: A }));
+  // LOOM_BOX_DATA, LOOM_BOX_PODMAN, LOOM_RUNTIME_LOGIN_IMAGE: settings runtime doesn't declare, which the code reads.
+  writeFileSync(join(home, 'pieces', 'box', 'settings.json'), JSON.stringify({ LOOM_BOX_LOOM_URL: 'https://loom.example.ts.net/mcp', LOOM_BOX_PUBLIC_URL: 'https://loom.example',
+    LOOM_BOX_DATA: '/srv/box-data', LOOM_BOX_PODMAN: '/usr/local/bin/podman', LOOM_RUNTIME_LOGIN_IMAGE: 'localhost/clis:1' }));
+  // The running version's package, which the swap keeps a copy of to roll back to without the network.
+  const pkg = join(home, 'pieces', 'box', 'versions', A, 'node_modules', 'loom-box');
+  mkdirSync(join(pkg, 'src'), { recursive: true });
+  writeFileSync(join(pkg, 'package.json'), JSON.stringify({ name: 'loom-box', bin: { 'loom-box': 'src/cli.mjs' } }));
+  writeFileSync(join(pkg, 'src', 'cli.mjs'), '// old\n');
+  return { home, pkg };
 }
+const swap = (home, pkg, stateDir, run) => applyUpgrade({ commit: B, from: A, piece: 'box', target: 'runtime', env: { LOOM_HOME: home }, stateDir, run, keepDir: pkg, node: 'node', cli: 'cli.mjs' });
+const recover = (home, stateDir, run) => recoverUpgrade({ env: { LOOM_HOME: home }, stateDir, run, node: 'node', cli: 'cli.mjs' });
+const ARM1 = `systemd-run --user --collect --quiet --on-active=10min --unit=loom-box-upgrade-recover-${B.slice(0, 12)}-1`;
 
-test('the rename: a box installed as box, told to install a runtime commit, swaps the pieces and carries its settings over', () => {
-  const home = oldBox();
+test('the rename: kept copy, recovery timer, remove, install, every setting carried, timer stopped', () => {
+  const { home, pkg } = oldBox();
   const stateDir = scratch('loom-box-v-');
   const { run, calls } = fakeLoom(home);
-  const r = applyUpgrade({ commit: B, from: A, piece: 'box', target: 'runtime', env: { LOOM_HOME: home }, stateDir, run });
+  const r = swap(home, pkg, stateDir, run);
   assert.equal(r.state, 'done');
-  assert.deepEqual(calls, [
+  assert.deepEqual(calls.map((c) => c.split(' --setenv')[0]), [
+    ARM1,
     'pieces remove box',
     `pieces install --from github:sleepunit-agents/loom-box#${B} --yes`,
-    // Only what runtime declares, under its names: LOOM_BOX_GONE isn't one of them.
+    // The new names of what runtime declares, in loom's settings store.
     'pieces set runtime LOOM_RUNTIME_LOOM_URL=https://loom.example.ts.net/mcp LOOM_RUNTIME_PUBLIC_URL=https://loom.example',
+    `systemctl --user stop loom-box-upgrade-recover-${B.slice(0, 12)}-1.timer`,
   ]);
-  assert.deepEqual([record(stateDir).state, record(stateDir).swapped], ['done', { from: 'box', to: 'runtime', settings: 2 }]);
+  assert.ok(calls[0].endsWith('node cli.mjs upgrade-apply --recover'));
+  // Every one of the old settings, under its own name, where the runtime reads them at start (loadCarried).
+  const carried = readFileSync(join(home, 'pieces', 'runtime', 'carried.env'), 'utf-8');
+  for (const line of ['LOOM_BOX_DATA=/srv/box-data', 'LOOM_BOX_PODMAN=/usr/local/bin/podman', 'LOOM_RUNTIME_LOGIN_IMAGE=localhost/clis:1', 'LOOM_BOX_LOOM_URL=https://loom.example.ts.net/mcp']) assert.ok(carried.includes(line), line);
+  const env = { LOOM_PIECE_HOME: join(home, 'pieces', 'runtime'), LOOM_BOX_PODMAN: '/set/by/loom' };
+  assert.equal(loadCarried(env), 4);
+  assert.deepEqual([env.LOOM_BOX_DATA, env.LOOM_BOX_PODMAN], ['/srv/box-data', '/set/by/loom'], 'it fills in; what loom sets wins');
+  assert.deepEqual([record(stateDir).state, record(stateDir).swapped], ['done', { from: 'box', to: 'runtime', settings: 5, declared: 2 }]);
+  assert.equal(existsSync(join(stateDir, 'upgrade-keep', A, 'package.json')), true);
 });
 
-test('the rename: an install that fails puts the box piece back, and says so, with the install\'s last lines and no token', () => {
-  const home = oldBox();
+test('the rename: an install that fails puts the kept copy back from path: (no network), and says so with no token', () => {
+  const { home, pkg } = oldBox();
   const stateDir = scratch('loom-box-v-');
-  const { run, calls } = fakeLoom(home, [`pieces install --from github:sleepunit-agents/loom-box#${B}`]);
-  const r = applyUpgrade({ commit: B, from: A, piece: 'box', target: 'runtime', env: { LOOM_HOME: home }, stateDir, run });
+  const { run, calls } = fakeLoom(home, { fails: [`pieces install --from github:sleepunit-agents/loom-box#${B}`] });
+  const r = swap(home, pkg, stateDir, run);
   assert.equal(r.state, 'failed');
-  assert.deepEqual(calls, ['pieces remove box', `pieces install --from github:sleepunit-agents/loom-box#${B} --yes`, `pieces install --from github:sleepunit-agents/loom-box#${A} --yes`]);
+  assert.deepEqual(calls.map((c) => c.split(' --setenv')[0]), [ARM1, 'pieces remove box', `pieces install --from github:sleepunit-agents/loom-box#${B} --yes`,
+    `pieces install --from path:${join(stateDir, 'upgrade-keep', A)} --yes`, `systemctl --user stop loom-box-upgrade-recover-${B.slice(0, 12)}-1.timer`]);
   assert.match(record(stateDir).error, /installing runtime failed \(exit 1\); the box piece is back as it was/);
   assert.match(record(stateDir).detail, /EEXIST: file already exists, bin loom-box/);
   assert.equal(record(stateDir).detail.includes('npm_SECRET'), false);
-  // Both failing: it says what to run by hand.
-  const both = fakeLoom(oldBox(), ['pieces install']);
-  const r2 = applyUpgrade({ commit: B, from: A, piece: 'box', target: 'runtime', env: { LOOM_HOME: home }, stateDir, run: both.run });
-  assert.match(r2.error, /putting the box piece back failed too .*loom pieces install --from github:sleepunit-agents\/loom-box#a{40} --yes/);
+});
+
+test('the rename: a unit killed after the remove leaves neither piece; the recovery timer finishes the swap', () => {
+  const { home, pkg } = oldBox();
+  const stateDir = scratch('loom-box-v-');
+  const dying = fakeLoom(home, { dies: ['pieces install'] });
+  assert.throws(() => swap(home, pkg, stateDir, dying.run), /killed/);
+  // What's on disk: no box, no runtime, and upgrade.json at its last step, with the timer armed.
+  assert.deepEqual([existsSync(join(home, 'pieces', 'box', 'piece.json')), existsSync(join(home, 'pieces', 'runtime', 'piece.json'))], [false, false]);
+  assert.deepEqual([record(stateDir).state, record(stateDir).recoverUnit], ['installing', `loom-box-upgrade-recover-${B.slice(0, 12)}-1`]);
+  assert.equal(lastUpgrade(stateDir, Date.now() + INSTALL_STALE_MS + 1).state, 'installing', 'the timer\'s, not given up');
+  // The timer fires.
+  const later = fakeLoom(home);
+  const r = recover(home, stateDir, later.run);
+  assert.equal(r.state, 'done');
+  assert.equal(JSON.parse(readFileSync(join(home, 'pieces', 'runtime', 'piece.json'), 'utf-8')).commit, B, 'a running piece');
+  assert.equal(later.calls[0], `pieces install --from github:sleepunit-agents/loom-box#${B} --yes`);
+  assert.equal(later.calls.at(-1), `systemctl --user stop loom-box-upgrade-recover-${B.slice(0, 12)}-1.timer`);
+  // Fired again (a stray timer): nothing more to do.
+  assert.equal(recover(home, stateDir, () => assert.fail('nothing to run')).state, 'done');
+});
+
+test('the rename: install and both rollbacks failing re-arm the timer; its next run puts the old piece back from path:', () => {
+  const { home, pkg } = oldBox();
+  const stateDir = scratch('loom-box-v-');
+  const broken = fakeLoom(home, { fails: ['pieces install'] });
+  const r = swap(home, pkg, stateDir, broken.run);
+  assert.equal(r.state, 'rolling-back');
+  assert.match(r.error, /putting the box piece back failed too \(exit 1\): it tries again in 10min\. By hand, on the box: loom pieces install --from path:.*upgrade-keep/);
+  assert.ok(broken.calls.some((c) => c.startsWith(`systemd-run --user --collect --quiet --on-active=10min --unit=loom-box-upgrade-recover-${B.slice(0, 12)}-2`)), 're-armed');
+  assert.equal(existsSync(join(home, 'pieces', 'box', 'piece.json')), false);
+  // The network's back (or the disk had room again): the recovery puts the kept copy back.
+  const later = fakeLoom(home, { fails: [`pieces install --from github:sleepunit-agents/loom-box#${B}`] });
+  const back = recover(home, stateDir, later.run);
+  assert.equal(back.state, 'failed');
+  assert.match(back.error, /the box piece is back as it was/);
+  assert.equal(later.calls[0], `pieces install --from path:${join(stateDir, 'upgrade-keep', A)} --yes`);
+  assert.equal(JSON.parse(readFileSync(join(home, 'pieces', 'box', 'piece.json'), 'utf-8')).source, `path:${join(stateDir, 'upgrade-keep', A)}`);
+});
+
+test('a swap that can\'t keep a copy or arm its timer changes nothing', () => {
+  const { home } = oldBox();
+  const { run, calls } = fakeLoom(home);
+  assert.match(swap(home, join(home, 'nowhere'), scratch('loom-box-v-'), run).error, /couldn't keep a copy of the box piece .*nothing changed/);
+  assert.equal(calls.length, 0);
+  const noTimer = fakeLoom(home, { fails: ['--user --collect'] });
+  const { pkg } = oldBox();
+  assert.match(swap(home, pkg, scratch('loom-box-v-'), noTimer.run).error, /couldn't arm the recovery timer/);
+  assert.equal(noTimer.calls.some((c) => c.startsWith('pieces remove')), false);
 });
 
 test('a plain update is one install; a failed one says so', () => {
   const stateDir = scratch('loom-box-v-');
-  const { run, calls } = fakeLoom(scratch('loom-home-'), ['pieces install']);
+  const { run, calls } = fakeLoom(scratch('loom-home-'), { fails: ['pieces install'] });
   const r = applyUpgrade({ commit: B, from: A, piece: 'runtime', target: 'runtime', env: {}, stateDir, run });
   assert.deepEqual([r.state, calls.length], ['failed', 1]);
   assert.match(record(stateDir).error, /loom pieces install failed \(exit 1\)/);
 });
 
-test('settings carry under the new names, and the one line for a box too old to swap itself', () => {
-  assert.deepEqual(carriedSettings({ LOOM_BOX_LOOM_URL: 'u', LOOM_RUNTIME_ACCOUNTS: 'none', OTHER: 'x' }), ['LOOM_RUNTIME_LOOM_URL=u', 'LOOM_RUNTIME_ACCOUNTS=none']);
+test('settings: every one kept under its name, the declared ones also under the new; the one line for a box too old to swap itself', () => {
+  const c = carriedSettings({ LOOM_BOX_LOOM_URL: 'u', LOOM_BOX_DATA: '/d', LOOM_RUNTIME_ACCOUNTS: 'none', OTHER: 'x' }, ['LOOM_RUNTIME_LOOM_URL', 'LOOM_RUNTIME_ACCOUNTS']);
+  assert.deepEqual(c.all, [['LOOM_BOX_LOOM_URL', 'u'], ['LOOM_BOX_DATA', '/d'], ['LOOM_RUNTIME_ACCOUNTS', 'none']]);
+  assert.deepEqual(c.set, ['LOOM_RUNTIME_LOOM_URL=u', 'LOOM_RUNTIME_ACCOUNTS=none']);
   assert.equal(swapCommand(B), `loom pieces remove box && loom pieces install --from github:sleepunit-agents/loom-box#${B} --yes && loom runtime carry-settings`);
 });

@@ -383,9 +383,13 @@ export const LOGIN_MS = 15 * 60_000;
  */
 export function sweepCliContainers(env, { run = spawnSync, keep = [] } = {}) {
   const r = run(podmanBin(env), ['ps', '-a', '--filter', `label=${CLI_LABEL}`, '--format', '{{.Names}}'], { env: podEnv(env), encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000 });
-  if (r.error || r.status !== 0) return [];
+  // null: podman didn't answer, so nothing is known (the box tries again); [] is "none left".
+  if (r.error || r.status !== 0) return null;
   const names = String(r.stdout ?? '').split('\n').map((x) => x.trim()).filter((x) => /^[A-Za-z0-9_.-]{1,128}$/.test(x) && !keep.includes(x));
-  if (names.length) run(podmanBin(env), ['rm', '-f', '-t', '2', ...names], { env: podEnv(env), stdio: 'ignore', timeout: 60_000 });
+  if (names.length) {
+    const rm = run(podmanBin(env), ['rm', '-f', '-t', '2', ...names], { env: podEnv(env), stdio: 'ignore', timeout: 60_000 });
+    if (rm.error || rm.status !== 0) return null;
+  }
   return names;
 }
 

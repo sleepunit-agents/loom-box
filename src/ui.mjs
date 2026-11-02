@@ -8,9 +8,9 @@ import { join } from 'node:path';
 import { StateError, load, localBoxName, stateDir } from './state.mjs';
 import { sessionsBusy } from './busy.mjs';
 import { allowJoin, blockAllJoins, blockJoin, pendingJoins } from './enroll.mjs';
-import { addBox, boxLabelOf, boxUpdateNow, factsOf, lendBox, list, loginCancel, loginCode, loginStart, loginView, primaryOf, remoteDown, remoteUp, revokeBox, serviceDown, serviceMove, serviceRestart, serviceUp, setAgent, setBoxOwner, setMayHost, setPrimary, up, down, LIVE } from './control.mjs';
+import { addBox, assertBoxOwner, isBoxOwner, boxLabelOf, boxOfCall, boxUpdateNow, loginOver, factsOf, lendBox, list, loginCancel, loginCode, loginStart, loginView, primaryOf, remoteDown, remoteUp, revokeBox, serviceDown, serviceMove, serviceRestart, serviceUp, setAgent, setBoxOwner, setMayHost, setPrimary, up, down, LIVE } from './control.mjs';
 import { LOGIN_HARNESSES } from './logins.mjs';
-import { selfCommit, swapCommand } from './version.mjs';
+import { ownCommit, swapCommand } from './version.mjs';
 import { stateAccounts } from './accounts.mjs';
 
 const OWNER = { kind: 'owner' };
@@ -341,7 +341,9 @@ function diskUse(env) {
   } catch { return null; }
 }
 
-function boxesPage(env, nowMs) {
+function boxesPage(env, nowMs, caller = OWNER) {
+  // A box's logins and Update now are its owner's (control.mjs, assertBoxOwner): another household owner sees, doesn't press.
+  const mayAct = (b) => isBoxOwner(env, caller, b.id);
   const s = load(env);
   const view = list(env, OWNER);
   const agents = Object.keys(s.agents).sort();
@@ -364,7 +366,7 @@ function boxesPage(env, nowMs) {
     sections.push({ id: `box-${b.id}`, title: b.local ? `${b.label} · loom's own` : b.label, tone: b.local || b.lastSeen ? undefined : 'warn', blocks: [
       { type: 'text', tone: 'muted', text: b.local ? `Up ${span(uptime() * 1000)}` : b.lastSeen ? `Seen ${ago(b.lastSeen, nowMs)}` : 'Not joined yet' },
       // Up front: which runtime it runs against loom's, and each harness: installed, logged in, or a Log in button.
-      { type: 'list', items: [...(b.lastSeen || b.local ? [runtimeRow(env, b, nowMs)] : []), ...harnessRows(s, b, nowMs)] },
+      { type: 'list', items: [...(b.lastSeen || b.local ? [runtimeRow(env, b, nowMs, mayAct(b))] : []), ...harnessRows(s, b, nowMs, mayAct(b))] },
       ...runtimeHelp(env, b),
       ...(disk ? [{ type: 'meter', items: [{ label: 'Disk', value: disk.used, detail: `${disk.free} free`, ...(disk.used >= 0.95 ? { tone: 'bad' } : disk.used >= 0.85 ? { tone: 'warn' } : {}) }] }] : []),
       here.length
@@ -438,29 +440,31 @@ const inTime = (iso, nowMs = Date.now()) => {
  * A box's runtime against loom's (version.mjs): up to date; updating…; why the last try failed and when it tries
  * again, with "Update now"; or too old to say (an old `box` piece: runtimeHelp says what to run on it).
  */
-function runtimeRow(env, b, nowMs) {
-  const loomC = selfCommit(env);
+function runtimeRow(env, b, nowMs, may = true) {
+  const loomC = ownCommit();
   const rt = b.runtime ?? {};
   const mine = rt.commit;
-  const now = { action: 'box-update-now', label: 'Update now', fields: { name: b.id } };
-  if (!loomC) return { text: 'Runtime', meta: mine ? `${short7(mine)} (loom runs a dev checkout)` : 'loom runs a dev checkout', tone: 'muted' };
+  const now = may ? { action: 'box-update-now', label: 'Update now', fields: { name: b.id } } : null;
+  // loom's commit is ownCommit() alone, what it tells boxes to run: a dev checkout has none, so nothing to compare or press.
+  if (!loomC) return { text: 'Runtime', meta: `${mine ? `${short7(mine)} · ` : ''}loom's version unknown`, tone: 'muted' };
   if (b.local && !mine) return { text: 'Runtime', meta: `${short7(loomC)} · loom's own`, tone: 'ok' };
   if (!mine) return { text: 'Runtime', meta: `too old to say which · loom's ${short7(loomC)}`, tone: 'warn', badge: 'old' };
   if (mine === loomC) return { text: 'Runtime', meta: `${short7(mine)} · up to date with loom's`, tone: 'ok' };
   const u = rt.upgrade?.commit === loomC ? rt.upgrade : null;
   const lag = `${short7(mine)} · loom's ${short7(loomC)}`;
   if (u && (u.state === 'failed' || u.state === 'refused')) {
-    return { text: 'Runtime', meta: `${lag} · the update didn't work: ${u.error ?? 'no reason given'}${u.retryAt ? ` · tries again ${inTime(u.retryAt, nowMs)}` : ''}`, tone: 'bad', act: { ...now, tone: 'primary' } };
+    return { text: 'Runtime', meta: `${lag} · the update didn't work: ${u.error ?? 'no reason given'}${u.retryAt ? ` · tries again ${inTime(u.retryAt, nowMs)}` : ''}`, tone: 'bad', ...(now ? { act: { ...now, tone: 'primary' } } : {}) };
   }
+  if (u?.state === 'rolling-back') return { text: 'Runtime', meta: `${lag} · the update didn't work; putting the ${rt.piece ?? 'old'} piece back: ${u.error ?? ''}`.trim(), tone: 'bad', badge: 'rolling back' };
   const swap = rt.piece && rt.piece !== 'runtime' ? `, swapping its ${rt.piece} piece for runtime` : '';
   // Updating, or about to (it tries on its next poll): the button only once it's been a while.
   const since = u?.at ? nowMs - Date.parse(u.at) : Infinity;
-  return { text: 'Runtime', meta: `${lag} · updating…${swap}`, tone: 'warn', badge: 'updating…', ...(since > 10 * 60_000 ? { act: now } : {}) };
+  return { text: 'Runtime', meta: `${lag} · updating…${swap}`, tone: 'warn', badge: 'updating…', ...(now && since > 10 * 60_000 && !(u && ['removing', 'installing'].includes(u.state)) ? { act: now } : {}) };
 }
 
 /** Below the runtime row: the failed update's last lines, or, for a box too old to report, the one line to run on it. */
 function runtimeHelp(env, b) {
-  const loomC = selfCommit(env);
+  const loomC = ownCommit();
   const rt = b.runtime ?? {};
   if (!loomC || b.local) return [];
   if (!rt.commit && b.lastSeen) {
@@ -483,7 +487,7 @@ const loginWords = (st) => [st?.method, st?.plan ? st.plan.charAt(0).toUpperCase
  * Each harness on a box, as one row: not reported yet, not installed, unhealthy, signing in (its page), logged
  * in (how, and its plan; "Log in again"), or not (a "Log in" button; after a failed try, why, and "Try again").
  */
-function harnessRows(s, b, nowMs) {
+function harnessRows(s, b, nowMs, may = true) {
   void nowMs;
   const items = [];
   for (const [h, def] of Object.entries(LOGIN_HARNESSES)) {
@@ -494,11 +498,11 @@ function harnessRows(s, b, nowMs) {
     const mine = Object.values(s.logins ?? {}).filter((l) => l.box === b.id && l.harness === h).sort((x, y) => Date.parse(y.created) - Date.parse(x.created));
     const under = mine.find((l) => !['done', 'failed'].includes(l.state));
     const start = { action: 'login-start', fields: { box: b.id, harness: h } };
-    if (under) { items.push({ text: def.label, meta: 'signing in…', badge: 'signing in', tone: 'warn', page: `login/${under.id}` }); continue; }
-    if (st.loggedIn) { items.push({ text: def.label, meta: `✓ logged in${loginWords(st) ? ` (${loginWords(st)})` : ''}`, tone: 'ok', act: { ...start, label: 'Log in again' } }); continue; }
+    if (under) { items.push({ text: def.label, meta: 'signing in…', badge: 'signing in', tone: 'warn', ...(may ? { page: `login/${under.id}` } : {}) }); continue; }
+    if (st.loggedIn) { items.push({ text: def.label, meta: `✓ logged in${loginWords(st) ? ` (${loginWords(st)})` : ''}`, tone: 'ok', ...(may ? { act: { ...start, label: 'Log in again' } } : {}) }); continue; }
     const lastFail = mine[0]?.state === 'failed' ? mine[0] : null;
     items.push({ text: def.label, meta: lastFail ? `not logged in · last try: ${lastFail.error}` : 'installed, not logged in', tone: lastFail ? 'bad' : 'warn',
-      ...(lastFail ? { page: `login/${lastFail.id}` } : {}), act: { ...start, label: lastFail ? 'Try again' : `Log in ${def.label}`, tone: 'primary' } });
+      ...(lastFail && may ? { page: `login/${lastFail.id}` } : {}), ...(may ? { act: { ...start, label: lastFail ? 'Try again' : `Log in ${def.label}`, tone: 'primary' } } : {}) });
   }
   return items;
 }
@@ -528,7 +532,10 @@ function loginsSection(env, s, boxes, nowMs, rows) {
  * loom core's page vocabulary), then flips to "✓ Claude logged in (claude.ai, Max)", or to why it didn't and "Try again".
  */
 function loginPage(env, id, nowMs = Date.now()) {
-  const l = loginView(env, id);
+  const seen = loginView(env, id);
+  // A page changes nothing: a login loom would give up on its next look (its box went quiet) reads as failed now.
+  const over = seen ? loginOver(load(env), seen, nowMs) : null;
+  const l = over ? { ...seen, state: 'failed', error: over, link: undefined } : seen;
   if (!l) return { title: 'Not found', sections: [{ id: 'gone', blocks: [{ type: 'text', tone: 'muted', text: 'That sign-in is gone (finished ones go after 20 minutes).' }, { type: 'link', text: 'Back to Boxes', page: '' }] }] };
   const s = load(env);
   const def = LOGIN_HARNESSES[l.harness];
@@ -751,9 +758,13 @@ export function page(env, { path, caller: c }, nowMs = Date.now()) {
   }
   if (scope && (path === '' || path === undefined)) return agentTabPage(env, scope, caller, nowMs);
   if (Array.isArray(caller.agents)) return path === '' || path === undefined ? agentOwnerPage(env, caller, nowMs) : { title: 'Not found', sections: [] };
-  if (path === '' || path === undefined) return boxesPage(env, nowMs);
+  if (path === '' || path === undefined) return boxesPage(env, nowMs, caller);
   if (path === 'agents') return agentsPage(env);
-  if (typeof path === 'string' && /^login\/l-[0-9a-f]{12}$/.test(path)) return loginPage(env, path.slice(6), nowMs);
+  if (typeof path === 'string' && /^login\/l-[0-9a-f]{12}$/.test(path)) {
+    const l = load(env).logins?.[path.slice(6)];
+    if (l) { try { assertBoxOwner(env, caller, l.box); } catch (e) { return { status: 403, title: 'Not allowed', sections: [{ id: 'no', blocks: [{ type: 'text', tone: 'muted', text: e.message }] }] }; } }
+    return loginPage(env, path.slice(6), nowMs);
+  }
   return { title: 'Not found', sections: [] };
 }
 
@@ -798,6 +809,8 @@ export function act(env, effects, { action, fields: raw = {}, caller: c }, publi
   }
   const label = (id) => boxLabelOf(load(env), id);
   try {
+    // A box's logins and Update now: its owner's only.
+    if (['login-start', 'login-code', 'login-cancel', 'box-update-now'].includes(action)) assertBoxOwner(env, OWNER, boxOfCall(env, action, fields));
     switch (action) {
       case 'add-box': {
         const { name, token } = addBox(env, effects, fields);

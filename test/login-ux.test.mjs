@@ -10,9 +10,9 @@
 //    failed and when it tries again, Update now, and the one line for a box still on the old box piece).
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, copyFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, cpSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { api } from '../src/control.mjs';
 import { runner } from '../src/box.mjs';
 import { harnessStatus, startLogin, sweepCliContainers, whyLoginFailed, scrubCliOutput } from '../src/logins.mjs';
@@ -61,7 +61,8 @@ beforeEach(() => {
 });
 
 /** A runner on the fake CLIs: their status and login, through the fake podman. */
-const boxRunner = (o = {}) => runner(env, client, { loomUrl: 'http://loom.test/mcp', log: () => {}, upgrade: () => null,
+let logged = [];
+const boxRunner = (o = {}) => runner(env, client, { loomUrl: 'http://loom.test/mcp', log: (m) => logged.push(m), upgrade: () => null,
   status: (agents) => harnessStatus(env, { agents }), login: (h, opt) => startLogin(env, h, { ...opt, every: 100 }), sweep: () => [], ...o });
 
 test('Claude: the page spins through each step by itself and flips to "✓ Claude logged in (claude.ai, Max)"', async () => {
@@ -83,6 +84,9 @@ test('Claude: the page spins through each step by itself and flips to "✓ Claud
   assert.equal(act(env, fx, { action: 'login-code', fields: { id, code: 'good-code#s1' } }).message, 'Got it: the box is checking the code.');
   p = loginPage(id);
   assert.deepEqual([calloutOf(p).busy, calloutOf(p).title, p.refresh], [true, 'Checking with Anthropic…', 2]);
+  // The link carries the sign-in's state and code challenge: kept only while it's waiting, and never logged.
+  assert.equal(load(env).logins[id].link, undefined);
+  assert.equal(JSON.stringify(p).includes('oauth/authorize'), false);
   // Nothing the owner does from here: the box's next poll takes the code, the CLI finishes, the page flips.
   await box.tick();
   p = await until(() => { const x = loginPage(id); return calloutOf(x)?.tone === 'ok' && x; });
@@ -90,6 +94,7 @@ test('Claude: the page spins through each step by itself and flips to "✓ Claud
   assert.equal(calloutOf(p).busy, undefined);
   assert.equal(p.refresh, undefined, 'settled: no more reloads');
   assert.equal(JSON.stringify(p).includes('good-code'), false);
+  assert.equal(logged.some((m) => /oauth|authorize|good-code/.test(m)), false, logged.join('\n'));
   // And the box's card says so up front.
   assert.deepEqual([rowsOf(boxCard()).find((i) => i.text === 'Claude').meta, rowsOf(boxCard()).find((i) => i.text === 'Claude').tone], ['✓ logged in (claude.ai, Max)', 'ok']);
 });
@@ -180,7 +185,9 @@ test('a runner that lost a login (its process gone, the runner the same) fails i
   assert.equal(load(env).logins[l2.id].error, 'No sign-in in time; start again.');
   // A box that stops polling mid-sign-in: given up after two minutes, saying so.
   ok(boxCall('poll', { loginsRunning: { run: 'abcdef123456', ids: [] } }));
-  update(env, (s) => { s.boxes.one.lastSeen = new Date(Date.now() - 3 * 60_000).toISOString(); });
+  update(env, (s) => { s.boxes.one.lastSeen = new Date(Date.now() - 3 * 60_000).toISOString(); s.logins[l3.id].created = new Date(Date.now() - 3 * 60_000).toISOString(); });
+  // The page says so before anything polls (a page changes nothing; it reads the login as loom will).
+  assert.equal(calloutOf(loginPage(l3.id)).text, 'one stopped answering during the sign-in; start again');
   const l4 = ok(call('login-start', { box: 'one', harness: 'claude' }));
   assert.notEqual(l4.id, l3.id);
   assert.equal(load(env).logins[l3.id].error, 'one stopped answering during the sign-in; start again');
@@ -209,16 +216,26 @@ test('why a login failed, in a line; what the CLI said, with no code or token in
   assert.equal(s, 'visit https://claude.com/cai/oauth/authorize?[…]\nrefresh_token: […]\nAuthorization: Bearer […]\npasted […] rejected\nexpires 2026-11-02');
 });
 
-test('the box\'s card: its runtime against loom\'s, updating…, why an update failed and when it retries, Update now, and the old box piece\'s one line', () => {
+/** This runtime as loom installs it, at `commit`: its own code under pieces/runtime/versions/<commit>/, so ownCommit() says so. */
+async function installedAt(commit) {
+  const pkg = join(scratch('loom-pieces-'), 'pieces', 'runtime', 'versions', commit, 'node_modules', 'loom-runtime');
+  cpSync(join(here, '..', 'src'), join(pkg, 'src'), { recursive: true });
+  copyFileSync(join(here, '..', 'package.json'), join(pkg, 'package.json'));
+  const at = (f) => import(pathToFileURL(join(pkg, 'src', f)).href);
+  return { ui: await at('ui.mjs'), control: await at('control.mjs') };
+}
+
+test('the box\'s card: its runtime against loom\'s (one source: ownCommit), updating…, why an update failed and when it retries, Update now, and the old box piece\'s one line', async () => {
   const LOOM = 'c'.repeat(40), OLD = 'a'.repeat(40);
-  env.LOOM_RUNTIME_COMMIT = LOOM;
+  const { ui, control } = await installedAt(LOOM);
   // A box of its own (not loom's own machine, which runs loom's runtime by definition), so it can lag.
-  const thor = ok(call('add-box', { name: 'thor', mayHost: 'art' })).box;
-  const boxCall = (path, body = {}) => api(env, fx, { caller: { kind: 'piece', subject: thor }, path, body });
-  const boxCard = () => page(env, { path: '' }).sections.find((x) => x.id === `box-${thor}`);
+  const thor = ok(control.api(env, fx, { caller: owner, path: 'add-box', body: { name: 'thor', mayHost: 'art' } })).box;
+  const boxCall = (path, body = {}) => control.api(env, fx, { caller: { kind: 'piece', subject: thor }, path, body });
+  const boxCard = () => ui.page(env, { path: '' }).sections.find((x) => x.id === `box-${thor}`);
   const runtimeRow = () => boxCard().blocks.find((b) => b.type === 'list').items.find((i) => i.text === 'Runtime');
+  // What loom tells the box to run is what the page compares against.
+  assert.equal(ok(boxCall('poll', { harnesses: { claude: { installed: true, loggedIn: true, method: 'claude.ai', plan: 'max' } } })).version, LOOM);
   // Too old to say: the old box piece, and the line to run on it once.
-  ok(boxCall('poll', { harnesses: { claude: { installed: true, loggedIn: true, method: 'claude.ai', plan: 'max' } } }));
   assert.deepEqual([runtimeRow().meta, runtimeRow().tone], [`too old to say which · loom's ccccccc`, 'warn']);
   const help = boxCard().blocks.find((b) => b.type === 'callout');
   assert.equal(help.title, 'This box is on the old box piece');
@@ -234,18 +251,78 @@ test('the box\'s card: its runtime against loom\'s, updating…, why an update f
   assert.equal(runtimeRow().meta, `aaaaaaa · loom's ccccccc · the update didn't work: installing runtime failed (exit 1); the box piece is back as it was · tries again in 5h`);
   assert.deepEqual([runtimeRow().tone, runtimeRow().act], ['bad', { action: 'box-update-now', label: 'Update now', fields: { name: thor }, tone: 'primary' }]);
   assert.equal(boxCard().blocks.find((b) => b.type === 'details' && b.summary === 'What the install said').blocks[0].text, 'npm ERR! EEXIST: bin loom-box');
-  // Update now: the box's next poll is told to try at once, and only that one.
-  assert.equal(act(env, fx, { action: 'box-update-now', fields: { name: thor } }).message, 'thor tries loom\'s runtime on its next poll.');
-  assert.equal(ok(boxCall('poll', {})).upgradeNow, true);
+  // Update now: loom keeps asking, poll after poll, until the box's record says an attempt started on it.
+  assert.equal(ui.act(env, fx, { action: 'box-update-now', fields: { name: thor } }).message, 'thor tries loom\'s runtime on its next poll.');
+  const token = ok(boxCall('poll', {})).upgradeNow;
+  assert.match(token, /^[0-9a-f]{12}$/);
+  assert.equal(ok(boxCall('poll', {})).upgradeNow, token, 'not consumed by a poll where nothing started (a house starting, upgrades off)');
+  ok(boxCall('poll', { runtime: { commit: OLD, piece: 'box', upgrade: { commit: LOOM, from: OLD, state: 'installing', at: new Date().toISOString(), now: token } } }));
   assert.equal(ok(boxCall('poll', {})).upgradeNow, undefined);
+  // Rolling back: said, and no button (the recovery timer has it).
+  ok(boxCall('poll', { runtime: { commit: OLD, piece: 'box', upgrade: { commit: LOOM, from: OLD, state: 'rolling-back', at: new Date().toISOString(), error: 'installing runtime failed (exit 1)' } } }));
+  assert.deepEqual([runtimeRow().badge, runtimeRow().act], ['rolling back', undefined]);
   // Not for an agent owner.
-  assert.equal(act(env, fx, { action: 'box-update-now', fields: { name: thor }, caller: { kind: 'owner', who: 'loren', agents: ['art'] } }).ok, false);
+  assert.equal(ui.act(env, fx, { action: 'box-update-now', fields: { name: thor }, caller: { kind: 'owner', who: 'loren', agents: ['art'] } }).ok, false);
   // Caught up.
   ok(boxCall('poll', { runtime: { commit: LOOM, piece: 'runtime' } }));
   assert.deepEqual([runtimeRow().meta, runtimeRow().tone], ['ccccccc · up to date with loom\'s', 'ok']);
   // And the harnesses, up front on the same card.
   const claude = boxCard().blocks.find((b) => b.type === 'list').items.find((i) => i.text === 'Claude');
   assert.deepEqual([claude.meta, claude.act.label], ['✓ logged in (claude.ai, Max)', 'Log in again']);
+  // A dev checkout (this repo's own code) has no commit: "loom's version unknown", nothing to press.
+  const dev = page(env, { path: '' }).sections.find((x) => x.id === `box-${thor}`).blocks.find((b) => b.type === 'list').items.find((i) => i.text === 'Runtime');
+  assert.deepEqual([dev.meta, dev.act], ['ccccccc · loom\'s version unknown', undefined]);
+});
+
+test('a box\'s logins and Update now are its owner\'s: another household owner gets 403', () => {
+  mkdirSync(join(env.HOME, 'loom'), { recursive: true });
+  env.LOOM_HOME = join(env.HOME, 'loom');
+  writeFileSync(join(env.LOOM_HOME, 'household.json'), JSON.stringify({ members: [{ person: 'alice', agents: '*' }, { person: 'bob', agents: '*' }] }));
+  ok(boxCall('poll', { harnesses: { claude: { installed: true, loggedIn: false } } }));
+  ok(call('box-owner', { name: 'one', owner: 'alice' }));
+  const alice = { kind: 'owner', who: 'alice' }, bob = { kind: 'owner', who: 'bob' };
+  const as = (c, path, body) => api(env, fx, { caller: c, path, body });
+  assert.equal(as(bob, 'box-update-now', { name: 'one' }).status, 403);
+  assert.match(as(bob, 'box-update-now', { name: 'one' }).body.error, /one is alice's/);
+  assert.equal(as(bob, 'login-start', { box: 'one', harness: 'claude' }).status, 403);
+  const l = ok(as(alice, 'login-start', { box: 'one', harness: 'claude' }));
+  assert.equal(as(bob, 'login-cancel', { id: l.id }).status, 403);
+  assert.equal(page(env, { path: `login/${l.id}`, caller: bob }).status, 403);
+  assert.equal(page(env, { path: `login/${l.id}`, caller: alice }).status, undefined);
+  assert.equal(act(env, fx, { action: 'box-update-now', fields: { name: 'one' }, caller: bob }).ok, false);
+  ok(as(alice, 'box-update-now', { name: 'one' }));
+  // Bob sees the box's card, with nothing to press on it.
+  const claudeRow = (c) => page(env, { path: '', caller: c }).sections.find((x) => x.id === 'box-one').blocks.find((b) => b.type === 'list').items.find((r) => r.text === 'Claude');
+  ok(as(alice, 'login-cancel', { id: l.id }));
+  ok(boxCall('poll', {}));
+  assert.equal(claudeRow(bob).act, undefined);
+  assert.equal(claudeRow(alice).act.action, 'login-start');
+});
+
+test('a sign-in nobody picked up on a box that stopped polling fails after two minutes', () => {
+  ok(boxCall('poll', { harnesses: { claude: { installed: true, loggedIn: false } } }));
+  const l = ok(call('login-start', { box: 'one', harness: 'claude' }));
+  assert.equal(load(env).logins[l.id].state, 'wanted');
+  update(env, (s) => { s.boxes.one.lastSeen = new Date(Date.now() - 3 * 60_000).toISOString(); s.logins[l.id].created = new Date(Date.now() - 3 * 60_000).toISOString(); });
+  assert.equal(calloutOf(loginPage(l.id)).title, 'Claude didn\'t log in');
+  const again = ok(call('login-start', { box: 'one', harness: 'claude' }));
+  assert.notEqual(again.id, l.id);
+  assert.equal(load(env).logins[l.id].error, 'one stopped answering during the sign-in; start again');
+});
+
+test('the sweep of sign-in containers left behind is tried each tick until podman answers once, and a failure is logged', async () => {
+  let n = 0;
+  logged = [];
+  const box = boxRunner({ sweep: () => (++n === 1 ? null : []) });
+  await box.tick();
+  assert.equal(n, 1);
+  assert.ok(logged.some((m) => /podman couldn't list the sign-in containers/.test(m)));
+  await box.tick();
+  await box.tick();
+  assert.equal(n, 2, 'once it worked, not again');
+  const calls = [];
+  assert.equal(sweepCliContainers({ PATH: '/bin' }, { run: (b, a) => { calls.push(a[0]); return { status: 125 }; } }), null);
+  assert.equal(sweepCliContainers({ PATH: '/bin' }, { run: (b, a) => (a[0] === 'ps' ? { status: 0, stdout: 'loom-login-x\n' } : { status: 1 }) }), null, 'an rm that fails is not swept');
 });
 
 test('a runner tells loom which runtime it is, how its last upgrade went, and acts on Update now', async () => {
@@ -257,6 +334,8 @@ test('a runner tells loom which runtime it is, how its last upgrade went, and ac
   const rt = load(env).boxes.one.runtime;
   assert.deepEqual([rt.commit, rt.piece, rt.upgrade.state, rt.upgrade.error], ['a'.repeat(40), 'box', 'failed', 'loom pieces install failed (exit 1)']);
   act(env, fx, { action: 'box-update-now', fields: { name: 'one' } });
+  const token = load(env).boxes.one.upgradeNow;
   await box.tick();
-  assert.deepEqual(told, [false, true]);
+  assert.match(token, /^[0-9a-f]{12}$/);
+  assert.deepEqual(told, [false, token]);
 });
