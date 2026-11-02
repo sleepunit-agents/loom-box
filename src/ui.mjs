@@ -436,7 +436,7 @@ function loginsSection(env, s, boxes, nowMs) {
       const under = Object.values(s.logins ?? {}).find((l) => l.box === b.id && l.harness === h && !['done', 'failed'].includes(l.state));
       if (st.unhealthy) { items.push({ text: where, meta: `not used: its login dir has something in it that shouldn't be (${st.unhealthy})`, tone: 'bad' }); continue; }
       items.push({ text: where, meta: st.loggedIn ? `logged in${st.plan ? `, ${st.plan}` : ''}${st.method ? ` (${st.method})` : ''}` : 'not logged in', tone: st.loggedIn ? 'ok' : 'warn',
-        ...(under ? { page: `login:${under.id}`, badge: 'signing in' }
+        ...(under ? { page: `login/${under.id}`, badge: 'signing in' }
           : { act: { action: 'login-start', label: st.loggedIn ? `Log in ${def.label} again` : `Log in ${def.label}`, ...(st.loggedIn ? {} : { tone: 'primary' }), fields: { box: b.id, harness: h } } }) });
     }
   }
@@ -640,14 +640,14 @@ export function page(env, { path, caller: c }, nowMs = Date.now()) {
   const caller = pageCaller(c);
   const scope = scopeOf(env);
   // A box's login is its owner's, the way the login actions are: never an agent's tab or an agent owner's page.
-  if (typeof path === 'string' && path.startsWith('login:') && (scope || Array.isArray(caller.agents))) {
+  if (typeof path === 'string' && path.startsWith('login/') && (scope || Array.isArray(caller.agents))) {
     return { status: 403, title: 'Not allowed', sections: [{ id: 'no', blocks: [{ type: 'text', tone: 'muted', text: 'A box\'s login is the household owner\'s.' }] }] };
   }
   if (scope && (path === '' || path === undefined)) return agentTabPage(env, scope, caller, nowMs);
   if (Array.isArray(caller.agents)) return path === '' || path === undefined ? agentOwnerPage(env, caller, nowMs) : { title: 'Not found', sections: [] };
   if (path === '' || path === undefined) return boxesPage(env, nowMs);
   if (path === 'agents') return agentsPage(env);
-  if (typeof path === 'string' && /^login:l-[0-9a-f]{12}$/.test(path)) return loginPage(env, path.slice(6));
+  if (typeof path === 'string' && /^login\/l-[0-9a-f]{12}$/.test(path)) return loginPage(env, path.slice(6));
   return { title: 'Not found', sections: [] };
 }
 
@@ -707,9 +707,9 @@ export function act(env, effects, { action, fields: raw = {}, caller: c }, publi
       case 'box-lend': { const r = lendBox(env, effects, fields); return { ok: true, message: r.lentTo.length ? `${r.name} is lent to ${r.lentTo.join(', ')}.` : `${r.name} is lent to no one.`, page: '' }; }
       case 'login-start': {
         const r = loginStart(env, effects, fields);
-        return { ok: true, message: `${label(r.box)} is starting ${LOGIN_HARNESSES[r.harness].label}'s own login; its link shows here in a few seconds.`, page: `login:${r.id}` };
+        return { ok: true, message: `${label(r.box)} is starting ${LOGIN_HARNESSES[r.harness].label}'s own login; its link shows here in a few seconds.`, page: `login/${r.id}` };
       }
-      case 'login-code': { loginCode(env, effects, fields); return { ok: true, message: 'The code is on its way to the box; reload in a moment.', page: `login:${fields.id}` }; }
+      case 'login-code': { loginCode(env, effects, fields); return { ok: true, message: 'The code is on its way to the box; reload in a moment.', page: `login/${fields.id}` }; }
       case 'login-cancel': { loginCancel(env, effects, fields); return { ok: true, message: 'Cancelled.', page: '' }; }
       case 'set-primary': { const r = setPrimary(env, effects, fields); return { ok: true, message: `${r.agent}'s primary is ${label(r.primary)}.`, page: '' }; }
       case 'set-agent': { const r = setAgent(env, effects, fields); return { ok: true, message: `Saved ${r.agent}'s house.`, page: '' }; }
