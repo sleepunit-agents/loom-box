@@ -23,9 +23,14 @@ to those binaries. It does not log in for them.
   also reports a short hash of the org and account, so boxes on the same account
   share its quota. The email stays on the box.
 - **Houses use their box's login.** A house file that says
-  `"logins": ["claude", "codex"]` gets the box's login dir mounted at
-  `/run/loom/login/<harness>`, with `CLAUDE_SECURESTORAGE_CONFIG_DIR` or
-  `CODEX_HOME` pointing the house's own CLI at it. A box that isn't logged in
+  `"harnesses": ["claude"]` (what it, or one of its services, runs) gets the
+  box's login for those harnesses and no other, mounted at
+  `/run/loom/login/<harness>`. For Claude, `CLAUDE_SECURESTORAGE_CONFIG_DIR`
+  points the house's own `claude` at it, and the house keeps its own settings.
+  For Codex, `LOOM_LOGIN_CODEX` says where it is. The house links
+  `$CODEX_HOME/auth.json` to `$LOOM_LOGIN_CODEX/auth.json`, and Codex refreshes
+  it in place through the link. The house keeps its own `CODEX_HOME`, so its
+  config and transcripts aren't shared. A box that isn't logged in
   doesn't start such a house, and says how to fix it. The runtime offers a
   harness for an agent only where a box that may run the agent reports it
   logged in.
@@ -44,6 +49,19 @@ A box lent to another member's agent runs that agent's work, but never on the
 box owner's login. The login dir is mounted read-write on purpose: the CLI
 refreshes its token in place, and the refresh token rotates, so copies per
 house would revoke each other.
+
+**Why not a narrower token, or a read-only mount.** A program on the box that
+refreshed the login and handed each house a short-lived token would be the
+broker the providers' terms rule out, and the one this replaced. A read-only
+mount breaks the CLI's own refresh. So the login dir is mounted read-write
+(`nosuid,nodev,noexec`), and what's narrowed is who gets it: only the harnesses
+a house runs, only on its agent's owner's own box, only with the owner's grant.
+
+**Nothing planted.** A house can write the login dir. So before the box runs a
+CLI on it (status, login) or mounts it again, it walks the dir. Every entry must
+be a plain file or directory owned by the box's user, with no symlink, device
+or setuid bit. If anything else is in it, the box doesn't use that login, and
+its page shows it as unhealthy until someone cleans the dir.
 
 **What that leaves open.** An agent in a house that has its owner's login can
 read the login file. It's the owner's own agent, on the owner's own box, using

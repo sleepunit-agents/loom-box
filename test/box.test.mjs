@@ -474,7 +474,7 @@ test('a box reports its harness logins on its poll, runs the owner\'s login, and
     status: () => ({ claude: { installed: true, loggedIn, method: 'claude.ai', plan: 'max', account: 'claude-0123456789' }, codex: { installed: false, loggedIn: false } }),
     login: (h, { say }) => { said.push(h); setTimeout(() => say({ state: 'waiting', link: 'https://claude.com/cai/oauth/authorize?x=1' }), 0); return { code(c) { said.push(`code ${c}`); loggedIn = true; say({ state: 'done' }); return true; }, cancel() {} }; } });
   // A house that wants Claude's login, on a box that isn't logged in: refused, saying how to fix it.
-  agentRepo(repo, { ...HOUSE, logins: ['claude'] });
+  agentRepo(repo, { ...HOUSE, harnesses: ['claude'] });
   setAgent();
   const h = up();
   await box.tick();
@@ -495,5 +495,12 @@ test('a box reports its harness logins on its poll, runs the owner\'s login, and
   await box.tick();
   await until(() => house(h2.id).state === 'done');
   const s = ran(h2.id).args.join(' ');
-  assert.match(s, new RegExp(`-v ${env.LOOM_BOX_DATA}/logins/claude:/run/loom/login/claude -e CLAUDE_SECURESTORAGE_CONFIG_DIR=/run/loom/login/claude`));
+  assert.match(s, new RegExp(`-v ${env.LOOM_BOX_DATA}/logins/claude:/run/loom/login/claude:rw,nosuid,nodev,noexec -e CLAUDE_SECURESTORAGE_CONFIG_DIR=/run/loom/login/claude`));
+  // A house planted a symlink in the login dir: the next house isn't given it.
+  const { symlinkSync } = await import('node:fs');
+  symlinkSync('/etc/passwd', join(env.LOOM_BOX_DATA, 'logins', 'claude', 'planted'));
+  const h3 = up();
+  await box.tick();
+  await until(() => house(h3.id).state === 'failed');
+  assert.match(house(h3.id).log, /login dir isn't safe to mount: planted is a symlink/);
 });

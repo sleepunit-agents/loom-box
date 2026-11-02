@@ -17,10 +17,12 @@
 //       "nested": "/var/lib/containers",            this house's nested-container storage
 //       "mirror": "/garage/git/art.git"             the box's mirror of the repo, read-only
 //     },
-//     "logins": ["claude", "codex"],                 the box's own harness logins it uses (logins.mjs):
-//                                                   the box's login dir, mounted at /run/loom/login/<harness>,
-//                                                   and the env that points the house's CLI at it. A box
-//                                                   that isn't logged in to one won't start the house.
+//     "harnesses": ["claude"],                       the harnesses it runs (a service says its own): each
+//                                                   gets the box's own login for it (logins.mjs), and no
+//                                                   other: the box's login dir, mounted at
+//                                                   /run/loom/login/<harness>, and the env that points the
+//                                                   house's CLI at it. A box with no such login for the
+//                                                   agent won't start the house.
 //     "nested": true,                               wants the nested-container capabilities:
 //                                                   only if the owner allows it for this agent
 //     "hostname": "art-house",
@@ -131,11 +133,12 @@ function runSpec(h, where, { task: allowTask }) {
     targets.add(target);
     mounts[kind] = target;
   }
+  // The harnesses this house (or service) runs: it gets the box's login for those, and nothing for any other.
   const logins = [];
-  if (h.logins !== undefined) {
-    if (!Array.isArray(h.logins) || h.logins.length > 4) fail(`${where}logins is a list of harnesses, like ["claude", "codex"]`);
-    for (const l of h.logins) {
-      if (!LOGIN_HARNESSES[l] || logins.includes(l)) fail(`${where}logins: ${JSON.stringify(l)} isn't a harness the box logs in (${Object.keys(LOGIN_HARNESSES).join(', ')}), or it's listed twice`);
+  if (h.harnesses !== undefined) {
+    if (!Array.isArray(h.harnesses) || h.harnesses.length > 4) fail(`${where}harnesses is a list of the harnesses it runs, like ["claude"]`);
+    for (const l of h.harnesses) {
+      if (!LOGIN_HARNESSES[l] || logins.includes(l)) fail(`${where}harnesses: ${JSON.stringify(l)} isn't a harness the box logs in (${Object.keys(LOGIN_HARNESSES).join(', ')}), or it's listed twice`);
       for (const k of Object.keys(LOGIN_HARNESSES[l].houseEnv(''))) if (k in env || envs.has(k)) fail(`${where}env ${k} is set by the ${l} login`);
       logins.push(l);
     }
@@ -167,7 +170,7 @@ function runSpec(h, where, { task: allowTask }) {
 }
 
 const SERVICE_NAME = /^[a-z][a-z0-9-]{0,39}$/;
-const RUN_KEYS = ['command', 'secrets', 'env', 'mounts', 'logins', 'nested', 'hostname', 'ports', 'tailnets'];
+const RUN_KEYS = ['command', 'secrets', 'env', 'mounts', 'harnesses', 'nested', 'hostname', 'ports', 'tailnets'];
 
 /**
  * Validate a house file. Anything unexpected is refused, not ignored. A house
@@ -280,14 +283,19 @@ export function runArgs(house, { id, agent, loomUrl, task, service, session, ima
   // The box's own logins: the dir the box's CLI signed in to. Read-write on purpose: the CLI refreshes its token and
   // the refresh token rotates, so a copy per house would race the rotation and one house's refresh would revoke the
   // others' (2026-10-27, h-121/h-122 died that way on copied views). One file, refreshed in place by whichever CLI
-  // gets there first, is how the CLI itself shares a login between sessions. The control plane only lets a house
+  // gets there first, is how the CLI itself shares a login between sessions. Not a narrower token, and not one
+  // refreshed by a broker on the box and handed in: a program that refreshes and issues a provider's tokens is what
+  // the providers' terms rule out (docs/model-accounts.md). Not read-only either: that breaks the CLI's own refresh.
+  // So the mount stays read-write, and who gets it is narrowed instead: only the harnesses the house runs, only
+  // the agent's owner's own box, only with the owner's grant (control.mjs, claim). nosuid,nodev,noexec: nothing in
+  // it runs. The box checks the dir before each use (logins.mjs, checkLoginDir): a house can write it. The control plane only lets a house
   // have it when its agent's owner owns this box and has granted the agent that login (control.mjs, claim), and
   // the box mounts only the logins its claim names (box.mjs). Nothing else of the box's goes in.
   for (const l of house.logins ?? []) {
     const src = dirs.logins?.[l];
     if (!src) throw new HouseFileError(`this box isn't logged in to ${LOGIN_HARNESSES[l].label}`);
     const at = `${LOGIN_MOUNT}/${l}`;
-    args.push('-v', `${src}:${at}`);
+    args.push('-v', `${src}:${at}:rw,nosuid,nodev,noexec`);
     for (const [k, v] of Object.entries(LOGIN_HARNESSES[l].houseEnv(at))) args.push('-e', `${k}=${v}`);
   }
   args.push(image, ...(house.command ?? []));

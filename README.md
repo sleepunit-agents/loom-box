@@ -305,7 +305,7 @@ As the owner on loom's machine, add `--agent <name>`. From a body anywhere, with
     "loom-token":   { "file": "loom-token" },
     "github-token": { "file": "github-token" }
   },
-  "logins": ["claude"],
+  "harnesses": ["claude"],
   "env": { "ART_REPO": "https://github.com/sleepunit-agents/art.git" },
   "mounts": { "state": "/home/art/.local/state", "nested": "/var/lib/containers", "mirror": "/garage/git/art.git" },
   "nested": true,
@@ -316,7 +316,7 @@ As the owner on loom's machine, add `--agent <name>`. From a body anywhere, with
 - **The image** is built from the repo's Containerfile and cached by the git tree of its build context, so an unchanged house reuses it.
 - **Secrets** become the house's own podman secrets: a file under `/run/secrets/`, or an env var. `loom-token` is always there: an `agent:<agent>` token for this house only. The rest are the ones the control plane gives this agent's houses. The house file only says where each one lands; it can't ask for more.
 - **Mounts** are only the box's own per-house dirs: `state` (thrown away after), `nested` (the house's own nested-container storage) and `mirror` (the box's mirror of the repo, read-only). There are no host paths, and nothing of the box's environment or home goes in.
-- **Logins** (`"logins": ["claude", "codex"]`) are the box's own harness logins ([docs/model-accounts.md](docs/model-accounts.md)): the box's login dir, mounted read-write at `/run/loom/login/<harness>`, with `CLAUDE_SECURESTORAGE_CONFIG_DIR` or `CODEX_HOME` set so the house's CLI uses it and refreshes it in place. The house's user must be root inside the container (rootless podman makes that the box's user), so it can use the box's files. A box not logged in to one doesn't start the house.
+- **Harnesses** (`"harnesses": ["claude"]`, per house or service: what it runs) get the box's own harness logins, for those harnesses only ([docs/model-accounts.md](docs/model-accounts.md)): the box's login dir, mounted read-write (`nosuid,nodev,noexec`) at `/run/loom/login/<harness>`, with `CLAUDE_SECURESTORAGE_CONFIG_DIR` set for Claude (the house's claude uses it and refreshes it in place) and `LOOM_LOGIN_CODEX` for Codex (the house links `$CODEX_HOME/auth.json` to `$LOOM_LOGIN_CODEX/auth.json`; Codex writes through the link). The house's user must be root inside the container (rootless podman makes that the box's user), so it can use the box's files. A box not logged in to one doesn't start the house.
 - **Env** gets `LOOM_URL`, `HOUSE_ID` and `HOUSE_AGENT`, plus the house file's own plain values. The task arrives on stdin, or as `HOUSE_TASK`.
 - **Ports** (`"ports": ["7401", "127.0.0.1:4747"]`, the same number inside and out) are published on the box only if the owner allows each one for that agent (`loom box agent <agent> --port 7401`, or the agents page). A service with a web side (a chat pane, an app) needs one; when it moves to another box, whatever routes to it has to follow.
 - **Nested containers** (`"nested": true`: the extra capabilities Art's tank needs, still rootless) run only if the owner allows them for that agent (`loom box agent <agent> --nested`, or the agents page). The house file can only ask.

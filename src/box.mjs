@@ -23,7 +23,7 @@ import { containerName, missingSecrets, parseHouseFile, podmanSecret, runArgs, s
 import { PART_RAW, joinParts, partsOf } from './blobs.mjs';
 import { boxSessions } from './remote.mjs';
 import { sessionsBusy } from './busy.mjs';
-import { codexUsageOnBox, harnessStatus, LOGIN_HARNESSES, loginDir, startLogin } from './logins.mjs';
+import { checkLoginDir, codexUsageOnBox, harnessStatus, LOGIN_HARNESSES, loginDir, startLogin } from './logins.mjs';
 
 /** How often a box asks its harness CLIs whether they're logged in (and at once after a login). */
 export const STATUS_MS = 5 * 60_000;
@@ -446,7 +446,12 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
       const tag = image(env, h, house, repo, logFd);
       // Only the logins the claim names (logged in here, granted, and this box its agent's owner's): checked above,
       // and again here, so nothing else of the box's is ever mounted.
-      const dirs = { mirror, logins: Object.fromEntries((house.logins ?? []).filter((l) => (claimed.logins ?? []).includes(l)).map((l) => [l, loginDir(env, l)])) };
+      const dirs = { mirror, logins: Object.fromEntries((house.logins ?? []).filter((l) => (claimed.logins ?? []).includes(l)).map((l) => {
+        // A house can write a login dir: before it's mounted again, nothing planted in it (logins.mjs).
+        const bad = checkLoginDir(loginDir(env, l));
+        if (bad) throw new BoxError(`this box's ${LOGIN_HARNESSES[l].label} login dir isn't safe to mount: ${bad}`);
+        return [l, loginDir(env, l)];
+      })) };
       for (const d of ['state', 'nested']) { dirs[d] = pathJoin(dir, d); mkdirSync(dirs[d], { mode: 0o700 }); }
       if (h.service || h.slot) restoreState(dirs.state, await fetchState(client, h.id, claimed.state));
       // A session house: what attaching to it runs, for `loom box attach` on this box.

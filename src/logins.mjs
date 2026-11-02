@@ -5,7 +5,7 @@
 // The rule this module keeps: the CLI owns its login. Each box signs itself in, into a login dir of its own
 // (<data>/logins/<harness>, 0700), by running the CLI's own login command there. The CLI writes its credentials
 // into that dir and refreshes them itself. Nothing here reads, copies, refreshes or sends a credential; a house that
-// asks for a login (house file "logins") gets that dir mounted, and its own copy of the same CLI uses it. A login
+// runs a harness (house file "harnesses") gets that dir mounted, and its own copy of the same CLI uses it. A login
 // never leaves its box.
 //
 // What the box reports up (control.mjs, poll): per harness {installed, loggedIn, method, plan, account}, where
@@ -29,7 +29,11 @@ export const LOGIN_MOUNT = '/run/loom/login';
  *           CLAUDE_SECURESTORAGE_CONFIG_DIR is where Claude Code keeps its credentials, apart from its config, so a
  *           house keeps its own settings and uses the box's login.
  *   codex   `codex login --device-auth`: prints a link and a code to enter there; it finishes by itself.
- *           CODEX_HOME is the whole of Codex's home (its config, sessions and auth).
+ *           CODEX_HOME is the whole of Codex's home (its config, sessions and auth), so a house keeps its own and
+ *           is told where the box's login is (LOOM_LOGIN_CODEX): it links its own auth file to the one there.
+ *           Codex writes its auth file in place, through the link (codex-cli 0.162.1,
+ *           checked 2026-11-02 with a throwaway home), so a refresh lands in the box's file. Sharing the box's
+ *           CODEX_HOME instead would mix every house's config.toml (which carries its loom token) and transcripts.
  */
 export const LOGIN_HARNESSES = {
   claude: {
@@ -43,7 +47,7 @@ export const LOGIN_HARNESSES = {
     label: 'Codex', provider: 'openai', bin: 'codex', kind: 'device',
     status: ['login', 'status'], login: ['login', '--device-auth'],
     boxEnv: (dir) => ({ CODEX_HOME: dir }),
-    houseEnv: (at) => ({ CODEX_HOME: at }),
+    houseEnv: (at) => ({ LOOM_LOGIN_CODEX: at }),
     link: /https:\/\/auth\.openai\.com\/\S+/,
     userCode: /\b[A-Z0-9]{4}-[A-Z0-9]{4,5}\b/,
   },
@@ -59,6 +63,32 @@ export function loginDir(env, harness) {
   mkdirSync(d, { recursive: true, mode: 0o700 });
   chmodSync(d, 0o700);
   return d;
+}
+
+/**
+ * Whether a login dir is safe for the box to use: a house can write it, so before anything on the box runs the CLI
+ * on it, or mounts it again, every entry must be a plain file or directory (no symlink, device, fifo or socket),
+ * owned by the box's user, with no setuid or setgid bit. Returns why not, or null. lstat only: nothing followed.
+ */
+export function checkLoginDir(dir, { uid = process.getuid?.(), max = 5000 } = {}) {
+  const S_ISUID = 0o4000, S_ISGID = 0o2000;
+  let seen = 0;
+  const walk = (p, rel) => {
+    let st;
+    try { st = lstatSync(p); } catch (e) { return `${rel || '.'}: ${e.code ?? e.message}`; }
+    if (++seen > max) return `more than ${max} entries`;
+    if (st.isSymbolicLink()) return `${rel || '.'} is a symlink`;
+    if (!st.isFile() && !st.isDirectory()) return `${rel || '.'} isn't a plain file or directory`;
+    if (uid !== undefined && st.uid !== uid) return `${rel || '.'} isn't owned by the box's user`;
+    if (st.mode & (S_ISUID | S_ISGID)) return `${rel || '.'} has a setuid or setgid bit`;
+    if (st.isDirectory()) {
+      let names;
+      try { names = readdirSync(p); } catch (e) { return `${rel || '.'}: ${e.code ?? e.message}`; }
+      for (const n of names) { const why = walk(join(p, n), rel ? `${rel}/${n}` : n); if (why) return why; }
+    }
+    return null;
+  };
+  return walk(dir, '');
 }
 
 const binOf = (env, harness) => env[`LOOM_RUNTIME_${harness.toUpperCase()}`] || LOGIN_HARNESSES[harness].bin;
@@ -92,6 +122,9 @@ export function harnessStatus(env = process.env, { run = spawnSync } = {}) {
   for (const [h, def] of Object.entries(LOGIN_HARNESSES)) {
     const bin = binOf(env, h);
     if (run('sh', ['-c', 'command -v "$1"', 'sh', bin], { env, stdio: 'ignore' }).status !== 0) { out[h] = { installed: false, loggedIn: false }; continue; }
+    // Nothing runs on a login dir a house may have planted something in: that login is reported unhealthy.
+    const bad = checkLoginDir(loginDir(env, h));
+    if (bad) { out[h] = { installed: true, loggedIn: false, unhealthy: bad.slice(0, 120) }; continue; }
     const r = run(bin, def.status, { env: cliEnv(env, h), encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000 });
     if (r.error) { out[h] = { installed: true, loggedIn: false, error: `${bin}: ${r.error.message}`.slice(0, 120) }; continue; }
     // codex prints its status on stderr in some versions: read both.
@@ -167,11 +200,12 @@ export function lastRateLimit(harness, text) {
 }
 
 /**
- * The newest Codex reading on this box: the box's own login dir is the CODEX_HOME its houses use, so their rollouts
- * land here. Only the newest few files of the last two days are read, and only their rate-limit lines.
+ * The newest Codex reading in a Codex home's session rollouts: the box's own login dir (its own codex runs, and a
+ * house that chose to run with CODEX_HOME there), or, with `root`, a house's own ~/.codex
+ * (`loom runtime usage report --harness codex` with nothing on stdin). Only the newest few files of the last two
+ * days are read, and only their ends.
  */
-export function codexUsageOnBox(env, { now = Date.now() } = {}) {
-  const root = join(dataDir(env), 'logins', 'codex', 'sessions');
+export function codexUsageOnBox(env, { now = Date.now(), root = join(dataDir(env), 'logins', 'codex', 'sessions') } = {}) {
   if (!existsSync(root)) return null;
   const files = [];
   for (const back of [0, 1]) {
@@ -233,6 +267,8 @@ export function startLogin(env, harness, { say, spawnImpl = spawn, status = () =
   const def = LOGIN_HARNESSES[harness];
   if (!def) throw new LoginError(`no harness ${JSON.stringify(harness)} to log in`);
   const bin = binOf(env, harness);
+  const bad = checkLoginDir(loginDir(env, harness));
+  if (bad) throw new LoginError(`the ${def.label} login dir isn't safe to use: ${bad}`);
   const q = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
   // A wide terminal, so the link comes out on one line.
   const cmd = `stty cols 2000 rows 50 2>/dev/null; exec ${[bin, ...def.login].map(q).join(' ')}`;

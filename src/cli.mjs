@@ -70,7 +70,8 @@ import { localBoxName, renameLocal, stateDir } from './state.mjs';
 import { exportPart, importPart } from './bundle.mjs';
 import { pieceName, setting } from './piece.mjs';
 import { accountsFrom } from './accounts.mjs';
-import { lastRateLimit } from './logins.mjs';
+import { codexUsageOnBox, lastRateLimit } from './logins.mjs';
+import { join } from 'node:path';
 import { readModels, resolveFor, setModels } from './models.mjs';
 import { endBody, feedBody, listBodies, resumeBody, startBody } from './bodies.mjs';
 import { PART_RAW, joinParts, partsOf } from './blobs.mjs';
@@ -351,7 +352,10 @@ async function main(argv, env) {
     case 'usage': {
       const h = flag(rest, '--harness');
       if (rest[0] !== 'report' || !h) throw new Fail('usage: loom runtime usage report --harness claude|codex < output.jsonl', 2);
-      const reading = lastRateLimit(h, await readStdin());
+      // Codex with nothing piped: its own newest session rollout ($CODEX_HOME/sessions).
+      const piped = process.stdin.isTTY ? '' : await readStdin();
+      const reading = piped.trim() ? lastRateLimit(h, piped)
+        : h === 'codex' ? codexUsageOnBox(env, { root: join(env.CODEX_HOME || join(env.HOME, '.codex'), 'sessions') }) : null;
       if (!reading) { process.stderr.write('no rate-limit reading in that output\n'); return; }
       return out(await ownerOrRemote(env)('usage', { harness: h, reading: { ...reading, checked: Math.floor(Date.now() / 1000) } }));
     }

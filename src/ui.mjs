@@ -434,6 +434,7 @@ function loginsSection(env, s, boxes, nowMs) {
       if (!st) { items.push({ text: where, meta: 'not reported yet', tone: 'muted' }); continue; }
       if (!st.installed) { items.push({ text: where, meta: `${def.bin} isn't installed there`, tone: 'muted' }); continue; }
       const under = Object.values(s.logins ?? {}).find((l) => l.box === b.id && l.harness === h && !['done', 'failed'].includes(l.state));
+      if (st.unhealthy) { items.push({ text: where, meta: `not used: its login dir has something in it that shouldn't be (${st.unhealthy})`, tone: 'bad' }); continue; }
       items.push({ text: where, meta: st.loggedIn ? `logged in${st.plan ? `, ${st.plan}` : ''}${st.method ? ` (${st.method})` : ''}` : 'not logged in', tone: st.loggedIn ? 'ok' : 'warn',
         ...(under ? { page: `login:${under.id}`, badge: 'signing in' }
           : { act: { action: 'login-start', label: st.loggedIn ? `Log in ${def.label} again` : `Log in ${def.label}`, ...(st.loggedIn ? {} : { tone: 'primary' }), fields: { box: b.id, harness: h } } }) });

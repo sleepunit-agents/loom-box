@@ -72,6 +72,32 @@ test('a rollout is read only if it\'s a regular file, never through a symlink, a
   assert.equal(tailOf(join(day, 'rollout-dir.jsonl')), null);
 });
 
+test('a login dir with anything planted in it is refused: the box reports it unhealthy, won\'t log in there, and won\'t mount it', async () => {
+  const { symlinkSync, chmodSync: ch } = await import('node:fs');
+  const { checkLoginDir } = await import('../src/logins.mjs');
+  const env = fakeBox('claude');
+  const dir = loginDir(env, 'claude');
+  assert.equal(checkLoginDir(dir), null);
+  writeFileSync(join(dir, '.credentials.example'), '{}');
+  assert.equal(checkLoginDir(dir), null);
+  // A house planted a symlink (to something of the box's).
+  symlinkSync('/etc/passwd', join(dir, 'planted'));
+  assert.match(checkLoginDir(dir), /planted is a symlink/);
+  const st = harnessStatus(env).claude;
+  assert.deepEqual([st.loggedIn, st.unhealthy], [false, 'planted is a symlink']);
+  assert.throws(() => startLogin(env, 'claude', { say: () => {} }), /isn't safe to use: planted is a symlink/);
+  // A setuid file, and a directory deep down with a symlink in it.
+  const env2 = fakeBox('claude');
+  const d2 = loginDir(env2, 'claude');
+  writeFileSync(join(d2, 'x'), '');
+  ch(join(d2, 'x'), 0o4755);
+  assert.match(checkLoginDir(d2), /x has a setuid or setgid bit/);
+  ch(join(d2, 'x'), 0o600);
+  mkdirSync(join(d2, 'a', 'b'), { recursive: true });
+  symlinkSync('/', join(d2, 'a', 'b', 'up'));
+  assert.match(checkLoginDir(d2), /a\/b\/up is a symlink/);
+});
+
 test('a box\'s login state is the CLI\'s own status: states and a hash, never the email', () => {
   const s = parseClaudeStatus(JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', email: 'owner@example.com', orgId: 'org-1', subscriptionType: 'max' }));
   assert.deepEqual(s, { loggedIn: true, method: 'claude.ai', plan: 'max', account: accountKey('claude', 'org-1', 'owner@example.com') });
@@ -120,17 +146,28 @@ test('logging a box in to Codex: the device link and code to the owner, and it f
   assert.deepEqual(harnessStatus(env).codex, { installed: true, loggedIn: true, method: 'chatgpt' });
 });
 
-test('a house that asks for the box\'s logins gets the box\'s login dir, and the env that points its CLI there; nothing else', () => {
+test('a house gets the box\'s login for each harness it runs, and the env that points its CLI there; nothing else', async () => {
   const base = { build: { containerfile: 'house/Containerfile', context: 'house' } };
-  const house = parseHouseFile(JSON.stringify({ ...base, logins: ['claude', 'codex'] }));
+  const house = parseHouseFile(JSON.stringify({ ...base, harnesses: ['claude', 'codex'] }));
   const args = runArgs(house, { id: 'h-1', agent: 'art', loomUrl: 'http://x', task: 't', image: 'img', dirs: { logins: { claude: '/data/logins/claude', codex: '/data/logins/codex' } } });
   const joined = args.join(' ');
-  assert.match(joined, new RegExp(`-v /data/logins/claude:${LOGIN_MOUNT}/claude -e CLAUDE_SECURESTORAGE_CONFIG_DIR=${LOGIN_MOUNT}/claude`));
-  assert.match(joined, new RegExp(`-v /data/logins/codex:${LOGIN_MOUNT}/codex -e CODEX_HOME=${LOGIN_MOUNT}/codex`));
+  assert.match(joined, new RegExp(`-v /data/logins/claude:${LOGIN_MOUNT}/claude:rw,nosuid,nodev,noexec -e CLAUDE_SECURESTORAGE_CONFIG_DIR=${LOGIN_MOUNT}/claude`));
+  assert.match(joined, new RegExp(`-v /data/logins/codex:${LOGIN_MOUNT}/codex:rw,nosuid,nodev,noexec -e LOOM_LOGIN_CODEX=${LOGIN_MOUNT}/codex`));
   // A box that isn't logged in to one can't start it.
   assert.throws(() => runArgs(house, { id: 'h-1', agent: 'art', loomUrl: 'http://x', task: 't', image: 'img', dirs: { logins: { claude: '/d' } } }), /isn't logged in to Codex/);
-  assert.throws(() => parseHouseFile(JSON.stringify({ ...base, logins: ['gemini'] })), /isn't a harness the box logs in/);
-  assert.throws(() => parseHouseFile(JSON.stringify({ ...base, logins: ['codex'], env: { CODEX_HOME: '/x' } })), /CODEX_HOME is set by the codex login/);
+  assert.throws(() => parseHouseFile(JSON.stringify({ ...base, harnesses: ['gemini'] })), /isn't a harness the box logs in/);
+  assert.throws(() => parseHouseFile(JSON.stringify({ ...base, harnesses: ['codex'], env: { LOOM_LOGIN_CODEX: '/x' } })), /LOOM_LOGIN_CODEX is set by the codex login/);
+  // The house keeps its own CODEX_HOME (its config carries its own loom token): the login isn't it.
+  assert.equal(joined.includes('CODEX_HOME='), false);
+  // Least privilege: a service that runs only Claude gets no Codex login, though the box has one.
+  const svc = parseHouseFile(JSON.stringify({ ...base, services: { bridge: { harnesses: ['claude'] } } }));
+  const { specFor } = await import('../src/house.mjs');
+  const only = runArgs(specFor(svc, 'bridge'), { id: 'h-2', agent: 'art', loomUrl: 'http://x', service: 'bridge', image: 'img', dirs: { logins: { claude: '/data/logins/claude', codex: '/data/logins/codex' } } }).join(' ');
+  assert.equal(only.includes('/run/loom/login/claude'), true);
+  assert.equal(only.includes('/run/loom/login/codex'), false);
+  assert.equal(only.includes('LOOM_LOGIN_CODEX'), false);
+  // The old key is refused, not ignored.
+  assert.throws(() => parseHouseFile(JSON.stringify({ ...base, logins: ['claude'] })), /unknown key: logins/);
   // Without logins, no login dir goes in.
   assert.equal(runArgs(parseHouseFile(JSON.stringify(base)), { id: 'h-1', agent: 'art', loomUrl: 'http://x', task: 't', image: 'img', dirs: {} }).join(' ').includes(LOGIN_MOUNT), false);
 });

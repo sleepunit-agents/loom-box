@@ -274,7 +274,7 @@ export function setAgent(env, effects, { agent, repo, houseFile, nested, gpu, br
   if (typeof sec !== 'object' || Array.isArray(sec) || Object.keys(sec).length > 32
       || !Object.entries(sec).every(([k, v]) => SECRET_NAME.test(k) && typeof v === 'string' && SECRET_NAME.test(v))) {
     if (Object.values(sec).some((v) => typeof v === 'string' && SUB_SOURCE.test(v))) {
-      fail('sub:<provider> is gone: a box logs in to Claude or Codex itself (its page, Log in), and a house that wants the login says "logins" in its house file. An API key is a plain secret: anthropic-api-key=<store name>');
+      fail('sub:<provider> is gone: a box logs in to Claude or Codex itself (its page, Log in), and a house says which harnesses it runs ("harnesses" in its house file) and gets the box\'s login for those. An API key is a plain secret: anthropic-api-key=<store name>');
     }
     fail('secrets map the name a house sees to a secrets-store name (github-token=github-art-e-fish-token; an API key: anthropic-api-key=<store name>)');
   }
@@ -883,7 +883,8 @@ function harnessReport(v) {
     if (!r || typeof r !== 'object') continue;
     out[h] = { installed: !!r.installed, loggedIn: !!r.installed && !!r.loggedIn,
       ...(word(r.method) ? { method: word(r.method) } : {}), ...(word(r.plan) ? { plan: word(r.plan) } : {}),
-      ...(typeof r.account === 'string' && ACCOUNT.test(r.account) ? { account: r.account } : {}) };
+      ...(typeof r.account === 'string' && ACCOUNT.test(r.account) ? { account: r.account } : {}),
+      ...(typeof r.unhealthy === 'string' ? { unhealthy: r.unhealthy.replace(/[^\x20-\x7e]/g, '?').slice(0, 120) } : {}) };
   }
   return out;
 }
@@ -914,7 +915,7 @@ function usageReport(v, nowS) {
 }
 
 /** A box's harnesses, for a list: states only. */
-export const harnessesOf = (b) => Object.fromEntries(Object.entries(b.harnesses ?? {}).map(([k, v]) => [k, { installed: !!v.installed, loggedIn: !!v.loggedIn, ...(v.method ? { method: v.method } : {}), ...(v.plan ? { plan: v.plan } : {}), ...(v.account ? { account: v.account } : {}), ...(v.checked ? { checked: v.checked } : {}) }]));
+export const harnessesOf = (b) => Object.fromEntries(Object.entries(b.harnesses ?? {}).map(([k, v]) => [k, { installed: !!v.installed, loggedIn: !!v.loggedIn, ...(v.unhealthy ? { unhealthy: v.unhealthy } : {}), ...(v.method ? { method: v.method } : {}), ...(v.plan ? { plan: v.plan } : {}), ...(v.account ? { account: v.account } : {}), ...(v.checked ? { checked: v.checked } : {}) }]));
 
 /** A login nobody finished goes, and so does a finished one after a while. */
 function expireLogins(s, effects) {
