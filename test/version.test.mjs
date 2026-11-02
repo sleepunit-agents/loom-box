@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { applyUpgrade, carriedSettings, lastUpgrade, loadCarried, maybeUpgrade, ownCommit, ownPiece, packagePiece, recoverUpgrade, swapCommand, vetCommit, INSTALL_STALE_MS, UPGRADE_RETRY_MS } from '../src/version.mjs';
+import { applyUpgrade, carriedSettings, lastUpgrade, loadCarried, maybeUpgrade, ownCommit, ownPiece, packagePiece, recoverUpgrade, recoveryTrusted, swapCommand, vetCommit, INSTALL_STALE_MS, RECOVER_TRUST_MS, UPGRADE_RETRY_MS } from '../src/version.mjs';
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { scratch } from './scratch.mjs';
@@ -142,12 +142,17 @@ test('vetting with real git, against a local bare repo as the remote', () => {
  */
 function fakeLoom(home, { fails = [], dies = [] } = {}) {
   const calls = [];
+  let active = false;
   const rec = (name, r) => { mkdirSync(join(home, 'pieces', name), { recursive: true }); writeFileSync(join(home, 'pieces', name, 'piece.json'), JSON.stringify(r)); };
   const run = (bin, args) => {
     const line = args.join(' ');
     calls.push(bin === 'systemd-run' || bin === 'systemctl' ? `${bin} ${line}` : line);
     if (dies.some((f) => line.startsWith(f))) throw new Error('killed');
     if (fails.some((f) => line.startsWith(f))) return { status: 1, stdout: '', stderr: 'npm ERR! EEXIST: file already exists, bin loom-box\nnpm ERR! token=npm_SECRET0123456789abcdefghij' };
+    // systemd as far as the recovery timer goes: is-active is "its files are there and it was enabled since boot".
+    if (bin === 'systemctl' && args.includes('enable')) active = true;
+    if (bin === 'systemctl' && args.includes('disable')) active = false;
+    if (bin === 'systemctl' && args.includes('is-active')) return { status: active && existsSync(join(home, '.config', 'systemd', 'user', 'loom-box-upgrade-recover.timer')) ? 0 : 3 };
     if (bin !== 'loom' && !bin.endsWith('/loom')) return { status: 0 };
     if (args[0] === 'pieces' && args[1] === 'remove') rmSync(join(home, 'pieces', args[2], 'piece.json'), { force: true });
     if (args[0] === 'pieces' && args[1] === 'install') {
@@ -172,9 +177,12 @@ function oldBox() {
   writeFileSync(join(pkg, 'src', 'cli.mjs'), '// old\n');
   return { home, pkg };
 }
-const swap = (home, pkg, stateDir, run) => applyUpgrade({ commit: B, from: A, piece: 'box', target: 'runtime', env: { LOOM_HOME: home }, stateDir, run, keepDir: pkg, node: 'node', cli: 'cli.mjs' });
-const recover = (home, stateDir, run) => recoverUpgrade({ env: { LOOM_HOME: home }, stateDir, run, node: 'node', cli: 'cli.mjs' });
-const ARM1 = `systemd-run --user --collect --quiet --on-active=10min --unit=loom-box-upgrade-recover-${B.slice(0, 12)}-1`;
+// The box's home is the loom home's dir here: its systemd user units go in <home>/.config/systemd/user.
+const swap = (home, pkg, stateDir, run) => applyUpgrade({ commit: B, from: A, piece: 'box', target: 'runtime', env: { LOOM_HOME: home, HOME: home }, stateDir, run, keepDir: pkg, node: 'node', cli: 'cli.mjs' });
+const recover = (home, stateDir, run) => recoverUpgrade({ env: { LOOM_HOME: home, HOME: home }, stateDir, run, node: 'node', cli: 'cli.mjs' });
+const ARM = ['systemctl --user daemon-reload', 'systemctl --user enable --now loom-box-upgrade-recover.timer'];
+const DISARM = ['systemctl --user disable --now loom-box-upgrade-recover.timer', 'systemctl --user daemon-reload'];
+const units = (home) => ['timer', 'service'].map((x) => existsSync(join(home, '.config', 'systemd', 'user', `loom-box-upgrade-recover.${x}`)));
 
 test('the rename: kept copy, recovery timer, remove, install, every setting carried, timer stopped', () => {
   const { home, pkg } = oldBox();
@@ -182,15 +190,15 @@ test('the rename: kept copy, recovery timer, remove, install, every setting carr
   const { run, calls } = fakeLoom(home);
   const r = swap(home, pkg, stateDir, run);
   assert.equal(r.state, 'done');
-  assert.deepEqual(calls.map((c) => c.split(' --setenv')[0]), [
-    ARM1,
+  assert.deepEqual(calls, [
+    ...ARM,
     'pieces remove box',
     `pieces install --from github:sleepunit-agents/loom-box#${B} --yes`,
     // The new names of what runtime declares, in loom's settings store.
     'pieces set runtime LOOM_RUNTIME_LOOM_URL=https://loom.example.ts.net/mcp LOOM_RUNTIME_PUBLIC_URL=https://loom.example',
-    `systemctl --user stop loom-box-upgrade-recover-${B.slice(0, 12)}-1.timer`,
+    ...DISARM,
   ]);
-  assert.ok(calls[0].endsWith('node cli.mjs upgrade-apply --recover'));
+  assert.deepEqual(units(home), [false, false], 'the recovery timer\'s files are gone with the swap done');
   // Every one of the old settings, under its own name, where the runtime reads them at start (loadCarried).
   const carried = readFileSync(join(home, 'pieces', 'runtime', 'carried.env'), 'utf-8');
   for (const line of ['LOOM_BOX_DATA=/srv/box-data', 'LOOM_BOX_PODMAN=/usr/local/bin/podman', 'LOOM_RUNTIME_LOGIN_IMAGE=localhost/clis:1', 'LOOM_BOX_LOOM_URL=https://loom.example.ts.net/mcp']) assert.ok(carried.includes(line), line);
@@ -207,8 +215,8 @@ test('the rename: an install that fails puts the kept copy back from path: (no n
   const { run, calls } = fakeLoom(home, { fails: [`pieces install --from github:sleepunit-agents/loom-box#${B}`] });
   const r = swap(home, pkg, stateDir, run);
   assert.equal(r.state, 'failed');
-  assert.deepEqual(calls.map((c) => c.split(' --setenv')[0]), [ARM1, 'pieces remove box', `pieces install --from github:sleepunit-agents/loom-box#${B} --yes`,
-    `pieces install --from path:${join(stateDir, 'upgrade-keep', A)} --yes`, `systemctl --user stop loom-box-upgrade-recover-${B.slice(0, 12)}-1.timer`]);
+  assert.deepEqual(calls, [...ARM, 'pieces remove box', `pieces install --from github:sleepunit-agents/loom-box#${B} --yes`,
+    `pieces install --from path:${join(stateDir, 'upgrade-keep', A)} --yes`, ...DISARM]);
   assert.match(record(stateDir).error, /installing runtime failed \(exit 1\); the box piece is back as it was/);
   assert.match(record(stateDir).detail, /EEXIST: file already exists, bin loom-box/);
   assert.equal(record(stateDir).detail.includes('npm_SECRET'), false);
@@ -221,7 +229,7 @@ test('the rename: a unit killed after the remove leaves neither piece; the recov
   assert.throws(() => swap(home, pkg, stateDir, dying.run), /killed/);
   // What's on disk: no box, no runtime, and upgrade.json at its last step, with the timer armed.
   assert.deepEqual([existsSync(join(home, 'pieces', 'box', 'piece.json')), existsSync(join(home, 'pieces', 'runtime', 'piece.json'))], [false, false]);
-  assert.deepEqual([record(stateDir).state, record(stateDir).recoverUnit], ['installing', `loom-box-upgrade-recover-${B.slice(0, 12)}-1`]);
+  assert.deepEqual([record(stateDir).state, record(stateDir).recoverUnit], ['installing', 'loom-box-upgrade-recover.timer']);
   assert.equal(lastUpgrade(stateDir, Date.now() + INSTALL_STALE_MS + 1).state, 'installing', 'the timer\'s, not given up');
   // The timer fires.
   const later = fakeLoom(home);
@@ -229,7 +237,8 @@ test('the rename: a unit killed after the remove leaves neither piece; the recov
   assert.equal(r.state, 'done');
   assert.equal(JSON.parse(readFileSync(join(home, 'pieces', 'runtime', 'piece.json'), 'utf-8')).commit, B, 'a running piece');
   assert.equal(later.calls[0], `pieces install --from github:sleepunit-agents/loom-box#${B} --yes`);
-  assert.equal(later.calls.at(-1), `systemctl --user stop loom-box-upgrade-recover-${B.slice(0, 12)}-1.timer`);
+  assert.deepEqual(later.calls.slice(-2), DISARM);
+  assert.deepEqual(units(home), [false, false]);
   // Fired again (a stray timer): nothing more to do.
   assert.equal(recover(home, stateDir, () => assert.fail('nothing to run')).state, 'done');
 });
@@ -241,7 +250,8 @@ test('the rename: install and both rollbacks failing re-arm the timer; its next 
   const r = swap(home, pkg, stateDir, broken.run);
   assert.equal(r.state, 'rolling-back');
   assert.match(r.error, /putting the box piece back failed too \(exit 1\): it tries again in 10min\. By hand, on the box: loom pieces install --from path:.*upgrade-keep/);
-  assert.ok(broken.calls.some((c) => c.startsWith(`systemd-run --user --collect --quiet --on-active=10min --unit=loom-box-upgrade-recover-${B.slice(0, 12)}-2`)), 're-armed');
+  assert.deepEqual(units(home), [true, true], 'the timer stays armed: it repeats until the swap is over');
+  assert.equal(broken.calls.filter((c) => c.includes('enable')).length, 1);
   assert.equal(existsSync(join(home, 'pieces', 'box', 'piece.json')), false);
   // The network's back (or the disk had room again): the recovery puts the kept copy back.
   const later = fakeLoom(home, { fails: [`pieces install --from github:sleepunit-agents/loom-box#${B}`] });
@@ -257,7 +267,7 @@ test('a swap that can\'t keep a copy or arm its timer changes nothing', () => {
   const { run, calls } = fakeLoom(home);
   assert.match(swap(home, join(home, 'nowhere'), scratch('loom-box-v-'), run).error, /couldn't keep a copy of the box piece .*nothing changed/);
   assert.equal(calls.length, 0);
-  const noTimer = fakeLoom(home, { fails: ['--user --collect'] });
+  const noTimer = fakeLoom(home, { fails: ['--user enable'] });
   const { pkg } = oldBox();
   assert.match(swap(home, pkg, scratch('loom-box-v-'), noTimer.run).error, /couldn't arm the recovery timer/);
   assert.equal(noTimer.calls.some((c) => c.startsWith('pieces remove')), false);
@@ -276,4 +286,64 @@ test('settings: every one kept under its name, the declared ones also under the 
   assert.deepEqual(c.all, [['LOOM_BOX_LOOM_URL', 'u'], ['LOOM_BOX_DATA', '/d'], ['LOOM_RUNTIME_ACCOUNTS', 'none']]);
   assert.deepEqual(c.set, ['LOOM_RUNTIME_LOOM_URL=u', 'LOOM_RUNTIME_ACCOUNTS=none']);
   assert.equal(swapCommand(B), `loom pieces remove box && loom pieces install --from github:sleepunit-agents/loom-box#${B} --yes && loom runtime carry-settings`);
+});
+
+test('a recovery timer that\'s gone (a reboot wiped it) or never fires isn\'t trusted: the runner\'s next poll recovers at once', () => {
+  const { home, pkg } = oldBox();
+  const stateDir = scratch('loom-box-v-');
+  assert.throws(() => swap(home, pkg, stateDir, fakeLoom(home, { dies: ['pieces install'] }).run), /killed/);
+  const env = { LOOM_HOME: home, HOME: home };
+  const rec = record(stateDir);
+  const spawned = [];
+  const poll = (spawn, nowMs = Date.now()) => maybeUpgrade({ want: B, mine: A, piece: 'box', stateDir, env, nowMs, spawn, vet: () => assert.fail('no new upgrade over a stuck swap'), node: 'node', cli: 'cli.mjs' });
+  const systemd = (active) => (bin, args) => { spawned.push(`${bin} ${args.join(' ')}`); return { status: bin === 'systemctl' ? (active ? 0 : 3) : 0 }; };
+  // Its timer is there and active: the swap is the timer's.
+  assert.equal(recoveryTrusted(rec, { env, run: systemd(true) }), true);
+  assert.equal(poll(systemd(true)), null);
+  assert.equal(spawned.filter((c) => c.startsWith('systemd-run')).length, 0);
+  // Files there, but systemd doesn't have it (a reboot dropped what it knew; the timer isn't enabled): recover now.
+  assert.equal(recoveryTrusted(rec, { env, run: systemd(false) }), false);
+  assert.match(poll(systemd(false)), /stopped at installing and its recovery timer isn't there: recovering now/);
+  assert.equal(spawned.at(-1), `systemd-run --user --collect --quiet --unit=loom-box-upgrade-recover-now --setenv=LOOM_HOME=${home} --setenv=HOME=${home} node cli.mjs upgrade-apply --recover`);
+  // Active, but it hasn't run in three times an install's time: not trusted either.
+  assert.equal(recoveryTrusted(rec, { env, run: systemd(true), nowMs: Date.now() + RECOVER_TRUST_MS + 1 }), false);
+  assert.match(poll(systemd(true), Date.now() + RECOVER_TRUST_MS + 1), /recovering now/);
+  // Unit files gone altogether.
+  rmSync(join(home, '.config', 'systemd', 'user'), { recursive: true, force: true });
+  assert.equal(recoveryTrusted(rec, { env, run: systemd(true) }), false);
+  // What it runs (upgrade-apply --recover) finishes the swap.
+  assert.equal(recover(home, stateDir, fakeLoom(home).run).state, 'done');
+  assert.equal(poll(systemd(true)), null, 'over: nothing more');
+});
+
+test('a reboot mid-swap with neither piece installed: the timer is real unit files (Persistent), and its run after boot recovers', () => {
+  const { home, pkg } = oldBox();
+  const stateDir = scratch('loom-box-v-');
+  assert.throws(() => swap(home, pkg, stateDir, fakeLoom(home, { dies: ['pieces install'] }).run), /killed/);
+  // The reboot: every process and transient unit gone, no piece installed, so no runner. What's left is on disk.
+  assert.deepEqual([existsSync(join(home, 'pieces', 'box', 'piece.json')), existsSync(join(home, 'pieces', 'runtime', 'piece.json'))], [false, false]);
+  const dir = join(home, '.config', 'systemd', 'user');
+  const timer = readFileSync(join(dir, 'loom-box-upgrade-recover.timer'), 'utf-8');
+  for (const line of ['OnBootSec=2min', 'Persistent=true', 'WantedBy=timers.target']) assert.ok(timer.includes(line), line);
+  const service = readFileSync(join(dir, 'loom-box-upgrade-recover.service'), 'utf-8');
+  assert.match(service, /^ExecStart="node" "cli.mjs" "upgrade-apply" "--recover"$/m);
+  assert.match(service, new RegExp(`^Environment="LOOM_HOME=${home}"$`, 'm'));
+  // After boot, systemd starts the enabled timer, and it runs the service's ExecStart.
+  const booted = fakeLoom(home);
+  assert.equal(recover(home, stateDir, booted.run).state, 'done');
+  assert.equal(JSON.parse(readFileSync(join(home, 'pieces', 'runtime', 'piece.json'), 'utf-8')).commit, B);
+  assert.deepEqual(units(home), [false, false]);
+});
+
+test('one step at a time: a recovery while the upgrade unit holds the lock does nothing', () => {
+  const stateDir = scratch('loom-box-v-');
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(join(stateDir, 'upgrade.json'), JSON.stringify({ commit: B, from: A, piece: 'box', target: 'runtime', repo: 'sleepunit-agents/loom-box', state: 'installing', at: new Date().toISOString() }));
+  // A live process (this test's parent) holds it.
+  writeFileSync(join(stateDir, 'upgrade.lock'), String(process.ppid));
+  assert.equal(recoverUpgrade({ env: { LOOM_HOME: scratch('h-') }, stateDir, run: () => assert.fail('nothing runs under another\'s lock') }).state, 'installing');
+  // A dead holder doesn't hold.
+  writeFileSync(join(stateDir, 'upgrade.lock'), '999999999');
+  const home = scratch('h-');
+  assert.equal(recoverUpgrade({ env: { LOOM_HOME: home, HOME: home }, stateDir, run: fakeLoom(home).run }).state, 'done');
 });

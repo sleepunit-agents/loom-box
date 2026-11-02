@@ -57,11 +57,24 @@ recover from any step:
 1. **Keeps a copy** of the running version's package in
    `~/.config/loom-box/upgrade-keep/<old commit>`, outside the piece home that
    `remove` empties. A rollback then installs from `path:` with no network.
-2. **Arms a recovery timer**: `systemd-run --user --on-active=10min` running
-   `upgrade-apply --recover`. If the unit dies mid-swap (OOM, a reboot), the
-   timer carries on from the last step recorded in `upgrade.json`. It finishes
-   the swap, or rolls it back, and re-arms itself until one of those is done.
-   The successful path stops the timer.
+2. **Arms a recovery timer**. These are real unit files under
+   `~/.config/systemd/user` (`loom-box-upgrade-recover.timer` and `.service`),
+   enabled, with `OnBootSec=2min`, every 10 minutes, and `Persistent=true`.
+   They aren't a transient `systemd-run` unit because a reboot wipes those, and
+   a reboot mid-swap can leave neither piece installed, so no runner to notice.
+   The timer runs `upgrade-apply --recover`, which carries on from the last
+   step recorded in `upgrade.json`. It finishes the swap or rolls it back. The
+   unit files are removed when the swap is over.
+
+   The runner doesn't trust a recorded timer blindly. On each poll it checks
+   that the unit files are there, that `systemctl --user is-active` says the
+   timer is active, and that it was armed or last ran within 90 minutes (three
+   install times). If any of that fails, it starts the recovery at once from
+   that poll. It does this in a unit of its own
+   (`loom-box-upgrade-recover-now`), so the reinstall restarting the runner's
+   service can't cut it short. A lock file (`upgrade.lock`, the holder's pid)
+   keeps the upgrade unit, the timer and the runner from running steps at the
+   same time.
 3. **Writes each step** to `upgrade.json` before taking it: `removing`,
    `installing`, `rolling-back`, then `done` or `failed`.
 4. **Removes `box`.** loom keeps that piece's `settings.json` and its data. The
@@ -79,7 +92,8 @@ recover from any step:
 
 If step 5 fails, the kept copy goes back in from `path:`, then the old commit
 from GitHub if that fails too. If both fail, the timer tries again in 10
-minutes, and the page says so along with the command to run by hand. A commit
+minutes (the timer keeps firing), and the page says so along with the command
+to run by hand. A commit
 whose `package.json` can't be read is refused before anything changes: the box
 can't tell which piece it installs as.
 

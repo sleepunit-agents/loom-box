@@ -22,7 +22,7 @@
 // back by the timer (recoverUpgrade). Only a box already running this code can do that; one
 // older says so on its page, with the command (swapCommand).
 import { spawnSync } from 'node:child_process';
-import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
+import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, mkdirSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -35,8 +35,54 @@ export const INSTALL_STALE_MS = 30 * 60_000;
 export const DEFAULT_REPO = 'sleepunit-agents/loom-box';
 /** An upgrade under way: a new one isn't started over it. */
 export const UNDER_WAY = new Set(['installing', 'removing', 'rolling-back']);
-/** How long after a swap starts (and after each recovery that couldn't finish) the recovery timer fires. */
+/** How often the recovery timer fires while a swap is unfinished (and a couple of minutes after each boot). */
 export const RECOVER_AFTER = '10min';
+/**
+ * The recovery is a real user timer, not a transient one: a reboot wipes `systemd-run` units, and a reboot mid-swap
+ * may leave neither piece installed, so no runner to notice. Unit files under ~/.config/systemd/user, enabled, with
+ * Persistent=true; removed when the swap is over.
+ */
+export const RECOVER_UNIT = 'loom-box-upgrade-recover';
+/** A recovery that hasn't run in this long isn't trusted to be there (its timer never fires): the runner recovers. */
+export const RECOVER_TRUST_MS = 3 * INSTALL_STALE_MS;
+/** systemd's user unit dir: where the recovery timer's files go. */
+export const userUnitDir = (env) => join(env.XDG_CONFIG_HOME || join(env.HOME || homedir(), '.config'), 'systemd', 'user');
+
+/**
+ * Whether a swap's recovery can be left to its timer: the unit files are there, systemd says the timer is active,
+ * and it was armed or last ran within RECOVER_TRUST_MS. Otherwise the runner recovers at once (maybeUpgrade).
+ */
+export function recoveryTrusted(rec, { env = process.env, run = spawnSync, nowMs = Date.now() } = {}) {
+  if (!rec?.recoverUnit) return false;
+  const dir = userUnitDir(env);
+  if (!existsSync(join(dir, `${RECOVER_UNIT}.timer`)) || !existsSync(join(dir, `${RECOVER_UNIT}.service`))) return false;
+  const last = Math.max(Date.parse(rec.armedAt ?? 0) || 0, Date.parse(rec.recoveredAt ?? 0) || 0);
+  if (nowMs - last > RECOVER_TRUST_MS) return false;
+  const r = run('systemctl', ['--user', 'is-active', '--quiet', `${RECOVER_UNIT}.timer`], { env, stdio: 'ignore', timeout: 10_000 });
+  return r?.status === 0;
+}
+
+/**
+ * One swap step at a time, across the upgrade unit, the recovery timer and a runner's recovery: a lock file with
+ * the holder's pid, taken with O_EXCL. A holder that's gone (its pid dead) or older than RECOVER_TRUST_MS doesn't hold.
+ */
+function withLock(stateDir, f) {
+  const p = join(stateDir, 'upgrade.lock');
+  mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  const take = () => { try { writeFileSync(p, String(process.pid), { flag: 'wx', mode: 0o600 }); return true; } catch { return false; } };
+  if (!take()) {
+    let alive = false;
+    try {
+      const pid = Number(readFileSync(p, 'utf-8'));
+      const young = Date.now() - statSync(p).mtimeMs < RECOVER_TRUST_MS;
+      if (pid && pid !== process.pid && young) { try { process.kill(pid, 0); alive = true; } catch { alive = false; } }
+    } catch { alive = false; }
+    if (alive) return null;
+    rmSync(p, { force: true });
+    if (!take()) return null;
+  }
+  try { return f(); } finally { rmSync(p, { force: true }); }
+}
 
 /**
  * This code's commit, from the path loom installed it at; null when it isn't an installed piece (a dev checkout).
@@ -108,7 +154,7 @@ export function lastUpgrade(stateDir, nowMs = Date.now()) {
   const r = readRecord(stateDir);
   if (!r || !COMMIT.test(r.commit ?? '')) return null;
   // A swap rolling back is the recovery timer's (it re-arms until it's done): never taken as over.
-  if ((r.state === 'installing' || r.state === 'removing') && nowMs - Date.parse(r.at) > INSTALL_STALE_MS && !r.recoverUnit) {
+  if ((r.state === 'installing' || r.state === 'removing') && nowMs - Date.parse(r.at) > INSTALL_STALE_MS && !r.recoverUnit && !r.piece) {
     return { ...r, state: 'failed', error: 'the install never said how it went (its unit ended without a word)', retryAt: new Date(Date.parse(r.at) + UPGRADE_RETRY_MS).toISOString() };
   }
   // From before the record said how it went: an attempt, and when it's tried again.
@@ -127,10 +173,24 @@ export function maybeUpgrade({ want, mine = ownCommit(), piece = ownPiece(), sta
   if (env.LOOM_BOX_UPGRADE === 'off') return waits('upgrades are off on this box (LOOM_BOX_UPGRADE=off)');
   if (!COMMIT.test(want ?? '')) return waits('loom names no runtime commit (it runs a dev checkout)');
   if (!mine) return waits('this box runs a dev checkout, not an installed piece');
+  // A swap left part-way (even one that got as far as installing what this box now runs) comes first.
+  const last = lastUpgrade(stateDir, nowMs);
+  if (last && UNDER_WAY.has(last.state)) {
+    const swapping = last.piece && last.target && last.piece !== last.target;
+    // A swap whose recovery timer is really there, and has run lately: its own.
+    if (swapping && recoveryTrusted(last, { env, run: spawn, nowMs })) return waits(`an upgrade to ${short(last.commit)} is under way (${last.state})`);
+    const quiet = nowMs - Math.max(Date.parse(last.at) || 0, Date.parse(last.stepAt ?? 0) || 0, Date.parse(last.recoveredAt ?? 0) || 0) > INSTALL_STALE_MS;
+    // A swap with no timer to trust (a reboot wiped it, or it never fires): recover now, from this poll, in a unit of
+    // its own, so the reinstall restarting this box's service can't cut it short. A plain install: wait out its time.
+    if (swapping && (quiet || last.recoverUnit)) {
+      const k = spawn('systemd-run', ['--user', '--collect', '--quiet', `--unit=${RECOVER_UNIT}-now`, ...passEnv(env), node, cli, 'upgrade-apply', '--recover'], { stdio: 'ignore', env });
+      return k?.status === 0 ? `the swap to ${short(last.commit)} stopped at ${last.state} and its recovery timer isn't there: recovering now`
+        : `the swap to ${short(last.commit)} stopped at ${last.state}: couldn't start its recovery (systemd-run exit ${k?.status}); trying again next poll`;
+    }
+    if (!quiet) return waits(`an upgrade to ${short(last.commit)} is under way (${last.state})`);
+  }
   if (want === mine) return null;
   if (starting) return waits('a house is starting; it tries after');
-  const last = lastUpgrade(stateDir, nowMs);
-  if (last && UNDER_WAY.has(last.state) && (last.recoverUnit || nowMs - Date.parse(last.at) < INSTALL_STALE_MS)) return waits(`an upgrade to ${short(last.commit)} is under way (${last.state})`);
   if (!now && last?.commit === want && nowMs - Date.parse(last.at) < UPGRADE_RETRY_MS) return null;
   const at = new Date(nowMs).toISOString();
   const retryAt = new Date(nowMs + UPGRADE_RETRY_MS).toISOString();
@@ -233,18 +293,36 @@ function upgradeKit({ env, stateDir, run, node = process.execPath, cli = fileURL
     const r = run(loomBin, args, { env, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 20 * 60_000 });
     return r ?? { status: 1 };
   };
-  const systemd = (args) => run('systemd-run', args, { env, stdio: 'ignore' }) ?? { status: 1 };
-  const say = (rec) => { writeRecord(stateDir, rec); return rec; };
-  /** A one-shot recovery, RECOVER_AFTER from now: `upgrade-apply --recover`, a fresh unit name each time. */
+  const say = (rec) => { const r = { ...rec, stepAt: new Date().toISOString() }; writeRecord(stateDir, r); return r; };
+  const systemctl = (...args) => run('systemctl', ['--user', ...args], { env, stdio: 'ignore', timeout: 30_000 }) ?? { status: 1 };
+  /**
+   * The recovery timer (RECOVER_UNIT): real unit files, enabled, so it survives a reboot. It fires a couple of
+   * minutes after each boot and every RECOVER_AFTER (Persistent=true catches up a run missed while the box was off)
+   * until the swap is over (disarm).
+   */
   const arm = (rec) => {
-    const n = (rec.recoverTries ?? 0) + 1;
-    const unit = `loom-box-upgrade-recover-${rec.commit.slice(0, 12)}-${n}`;
-    const r = systemd(['--user', '--collect', '--quiet', `--on-active=${RECOVER_AFTER}`, `--unit=${unit}`, ...passEnv(env), node, cli, 'upgrade-apply', '--recover']);
-    return r.status === 0 ? { ...rec, recoverUnit: unit, recoverTries: n } : null;
+    const dir = userUnitDir(env);
+    const q = (v) => `"${String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+    const pass = ['LOOM_HOME', 'LOOM_BIN', 'LOOM_BOX_HOME', 'HOME', 'PATH'].filter((k) => env[k] && !/[\n\r]/.test(env[k]));
+    try {
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, `${RECOVER_UNIT}.service`), ['# Written by loom-runtime (src/version.mjs): finishes or rolls back a box→runtime swap. Removed when it\'s over.',
+        '[Unit]', 'Description=loom runtime: finish or roll back the box→runtime swap', '', '[Service]', 'Type=oneshot',
+        ...pass.map((k) => `Environment=${q(`${k}=${env[k]}`)}`), `ExecStart=${[node, cli, 'upgrade-apply', '--recover'].map(q).join(' ')}`, ''].join('\n'));
+      writeFileSync(join(dir, `${RECOVER_UNIT}.timer`), ['# Written by loom-runtime (src/version.mjs). Removed when the swap is over.',
+        '[Unit]', 'Description=loom runtime: the box→runtime swap\'s recovery', '', '[Timer]', 'OnBootSec=2min', `OnUnitActiveSec=${RECOVER_AFTER}`,
+        'OnCalendar=*:0/10', 'Persistent=true', '', '[Install]', 'WantedBy=timers.target', ''].join('\n'));
+    } catch { return null; }
+    if (systemctl('daemon-reload').status !== 0 || systemctl('enable', '--now', `${RECOVER_UNIT}.timer`).status !== 0) return null;
+    return { ...rec, recoverUnit: `${RECOVER_UNIT}.timer`, armedAt: new Date().toISOString() };
   };
   const disarm = (rec) => {
-    if (rec.recoverUnit) run('systemctl', ['--user', 'stop', `${rec.recoverUnit}.timer`], { env, stdio: 'ignore' });
-    const { recoverUnit: _u, ...rest } = rec;
+    if (rec.recoverUnit) {
+      systemctl('disable', '--now', `${RECOVER_UNIT}.timer`);
+      for (const f of [`${RECOVER_UNIT}.timer`, `${RECOVER_UNIT}.service`]) rmSync(join(userUnitDir(env), f), { force: true });
+      systemctl('daemon-reload');
+    }
+    const { recoverUnit: _u, armedAt: _a, ...rest } = rec;
     return rest;
   };
   return { loom, say, arm, disarm, loomBin };
@@ -286,7 +364,8 @@ function continueSwap(kit, env, rec) {
     if (back.status !== 0 && r.keep && existsSync(join(r.keep, 'package.json'))) back = loom('pieces', 'install', '--from', `path:${r.keep}`, '--yes');
     if (back.status !== 0) back = loom('pieces', 'install', '--from', `github:${r.repo}#${r.from}`, '--yes');
     if (back.status === 0) return say({ ...disarm(r), state: 'failed', error: `${r.error ?? `installing ${r.target} failed`}; the ${r.piece} piece is back as it was` });
-    const again = arm(disarm(r));
+    // The timer stays armed (it repeats); armed again if it isn't there any more.
+    const again = r.recoverUnit && existsSync(join(userUnitDir(env), `${RECOVER_UNIT}.timer`)) ? r : arm(r);
     return say({ ...(again ?? r), state: 'rolling-back',
       error: `${r.error ?? `installing ${r.target} failed`}, and putting the ${r.piece} piece back failed too (exit ${back.status}): ${again ? `it tries again in ${RECOVER_AFTER}` : 'and the recovery timer couldn\'t be armed'}. By hand, on the box: loom pieces install --from ${r.keep ? `path:${r.keep}` : `github:${r.repo}#${r.from}`} --yes` });
   }
@@ -323,7 +402,8 @@ export function applyUpgrade({ commit, from, repo = DEFAULT_REPO, piece, target,
   const armed = kit.arm({ ...base, keep });
   if (!armed) return kit.say({ ...base, state: 'failed', error: 'couldn\'t arm the recovery timer (systemd-run --on-active); nothing changed' });
   // 3. Each step written before it's taken.
-  return continueSwap(kit, env, kit.say({ ...armed, state: 'removing' }));
+  const went = withLock(stateDir, () => continueSwap(kit, env, kit.say({ ...armed, state: 'removing' })));
+  return went ?? readRecord(stateDir);
 }
 
 /**
@@ -331,9 +411,18 @@ export function applyUpgrade({ commit, from, repo = DEFAULT_REPO, piece, target,
  * its last step. Nothing to do once it's over.
  */
 export function recoverUpgrade({ env = process.env, stateDir, run = spawnSync, node, cli } = {}) {
-  const rec = readRecord(stateDir);
-  if (!rec || !UNDER_WAY.has(rec.state) || !rec.piece || !rec.target || rec.piece === rec.target) return rec;
-  return continueSwap({ ...upgradeKit({ env, stateDir, run, node, cli }), run }, env, rec);
+  const kit = { ...upgradeKit({ env, stateDir, run, node, cli }), run };
+  const went = withLock(stateDir, () => {
+    const rec = readRecord(stateDir);
+    if (!rec || !UNDER_WAY.has(rec.state) || !rec.piece || !rec.target || rec.piece === rec.target) {
+      // Over (or nothing): a timer left behind goes.
+      if (existsSync(join(userUnitDir(env), `${RECOVER_UNIT}.timer`))) kit.disarm({ recoverUnit: `${RECOVER_UNIT}.timer` });
+      return rec;
+    }
+    return continueSwap(kit, env, { ...rec, recoveredAt: new Date().toISOString() });
+  });
+  // Another holds the lock (the upgrade unit still at it): nothing to do this time.
+  return went === null ? readRecord(stateDir) : went;
 }
 
 /**
