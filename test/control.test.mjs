@@ -389,22 +389,32 @@ test('a box reports its harnesses; the owner logs it in from its page: the box r
 test('usage comes from a house\'s own run output, onto its box\'s login; the accounts are a view of the boxes\' reports', async () => {
   const { stateAccounts } = await import('../src/accounts.mjs');
   const hs = { claude: { installed: true, loggedIn: true, method: 'claude.ai', plan: 'max', account: 'claude-0123456789' }, codex: { installed: true, loggedIn: true, method: 'chatgpt' } };
-  ok(call(box('one'), 'poll', { harnesses: hs, usage: { codex: { windows: { '7d': 0.25 }, resets: { '7d': 1793779679 }, checked: 1793700000, plan: 'pro' } } }));
+  // fx's clock is 2026-10-25T03:00:00Z, 1792897200.
+  ok(call(box('one'), 'poll', { harnesses: hs, usage: { codex: { windows: { '7d': 0.25 }, resets: { '7d': 1793300000 }, checked: 1792890000, plan: 'pro' } } }));
+  // art's houses may have the box's Claude login, not its Codex one (the owner's grant).
+  ok(call(owner, 'set-agent', { agent: 'art', repo: 'https://github.com/x/art.git', secrets: { 'github-token': 'gh-art' }, logins: 'claude' }));
   const h = ok(call(art, 'up', { task: 't' }));
   // Only from a house, and only a running one.
   assert.equal(call(art, 'usage', { harness: 'claude', reading: { windows: { '7d': 0.5 } } }).status, 403);
   const house = { ...art, house: h.id };
   assert.equal(call(house, 'usage', { harness: 'claude', reading: { windows: { '7d': 0.5 } } }).status, 404);
   ok(call(box('one'), 'poll'));
-  ok(call(box('one'), 'claim', { id: h.id }));
-  assert.equal(call(house, 'usage', { harness: 'claude', reading: { windows: { '7d': 7 } } }).status, 400);
-  ok(call(house, 'usage', { harness: 'claude', reading: { windows: { '7d': 0.63, '5h': 0.98 }, resets: { '7d': 1793660400 }, checked: 1793700001 } }));
+  assert.deepEqual(ok(call(box('one'), 'claim', { id: h.id })).logins, ['claude']);
+  // A house can't speak for a login it wasn't given.
+  const notMine = call(house, 'usage', { harness: 'codex', reading: { windows: { '7d': 0.9 } } });
+  assert.equal(notMine.status, 403);
+  assert.match(notMine.body.error, /wasn't given the box's codex login/);
+  assert.equal(call(house, 'usage', { harness: 'claude', reading: { windows: { '7d': 'x' } } }).status, 400);
+  // Values are clamped: utilization to 0..1, a reset only within 8 days, a check time no later than now.
+  ok(call(house, 'usage', { harness: 'claude', reading: { windows: { '7d': 0.63, '5h': 7 }, resets: { '7d': 1793300000, '5h': 1899999999 }, checked: 1999999999 } }));
+  assert.deepEqual(load(env).boxes.one.usage.claude.house, { windows: { '7d': 0.63, '5h': 1 }, resets: { '7d': 1793300000 }, checked: 1792897200, source: 'house', house: h.id });
   const a = stateAccounts(env, { now: () => Date.parse('2026-10-25T03:00:00Z') }).list().accounts;
   assert.deepEqual(a.map((x) => [x.name, x.harness, x.label, x.boxes, x.agents]), [
     ['claude-0123456789', 'claude', 'Claude Max · 456789', ['one'], ['art', 'mark']],
     ['codex-box-one', 'codex', 'Codex Pro · ox-one', ['one'], ['art', 'mark']],
   ]);
-  assert.deepEqual(a[0].usage, { '7d': 0.63, '5h': 0.98, reset_7d: 1793660400, checked: 1793700001 });
+  assert.deepEqual(a[0].usage, { '7d': 0.63, '5h': 1, reset_7d: 1793300000, checked: 1792897200 });
+  assert.deepEqual([a[0].usageFrom, a[1].usageFrom], ['house', 'box']);
   // 5h is full: no room on that account.
   const { hasRoom } = await import('../src/accounts.mjs');
   assert.equal(hasRoom(a[0]), false);
@@ -546,4 +556,44 @@ test("an agent owner (loom docs/specs/owners.md) sees and runs only their agents
   assert.equal(call(loren, 'service-up', { agent: 'art', name: 'discord' }).status, 403);
   ok(call(jonathan, 'add-box', { name: 'thor' }));
   assert.equal(ok(call(jonathan, 'list')).houses.length, 2);
+});
+
+test('a house gets the box\'s logins only on a box its agent\'s owner owns, and only those granted; a box\'s own usage reading beats a house\'s', async () => {
+  const { writeFileSync: w, mkdirSync: md } = await import('node:fs');
+  const { stateAccounts } = await import('../src/accounts.mjs');
+  env.LOOM_HOME = join(env.HOME, 'loom');
+  md(env.LOOM_HOME, { recursive: true });
+  w(join(env.LOOM_HOME, 'household.json'), JSON.stringify({ v: 1, members: [{ person: 'jonathan', agents: '*' }, { person: 'loren', agents: ['pond-bot'] }] }));
+  ok(call(owner, 'set-agent', { agent: 'pond-bot', repo: 'https://x/pond-bot.git' }));
+  const hs = { claude: { installed: true, loggedIn: true, account: 'claude-0123456789' }, codex: { installed: true, loggedIn: true } };
+  ok(call(box('one'), 'poll', { harnesses: hs }));
+  const claimOf = (agent) => {
+    const h = ok(call(owner, 'up', { agent, box: 'one', task: 't' }));
+    ok(call(box('one'), 'poll'));
+    return ok(call(box('one'), 'claim', { id: h.id }));
+  };
+  // jonathan's own agent, on jonathan's box: both logins, by default.
+  assert.deepEqual(claimOf('art').logins, ['claude', 'codex']);
+  // loren's agent, on jonathan's box lent to it: it may run there, but never on jonathan's login.
+  ok(call(owner, 'box-lend', { name: 'one', agents: 'pond-bot' }));
+  assert.deepEqual(claimOf('pond-bot').logins, []);
+  // On loren's own box, loren's agent's logins are off until granted.
+  const lb = ok(call(owner, 'add-box', { name: 'loren-rig' }));
+  ok(call(owner, 'box-owner', { name: lb.box, owner: 'loren' }));
+  const rig = { kind: 'piece', subject: lb.box };
+  ok(call(rig, 'poll', { harnesses: hs }));
+  const onRig = () => { const h = ok(call(owner, 'up', { agent: 'pond-bot', box: lb.box, task: 't' })); ok(call(rig, 'poll')); return ok(call(rig, 'claim', { id: h.id })).logins; };
+  assert.deepEqual(onRig(), []);
+  ok(call(owner, 'set-agent', { agent: 'pond-bot', repo: 'https://x/pond-bot.git', logins: 'codex' }));
+  assert.deepEqual(onRig(), ['codex']);
+  assert.equal(call(owner, 'set-agent', { agent: 'pond-bot', repo: 'https://x/pond-bot.git', logins: 'gemini' }).status, 400);
+  // A house's reading and the box's own: the account shows the box's.
+  const h = ok(call(owner, 'up', { agent: 'art', box: 'one', task: 't' }));
+  ok(call(box('one'), 'poll'));
+  ok(call(box('one'), 'claim', { id: h.id }));
+  ok(call({ ...art, house: h.id }, 'usage', { harness: 'codex', reading: { windows: { '7d': 0.9 } } }));
+  const codexOf = () => stateAccounts(env, { now: () => Date.parse('2026-10-25T03:00:00Z') }).list().accounts.find((x) => x.name === 'codex-box-one');
+  assert.deepEqual([codexOf().usage['7d'], codexOf().usageFrom], [0.9, 'house']);
+  ok(call(box('one'), 'poll', { usage: { codex: { windows: { '7d': 0.2 }, checked: 1792890000 } } }));
+  assert.deepEqual([codexOf().usage['7d'], codexOf().usageFrom], [0.2, 'box']);
 });

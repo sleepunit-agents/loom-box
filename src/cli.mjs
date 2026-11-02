@@ -13,6 +13,7 @@
 //   loom runtime agent <agent> --repo <url> [--house-file house/house.json] [--nested] [--gpu]
 //                  [--branch b] [--repo-secret <store-name>] [--secret as=from]... [--port n]...
 //                  [--tailnet name=/run/…/tailscaled.sock]...
+//                  [--logins claude,codex|none|default]       which of a box's logins its houses may have
 //                                                         how its house is made (--port: one it may publish;
 //                                                         --tailnet: a box tailscaled.sock it may use, by name)
 //   loom runtime primary <agent> [<box>]                       an agent's primary (default: this machine)
@@ -182,7 +183,7 @@ async function main(argv, env) {
     case 'agent': {
       const [agent] = positional(rest);
       const secrets = Object.fromEntries(flags(rest, '--secret').map((p) => { const [k, v] = p.split('='); return [k, v ?? k]; }));
-      out(setAgent(env, realEffects(env), { agent, repo: flag(rest, '--repo'), houseFile: flag(rest, '--house-file'), nested: rest.includes('--nested'), gpu: rest.includes('--gpu'), branch: flag(rest, '--branch'), repoSecret: flag(rest, '--repo-secret'), secrets, ports: flags(rest, '--port'), tailnets: flags(rest, '--tailnet') }));
+      out(setAgent(env, realEffects(env), { agent, repo: flag(rest, '--repo'), houseFile: flag(rest, '--house-file'), nested: rest.includes('--nested'), gpu: rest.includes('--gpu'), branch: flag(rest, '--branch'), repoSecret: flag(rest, '--repo-secret'), secrets, ports: flags(rest, '--port'), tailnets: flags(rest, '--tailnet'), logins: flag(rest, '--logins') }));
       return;
     }
     case 'remote': {

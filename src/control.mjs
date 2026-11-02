@@ -14,7 +14,15 @@ import { joinPoll, joinRequest } from './enroll.mjs';
 import { MAX_PARTS, PART_RAW, drop, partsOf, putPart, putWhole, readPart } from './blobs.mjs';
 import { parsePortGrant, parseTailnetGrant } from './house.mjs';
 import { CODE, LOGIN_NAMES } from './logins.mjs';
-import { boxOwner, membersOf, ownersAllow } from './owners.mjs';
+import { boxOwner, householdOwners, membersOf, ownersAllow, ownersOf } from './owners.mjs';
+
+/** Whether the agent's own owner owns the box (a loan doesn't count): only then does a house get the box's logins. */
+export const ownsBox = (box, agent, members) => ownersOf(members, agent).includes(boxOwner(box, members));
+/** The box logins an agent's houses may have: the owner's grant, else all for a household owner's own agent, else none. */
+export function loginsOf(a, agent, members) {
+  if (Array.isArray(a?.logins)) return a.logins;
+  return ownersOf(members, agent).some((p) => householdOwners(members).includes(p)) ? [...LOGIN_NAMES] : [];
+}
 
 const TERMINAL = new Set(['done', 'failed', 'stopped', 'lost']);
 const LIVE = new Set(['wanted', 'starting', 'running', 'stopping']);
@@ -247,7 +255,7 @@ export function setPrimary(env, effects, { agent, box }) {
  * uses and the secrets-store name they come from. Kept here, not read from
  * the repo, so neither a box nor the repo can widen it.
  */
-export function setAgent(env, effects, { agent, repo, houseFile, nested, gpu, branch, repoSecret, secrets, ports, tailnets }) {
+export function setAgent(env, effects, { agent, repo, houseFile, nested, gpu, branch, repoSecret, secrets, ports, tailnets, logins }) {
   const a = str(agent, 'an agent', 40);
   if (!AGENT_NAME.test(a)) fail('an agent name is lowercase letters, digits and dashes');
   const r = str(repo, 'the repo', 400);
@@ -282,8 +290,16 @@ export function setAgent(env, effects, { agent, repo, houseFile, nested, gpu, br
   tn = tn.map(parseTailnetGrant);
   if (tn.some((g) => !g)) fail('a tailnet grant is a name and a tailscaled socket on the box, like fleet=/run/tailscale-fleet/tailscaled.sock');
   if (new Set(tn.map((g) => g.name)).size !== tn.length) fail('each tailnet is granted once');
+  // Which of a box's harness logins its houses may have mounted: the owner's grant, like nested and gpu. Unset is
+  // the default (loginsOf): granted to a household owner's own agents, off for anyone else's.
+  // Not given: the grant stays as it was. 'default' goes back to the default; 'none' (or empty) is none.
+  let lg = logins;
+  const reset = lg === 'default';
+  if (typeof lg === 'string') lg = reset ? undefined : lg === 'none' ? [] : lg.split(/[\s,]+/).filter(Boolean);
+  if (lg !== undefined && (!Array.isArray(lg) || !lg.every((x) => LOGIN_NAMES.includes(x)))) fail(`logins is a list of ${LOGIN_NAMES.join(', ')} (or empty for none)`);
   return update(env, (s) => {
-    s.agents[a] = { repo: r, houseFile: file, nested: nest, gpu: gp, branch: br, repoSecret: rs, secrets: sec, ports: pt, tailnets: tn };
+    const keep = lg !== undefined ? [...new Set(lg)] : reset ? undefined : s.agents[a]?.logins;
+    s.agents[a] = { repo: r, houseFile: file, nested: nest, gpu: gp, branch: br, repoSecret: rs, secrets: sec, ports: pt, tailnets: tn, ...(keep !== undefined ? { logins: keep } : {}) };
     return { agent: a, ...s.agents[a] };
   });
 }
@@ -402,7 +418,7 @@ const SESSION_KEY = /^(box:[^\0]{1,120}|house:h-\d{1,9})$/;
 export function poll(env, effects, caller, { facts, sessions, harnesses, usage } = {}) {
   const f = facts === undefined ? null : listOf(facts, 'facts', FACT, 32);
   const hs = harnessReport(harnesses);
-  const us = usageReport(usage);
+  const us = usageReport(usage, Math.floor(Date.parse(now(effects)) / 1000));
   // Its remote sessions, working or idle, as the box sampled them: only well-formed keys, a few.
   const busy = sessions && typeof sessions === 'object' && !Array.isArray(sessions)
     ? Object.fromEntries(Object.entries(sessions).filter(([k, v]) => SESSION_KEY.test(k) && typeof v === 'boolean').slice(0, 20)) : null;
@@ -410,7 +426,8 @@ export function poll(env, effects, caller, { facts, sessions, harnesses, usage }
     const b = boxOf(s, caller);
     if (f) b.facts = f;
     if (hs) b.harnesses = stamp(hs, now(effects));
-    for (const [h, r] of Object.entries(us ?? {})) (b.usage ??= {})[h] = r;
+    // A box's own reading (from the rollouts in its login dir) is kept apart from a house's report.
+    for (const [h, r] of Object.entries(us ?? {})) ((b.usage ??= {})[h] = usageSlot(b.usage[h])).box = { ...r, source: 'box' };
     // Only sessions this box runs: its houses, and the box sessions placed on it (it can't speak for another's).
     if (busy) {
       const ours = (k) => k.startsWith('house:') ? s.houses[k.slice(6)]?.box === caller.subject
@@ -494,8 +511,14 @@ export function claim(env, effects, caller, { id }) {
         if (SUB_SOURCE.test(from)) continue;
         secrets[as] = effects.secret(from);
       }
-      // Which of this box's logins are logged in, by harness: the box's own report.
-      const logins = Object.entries(s.boxes[caller.subject].harnesses ?? {}).filter(([, v]) => v.loggedIn).map(([k]) => k);
+      // Which of this box's logins the house may have mounted: logged in here (the box's own report), granted to
+      // the agent (loginsOf), and only on a box its owner owns. A box lent to the agent runs its work, not on its
+      // owner's login: the login file is readable from inside the house (docs/model-accounts.md).
+      const members = membersOf(env);
+      const own = ownsBox(s.boxes[caller.subject], h.agent, members);
+      const granted = loginsOf(a, h.agent, members);
+      const logins = own ? Object.entries(s.boxes[caller.subject].harnesses ?? {}).filter(([k, v]) => v.loggedIn && granted.includes(k)).map(([k]) => k) : [];
+      h.logins = logins;
       const repoAuth = a.repoSecret ? effects.secret(a.repoSecret) : null;
       h.state = 'starting'; h.tokenLabel = label; h.updated = now(effects);
       const key = stateKeyOf(h);
@@ -846,6 +869,8 @@ const ACCOUNT = /^[a-z]+-[0-9a-f]{10}$/;
 const LOGIN_ID = /^l-[0-9a-f]{12}$/;
 const LOGIN_TTL_MS = 20 * 60_000;
 const WINDOW = /^[0-9]+[hd](_[a-z0-9]+)?$/;
+/** A box's usage for one harness: its own reading and a house's, kept apart. A reading from before is the box's. */
+const usageSlot = (u) => (u && (u.box || u.house) ? u : u && u.windows ? { box: u } : {});
 const word = (v, max = 40) => (typeof v === 'string' && /^[A-Za-z0-9 ._()+-]{1,80}$/.test(v) ? v.slice(0, max) : undefined);
 const epoch = (v) => (typeof v === 'number' && Number.isFinite(v) && v > 0 && v < 1e11 ? Math.floor(v) : undefined);
 
@@ -865,20 +890,26 @@ function harnessReport(v) {
 const stamp = (hs, at) => Object.fromEntries(Object.entries(hs).map(([k, v]) => [k, { ...v, checked: at }]));
 
 /** A usage reading, checked: {windows: {"7d": 0.6}, resets: {"7d": epoch}, checked: epoch, plan?, limited?}, or null. */
-function readingOf(r) {
+const RESET_MAX_S = 8 * 86400;
+function readingOf(r, nowS = Math.floor(Date.now() / 1000)) {
   if (!r || typeof r !== 'object') return null;
   const windows = {}, resets = {};
+  // Utilization clamped to 0..1; a reset only within the next 8 days (the longest window is 7); a check time
+  // no later than now.
   for (const [w, x] of Object.entries(r.windows && typeof r.windows === 'object' ? r.windows : {}).slice(0, 8)) {
-    if (WINDOW.test(w) && typeof x === 'number' && x >= 0 && x <= 1) windows[w] = x;
+    if (WINDOW.test(w) && typeof x === 'number' && Number.isFinite(x)) windows[w] = Math.max(0, Math.min(1, x));
   }
-  for (const [w, x] of Object.entries(r.resets && typeof r.resets === 'object' ? r.resets : {}).slice(0, 8)) if (WINDOW.test(w) && epoch(x)) resets[w] = epoch(x);
+  for (const [w, x] of Object.entries(r.resets && typeof r.resets === 'object' ? r.resets : {}).slice(0, 8)) {
+    if (WINDOW.test(w) && windows[w] !== undefined && epoch(x) && x > nowS - 3600 && x <= nowS + RESET_MAX_S) resets[w] = epoch(x);
+  }
   if (!Object.keys(windows).length) return null;
-  return { windows, resets, checked: epoch(r.checked) ?? Math.floor(Date.now() / 1000), ...(word(r.plan) ? { plan: word(r.plan) } : {}), ...(r.limited ? { limited: true } : {}) };
+  const checked = Math.min(epoch(r.checked) ?? nowS, nowS);
+  return { windows, resets, checked, ...(word(r.plan) ? { plan: word(r.plan) } : {}), ...(r.limited ? { limited: true } : {}) };
 }
-function usageReport(v) {
+function usageReport(v, nowS) {
   if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
   const out = {};
-  for (const h of LOGIN_NAMES) { const r = readingOf(v[h]); if (r) out[h] = r; }
+  for (const h of LOGIN_NAMES) { const r = readingOf(v[h], nowS); if (r) out[h] = r; }
   return out;
 }
 
@@ -991,19 +1022,21 @@ export function setBoxOwner(env, effects, { name, owner }) {
 
 /**
  * A house tells the runtime how full its account is, from its own harness's run output (logins.mjs: Claude Code's
- * rate_limit_event, Codex's token_count): recorded on the house's box, for that harness's login there.
+ * rate_limit_event, Codex's token_count): recorded on the house's box, for that harness's login there, and only
+ * for a login the house was given at claim. Marked as the house's: the resolver prefers the box's own reading.
  */
 export function usage(env, effects, caller, { harness, reading }) {
   if (caller.kind !== 'agent' || !caller.house) fail('usage comes from a house', 403);
   if (!LOGIN_NAMES.includes(harness)) fail(`harness is one of ${LOGIN_NAMES.join(', ')}`);
-  const r = readingOf(reading);
+  const r = readingOf(reading, Math.floor(Date.parse(now(effects)) / 1000));
   if (!r) fail('a reading is {windows: {"7d": 0.6}, resets?, checked?}');
   return update(env, (s) => {
     const h = s.houses[caller.house];
     if (!h || h.agent !== caller.agent || !['starting', 'running'].includes(h.state)) fail('no such house running', 404);
+    if (!(h.logins ?? []).includes(harness)) fail(`this house wasn't given the box's ${harness} login, so it can't speak for it`, 403);
     const b = s.boxes[h.box];
     if (!b) fail('the house\'s box is gone', 404);
-    (b.usage ??= {})[harness] = r;
+    ((b.usage ??= {})[harness] = usageSlot(b.usage[harness])).house = { ...r, source: 'house', house: h.id };
     return { ok: true, box: h.box };
   });
 }

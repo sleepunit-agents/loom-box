@@ -61,11 +61,17 @@ export function deriveAccounts(s, { members, nowMs = Date.now() } = {}) {
       const def = LOGIN_HARNESSES[h];
       if (!def || !st?.loggedIn) continue;
       const name = st.account ?? `${h}-box-${id.replace(/[^a-z0-9]/g, '').slice(0, 12)}`;
-      const a = by.get(name) ?? { name, provider: def.provider, harness: h, kind: 'login', label: '', plan: '', method: st.method ?? '', boxes: [], agents: new Set(), readings: [], fresh: false };
+      const a = by.get(name) ?? { name, provider: def.provider, harness: h, kind: 'login', label: '', plan: '', method: st.method ?? '', boxes: [], agents: new Set(), boxReadings: [], houseReadings: [], fresh: false };
       a.boxes.push(id);
       a.fresh ||= !!fresh;
       if (st.plan && !a.plan) a.plan = String(st.plan);
-      if (b.usage?.[h]) { a.readings.push(b.usage[h]); if (b.usage[h].plan && !a.plan) a.plan = b.usage[h].plan; }
+      // A box's usage for a harness: its own reading ({box}) and a house's ({house}); an old flat one is the box's.
+      const u = b.usage?.[h];
+      const slot = u && (u.box || u.house) ? u : u?.windows ? { box: u } : {};
+      if (slot.box) a.boxReadings.push(slot.box);
+      if (slot.house) a.houseReadings.push(slot.house);
+      const plan = slot.box?.plan ?? slot.house?.plan;
+      if (plan && !a.plan) a.plan = plan;
       for (const ag of agents) if (ownersAllow(b, ag, members)) a.agents.add(ag);
       by.set(name, a);
     }
@@ -75,7 +81,9 @@ export function deriveAccounts(s, { members, nowMs = Date.now() } = {}) {
     label: `${LOGIN_HARNESSES[a.harness].label}${a.plan ? ` ${cap(a.plan)}` : ''} · ${a.name.slice(-6)}`,
     plan: a.plan, boxes: a.boxes.sort(), agents: [...a.agents].sort(),
     credentials: [{ kind: 'login', status: a.fresh ? 'valid' : 'unknown' }],
-    usage: mergeUsage(a.readings),
+    // The box's own readings when it has any (read from the harness's files on the box), else what houses reported.
+    usage: mergeUsage(a.boxReadings.length ? a.boxReadings : a.houseReadings),
+    usageFrom: a.boxReadings.length ? 'box' : a.houseReadings.length ? 'house' : null,
   }));
   // API keys: a secret mapped into an agent's houses as anthropic-api-key or openai-api-key.
   for (const [ag, cfg] of Object.entries(s.agents ?? {})) {

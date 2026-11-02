@@ -13,7 +13,7 @@
 // boxes signed in to one account share its quota. The email itself never leaves the box.
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { chmodSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -179,14 +179,41 @@ export function codexUsageOnBox(env, { now = Date.now() } = {}) {
     const day = join(root, String(d.getUTCFullYear()), String(d.getUTCMonth() + 1).padStart(2, '0'), String(d.getUTCDate()).padStart(2, '0'));
     try { for (const f of readdirSync(day)) if (f.endsWith('.jsonl')) files.push(join(day, f)); } catch { /* no such day */ }
   }
-  const newest = files.map((f) => ({ f, t: statSync(f).mtimeMs })).sort((a, b) => b.t - a.t).slice(0, 3);
+  // A house can write into this dir, so a file here is only read if it's a regular file (never a symlink), and only
+  // its last TAIL_BYTES, through one bounded read.
+  const newest = files.flatMap((f) => { try { const st = lstatSync(f); return st.isFile() ? [{ f, t: st.mtimeMs }] : []; } catch { return []; } })
+    .sort((a, b) => b.t - a.t).slice(0, 3);
   for (const { f, t } of newest) {
-    let text;
-    try { text = readFileSync(f, 'utf-8'); } catch { continue; }
+    const text = tailOf(f);
+    if (text === null) continue;
     const got = lastRateLimit('codex', text);
     if (got) return { ...got, checked: Math.floor(t / 1000) };
   }
   return null;
+}
+
+/** How much of a rollout's end is read: its last token_count is near the end. */
+export const TAIL_BYTES = 256 * 1024;
+
+/** A regular file's last TAIL_BYTES, opened without following a symlink; null if it isn't one. */
+export function tailOf(path, max = TAIL_BYTES) {
+  let fd;
+  try {
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    const st = fstatSync(fd);
+    if (!st.isFile()) return null;
+    const n = Math.min(st.size, max);
+    const buf = Buffer.alloc(n);
+    let got = 0;
+    while (got < n) {
+      const r = readSync(fd, buf, got, n - got, st.size - n + got);
+      if (r <= 0) break;
+      got += r;
+    }
+    const text = buf.subarray(0, got).toString('utf-8');
+    // A tail cut mid-line: drop the partial first line.
+    return st.size > n ? text.slice(text.indexOf('\n') + 1) : text;
+  } catch { return null; } finally { if (fd !== undefined) closeSync(fd); }
 }
 
 // ------------------------------------------------------------------ signing in, with the CLI's own login

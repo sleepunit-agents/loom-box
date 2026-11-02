@@ -277,7 +277,12 @@ export function runArgs(house, { id, agent, loomUrl, task, service, session, ima
     if (!src) throw new HouseFileError(`no ${kind} dir for this house`);
     args.push('-v', `${src}:${target}${kind === 'mirror' ? ':ro' : ''}`);
   }
-  // The box's own logins: the dir the box's CLI signed in to, read-write so the house's CLI refreshes it in place.
+  // The box's own logins: the dir the box's CLI signed in to. Read-write on purpose: the CLI refreshes its token and
+  // the refresh token rotates, so a copy per house would race the rotation and one house's refresh would revoke the
+  // others' (2026-10-27, h-121/h-122 died that way on copied views). One file, refreshed in place by whichever CLI
+  // gets there first, is how the CLI itself shares a login between sessions. The control plane only lets a house
+  // have it when its agent's owner owns this box and has granted the agent that login (control.mjs, claim), and
+  // the box mounts only the logins its claim names (box.mjs). Nothing else of the box's goes in.
   for (const l of house.logins ?? []) {
     const src = dirs.logins?.[l];
     if (!src) throw new HouseFileError(`this box isn't logged in to ${LOGIN_HARNESSES[l].label}`);

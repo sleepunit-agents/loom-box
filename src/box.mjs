@@ -439,12 +439,14 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
       if (missing.length) throw new BoxError(`the house file wants ${missing.join(', ')}, which ${h.agent}'s houses don't get`);
       // The box's own logins the house wants: each must be logged in here (the box's report, as of its claim).
       const notIn = (house.logins ?? []).filter((l) => !(claimed.logins ?? []).includes(l));
-      if (notIn.length) throw new BoxError(`this box isn't logged in to ${notIn.map((l) => LOGIN_HARNESSES[l].label).join(' or ')}: log it in from its page (Boxes, Log in)`);
+      if (notIn.length) throw new BoxError(`this box has no ${notIn.map((l) => LOGIN_HARNESSES[l].label).join(' or ')} login for ${h.agent}'s houses: log it in from its page (Boxes, Log in), on a box ${h.agent}'s owner owns, with the login granted to ${h.agent}`);
       if (house.nested && !rootless(env)) throw new BoxError('nested containers need rootless podman on the box');
       if (h.gpu && !claimed.gpu) throw new BoxError(`the house needs the GPU, and the owner hasn't allowed ${h.agent}'s houses a GPU (loom box agent ${h.agent} … --gpu, or the agent's page)`);
       if (h.gpu && !hasCdi()) throw new BoxError('the house needs the GPU, and this box has no NVIDIA CDI spec: run `sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml` (nvidia-container-toolkit) once, then try again');
       const tag = image(env, h, house, repo, logFd);
-      const dirs = { mirror, logins: Object.fromEntries((house.logins ?? []).map((l) => [l, loginDir(env, l)])) };
+      // Only the logins the claim names (logged in here, granted, and this box its agent's owner's): checked above,
+      // and again here, so nothing else of the box's is ever mounted.
+      const dirs = { mirror, logins: Object.fromEntries((house.logins ?? []).filter((l) => (claimed.logins ?? []).includes(l)).map((l) => [l, loginDir(env, l)])) };
       for (const d of ['state', 'nested']) { dirs[d] = pathJoin(dir, d); mkdirSync(dirs[d], { mode: 0o700 }); }
       if (h.service || h.slot) restoreState(dirs.state, await fetchState(client, h.id, claimed.state));
       // A session house: what attaching to it runs, for `loom box attach` on this box.

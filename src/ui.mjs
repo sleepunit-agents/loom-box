@@ -599,6 +599,7 @@ function agentForm(agent, c) {
     { name: 'ports', label: 'Ports', kind: 'text', value: (c?.ports ?? []).map((g) => `${g.ip}:${g.port}`).join(', '), hint: 'Ports a house may publish on its box: 7401 binds loopback, 0.0.0.0:7401 every interface' },
     // Saving replaces the whole record, so every grant is on the form (a missing one would be dropped).
     { name: 'tailnets', label: 'Tailnets', kind: 'text', value: (c?.tailnets ?? []).map((g) => `${g.name}=${g.socket}`).join(', '), hint: 'name=/run/…/tailscaled.sock, comma separated: a box tailscaled the house may use' },
+    { name: 'logins', label: 'Box logins', kind: 'text', value: Array.isArray(c?.logins) ? (c.logins.join(', ') || 'none') : 'default', hint: 'claude, codex, none, or default (a household owner\'s own agent gets both): which of a box\'s logins its houses may have, on boxes its owner owns. A house can read the login it\'s given.' },
     { name: 'branch', label: 'Branch', kind: 'text', value: c?.branch ?? '' },
     { name: 'repo_secret', label: 'Repo secret', kind: 'text', value: c?.repoSecret ?? '', hint: 'A secrets-store name, for a private repo over https' },
     { name: 'secrets', label: 'Secrets', kind: 'text', value: Object.entries(c?.secrets || {}).map(([k, v]) => `${k}=${v}`).join(', '), hint: 'name-in-house=store-name, comma separated' },

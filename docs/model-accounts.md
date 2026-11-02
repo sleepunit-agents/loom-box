@@ -36,6 +36,26 @@ to those binaries. It does not log in for them.
   `loom runtime usage report --harness claude < stream.jsonl`. The model resolver
   skips an account whose window is full.
 
+**Which houses get a box's login.** Only a house whose agent's owner owns the
+box, and only the logins the owner granted that agent (`loom box agent <agent>
+--logins claude,codex|none|default`, or the agent's form). By default a
+household owner's own agents get both, and any other member's agent gets none.
+A box lent to another member's agent runs that agent's work, but never on the
+box owner's login. The login dir is mounted read-write on purpose: the CLI
+refreshes its token in place, and the refresh token rotates, so copies per
+house would revoke each other.
+
+**What that leaves open.** An agent in a house that has its owner's login can
+read the login file. It's the owner's own agent, on the owner's own box, using
+the owner's own subscription. That's the same reach a program the owner runs on
+their own laptop has, and the reason the grant exists.
+
+**Usage readings.** A box's own reading (from the session files in its login
+dir) is preferred over one a house reports. A house can report only for a login
+it was given, and its values are clamped (utilization 0 to 1, a reset within 8
+days). A rollout file is read only if it's a regular file, never through a
+symlink, and only its last 256 KB.
+
 **loom never handles a model login.** It never reads, stores, copies, refreshes
 or issues a token. It never calls a provider's API, and it never pretends to be
 a provider's own client. A login stays on the box it was made on.

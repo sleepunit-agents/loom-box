@@ -479,7 +479,7 @@ test('a box reports its harness logins on its poll, runs the owner\'s login, and
   const h = up();
   await box.tick();
   await until(() => house(h.id).state === 'failed');
-  assert.match(house(h.id).log, /this box isn't logged in to Claude: log it in from its page/);
+  assert.match(house(h.id).log, /this box has no Claude login for art's houses: log it in from its page/);
   assert.equal(ok(api(env, fx, { caller: owner, path: 'list', body: {} })).boxes.find((b) => b.id === 'one').harnesses.claude.loggedIn, false);
   // The owner logs it in: the box runs the login, its link comes back, the code goes in.
   const l = ok(api(env, fx, { caller: owner, path: 'login-start', body: { box: 'one', harness: 'claude' } }));

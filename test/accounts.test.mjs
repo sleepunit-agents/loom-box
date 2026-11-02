@@ -47,6 +47,31 @@ test('a box reads Codex\'s usage from the rollouts its houses leave in its own l
   assert.equal(typeof got.checked, 'number');
 });
 
+test('a rollout is read only if it\'s a regular file, never through a symlink, and only its last 256 KB', async () => {
+  const { symlinkSync } = await import('node:fs');
+  const { TAIL_BYTES, tailOf } = await import('../src/logins.mjs');
+  const env = { HOME: scratch('rt-cx2-') };
+  env.LOOM_BOX_DATA = join(env.HOME, 'data');
+  const now = Date.parse('2026-11-02T18:40:00Z');
+  const day = join(loginDir(env, 'codex'), 'sessions', '2026', '11', '02');
+  mkdirSync(day, { recursive: true });
+  // A symlink a house left, pointing at something of the box's: not followed.
+  const outside = join(env.HOME, 'box-secret.jsonl');
+  writeFileSync(outside, `${CODEX_EVENT}\n`);
+  symlinkSync(outside, join(day, 'rollout-link.jsonl'));
+  assert.equal(codexUsageOnBox(env, { now }), null);
+  assert.equal(tailOf(join(day, 'rollout-link.jsonl')), null);
+  // A huge file: only its end is read, and its reading (at the end) is still found.
+  const big = join(day, 'rollout-big.jsonl');
+  writeFileSync(big, `${'{"type":"x","pad":"'.padEnd(1000, 'p')}"}\n`.repeat(3000) + `${CODEX_EVENT}\n`);
+  const tail = tailOf(big);
+  assert.ok(Buffer.byteLength(tail) <= TAIL_BYTES);
+  assert.equal(codexUsageOnBox(env, { now }).windows['7d'], 0.125);
+  // A directory named like a rollout isn't read.
+  mkdirSync(join(day, 'rollout-dir.jsonl'));
+  assert.equal(tailOf(join(day, 'rollout-dir.jsonl')), null);
+});
+
 test('a box\'s login state is the CLI\'s own status: states and a hash, never the email', () => {
   const s = parseClaudeStatus(JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', email: 'owner@example.com', orgId: 'org-1', subscriptionType: 'max' }));
   assert.deepEqual(s, { loggedIn: true, method: 'claude.ai', plan: 'max', account: accountKey('claude', 'org-1', 'owner@example.com') });
