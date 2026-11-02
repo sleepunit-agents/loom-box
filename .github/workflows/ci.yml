@@ -14,4 +14,6 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
       - run: git config --global user.email ci@example.com && git config --global user.name ci
+      # The runtime's slots and bundle parts are age files: their tests run against the real thing.
+      - run: sudo apt-get update -q && sudo apt-get install -y -q age
       - run: npm test

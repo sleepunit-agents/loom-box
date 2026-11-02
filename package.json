@@ -2,7 +2,7 @@
   "name": "loom-runtime",
   "version": "0.1.0",
   "private": true,
-  "description": "loom's runtime piece: boxes and houses, model accounts, harness runners and model choice",
+  "description": "loom's runtime piece: boxes and houses, model accounts, harness runners, model choice and delivery",
   "type": "module",
   "bin": {
     "loom-runtime": "src/cli.mjs",
@@ -19,7 +19,7 @@
     "name": "runtime",
     "role": "runtime",
     "label": "Runtime",
-    "description": "The runtime: the machines (boxes) and containers (houses) agents run in, their model accounts, the harnesses that run a body, and which model it runs on.",
+    "description": "The runtime: the machines (boxes) and containers (houses) agents run in, their model accounts, the harnesses that run a body, which model it runs on, and delivery: anything addressed to an agent becomes a body handling it.",
     "settings": [
       {
         "name": "LOOM_RUNTIME_LOOM_URL",
@@ -38,8 +38,28 @@
       },
       {
         "name": "LOOM_RUNTIME_TOKEN_FILE",
-        "label": "A runtime token, for reading scorecards",
-        "hint": "a file holding a token with loom's runtime role; without one, model choice reads no scorecards"
+        "label": "A runtime token, for core's conversation records and scorecards",
+        "hint": "a file holding a token with loom's runtime role; without one, delivery writes no turns (and answers 503) and model choice reads no scorecards"
+      },
+      {
+        "name": "LOOM_RUNTIME_BUSY_LIMIT",
+        "label": "Bodies an agent has mid-turn before a new conversation waits",
+        "default": "5"
+      },
+      {
+        "name": "LOOM_RUNTIME_WARM_IDLE_S",
+        "label": "Seconds a body whose turn is over stays warm",
+        "default": "600"
+      },
+      {
+        "name": "LOOM_RUNTIME_CONTINUITY",
+        "label": "How long a conversation's slot is kept, in days",
+        "hint": "JSON by venue or venue kind, e.g. {\"slack\": 7, \"scheduled\": 1}; at most 14 (default live 14, scheduled 1, agent 3)"
+      },
+      {
+        "name": "LOOM_RUNTIME_BODY_CWD",
+        "label": "Where a delivered body starts",
+        "hint": "a directory on this machine (default: the runtime's own)"
       }
     ],
     "services": [
@@ -51,7 +71,20 @@
           "--local"
         ],
         "keepChildren": true
+      },
+      {
+        "name": "delivery",
+        "argv": [
+          "loom-runtime",
+          "deliver",
+          "run"
+        ],
+        "keepChildren": true
       }
+    ],
+    "delivery": [
+      "loom-runtime",
+      "deliver"
     ],
     "strangers": [
       "join-request",
