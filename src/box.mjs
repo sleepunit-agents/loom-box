@@ -13,6 +13,7 @@
 import { maybeUpgrade } from './version.mjs';
 import { spawn, spawnSync } from 'node:child_process';
 import { gunzipSync } from 'node:zlib';
+import { pieceName } from './piece.mjs';
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, rmSync, statSync, writeFileSync, writeSync } from 'node:fs';
 import { arch, cpus, homedir, platform, totalmem } from 'node:os';
 import { join as pathJoin } from 'node:path';
@@ -96,12 +97,15 @@ export function detectFacts(env = process.env, labels = []) {
   return [...facts].filter((f) => /^[a-z][a-z0-9-]{0,31}(:[A-Za-z0-9._ +-]{1,64})?$/.test(f)).slice(0, 32);
 }
 
-/** A client for the control plane over loom's piece API. */
-export function remoteClient(url, credential, fetchImpl = fetch) {
+/**
+ * A client for the control plane over loom's piece API, at /api/<piece>/…: the name the box joined under (box.json
+ * `piece`), and for a box that joined before the runtime had its new name, `box`, which its credential's role names.
+ */
+export function remoteClient(url, credential, fetchImpl = fetch, piece = 'box') {
   const base = url.replace(/\/+$/, '');
   return {
     async call(path, body = {}) {
-      const r = await fetchImpl(`${base}/api/box/${path}`, {
+      const r = await fetchImpl(`${base}/api/${piece}/${path}`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${credential}` },
         body: JSON.stringify(body),
@@ -127,7 +131,7 @@ export async function askToJoin(env, { url, name, labels = [] }, { fetchImpl = f
   const post = async (path, body) => {
     let r;
     try {
-      r = await fetchImpl(`${base}/api/box/${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+      r = await fetchImpl(`${base}/api/${pieceName(env)}/${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
     } catch (err) { throw Object.assign(new BoxError(`can't reach ${base}: ${err.message}`), { transient: true }); }
     const out = await r.json().catch(() => ({}));
     if (!r.ok) throw Object.assign(new BoxError(out.error ?? `${r.status} ${r.statusText}`), { transient: r.status >= 500 });
@@ -158,7 +162,7 @@ export async function joinLoom(env, { url, name, labels = [], credential }, fetc
   if (!BOX_NAME.test(name ?? '')) throw new BoxError('--name is the box\'s name, as the owner added it');
   const cred = (credential ?? '').trim();
   if (!/^loom_[A-Za-z0-9_-]{20,}$/.test(cred)) throw new BoxError('that isn\'t a loom credential (it starts with loom_)');
-  const client = remoteClient(url, cred, fetchImpl);
+  const client = remoteClient(url, cred, fetchImpl, pieceName(env));
   const hi = await client.call('hello', { facts: detectFacts(env, labels) });
   // The box's name is only what it's called; loom knows it by its id (an old box: the name is the id).
   if (hi.box !== name && hi.name !== name) throw new BoxError(`that credential is ${hi.name ?? hi.box}'s, not ${name}'s`);
@@ -166,7 +170,7 @@ export async function joinLoom(env, { url, name, labels = [], credential }, fetc
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   chmodSync(dir, 0o700);
   writePrivate(credPath(env), cred + '\n');
-  writePrivate(configPath(env), JSON.stringify({ url, name, id: hi.box, labels }, null, 2) + '\n');
+  writePrivate(configPath(env), JSON.stringify({ url, name, id: hi.box, labels, piece: pieceName(env) }, null, 2) + '\n');
   return hi;
 }
 
