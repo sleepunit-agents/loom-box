@@ -1,8 +1,10 @@
 // What the runtime does outside its own state, on the control plane: mint and
 // revoke loom tokens (through loom's own CLI, so core keeps the only token
-// store) and read a secret for a house (through the secrets piece, host side).
+// store), read a secret for a house (through the secrets piece, host side), and
+// issue a model credential for one (through the runtime's accounts provider).
 // Values only ever travel on pipes, never in argv.
 import { spawnSync } from 'node:child_process';
+import { accountsFrom } from './accounts.mjs';
 
 // 60s: on 2026-10-30 a `loom token create` on a box at load 120+ outran 20s and was killed after writing its token.
 function run(cmd, args, env, what) {
@@ -15,6 +17,7 @@ function run(cmd, args, env, what) {
 export function realEffects(env = process.env) {
   const loom = env.LOOM_BOX_LOOM || 'loom';
   const secrets = env.LOOM_BOX_SECRETS || 'loom-secrets';
+  let accounts;
   return {
     now: () => new Date(),
     /** `loom token create <role flags> --label <label>`: the token is its stdout, alone. */
@@ -25,17 +28,13 @@ export function realEffects(env = process.env) {
     },
     revoke(label) { run(loom, ['token', 'revoke', label], env, 'revoking a token'); },
     /**
-     * What an agent's next house runs on, for a provider: the subscriptions
-     * piece's issue (its order, the first with room left, made safe for a
-     * house: an OpenAI login without its refresh token; a kind, as
-     * 'session', picks a Claude session login's access-only view). {name, value}, the
-     * value on a pipe; the name is which credential, from its stderr.
+     * What an agent's next house runs on, for a provider: the runtime's accounts provider issues it (accounts.mjs):
+     * the agent's first account with room left, made safe for a house; a kind, as 'session', picks one kind of
+     * credential. {name, value}, the value on a pipe; the name is which credential.
      */
     issue(agent, provider, kind) {
-      const r = spawnSync(loom, ['subscriptions', 'issue', agent, provider, ...(kind ? ['--kind', kind] : [])], { env, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 40_000 });
-      if (r.error || r.status !== 0) throw new Error(`issuing ${agent}'s ${provider} credential: ${(r.stderr || r.error?.message || '').trim().split('\n').pop()}`);
-      const m = /issued ([a-z0-9-]+)\/([A-Za-z0-9._-]+)/.exec(r.stderr || '');
-      return { name: m ? m[2] : 'unknown', value: r.stdout };
+      const got = (accounts ??= accountsFrom(env)).issue(agent, provider, kind);
+      return { name: got.name, value: got.value };
     },
     /** The control plane is the host side, so it may pass the secrets piece's body gate. */
     secret(name) {

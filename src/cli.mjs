@@ -1,44 +1,57 @@
 #!/usr/bin/env node
-// loom-box: loom's runtime piece (loom docs/specs/runtime.md). `loom box …`
-// reaches it through loom's piece dispatch.
+// loom-runtime: loom's runtime piece (loom docs/specs/agent-runtime.md, docs/specs/runtime.md). `loom runtime …`
+// reaches it through loom's piece dispatch; `loom runtime …` (the bin loom-box) is the same program, kept through the
+// move from the piece's old name.
 //
 // Boxes are pets: machines enrolled once and kept (wunder, the 5090 box, a
 // laptop). Houses are cattle: an agent's container on a box, built from the
 // agent's repo for a task and thrown away. Nothing picks a box by itself.
 //
 // On loom's own machine (the control plane, and its first box):
-//   loom box add <name> [--may-host a,b] [--labels x,y]   enroll a box; prints its credential once
-//   loom box revoke <name>                                 revoke a box and its houses' tokens
-//   loom box agent <agent> --repo <url> [--house-file house/house.json] [--nested] [--gpu]
+//   loom runtime add <name> [--may-host a,b] [--labels x,y]   enroll a box; prints its credential once
+//   loom runtime revoke <name>                                 revoke a box and its houses' tokens
+//   loom runtime agent <agent> --repo <url> [--house-file house/house.json] [--nested] [--gpu]
 //                  [--branch b] [--repo-secret <store-name>] [--secret as=from]... [--port n]...
 //                  [--tailnet name=/run/…/tailscaled.sock]...
 //                                                         how its house is made (--port: one it may publish;
 //                                                         --tailnet: a box tailscaled.sock it may use, by name)
-//   loom box primary <agent> [<box>]                       an agent's primary (default: this machine)
-//   loom box rename-local                                  after renaming this machine: its box takes the new name
-//   loom box remote up <agent> [--box b] [--dir /path]     a box session: Claude's remote-control on the box itself,
+//   loom runtime primary <agent> [<box>]                       an agent's primary (default: this machine)
+//   loom runtime rename-local                                  after renaming this machine: its box takes the new name
+//   loom runtime remote up <agent> [--box b] [--dir /path]     a box session: Claude's remote-control on the box itself,
 //                                                         in the agent's folder there (the box's whole reach; take it down after)
-//   loom box remote down <agent>
-//   loom box run --local                                   run houses here (a user service)
+//   loom runtime remote down <agent>
+//   loom runtime run --local                                   run houses here (a user service)
 // Anywhere (here as the owner; elsewhere with LOOM_URL + LOOM_TOKEN_FILE, as that token):
-//   loom box up [--agent a] [--box b] [--needs gpu:5090] [--slot s] --task <text|->   ask for a house
+//   loom runtime up [--agent a] [--box b] [--needs gpu:5090] [--slot s] --task <text|->   ask for a house
 //                                                         (--slot: its bookkeeping, restored and saved; one house at a time)
-//   loom box slot seed <name> --from <dir> | slot state <name> --to <dir>   a slot's state (the owner's)
-//   loom box list [--json]   |   loom box down <house>
-//   loom box session [--agent a]                           a house with an interactive session, here, at this terminal
-//   loom box attach <house>                                into a session house on this box (again)
-//   loom box service up <name> [--agent a] [--box b]       a long-lived house (a bridge), kept up
-//   loom box service move <name> <box> [--force]           hand it off: stopped there, then started here
-//   loom box service down <name>
-//   loom box service seed <name> --from <dir>             its starting state (a bridge moving in)
-//   loom box service state <name> --to <dir>              its saved state, unpacked (a bridge moving out)
+//   loom runtime slot seed <name> --from <dir> | slot state <name> --to <dir>   a slot's state (the owner's)
+//   loom runtime list [--json]   |   loom runtime down <house>
+//   loom runtime session [--agent a]                           a house with an interactive session, here, at this terminal
+//   loom runtime attach <house>                                into a session house on this box (again)
+//   loom runtime service up <name> [--agent a] [--box b]       a long-lived house (a bridge), kept up
+//   loom runtime service move <name> <box> [--force]           hand it off: stopped there, then started here
+//   loom runtime service down <name>
+//   loom runtime service seed <name> --from <dir>             its starting state (a bridge moving in)
+//   loom runtime service state <name> --to <dir>              its saved state, unpacked (a bridge moving out)
 // On a box:
-//   loom box join <loom-url> --name <name> [--labels x,y]  asks loom; the owner lets it in on the page
+//   loom runtime join <loom-url> --name <name> [--labels x,y]  asks loom; the owner lets it in on the page
 //                                       [--credential]     or: a credential from Add a box, on stdin or prompted
-//   loom box run                                           poll and run houses (a user service)
+//   loom runtime run                                           poll and run houses (a user service)
 // For loom (the piece contract):
-//   loom box ui --json | ui page --json | ui act --json | api --json
-//   loom box bundle export | bundle import [--force]       its part of loom's bundle
+// Bodies (on the machine they run on; the model is the runtime's choice):
+//   loom runtime body start --agent a --venue v [--venue-kind live|scheduled|agent] [--prefer m]... [--place p]
+//                      [--cwd d] [--deny tool]... --brief <text|->        a body on the model the resolver picks
+//   loom runtime body feed <body> --text <text|->                      a message mid-turn, where the harness allows
+//   loom runtime body resume <body> | --slot <harness>:<session> [--agent a --venue v] --brief <text|->
+//   loom runtime body end <body>   |   loom runtime body list [--json]
+// Models and accounts (the owner's, on loom's machine):
+//   loom runtime models [--json]                                         the model list and each agent's settings
+//   loom runtime models set --json < {list?, agent?, allow?, prefer?}    change them
+//   loom runtime models resolve --agent a --venue v [--venue-kind k] [--prefer m]...   which model, and why
+//   loom runtime accounts [--json] | accounts usage [--json]           the accounts provider's accounts, and usage
+// For loom (the piece contract):
+//   loom runtime ui --json | ui page --json | ui act --json | api --json
+//   loom runtime bundle export | bundle import [--force]       its part of loom's bundle
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -49,6 +62,10 @@ import { act, manifest, page } from './ui.mjs';
 import { askToJoin, BoxError, joinLoom, loadConfig, packState, POLL_MS, remoteClient, restoreState, runner, runMode } from './box.mjs';
 import { localBoxName, renameLocal, stateDir } from './state.mjs';
 import { exportPart, importPart } from './bundle.mjs';
+import { pieceName, setting } from './piece.mjs';
+import { accountsFrom } from './accounts.mjs';
+import { readModels, resolveFor, setModels } from './models.mjs';
+import { endBody, feedBody, listBodies, resumeBody, startBody } from './bodies.mjs';
 import { PART_RAW, joinParts, partsOf } from './blobs.mjs';
 
 /**
@@ -98,7 +115,7 @@ function ownerOrRemote(env) {
     const base = env.LOOM_URL.replace(/\/mcp\/?$/, '').replace(/\/+$/, '');
     const token = readFileSync(env.LOOM_TOKEN_FILE, 'utf-8').trim();
     return async (path, body) => {
-      const r = await fetch(`${base}/api/box/${path}`, {
+      const r = await fetch(`${base}/api/${pieceName(env)}/${path}`, {
         method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` }, body: JSON.stringify(body),
       });
       const out = await r.json().catch(() => ({}));
@@ -132,7 +149,7 @@ async function main(argv, env) {
       const sub = rest[0] === '--json' ? '' : rest[0];
       if (sub === '') return out(manifest(env));
       if (sub === 'page') return out(page(env, JSON.parse(await readStdin())));
-      if (sub === 'act') return out(act(env, realEffects(env), JSON.parse(await readStdin()), env.LOOM_BOX_PUBLIC_URL));
+      if (sub === 'act') return out(act(env, realEffects(env), JSON.parse(await readStdin()), setting(env, 'PUBLIC_URL')));
       throw new Fail(USAGE, 2);
     }
     case 'api': {
@@ -151,7 +168,7 @@ async function main(argv, env) {
     case 'add': {
       const [name] = positional(rest);
       const { box, token } = addBox(env, realEffects(env), { name, mayHost: flag(rest, '--may-host'), labels: flag(rest, '--labels') });
-      process.stderr.write(`Added ${name} (${box}). On ${name}: loom box join ${env.LOOM_BOX_PUBLIC_URL || '<loom-url>'} --name ${name} --credential, and paste this when it asks. It won't be shown again.\n`);
+      process.stderr.write(`Added ${name} (${box}). On ${name}: loom box join ${setting(env, 'PUBLIC_URL') || '<loom-url>'} --name ${name} --credential, and paste this when it asks. It won't be shown again.\n`);
       process.stdout.write(`${token}\n`);
       return;
     }
@@ -257,10 +274,10 @@ async function main(argv, env) {
         const effects = realEffects(env);
         const caller = { kind: 'piece', subject: localBoxName(env) };
         client = { async call(path, body) { const r = api(env, effects, { caller, path, body }); if (r.status !== 200) throw new BoxError(`${path}: ${r.body.error}`); return r.body; } };
-        loomUrl = env.LOOM_BOX_LOOM_URL || 'http://127.0.0.1:8787/mcp';
+        loomUrl = setting(env, 'LOOM_URL') || 'http://127.0.0.1:8787/mcp';
       } else {
         const c = loadConfig(env);
-        client = remoteClient(c.url, readFileSync(`${stateDir(env)}/credential`, 'utf-8').trim());
+        client = remoteClient(c.url, readFileSync(`${stateDir(env)}/credential`, 'utf-8').trim(), fetch, c.piece);
         loomUrl = `${c.url.replace(/\/+$/, '')}/mcp`;
         labels = c.labels || [];
       }
@@ -291,6 +308,22 @@ async function main(argv, env) {
         await sleep(every);
       }
     }
+    case 'body': return body(rest, env, json);
+    case 'models': return models(rest, env, json);
+    case 'accounts': {
+      const a = accountsFrom(env);
+      if (rest[0] === 'usage') {
+        const u = a.usage();
+        if (json) return out(u);
+        for (const x of u) process.stdout.write(`${x.account} (${x.provider}): ${Object.entries(x.windows).map(([w, v]) => `${w} ${Math.round(v * 100)}%`).join(', ') || 'not read'}${x.room ? '' : ' — out of room'}\n`);
+        return;
+      }
+      const l = a.list();
+      if (json) return out(l);
+      for (const x of l.accounts) process.stdout.write(`${x.name}  ${x.provider} ${x.plan}  ${x.credentials.map((c) => `${c.kind} ${c.status}`).join(', ')}\n`);
+      for (const [agent, order] of Object.entries(l.assign)) process.stdout.write(`${agent} runs on: ${order.join(' → ')}\n`);
+      return;
+    }
     case undefined: case '-h': case '--help': case 'help':
       process.stdout.write(USAGE);
       return;
@@ -300,6 +333,61 @@ async function main(argv, env) {
 }
 
 function out(v) { process.stdout.write(JSON.stringify(v) + '\n'); }
+
+/** `--text -` or `--brief -` (or none): stdin. */
+async function textOf(args, name) {
+  const v = flag(args, name);
+  return v === undefined || v === '-' ? readStdin() : v;
+}
+
+/** loom runtime body …: on the machine the body runs on. */
+async function body(rest, env, json) {
+  const [sub, ref] = positional(rest);
+  const said = (r, line) => (json ? out(r) : process.stdout.write(line + '\n'));
+  if (sub === 'start' || sub === 'resume') {
+    const slotArg = flag(rest, '--slot');
+    const slot = slotArg ? { harness: slotArg.split(':')[0], session: slotArg.slice(slotArg.indexOf(':') + 1) } : undefined;
+    const o = {
+      agent: flag(rest, '--agent') ?? (sub === 'start' ? defaultAgent(env) : undefined), venue: flag(rest, '--venue'), venueKind: flag(rest, '--venue-kind'),
+      prefer: flags(rest, '--prefer'), place: flag(rest, '--place'), cwd: flag(rest, '--cwd'), deny: flags(rest, '--deny'), brief: await textOf(rest, '--brief'),
+    };
+    const r = sub === 'start' ? await startBody(env, o) : await resumeBody(env, { ...o, body: ref, slot });
+    return said(r, `${r.body}: ${r.agent} on ${r.model} (${r.harness}, ${r.family})${r.resumed ? `, resuming ${r.resumed}` : ''}`);
+  }
+  if (sub === 'feed') {
+    const r = feedBody(env, ref, { text: await textOf(rest, '--text'), ...(flag(rest, '--id') ? { id: flag(rest, '--id') } : {}) });
+    if (!r.fed) process.exitCode = 3;
+    return said(r, r.fed ? `${ref}: fed` : `${ref}: not fed: ${r.reason}`);
+  }
+  if (sub === 'end') return said(endBody(env, ref), `${ref}: ended`);
+  if (sub === 'list') {
+    const l = listBodies(env);
+    if (json) return out(l);
+    for (const b of l) process.stdout.write(`${b.body} ${b.agent} ${b.venue}${b.place ? ` ${b.place}` : ''} on ${b.model}: ${b.status}\n`);
+    return;
+  }
+  throw new Fail('usage: loom runtime body start|feed|resume|end|list …', 2);
+}
+
+/** loom runtime models …: the list, each agent's settings, and the resolver. */
+async function models(rest, env, json) {
+  const [sub] = positional(rest);
+  if (sub === undefined) {
+    const m = readModels(env);
+    if (json) return out(m);
+    for (const x of m.list) process.stdout.write(`${x.id}  ${x.harness}  ${x.family}${x.window ? `  (window ${x.window})` : ''}\n`);
+    for (const [a, v] of Object.entries(m.agents)) process.stdout.write(`${a}: prefers ${(v.prefer ?? []).join(' → ') || '(the list\'s order)'}${v.allow?.length ? `; may use ${v.allow.join(', ')}` : ''}\n`);
+    return;
+  }
+  if (sub === 'set') return out(setModels(env, JSON.parse(await readStdin())));
+  if (sub === 'resolve') {
+    const r = await resolveFor(env, { agent: flag(rest, '--agent') ?? defaultAgent(env), venue: flag(rest, '--venue'), venueKind: flag(rest, '--venue-kind'), prefer: flags(rest, '--prefer'), accounts: accountsFrom(env) });
+    if (json) return out(r);
+    process.stdout.write(`${r.model} (${r.harness}, ${r.family})${r.account ? ` on ${r.account}` : ''}\n${r.why.map((w) => `  ${w}`).join('\n')}\n`);
+    return;
+  }
+  throw new Fail('usage: loom runtime models [set|resolve] …', 2);
+}
 
 /** A dir packed and handed over as a service's (or slot's) starting state, in parts inside loom's body cap. */
 async function seedFrom(call, who, from) {
@@ -355,7 +443,7 @@ if (isMain) {
   main(process.argv.slice(2), process.env).then(
     () => {},
     (err) => {
-      process.stderr.write(`loom box: ${err.message}\n`);
+      process.stderr.write(`loom ${/loom-box$/.test(process.argv[1] ?? '') ? 'box' : 'runtime'}: ${err.message}\n`);
       process.exit(err instanceof Fail ? err.code : 1);
     },
   );

@@ -1,12 +1,13 @@
-# loom-box
+# loom-runtime (was loom-box)
 
-loom's **runtime piece**: boxes and houses ([loom docs/specs/runtime.md](https://github.com/sleepunit-agents/loom/blob/main/docs/specs/runtime.md)).
+loom's **runtime piece** ([loom docs/specs/agent-runtime.md](https://github.com/sleepunit-agents/loom/blob/main/docs/specs/agent-runtime.md)): the layer that lets an agent run. It holds:
 
-- A **box** is a machine you keep: wunder, the 5090 box, a laptop, a Thor. You enroll it once.
-- A **house** is one agent's container on a box, built fresh from the agent's repo for one task, then thrown away.
-- **It's not a scheduler.** A house goes to the box you name, or to the one permitted box that has what it needs, or to the agent's primary. If that doesn't come down to exactly one box, it says why and starts nothing.
+- **Boxes and houses** ([runtime.md](https://github.com/sleepunit-agents/loom/blob/main/docs/specs/runtime.md)). A **box** is a machine you keep: wunder, the 5090 box, a laptop, a Thor. You enroll it once. A **house** is one agent's container on a box, built fresh from the agent's repo for one task, then thrown away. **It's not a scheduler.** A house goes to the box you name, or to the one permitted box that has what it needs, or to the agent's primary. If that doesn't come down to exactly one box, it says why and starts nothing.
+- **Model accounts**, through an accounts provider ([below](#model-accounts)).
+- **Runners**: one interface over the harnesses a body runs in, Claude Code and Codex.
+- **Model choice**: one resolver that picks the model for a body.
 
-`loom box …` reaches it through loom's piece dispatch: `loom pieces install box` installs it (or, working on it, put this repo's `src/cli.mjs` on PATH as `loom-box`). Node 22 or later, no dependencies.
+Its piece name is `runtime` (`loom runtime …`, bin `loom-runtime`). It was `box`, and `loom-box` stays a second bin through the move, so `loom box …` and everything below that says it keeps working. Node 22 or later, no dependencies.
 
 ## Setting it up
 
@@ -228,6 +229,53 @@ Without the spec, the house fails, and its log names that command.
 | the box never shows as seen | the URL from step 3 isn't reachable from this machine |
 | `this box may not host <agent>` | on the Boxes page, open the box and set who it may host |
 
+## Bodies
+
+Whoever needs a body asks the runtime for one, on the machine the body runs on:
+
+```bash
+loom runtime body start --agent art --venue wake --place schedule:reflect --brief - < brief.md   # prints its id, model and why
+loom runtime body feed claude:99553cf9 --text -        # a message mid-turn, where the harness allows (exit 3: not fed)
+loom runtime body resume claude:99553cf9 --brief -     # its turn is over: continue its session
+loom runtime body resume --slot codex:th-123 --agent art --venue slack --brief -   # a slot another machine kept
+loom runtime body end claude:99553cf9  |  loom runtime body list
+```
+
+- **The model** is the resolver's (below). `--prefer <model>` puts one ahead of the agent's own preference for this body; the hard limits still apply.
+- **The harness** is the model's. `claude` runs `claude --bg` with the brief on stdin, never on argv (`LOOM_RUNTIME_CLAUDE`, extra flags in `LOOM_RUNTIME_CLAUDE_ARGS` as a JSON argv, e.g. `["--dangerously-skip-permissions"]` for an agent that runs unattended). `codex` runs `codex exec --json` (`LOOM_RUNTIME_CODEX`, `LOOM_RUNTIME_CODEX_PROFILE`), and can't deny tools, so a body with a deny list isn't started on it.
+- **Feeding** goes through the body's inbox, in the layout the bridges' inbox hook reads, under `LOOM_RUNTIME_INBOX_DIR`. Without one, or once the turn is over, a body isn't fed: resume it.
+- **A body's record** (`<LOOM_BOX_DATA>/bodies`, 0600) holds its agent, venue, model, harness and slot, never its brief or a message.
+
+## Model choice
+
+```bash
+loom runtime models                                   # the model list, and each agent's settings
+echo '{"list": [{"id": "claude-opus-5-5", "harness": "claude", "family": "anthropic", "window": "7d_opus"},
+                {"id": "gpt-5.5", "harness": "codex", "family": "openai"}],
+       "agent": "art", "prefer": ["claude-opus-5-5"]}' | loom runtime models set --json
+loom runtime models resolve --agent art --venue slack # which model, and why
+```
+
+Each model has a harness and a **family**, one of `anthropic`, `openai`, `google`, `mistral`, or `local:<name>` for one the household runs itself. `window` names the model's own usage window, if its accounts report one. An agent may have `allow` (the models it may use; default all) and `prefer` (its order). Until the owner sets a list, it's Claude Opus 5.5, Opus 5 and Sonnet 5.
+
+The resolver, in order:
+
+1. **Hard limits:** the models the agent may use, with quota left on one of its accounts (a local model needs none). If the accounts can't be read, quota isn't checked, and it says so.
+2. **The agent's preference** among those: this body's `--prefer`, then the agent's `prefer`, then the list's order.
+3. **Scorecards** demote the preference when another allowed model's `graded` value for the venue's kind (`live`, `scheduled`, `agent`) is at least 1.0 higher, over the last 14 days, with at least 5 graded samples each. They're read from loom's `GET /api/loom/scorecards` with a runtime token (`LOOM_RUNTIME_TOKEN_FILE`), or a file of rows (`LOOM_RUNTIME_SCORECARDS`). None readable is no demotion.
+
+## Model accounts
+
+The household's model accounts (sign-ins, usage, and a credential issued into a house as `sub:<provider>`) are held through an **accounts provider**. This package defines the interface and carries no provider's sign-in code:
+
+| | |
+|---|---|
+| `list()` | the accounts, by name: provider, plan, each credential's kind and status, usage windows; and each agent's order |
+| `usage()` | each account's windows, when they reset, and whether it has room |
+| `issue(agent, provider, kind?)` | what one of the agent's houses runs on now: the value, and which account and credential |
+
+A household plugs its own in as a command, `LOOM_RUNTIME_ACCOUNTS` (a JSON argv, or `none`). Unset, it's `["loom", "subscriptions"]`. The command answers two verbs: `accounts --json` (the list on stdout: `{v: 1, accounts, assign}`) and `issue <agent> <provider> [--kind k]` (the value on stdout, `issued <account>/<credential>` on stderr). Whatever else a provider's list carries is dropped, so a credential's value or where it's kept never reaches the runtime's answers. `loom runtime accounts [usage] [--json]` shows them.
+
 ## Asking for a house
 
 ```bash
@@ -277,7 +325,7 @@ When the container exits, the box removes its podman secrets and its dirs, then 
 
 ## How it talks
 
-A box never reads loom's stores, and loom never reaches into a box. The box polls `POST /api/box/<call>` (loom's piece API, docs/extensions.md "The API") with its **box credential**, a loom token with the role `piece:box/<id>` (the box's id is loom's; its name is only a label). That credential reaches this piece's API and nothing else in loom: no MCP, no CLI, no page.
+A box never reads loom's stores, and loom never reaches into a box. The box polls `POST /api/<piece>/<call>` (loom's piece API, docs/extensions.md "The API") with its **box credential**, a loom token with the role `piece:<piece>/<id>` (the box's id is loom's; its name is only a label). That credential reaches this piece's API and nothing else in loom: no MCP, no CLI, no page.
 
 | Call | Who | |
 |---|---|---|
@@ -286,6 +334,8 @@ A box never reads loom's stores, and loom never reaches into a box. The box poll
 | `report` | a box | how a house is going; ending one revokes its token |
 | `up`, `down`, `list` | owner, agent | ask for, stop and see houses (an agent only its own) |
 | `add-box`, `revoke-box`, `may-host`, `set-primary`, `set-agent` | owner | enrollment and config |
+
+`<piece>` is the name loom runs it under: `box`, or `runtime` once it's installed by its new name. A box remembers the name it joined under (`piece` in its `box.json`), and one that joined before the rename keeps calling `/api/box/`, which its `piece:box/<id>` credential names.
 
 ## Threat model
 
@@ -302,4 +352,4 @@ A box never reads loom's stores, and loom never reaches into a box. The box poll
 npm test
 ```
 
-They pin the spec's list: a box refuses an agent it may not host; a need nobody has fails and names itself; nothing else picks a box; a box credential gets only box calls; a revoked box gets nothing and its houses' tokens go with it; secrets go once, to the house's box; with nothing enrolled, everything goes to loom's own machine. There's also a house run end to end against a real git repo.
+They pin runtime.md's list: a box refuses an agent it may not host; a need nobody has fails and names itself; nothing else picks a box; a box credential gets only box calls; a revoked box gets nothing and its houses' tokens go with it; secrets go once, to the house's box; with nothing enrolled, everything goes to loom's own machine. There's also a house run end to end against a real git repo. And agent-runtime.md's: model choice (test 4, `test/models.test.mjs`), the runner interface against stand-in harnesses (`test/runners.test.mjs`), the accounts seam (`test/accounts.test.mjs`), and the rename (`test/rename.test.mjs`).

@@ -1,12 +1,13 @@
 // The control plane's half of the runtime (loom docs/specs/runtime.md): what
 // each caller may ask of it. It runs on the machine loom runs on, reached
-// through loom's piece API (POST /api/box/<path>) by boxes and bodies, and
+// through loom's piece API (POST /api/<piece>/<path>: box, or runtime under its new name) by boxes and bodies, and
 // through the page (ui act) by the owner.
 //
 // It is not a scheduler. A house goes where it's told (a box), or to the one
 // permitted box that has what it needs, or to the agent's primary. If that
 // doesn't name exactly one box, it says why and starts nothing.
 import { ownCommit } from './version.mjs';
+import { pieceName } from './piece.mjs';
 import { randomBytes } from 'node:crypto';
 import { AGENT_NAME, BOX_NAME, SECRET_NAME, StateError, load, localBoxName, nextHouseId, update } from './state.mjs';
 import { joinPoll, joinRequest } from './enroll.mjs';
@@ -17,7 +18,7 @@ const TERMINAL = new Set(['done', 'failed', 'stopped', 'lost']);
 const LIVE = new Set(['wanted', 'starting', 'running', 'stopping']);
 /** How many claims in a row may fail before the house does. */
 export const MAX_CLAIM_TRIES = 5;
-/** A house secret that comes from the agent's subscriptions, not a fixed name. */
+/** A house secret that comes from the runtime's model accounts (accounts.mjs), not a fixed name. */
 // sub:<provider>[:<kind>]: a kind picks one kind of credential (sub:anthropic:session, a session login's view).
 const SUB_SOURCE = /^sub:(anthropic|openai)(?::(session))?$/;
 const FACT = /^[a-z][a-z0-9-]{0,31}(:[A-Za-z0-9._ +-]{1,64})?$/;
@@ -176,7 +177,7 @@ export function addBox(env, effects, { name, mayHost: mh, labels }) {
       let id;
       do id = newBoxId(); while (s.boxes[id]);
       const label = `box · ${n} (${id})`;
-      token = effects.mint(['--piece', `box/${id}`], label);
+      token = effects.mint(['--piece', `${pieceName(env)}/${id}`], label);
       minted = label;
       s.boxes[id] = { name: n, credLabel: label, mayHost: may, facts: [], labels: ls, created: now(effects), joined: null, lastSeen: null };
       return { box: id, name: n, token };
@@ -453,7 +454,7 @@ export function claim(env, effects, caller, { id }) {
     }
     try {
       const secrets = {};
-      // A secret named `sub:<provider>` is what the subscriptions piece issues for
+      // A secret named `sub:<provider>` is what the accounts provider issues for
       // the agent now (its first with room, house-safe); the house records which, by name.
       const runsOn = {};
       let notIssued;
@@ -464,7 +465,7 @@ export function claim(env, effects, caller, { id }) {
         try {
           got = effects.issue(h.agent, sub[1], sub[2]);
           if (!SECRET_NAME.test(got.name) || typeof got.value !== 'string' || !got.value) {
-            throw new StateError(`the subscriptions piece issued nothing usable for ${h.agent}'s ${sub[1]}${sub[2] ? ` ${sub[2]}` : ''}`, 500);
+            throw new StateError(`the accounts provider issued nothing usable for ${h.agent}'s ${sub[1]}${sub[2] ? ` ${sub[2]}` : ''}`, 500);
           }
         } catch (err) {
           // A kind (sub:anthropic:session) is an extra only some of the agent's

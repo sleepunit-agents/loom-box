@@ -1,10 +1,11 @@
 {
-  "name": "loom-box",
+  "name": "loom-runtime",
   "version": "0.1.0",
   "private": true,
-  "description": "loom's runtime piece: boxes (machines that call home) and houses (an agent's container on a box, started on request)",
+  "description": "loom's runtime piece: boxes and houses, model accounts, harness runners and model choice",
   "type": "module",
   "bin": {
+    "loom-runtime": "src/cli.mjs",
     "loom-box": "src/cli.mjs"
   },
   "scripts": {
@@ -15,26 +16,37 @@
   },
   "license": "AGPL-3.0-or-later",
   "loom": {
+    "name": "runtime",
     "role": "runtime",
-    "label": "Boxes",
-    "description": "The runtime: machines (boxes) and the containers (houses) an agent runs its work in.",
+    "label": "Runtime",
+    "description": "The runtime: the machines (boxes) and containers (houses) agents run in, their model accounts, the harnesses that run a body, and which model it runs on.",
     "settings": [
       {
-        "name": "LOOM_BOX_LOOM_URL",
+        "name": "LOOM_RUNTIME_LOOM_URL",
         "label": "loom's MCP URL, as this machine reaches it",
         "default": "http://127.0.0.1:8787/mcp"
       },
       {
-        "name": "LOOM_BOX_PUBLIC_URL",
+        "name": "LOOM_RUNTIME_PUBLIC_URL",
         "label": "loom's URL for other boxes",
         "hint": "what a new box joins, e.g. https://loom.example.com"
+      },
+      {
+        "name": "LOOM_RUNTIME_ACCOUNTS",
+        "label": "The accounts provider",
+        "hint": "the command that holds the household's model accounts, as a JSON argv (default [\"loom\", \"subscriptions\"]), or none"
+      },
+      {
+        "name": "LOOM_RUNTIME_TOKEN_FILE",
+        "label": "A runtime token, for reading scorecards",
+        "hint": "a file holding a token with loom's runtime role; without one, model choice reads no scorecards"
       }
     ],
     "services": [
       {
         "name": "run",
         "argv": [
-          "loom-box",
+          "loom-runtime",
           "run",
           "--local"
         ],
