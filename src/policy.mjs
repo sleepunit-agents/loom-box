@@ -164,7 +164,11 @@ export async function rulesFor(c, msgs, d, { platform }) {
   if (pol && policyProblem(pol)) throw new RulesError(`${c.agent}'s policy isn't one: ${policyProblem(pol)}`);
   pol ??= {};
   let gates = null;
-  try { gates = d.gates(c.agent); } catch (e) { if (platform) throw new RulesError(`${c.agent}'s gates can't be read (${e.message})`); }
+  try { gates = d.gates(c.agent); } catch (e) {
+    // Without the gates, a person's tier is unknown: a platform venue, any message from a person, or one whose tier
+    // couldn't be read when it came, gets no body (only the schedule's and an agent's relays go on without them).
+    if (platform || msgs.some((x) => x.from?.kind === 'person' || x.tierUnread)) throw new RulesError(`${c.agent}'s gates can't be read (${e.message}): no body for a person's message without them`);
+  }
   let about = cleanAbout({});
   if (platform) {
     let a;

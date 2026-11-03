@@ -29,7 +29,7 @@ import { RunnerError, inbox } from '../src/runners.mjs';
 import { ageSealer } from '../src/sealed.mjs';
 import { scratch } from './scratch.mjs';
 
-import { here, pkg, cvOf, hasAge, fakeRunner, fakeCore, testSealer, world } from './delivery-world.mjs';
+import { here, pkg, cvOf, hasAge, fakeRunner, fakeCore, testSealer, world, plain } from './delivery-world.mjs';
 
 test('the piece offers delivery: an argv of its own bin, which core runs with the deliver body on stdin', () => {
   assert.deepEqual(pkg.loom.delivery, ['loom-runtime', 'deliver']);
@@ -48,7 +48,7 @@ test('1. one way to start a body: a delivery from a source, and a relay, each st
   assert.equal(brief.split('\n')[0], 'You are art, in a conversation on slack: Loren (dm:U1).');
   assert.ok(brief.includes(`identity with {conversation: "${cv}", run: "${c.run}"}`));
   assert.ok(brief.includes(`loom runtime send --conversation ${cv}`), 'slack declares a send: the body is told how to answer');
-  assert.ok(brief.endsWith('loren: what did we decide about the pond?'));
+  assert.ok(plain(brief).endsWith('loren: what did we decide about the pond?'));
   assert.equal(c.body, `claude:${id}`);
   assert.equal(readBody(w.env, c.body).venue, 'slack');
   // A relay: from another agent, on the runtime's own venue.
@@ -56,7 +56,7 @@ test('1. one way to start a body: a delivery from a source, and a relay, each st
   assert.equal(r.body, 'started');
   const starts = w.log.filter((l) => l[0] === 'start');
   assert.equal(starts.length, 2);
-  assert.ok(starts[1][2].endsWith('mark: can you look at PR 12?'));
+  assert.ok(plain(starts[1][2]).endsWith('mark: can you look at PR 12?'));
   assert.equal(starts[1][2].includes('runtime send'), false, 'relay declares no send here');
   // Nothing of the message is kept as it came: the conversation's record holds no text.
   assert.equal(readFileSync(join(deliveryDir(w.env), 'conversations', `${cv}.json`), 'utf-8').includes('pond'), false);
@@ -136,7 +136,7 @@ test('3. capacity and continuity: same body, busy-only capacity, a warm idle bod
   assert.equal((await deliver(w.env, w.msg('dm:A', 'one'), w.o)).body, 'started');
   const aBody = loadConv(w.env, A).body;
   assert.equal((await deliver(w.env, w.msg('dm:A', 'two'), w.o)).body, 'fed');
-  assert.deepEqual(w.log.at(-1), ['feed', aBody.split(':')[1], 'loren: two']);
+  assert.deepEqual([...w.log.at(-1).slice(0, 2), plain(w.log.at(-1)[2])], ['feed', aBody.split(':')[1], 'loren: two']);
   assert.equal((await deliver(w.env, w.msg('dm:B', 'b one'), w.o)).body, 'started');
 
   // Capacity counts busy bodies: two mid-turn, so a third conversation's message waits.
@@ -174,7 +174,7 @@ test('3. capacity and continuity: same body, busy-only capacity, a warm idle bod
   const resumed = w.log.find((l) => l[0] === 'resume');
   assert.equal(resumed[2], a.slot.session);
   assert.match(resumed[3], /^transcript of c0000000: You are art/, 'the slot restored the session before the resume');
-  assert.match(resumed[4], /loren: three$/);
+  assert.match(plain(resumed[4]), /loren: three$/);
   assert.match(resumed[4], new RegExp(`run is ${loadConv(w.env, A).run}`));
   assert.equal(existsSync(slotPath), false, 'restored: the session is the live body\'s again');
   assert.equal(loadConv(w.env, B).slot.session.startsWith('s-c'), true);
@@ -235,7 +235,7 @@ test('slots and waiting messages are sealed with age to the runtime\'s own key',
   // A's turn ends; B takes its place, so A's session goes into its slot: an age file, not its text.
   w.runner.finish(loadConv(w.env, cvOf('art', 'slack', 'dm:A')).body);
   await tick(w.env, o);
-  assert.ok(w.log.some((l) => l[0] === 'start' && l[2].endsWith('THE SECOND SECRET')), 'opened again for its body');
+  assert.ok(w.log.some((l) => l[0] === 'start' && plain(l[2]).endsWith('THE SECOND SECRET')), 'opened again for its body');
   const slot = readFileSync(join(dir, 'slots', `${cvOf('art', 'slack', 'dm:A')}.age`));
   assert.equal(slot.subarray(0, 21).toString(), 'age-encryption.org/v1');
   assert.equal(slot.includes(Buffer.from('first secret')), false);
@@ -377,8 +377,8 @@ test('E. a warm body\'s inbox isn\'t lost to a resume that fails: what it held g
   assert.equal(r.body, 'started');
   const next = w.log.at(-1);
   assert.equal(next[0], 'start');
-  assert.ok(next[2].includes('loren: two, never heard'));
-  assert.ok(next[2].endsWith('loren: three'));
+  assert.ok(plain(next[2]).includes('loren: two, never heard'));
+  assert.ok(plain(next[2]).endsWith('loren: three'));
   assert.equal(loadConv(w.env, A).queue.length, 0);
 });
 
@@ -400,7 +400,7 @@ test('G. from an inbox, only what the runtime fed and the hook never took goes o
   const brief = w.log.at(-1)[4];
   assert.equal(brief.match(/not taken/g).length, 1);
   assert.equal(brief.includes('forged') || brief.includes('rm -rf'), false);
-  assert.equal(/loren: taken\b/.test(brief), false);
+  assert.equal(/loren: taken\b/.test(plain(brief)), false);
   assert.equal(existsSync(dir), false, 'the inbox is gone, its text with it');
 });
 
@@ -451,10 +451,10 @@ test('H. two plans at once start one body; an op that outlived its marker can\'t
   const c = loadConv(w.env, B);
   assert.equal(c.body, owner, 'the late op didn\'t take the conversation back');
   assert.equal(c.starting, undefined);
-  const slowId = w.log.find((l) => l[0] === 'start' && l[2].endsWith('slow one'))[1];
+  const slowId = w.log.find((l) => l[0] === 'start' && plain(l[2]).endsWith('slow one'))[1];
   assert.ok(w.log.some((l) => l[0] === 'end' && l[1] === slowId), 'its body was ended');
   await tick(w.env, w.o);
-  assert.ok(w.log.some((l) => l[0] === 'feed' && l[1] === owner.split(':')[1] && l[2] === 'loren: slow one'), 'its message went to the conversation\'s body');
+  assert.ok(w.log.some((l) => l[0] === 'feed' && l[1] === owner.split(':')[1] && plain(l[2]) === 'loren: slow one'), 'its message went to the conversation\'s body');
 });
 
 test('I. a conversation id from core is checked before it names any path', async () => {

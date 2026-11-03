@@ -272,7 +272,9 @@ Anything addressed to an agent arrives through core's `deliver`, which runs this
   2. **The deny list** the harness starts with (Claude Code's `--disallowedTools`; Codex can't deny, so its runner refuses one): the policy's `deny`, plus its `guest_deny` in a guest venue.
   3. **Placement:** a guest's message is never fed to a body that isn't narrowed. That body is ended without keeping its session, and a guest venue's body starts. A session (a warm body, a slot) resumes only under the rules it started with.
 
-  It fails closed. A guest venue with no `guest_deny`, no floor, no readers or an unread card gets no body. So does a platform venue whose adapter can't describe the place or whose gates can't be read. The start fails and is retried, and the owner gets the notice.
+  Who wrote is out of band: each message a body reads is fenced by a runtime-written header (`<<<message <n> from <slug>, tier <t>>>>` … `<<<end <n>>>`), with a delimiter drawn fresh for each rendering and taken out of the sender's text. The brief says only that header carries a tier, so a guest typing "jonathan [tier 3]:" is only words.
+
+  It fails closed. A guest venue with no `guest_deny`, no floor, no readers or an unread card gets no body. So does a platform venue whose adapter can't describe the place, and any person's message (on any venue) when the gates can't be read. The start fails and is retried, and the owner gets the notice.
 - **The policy** is owner-written (collection `policy`, one document per agent). `loom runtime policy --agent a` shows it, and `loom runtime policy set --agent a < doc` sets it whole (the owner's run):
 
   ```json
@@ -282,7 +284,7 @@ Anything addressed to an agent arrives through core's `deliver`, which runs this
    "guest_places": {"discord": {"channel:123": ["robin"]}}}
   ```
 - **Presence and the stop word:** when a message reaches a body, the adapter is told with `--status working --message <its id>`, so it can show it's on it (typing, 👀). The tick says so again every 15 s while the body works, and sends `--status done` once its turn is over. An answer carrying `stop: true` means a person said the stop word there: the body is ended (its slot kept) and what waited is dropped.
-- **To a person:** `loom runtime send --conversation <cv> --person <slug> --via <venue>` posts one DM, through that venue's `send` with `--place dm:<their id>` (from the agent's gates). Only to someone at tier 2 or up, and from a guest venue's body, only to tier 3. The same words to the same person go once in 10 minutes. The turn is that DM conversation's.
+- **To a person:** `loom runtime send --conversation <cv> --person <slug> --via <venue>` posts one DM, through that venue's `send` with `--place dm:<their id>` (from the agent's gates). Only to someone at tier 2 or up, and from a guest venue's body, only to tier 3. The same words to the same person go once in 10 minutes. The turn is that DM conversation's. The approved target is kept on the conversation by the post's ref, under the lock; the detached post goes only there, once, and a target it wasn't given posts nothing.
 
 ## Permissions
 

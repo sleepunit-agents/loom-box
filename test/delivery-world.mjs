@@ -151,6 +151,16 @@ export function world(extra = {}, { inboxDir } = {}) {
 }
 
 
+/**
+ * A rendering of fenced messages (delivery.mjs, render) as `who: text` lines, for assertions: the fence note dropped,
+ * each `<<<message N from who[, tier t]>>>` … `<<<end N>>>` block one line.
+ */
+export function plain(s) {
+  return String(s)
+    .replace(/\(The runtime fences each message: [^\n]*\)\n\n/g, '')
+    .replace(/<<<message ([0-9a-f]{12}) from ([a-z0-9-]+)(?:, tier (?:\d|unknown)| \(an agent of this household\))?>>>\n([\s\S]*?)\n<<<end \1>>>/g, (_m, _n, w, t) => `${w}: ${t}`);
+}
+
 export const until = async (f, ms = 5000) => { const end = Date.now() + ms; while (!(await f())) { if (Date.now() > end) throw new Error('timed out'); await new Promise((r) => setTimeout(r, 10)); } };
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 

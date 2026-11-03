@@ -9,7 +9,7 @@ import * as houses from '../src/houserunner.mjs';
 const { hostOf } = houses;
 import { startBody } from '../src/bodies.mjs';
 import { load } from '../src/state.mjs';
-import { bodyInHouse, cvOf, hasAge, here, houseWorld, sleep, testSealer, until, world } from './delivery-world.mjs';
+import { bodyInHouse, cvOf, hasAge, here, houseWorld, sleep, testSealer, until, world, plain } from './delivery-world.mjs';
 import { scratch } from './scratch.mjs';
 
 const ageOnly = { skip: !hasAge && 'age isn\'t installed' };
@@ -45,7 +45,7 @@ test('2a. a body that lost its race (H) is ended with its session gone, not left
   await deliver(w.env, w.msg('dm:I', 'fast one'), w.o);
   await slow;
   await slowDrain;
-  const slowId = w.log.find((l) => l[0] === 'start' && l[2].endsWith('slow one'))[1];
+  const slowId = w.log.find((l) => l[0] === 'start' && plain(l[2]).endsWith('slow one'))[1];
   assert.notEqual(loadConv(w.env, B).body, `claude:${slowId}`);
   assert.equal(existsSync(w.runner.transcript(`s-${slowId}`)), false, 'its transcript is gone');
 });
