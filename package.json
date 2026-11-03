@@ -67,6 +67,11 @@
         "hint": "variable names, comma-separated; never LOOM_*, a harness's settings or a provider's key (a body in a house runs in the house's own environment)"
       },
       {
+        "name": "LOOM_RUNTIME_GRADER_IMAGE",
+        "label": "The review's grader image, pinned by digest",
+        "hint": "name@sha256:\u2026, built from grader/Containerfile on loom's machine; without it the review grades nothing (never in an agent's house image)"
+      },
+      {
         "name": "LOOM_RUNTIME_REVIEW_LIMIT",
         "label": "Audit entries the daily review grades, at most",
         "default": "200",

@@ -4,10 +4,20 @@
 //
 // It's ordinary use of a harness's CLI under its box's own login, never a call to a provider's API with anything of
 // the login's: `claude -p` or `codex exec`, run in a throwaway container on the box (as the box runs its logins'
-// status and sign-in, logins.mjs), whose only mount is the box's shared login dir. The container has the network
-// (the CLI has to reach its provider), a tmpfs home that goes with it, no capabilities, and a time limit. The sample
-// goes in on stdin, never in argv (it would show in /proc/<pid>/cmdline), and nothing of it, or of what the grader
-// said, is ever logged: a failure says only what failed.
+// status and sign-in, logins.mjs). The sample goes in on stdin, never in argv (it would show in /proc/<pid>/cmdline),
+// and nothing of it, or of what the grader said, is ever logged: a failure says only what failed.
+//
+// The container:
+//   - its image is the grader image (grader/Containerfile), which the box's owner built and pinned by digest
+//     (LOOM_RUNTIME_GRADER_IMAGE, else an owner-set LOOM_RUNTIME_LOGIN_IMAGE pinned the same way). It's checked on
+//     the box before it's used, and run by that digest with --pull never. Never an agent's house image: an agent
+//     builds its own, and could put a CLI in it that reads the samples or bends the scores;
+//   - it has no network (--network none). Its one way out is an egress proxy the review runs for that grading, on a
+//     unix socket mounted into the container. It allows CONNECT to the CLI's own provider hosts on 443 and nothing
+//     else, never loom, the box or the LAN. In the container, the image's node forwards 127.0.0.1:3128 to the socket,
+//     and the CLI is told HTTPS_PROXY;
+//   - its mounts are the box's login dir for that harness and the proxy's socket dir;
+//   - a tmpfs home that goes with it, no capabilities, and a time limit.
 //
 //   Claude Code: --tools "" (no tools at all), --strict-mcp-config (no MCP servers), --setting-sources "" (no user,
 //                project or local settings), --disable-slash-commands (no skills), --no-session-persistence, its own
@@ -17,8 +27,12 @@
 //                plugins, browser and computer use, web search, memories, skills), in an empty dir with a fresh
 //                CODEX_HOME whose auth file is a link to the box's (linked inside the container, as the box's own
 //                status run does: logins.mjs).
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import net from 'node:net';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { CRED_FILE, LOGIN_MOUNT, loginDir, podmanBin } from './logins.mjs';
 
 export class GraderError extends Error {}
@@ -69,6 +83,91 @@ export function graderInput(entry) {
 }
 
 const AT = (h) => `${LOGIN_MOUNT}/${h}`;
+
+// ─── The image ──────────────────────────────────────────────────────────────
+
+/** An image named by its digest: name@sha256:<64 hex>. */
+export const PINNED = /^[a-z0-9][a-z0-9._/:-]{0,200}@sha256:([0-9a-f]{64})$/;
+
+/**
+ * The grader image: the owner's LOOM_RUNTIME_GRADER_IMAGE, else their LOOM_RUNTIME_LOGIN_IMAGE, pinned by digest and
+ * on this box with that digest. Never an image an agent built (logins.mjs's loginImage picks a house image when the
+ * owner set none; graders never use it). Answers {image} or {image: null, why} (why starts "no grader image").
+ */
+export function graderImage(env, { run = spawnSync } = {}) {
+  const [name, ref] = env.LOOM_RUNTIME_GRADER_IMAGE ? ['LOOM_RUNTIME_GRADER_IMAGE', env.LOOM_RUNTIME_GRADER_IMAGE]
+    : env.LOOM_RUNTIME_LOGIN_IMAGE ? ['LOOM_RUNTIME_LOGIN_IMAGE', env.LOOM_RUNTIME_LOGIN_IMAGE] : [null, null];
+  if (!ref) return { image: null, why: 'no grader image: set LOOM_RUNTIME_GRADER_IMAGE to the grader image\'s pinned digest (grader/Containerfile)' };
+  const m = PINNED.exec(ref);
+  if (!m) return { image: null, why: `no grader image: ${name} isn't pinned by digest (name@sha256:…)` };
+  const r = run(podmanBin(env), ['image', 'inspect', '--format', '{{.Digest}}{{range .RepoDigests}} {{.}}{{end}}', ref], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 30_000 });
+  if (r.error || r.status !== 0) return { image: null, why: `no grader image: ${ref} isn't on this box (build grader/Containerfile)` };
+  const seen = String(r.stdout ?? '').trim().split(/\s+/);
+  if (seen[0] !== `sha256:${m[1]}` && !seen.includes(ref)) return { image: null, why: `no grader image: the image on this box isn't the digest ${name} names` };
+  return { image: ref };
+}
+
+// ─── Egress ─────────────────────────────────────────────────────────────────
+
+/** The hosts each CLI needs: its provider's API and its login's refresh. Everything else is refused. */
+export const EGRESS = {
+  claude: ['api.anthropic.com', 'console.anthropic.com', 'platform.claude.com', 'claude.ai'],
+  codex: ['chatgpt.com', 'auth.openai.com', 'api.openai.com'],
+};
+const EGRESS_MOUNT = '/run/loom/egress';
+
+/**
+ * An egress proxy for one grading, on a unix socket in a new 0700 dir: CONNECT <allowed host>:443 is tunnelled, and
+ * anything else answered 403 (the host it asked for kept in `denied`, a name, never content). Answers
+ * {dir, denied, close()}.
+ */
+export async function egressProxy(parent, allow, { connect = (port, host) => net.connect(port, host) } = {}) {
+  mkdirSync(parent, { recursive: true, mode: 0o700 });
+  const dir = mkdtempSync(join(parent, 'egress-'));
+  const denied = new Set();
+  const conns = new Set();
+  const server = net.createServer((c) => {
+    conns.add(c);
+    c.on('close', () => conns.delete(c));
+    c.on('error', () => c.destroy());
+    let buf = Buffer.alloc(0);
+    const onData = (d) => {
+      buf = Buffer.concat([buf, d]);
+      if (buf.length > 8192) { c.end('HTTP/1.1 431 Request Header Fields Too Large\r\n\r\n'); return; }
+      const end = buf.indexOf('\r\n\r\n');
+      if (end < 0) return;
+      c.off('data', onData);
+      const m = /^CONNECT ([a-z0-9.-]{1,253}):([0-9]{1,5}) HTTP\/1\.[01]\r\n/i.exec(buf.toString('latin1'));
+      const host = m?.[1].toLowerCase();
+      if (!m || m[2] !== '443' || !allow.includes(host)) {
+        denied.add(m ? `${host}:${m[2]}`.slice(0, 120) : 'a request that isn\'t CONNECT');
+        c.end('HTTP/1.1 403 Forbidden\r\n\r\n');
+        return;
+      }
+      const u = connect(443, host);
+      conns.add(u);
+      u.on('close', () => conns.delete(u));
+      u.on('error', () => c.destroy());
+      c.on('error', () => u.destroy());
+      u.on('connect', () => {
+        c.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+        const rest = buf.subarray(end + 4);
+        if (rest.length) u.write(rest);
+        c.pipe(u); u.pipe(c);
+      });
+    };
+    c.on('data', onData);
+  });
+  await new Promise((res, rej) => { server.once('error', rej); server.listen(join(dir, 's'), res); });
+  return {
+    dir, denied,
+    close: () => new Promise((res) => { for (const x of conns) x.destroy(); server.close(() => { rmSync(dir, { recursive: true, force: true }); res(); }); }),
+  };
+}
+
+/** In the container: the image's node forwards 127.0.0.1:3128 to the proxy's socket; the CLI waits for it (5 s at most). */
+const FORWARD = `node -e 'const n=require("net");n.createServer(c=>{const u=n.connect("${EGRESS_MOUNT}/s");c.pipe(u);u.pipe(c);c.on("error",()=>u.destroy());u.on("error",()=>c.destroy())}).listen(3128,"127.0.0.1",()=>require("fs").writeFileSync("/tmp/cli/egress-ready",""))' & `
+  + 'i=0; until [ -e /tmp/cli/egress-ready ] || [ $i -ge 50 ]; do sleep 0.1; i=$((i+1)); done; ';
 const q = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
 const MODEL = /^[A-Za-z0-9][A-Za-z0-9._:/\[\]-]{0,79}$/;
 
@@ -76,31 +175,34 @@ const MODEL = /^[A-Za-z0-9][A-Za-z0-9._:/\[\]-]{0,79}$/;
 export function graderScript(harness, model, kind) {
   if (!MODEL.test(model ?? '')) throw new GraderError('a grader names its model');
   if (harness === 'claude') {
-    return 'command -v claude >/dev/null 2>&1 || exit 99; mkdir -p /tmp/cli/.claude /tmp/cli/w; cd /tmp/cli/w; '
+    return `command -v claude >/dev/null 2>&1 || exit 99; mkdir -p /tmp/cli/.claude /tmp/cli/w; ${FORWARD}cd /tmp/cli/w; `
       + `exec claude -p --model ${q(model)} --tools '' --strict-mcp-config --setting-sources '' --disable-slash-commands `
       + `--no-session-persistence --exclude-dynamic-system-prompt-sections --output-format json --system-prompt ${q(graderPrompt(kind))}`;
   }
   if (harness === 'codex') {
     const off = ['shell_tool', 'unified_exec', 'apps', 'plugins', 'browser_use', 'computer_use', 'sleep_tool', 'tool_suggest', 'skill_search', 'memories'];
-    return `command -v codex >/dev/null 2>&1 || exit 99; mkdir -p "$CODEX_HOME" /tmp/cli/w; ln -s ${AT('codex')}/${CRED_FILE.codex} "$CODEX_HOME/${CRED_FILE.codex}"; cd /tmp/cli/w; `
+    return `command -v codex >/dev/null 2>&1 || exit 99; mkdir -p "$CODEX_HOME" /tmp/cli/w; ln -s ${AT('codex')}/${CRED_FILE.codex} "$CODEX_HOME/${CRED_FILE.codex}"; ${FORWARD}cd /tmp/cli/w; `
       + `exec codex exec --json --skip-git-repo-check --ephemeral --sandbox read-only ${off.map((f) => `--disable ${f}`).join(' ')} `
       + `-c 'web_search="disabled"' -m ${q(model)} -`;
   }
   throw new GraderError(`no grader for harness ${JSON.stringify(harness)}`);
 }
 
+const PROXY = 'http://127.0.0.1:3128';
 const ENV = {
-  claude: { CLAUDE_CONFIG_DIR: '/tmp/cli/.claude', CLAUDE_SECURESTORAGE_CONFIG_DIR: AT('claude') },
+  claude: { CLAUDE_CONFIG_DIR: '/tmp/cli/.claude', CLAUDE_SECURESTORAGE_CONFIG_DIR: AT('claude'), CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1', DISABLE_AUTOUPDATER: '1' },
   codex: { CODEX_HOME: '/tmp/cli/.codex' },
 };
 
-/** The exact `podman run` arguments for one grader: the box's login dir its only mount. */
-export function graderRunArgs(env, { harness, model, kind, image, name }) {
-  if (!image) throw new GraderError('no image to run a grader in');
-  return ['run', '--rm', '-i', '--label', `${CLI_LABEL}=grade`, '--name', name, '--user', '0:0', '--cap-drop', 'all', '--security-opt', 'no-new-privileges',
+/** The exact `podman run` arguments for one grader: the pinned grader image, no network, two mounts. */
+export function graderRunArgs(env, { harness, model, kind, image, name, egress }) {
+  if (!PINNED.test(image ?? '')) throw new GraderError('a grader runs only in the pinned grader image');
+  if (!egress) throw new GraderError('a grader runs only behind its egress proxy');
+  return ['run', '--rm', '-i', '--pull', 'never', '--network', 'none', '--label', `${CLI_LABEL}=grade`, '--name', name, '--user', '0:0', '--cap-drop', 'all', '--security-opt', 'no-new-privileges',
     '--pids-limit', '256', '--memory', '2g', '--tmpfs', '/tmp:rw,nosuid,nodev,size=256m',
-    ...Object.entries({ ...ENV[harness], NO_COLOR: '1', BROWSER: '/bin/false' }).flatMap(([k, v]) => ['-e', `${k}=${v}`]),
+    ...Object.entries({ ...ENV[harness], HTTPS_PROXY: PROXY, https_proxy: PROXY, HTTP_PROXY: PROXY, http_proxy: PROXY, NO_COLOR: '1', BROWSER: '/bin/false' }).flatMap(([k, v]) => ['-e', `${k}=${v}`]),
     '-v', `${loginDir(env, harness)}:${AT(harness)}:rw,nosuid,nodev,noexec`,
+    '-v', `${egress}:${EGRESS_MOUNT}:rw,nosuid,nodev,noexec`,
     '--entrypoint', 'sh', image, '-c', graderScript(harness, model, kind)];
 }
 
@@ -150,21 +252,46 @@ export function verdictOf(text) {
   return { score: d.score, ...(finding ? { finding } : {}) };
 }
 
+/** A process run to its end, its stdout kept (8 MB at most) and its stderr dropped unread: {status, stdout, signal, error}. */
+export function runAsync(bin, argv, { env, input, timeout }) {
+  return new Promise((resolve) => {
+    let out = '';
+    let done = false;
+    const child = spawn(bin, argv, { env, stdio: ['pipe', 'pipe', 'ignore'] });
+    const t = setTimeout(() => { child.kill('SIGKILL'); }, timeout);
+    child.stdout.setEncoding('utf-8');
+    child.stdout.on('data', (d) => { if (out.length < 8 * 1024 * 1024) out += d; });
+    const end = (r) => { if (done) return; done = true; clearTimeout(t); resolve(r); };
+    child.on('error', (error) => end({ status: null, stdout: out, error }));
+    child.on('close', (status, signal) => end({ status, stdout: out, signal }));
+    child.stdin.on('error', () => {});
+    child.stdin.end(input);
+  });
+}
+
+const dataDir = (env) => env.LOOM_BOX_DATA || join(env.HOME || homedir(), '.local', 'share', 'loom-box');
+
 /**
- * One grading: the grader {harness, model, image} on one entry {kind (the venue kind), text, kind of turn}. Answers
- * {score, finding?}, or throws a GraderError that says what failed and never what was in the sample or the answer.
+ * One grading: the grader {harness, model, image} on one entry {kind (the venue kind), text, kind of turn}, behind
+ * its own egress proxy. Answers {score, finding?}, or throws a GraderError that says what failed and never what was
+ * in the sample or the answer.
  */
-export function grade(env, grader, { venueKind, entry }, { run = spawnSync, timeoutMs = GRADE_MS, name = `loom-grade-${randomBytes(4).toString('hex')}` } = {}) {
-  const argv = graderRunArgs(env, { harness: grader.harness, model: grader.model, kind: venueKind, image: grader.image, name });
+export async function grade(env, grader, { venueKind, entry }, { run = runAsync, rm = spawnSync, timeoutMs = GRADE_MS, name = `loom-grade-${randomBytes(4).toString('hex')}`, proxy = egressProxy } = {}) {
   const input = grader.harness === 'codex' ? `${graderPrompt(venueKind)}\n\n${graderInput(entry)}` : graderInput(entry);
+  const px = await proxy(join(dataDir(env), 'review'), EGRESS[grader.harness] ?? []);
   const podEnv = { PATH: env.PATH, HOME: env.HOME, ...(env.XDG_RUNTIME_DIR ? { XDG_RUNTIME_DIR: env.XDG_RUNTIME_DIR } : {}) };
-  const r = run(podmanBin(env), argv, { env: podEnv, input, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024 });
-  if (r.error?.code === 'ETIMEDOUT' || r.signal) {
-    run(podmanBin(env), ['rm', '-f', name], { env: podEnv, stdio: 'ignore', timeout: 30_000 });
-    throw new GraderError(`the grader took longer than ${Math.round(timeoutMs / 1000)}s`);
+  let r;
+  try {
+    const argv = graderRunArgs(env, { harness: grader.harness, model: grader.model, kind: venueKind, image: grader.image, name, egress: px.dir });
+    r = await run(podmanBin(env), argv, { env: podEnv, input, timeout: timeoutMs });
+  } finally { await px.close(); }
+  const refused = px.denied.size ? ` (egress refused ${[...px.denied].slice(0, 3).join(', ')})` : '';
+  if (r.signal || r.error?.code === 'ETIMEDOUT') {
+    rm(podmanBin(env), ['rm', '-f', name], { env: podEnv, stdio: 'ignore', timeout: 30_000 });
+    throw new GraderError(`the grader took longer than ${Math.round(timeoutMs / 1000)}s${refused}`);
   }
   if (r.error) throw new GraderError(`can't run a container: ${r.error.code ?? 'error'}`);
   if (r.status === 99) throw new GraderError(`the image has no ${grader.harness}`);
-  if (r.status !== 0 && grader.harness === 'codex') throw new GraderError(`codex exited ${r.status}`);
-  return verdictOf(answerOf(grader.harness, r.stdout));
+  if (r.status !== 0 && grader.harness === 'codex') throw new GraderError(`codex exited ${r.status}${refused}`);
+  try { return verdictOf(answerOf(grader.harness, r.stdout)); } catch (e) { throw new GraderError(`${e.message}${refused}`); }
 }

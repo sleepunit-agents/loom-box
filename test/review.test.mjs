@@ -11,7 +11,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { CoreError } from '../src/core.mjs';
 import { parseDelivery } from '../src/delivery.mjs';
-import { GraderError, MAX_FINDING, cleanFinding, grade, graderInput, graderRunArgs, verdictOf } from '../src/grader.mjs';
+import { EGRESS, GraderError, MAX_FINDING, cleanFinding, egressProxy, grade, graderImage, graderInput, graderRunArgs, verdictOf } from '../src/grader.mjs';
 import { dueDay, graderPool, introspectionMessage, localTime, pickGraders, producersOf, resetTick, reviewDir, reviewRuns, reviewTick, runReview } from '../src/review.mjs';
 import { scratch } from './scratch.mjs';
 
@@ -95,7 +95,7 @@ test('the grader pool: models whose harness is logged in on loom\'s own box, a h
     { id: 'claude-sonnet-5', harness: 'claude', family: 'anthropic', window: '7d_sonnet' },
     { id: 'gpt-5', harness: 'codex', family: 'openai' },
   ];
-  const opts = { members: [{ person: 'jo', agents: '*' }, { person: 'kim', agents: ['pond'] }], models, nowMs, image: () => ({ image: 'loom-house-art:x' }), cred: () => null };
+  const opts = { members: [{ person: 'jo', agents: '*' }, { person: 'kim', agents: ['pond'] }], models, nowMs, image: () => ({ image: PIN }), cred: () => null };
   const { pool, why } = graderPool({}, { ...opts, s: s(box({ '7d': 0.2, '7d_opus': 0.99 })) });
   assert.deepEqual(pool.map((g) => g.model), ['claude-sonnet-5'], 'opus\'s window is full, codex isn\'t logged in');
   assert.match(why.join('\n'), /claude-opus-5: .* no room/);
@@ -306,31 +306,99 @@ test('introspection: each hosted agent gets a wake to its own body, through deli
 
 // ─── The bare grader ────────────────────────────────────────────────────────
 
-test('a bare grader: the CLI with no tools, MCP, settings or session, the box\'s login its only mount, the sample on stdin', () => {
+const PIN = `localhost/loom-grader@sha256:${'ab'.repeat(32)}`;
+const noProxy = async () => ({ dir: '/run/x/egress-1', denied: new Set(), close: async () => {} });
+
+test('a bare grader: the CLI with no tools, MCP, settings or session, no network but its proxy, the sample on stdin', async () => {
   const env = envOf();
-  const argv = graderRunArgs(env, { harness: 'claude', model: 'claude-sonnet-5', kind: 'live', image: 'loom-house-art:x', name: 'loom-grade-1' });
+  const argv = graderRunArgs(env, { harness: 'claude', model: 'claude-sonnet-5', kind: 'live', image: PIN, name: 'loom-grade-1', egress: '/run/x/egress-1' });
   const vols = argv.flatMap((a, i) => (argv[i - 1] === '-v' ? [a] : []));
-  assert.deepEqual(vols, [`${join(env.LOOM_BOX_DATA, 'logins', 'claude')}:/run/loom/login/claude:rw,nosuid,nodev,noexec`]);
+  assert.deepEqual(vols, [`${join(env.LOOM_BOX_DATA, 'logins', 'claude')}:/run/loom/login/claude:rw,nosuid,nodev,noexec`, '/run/x/egress-1:/run/loom/egress:rw,nosuid,nodev,noexec']);
+  assert.equal(argv[argv.indexOf('--network') + 1], 'none');
+  assert.equal(argv[argv.indexOf('--pull') + 1], 'never');
+  assert.equal(argv.at(-3), PIN, 'run by its digest');
+  assert.ok(argv.includes('HTTPS_PROXY=http://127.0.0.1:3128'));
   assert.ok(argv.includes('--rm') && argv.includes('all') && !argv.includes('--privileged'));
   const script = argv.at(-1);
-  for (const f of ["--tools ''", '--strict-mcp-config', "--setting-sources ''", '--disable-slash-commands', '--no-session-persistence', '--system-prompt', "--model 'claude-sonnet-5'"]) assert.ok(script.includes(f), f);
+  for (const f of ["--tools ''", '--strict-mcp-config', "--setting-sources ''", '--disable-slash-commands', '--no-session-persistence', '--system-prompt', "--model 'claude-sonnet-5'", 'listen(3128,"127.0.0.1"', '$i -ge 50']) assert.ok(script.includes(f), f);
   assert.match(script, /Did the agent answer what was actually asked/);
-  const cx = graderRunArgs(env, { harness: 'codex', model: 'gpt-5', kind: 'agent', image: 'img', name: 'n' }).at(-1);
+  const cx = graderRunArgs(env, { harness: 'codex', model: 'gpt-5', kind: 'agent', image: PIN, name: 'n', egress: '/e' }).at(-1);
   for (const f of ['--ephemeral', '--sandbox read-only', '--disable shell_tool', '--disable unified_exec', "web_search=\"disabled\""]) assert.ok(cx.includes(f), f);
+  // Never an image that isn't pinned, and never without its proxy.
+  assert.throws(() => graderRunArgs(env, { harness: 'claude', model: 'm', kind: 'live', image: 'localhost/loom-house-art:de52', name: 'n', egress: '/e' }), /pinned grader image/);
+  assert.throws(() => graderRunArgs(env, { harness: 'claude', model: 'm', kind: 'live', image: PIN, name: 'n' }), /egress proxy/);
 
   // One grading: the sample goes on stdin, never into argv, and the answer is checked.
   const calls = [];
-  const run = (bin, a, o) => { calls.push({ a, input: o.input }); return { status: 0, stdout: JSON.stringify({ is_error: false, result: '{"score": 2, "finding": "Said it pushed\\nwithout saying where."}' }) }; };
-  const v = grade(env, { harness: 'claude', model: 'claude-sonnet-5', image: 'img' }, { venueKind: 'live', entry: { kind: 'reply', text: 'SECRET-SAMPLE-WORDS' } }, { run, name: 'loom-grade-t' });
+  const run = async (bin, a, o) => { calls.push({ a, input: o.input }); return { status: 0, stdout: JSON.stringify({ is_error: false, result: '{"score": 2, "finding": "Said it pushed\\nwithout saying where."}' }) }; };
+  const v = await grade(env, { harness: 'claude', model: 'claude-sonnet-5', image: PIN }, { venueKind: 'live', entry: { kind: 'reply', text: 'SECRET-SAMPLE-WORDS' } }, { run, name: 'loom-grade-t', proxy: noProxy });
   assert.deepEqual(v, { score: 2, finding: 'Said it pushed without saying where.' });
   assert.ok(!calls[0].a.join(' ').includes('SECRET-SAMPLE-WORDS'));
   assert.match(calls[0].input, /SECRET-SAMPLE-WORDS/);
   // A timeout removes its container, and says nothing of the sample.
   const killed = [];
-  assert.throws(() => grade(env, { harness: 'claude', model: 'm', image: 'img' }, { venueKind: 'live', entry: { text: 'SECRET' } }, { run: (b, a) => { killed.push(a); return a[0] === 'rm' ? {} : { error: { code: 'ETIMEDOUT' }, signal: 'SIGTERM' }; }, name: 'loom-grade-x' }),
+  await assert.rejects(grade(env, { harness: 'claude', model: 'm', image: PIN }, { venueKind: 'live', entry: { text: 'SECRET' } }, { run: async () => ({ signal: 'SIGKILL' }), rm: (b, a) => { killed.push(a); return {}; }, name: 'loom-grade-x', proxy: noProxy }),
     (e) => e instanceof GraderError && !/SECRET/.test(e.message));
-  assert.deepEqual(killed[1], ['rm', '-f', 'loom-grade-x']);
+  assert.deepEqual(killed[0], ['rm', '-f', 'loom-grade-x']);
   assert.throws(() => graderInput({ text: 'x'.repeat(40_001) }), /1-40,000/);
+});
+
+test('the grader image is the owner\'s, pinned by digest and checked on the box; an agent\'s house image is never chosen', () => {
+  const asked = [];
+  const podman = (digest) => (bin, a) => { asked.push(a); return a[0] === 'image' ? { status: 0, stdout: `${digest} ${a.at(-1)}\n` } : { status: 0, stdout: 'localhost/loom-house-art:de52 2026-11-03 05:22:13 +0000 UTC\nlocalhost/loom-house-mark:7f02 2026-11-03 05:29:04 +0000 UTC\n' }; };
+  // Nothing set: no grader image, even with agents' house images on the box (they aren't even listed).
+  assert.match(graderImage({}, { run: podman('sha256:x') }).why, /^no grader image: set LOOM_RUNTIME_GRADER_IMAGE/);
+  assert.deepEqual(asked, []);
+  // A tag isn't a pin: a house image named by tag is refused (here as the login image, and as the grader image).
+  assert.match(graderImage({ LOOM_RUNTIME_LOGIN_IMAGE: 'localhost/loom-house-art:de52' }, { run: podman('sha256:x') }).why, /LOOM_RUNTIME_LOGIN_IMAGE isn't pinned by digest/);
+  assert.match(graderImage({ LOOM_RUNTIME_GRADER_IMAGE: 'localhost/loom-grader:1' }, { run: podman('sha256:x') }).why, /isn't pinned by digest/);
+  // Pinned: checked against the box's own image; a mismatch or an absent image is refused.
+  assert.deepEqual(graderImage({ LOOM_RUNTIME_GRADER_IMAGE: PIN }, { run: podman(`sha256:${'ab'.repeat(32)}`) }), { image: PIN });
+  assert.match(graderImage({ LOOM_RUNTIME_GRADER_IMAGE: PIN }, { run: (b, a) => ({ status: 0, stdout: `sha256:${'cd'.repeat(32)} localhost/other@sha256:${'cd'.repeat(32)}` }) }).why, /isn't the digest/);
+  assert.match(graderImage({ LOOM_RUNTIME_GRADER_IMAGE: PIN }, { run: () => ({ status: 125, stdout: '' }) }).why, /isn't on this box/);
+  // The owner's pinned login image is the fallback.
+  assert.deepEqual(graderImage({ LOOM_RUNTIME_LOGIN_IMAGE: PIN }, { run: podman(`sha256:${'ab'.repeat(32)}`) }), { image: PIN });
+  assert.ok(asked.every((a) => a[0] === 'image' && a[1] === 'inspect'), 'only ever inspects the named image: never lists images to pick one');
+  // And the review never reaches for the login runs' image picker, which falls back to an agent's house image.
+  assert.doesNotMatch(readFileSync(join(import.meta.dirname, '..', 'src', 'review.mjs'), 'utf-8'), /loginImage/);
+});
+
+test('no grader image: nothing is taken, and the record says "no grader image"', async () => {
+  const env = envOf();
+  const { st, core, reviewer } = fakeCore({ entries: [entry(1)] });
+  const s = { v: 1, boxes: { loom: { local: true, owner: 'jo', harnesses: { claude: { loggedIn: true } } } }, agents: { art: { repo: 'x' } } };
+  const pool = () => graderPool(env, { s, members: [{ person: 'jo', agents: '*' }], models: anthropicOnly, cred: () => null, image: () => graderImage(env) });
+  const r = await runReview(env, { core, reviewer, models: anthropicOnly, introspect: 'none', state: { agents: {} }, pool, grade: async () => assert.fail('no grader runs') });
+  assert.equal(st.takes, 0);
+  assert.match(r.nothing_graded, /^no grader image: set LOOM_RUNTIME_GRADER_IMAGE/);
+});
+
+test('the egress proxy tunnels only CONNECT to the CLI\'s own hosts on 443; loom, the box, the LAN and anything else are refused', async () => {
+  const net = await import('node:net');
+  const env = envOf();
+  // A stand-in for the provider: whatever the proxy connects an allowed host to.
+  const upstream = net.createServer((c) => c.end('hello from upstream'));
+  await new Promise((r) => upstream.listen(0, '127.0.0.1', r));
+  const reached = [];
+  const px = await egressProxy(join(env.LOOM_BOX_DATA, 'review'), EGRESS.claude, { connect: (port, host) => { reached.push(`${host}:${port}`); return net.connect(upstream.address().port, '127.0.0.1'); } });
+  const ask = (req) => new Promise((resolve) => {
+    const c = net.connect(join(px.dir, 's'));
+    let got = '';
+    c.on('data', (d) => { got += d; });
+    c.on('close', () => resolve(got));
+    c.on('error', () => resolve(got));
+    c.write(req);
+  });
+  assert.match(await ask('CONNECT api.anthropic.com:443 HTTP/1.1\r\nHost: api.anthropic.com:443\r\n\r\n'), /^HTTP\/1\.1 200 Connection Established\r\n\r\nhello from upstream$/);
+  for (const req of ['CONNECT 100.79.56.125:8787 HTTP/1.1\r\n\r\n', 'CONNECT 127.0.0.1:443 HTTP/1.1\r\n\r\n', 'CONNECT api.anthropic.com:80 HTTP/1.1\r\n\r\n', 'CONNECT evil.example:443 HTTP/1.1\r\n\r\n', 'GET http://192.168.6.30:8787/ HTTP/1.1\r\n\r\n']) {
+    assert.match(await ask(req), /^HTTP\/1\.1 403 Forbidden/, req);
+  }
+  assert.deepEqual(reached, ['api.anthropic.com:443']);
+  assert.deepEqual([...px.denied], ['100.79.56.125:8787', '127.0.0.1:443', 'api.anthropic.com:80', 'evil.example:443', 'a request that isn\'t CONNECT']);
+  await px.close();
+  upstream.close();
+  const { existsSync } = await import('node:fs');
+  assert.equal(existsSync(px.dir), false, 'its socket dir goes with it');
 });
 
 test('a grader\'s answer: a whole score of 1-5, and a finding of one line, at most 200 characters, never key-like', () => {

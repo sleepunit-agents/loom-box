@@ -13,8 +13,9 @@
 //   2. up to N entries (LOOM_RUNTIME_REVIEW_LIMIT, default 200), taken in batches (`audit/take`) while the token
 //      has time left. Each is redacted by core and carries its producer's family, never its model;
 //   3. for each entry, graders from the families allowed to grade it, among the models the runtime can run now. A
-//      grader can run when its harness is logged in on loom's own box (the control plane's, a household owner's),
-//      its account has room for that model's window, and an image is there to run its CLI in:
+//      grader can run when the box's owner has built and pinned the grader image (grader.mjs: never an image an
+//      agent built), its harness is logged in on loom's own box (the control plane's, a household owner's), and its
+//      account has room for that model's window. Without the image nothing is taken ("no grader image"):
 //        - not the producer's family: two families where the household has them, else one;
 //        - a household of one family falls back to a different model of that family (same_family: true);
 //        - a conversation with someone other than the owner: only the families that already processed it
@@ -45,8 +46,8 @@ import { fileURLToPath } from 'node:url';
 import { deriveAccounts, hasRoom } from './accounts.mjs';
 import { CoreError, coreFrom, reviewFrom } from './core.mjs';
 import { deliver } from './delivery.mjs';
-import { GraderError, grade as gradeOnce } from './grader.mjs';
-import { credentialState, loginImage } from './logins.mjs';
+import { GraderError, grade as gradeOnce, graderImage } from './grader.mjs';
+import { credentialState } from './logins.mjs';
 import { fetchScorecards, providerOf, readModels, sinceDay, VENUE_KIND, VENUE_KINDS } from './models.mjs';
 import { boxOwner, householdOwners, membersOf } from './owners.mjs';
 import { pieceName, setting } from './piece.mjs';
@@ -133,11 +134,14 @@ function spawnReview(env, day) {
 
 /**
  * The graders the runtime can run now: each model in its list whose harness is logged in on loom's own box (a
- * household owner's), whose account there has room for the model's window, and whose CLI has an image to run in.
- * Answers {pool: [{model, harness, family, window?, image}], why: [lines]}.
+ * household owner's) and whose account there has room for the model's window, all in the one grader image the
+ * owner pinned (graderImage). Answers {pool: [{model, harness, family, window?, image}], why: [lines], noImage?}.
  */
-export function graderPool(env, { s = load(env), members = membersOf(env), models = readModels(env).list, nowMs = Date.now(), image = (agents) => loginImage(env, agents), cred = (h) => credentialState(env, h) } = {}) {
+export function graderPool(env, { s = load(env), members = membersOf(env), models = readModels(env).list, nowMs = Date.now(), image = () => graderImage(env), cred = (h) => credentialState(env, h) } = {}) {
   const why = [];
+  // The owner's pinned grader image, or no grading at all: never an agent's house image.
+  const img = image();
+  if (!img?.image) return { pool: [], why: [img?.why ?? 'no grader image'], noImage: true };
   const local = Object.entries(s.boxes ?? {}).find(([, b]) => b.local && !b.revoked);
   if (!local) return { pool: [], why: ['loom\'s own box isn\'t in the runtime\'s state'] };
   const [id, box] = local;
@@ -152,8 +156,6 @@ export function graderPool(env, { s = load(env), members = membersOf(env), model
     if (!hasRoom(acct, m.window)) { why.push(`${m.id}: ${acct.label} has no room`); continue; }
     const bad = cred(m.harness);
     if (bad) { why.push(`${m.id}: ${id}'s ${m.harness} login can't be used (${bad})`); continue; }
-    const img = image(acct.agents);
-    if (!img?.image) { why.push(`${m.id}: ${img?.why ?? 'no image to run its CLI in'}`); continue; }
     pool.push({ model: m.id, harness: m.harness, family: m.family, ...(m.window ? { window: m.window } : {}), image: img.image });
   }
   return { pool, why };
@@ -301,9 +303,9 @@ export async function runReview(env, o = {}) {
 
   async function grading() {
     const poolOf = o.pool ?? (() => graderPool(env));
-    let { pool, why } = poolOf();
+    let { pool, why, noImage } = poolOf();
     if (!pool.length) {
-      rec.nothing_graded = `no allowed family has room: ${why.join('; ') || 'the runtime can run no model'}`;
+      rec.nothing_graded = noImage ? why.join('; ') : `no allowed family has room: ${why.join('; ') || 'the runtime can run no model'}`;
       log(rec.nothing_graded);
       return;
     }
