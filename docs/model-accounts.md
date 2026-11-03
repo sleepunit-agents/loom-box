@@ -83,7 +83,15 @@ to those binaries. It does not log in for them.
   Code's stream-json `rate_limit_event` and Codex's `token_count` events (in the
   session files under the house's own `CODEX_HOME`) say how full each usage
   window is. A house reports them with
-  `loom runtime usage report --harness claude|codex`. The box reads none itself:
+  `loom runtime usage report --harness claude|codex`. A body the runtime's body
+  host starts reports too, when its turn ends: a `claude --bg` body writes no
+  stream-json, so the runner gives it a status line (`src/statusline.mjs`),
+  which Claude Code runs for a background session as well, with its
+  `rate_limits`; only those are kept, by session, in
+  `~/.local/state/loom-runtime/usage` (`LOOM_RUNTIME_USAGE_DIR`). A Codex body's
+  reading is the last `token_count` in its thread's rollout. Another body host
+  (shuttle's) can do the same with `loom runtime usage statusline` as the
+  status line and `usage report --harness claude --session <id>`. The box reads none itself:
   its shared login dir holds only the credential file. A house can report only
   for a login it was given. The owner-only rule bounds what a wrong reading can
   do: it's the owner's own agent, misreporting the owner's own account, which

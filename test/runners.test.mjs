@@ -29,13 +29,14 @@ const BRIEF = 'You are Art, in a DM with Loren.\nSECRET-ISH MESSAGE TEXT: what d
 
 test('Claude Code: a body starts with its brief on stdin (never argv), is found by its spawn token, and has a slot', () => {
   const h = harness();
-  const r = new ClaudeRunner({ claude: join(here, 'fake-claude.mjs'), jobsDir: join(h.D, 'jobs'), args: ['--dangerously-skip-permissions'], inboxDir: h.inbox, sleep: () => {} });
+  const r = new ClaudeRunner({ claude: join(here, 'fake-claude.mjs'), jobsDir: join(h.D, 'jobs'), args: ['--dangerously-skip-permissions'], inboxDir: h.inbox, usageDir: join(h.D, 'usage'), sleep: () => {} });
   const b = r.start({ brief: BRIEF, model: 'claude-sonnet-5', cwd: h.D, env: h.env, deny: ['mcp__x__send'] });
   assert.equal(b.harness, 'claude');
   assert.match(b.id, /^[0-9a-f]{8}$/);
   assert.equal(b.slot.harness, 'claude');
   const bg = h.argv().find((a) => a[0] === '--bg');
-  assert.deepEqual(bg, ['--bg', '--model', 'claude-sonnet-5', '--dangerously-skip-permissions', '--disallowedTools', 'mcp__x__send']);
+  assert.deepEqual(bg, ['--bg', '--model', 'claude-sonnet-5', ...r.statusLine(), '--dangerously-skip-permissions', '--disallowedTools', 'mcp__x__send']);
+  assert.equal(r.statusLine()[0], '--settings', 'its status line keeps its usage (t-1754)');
   assert.equal(JSON.stringify(h.argv()).includes('SECRET-ISH'), false);
   // Its brief, with the spawn token on line 2 so line 1 stays the brief's opening.
   const intent = JSON.parse(readFileSync(join(h.D, 'jobs', b.id, 'state.json'), 'utf-8')).intent.split('\n');

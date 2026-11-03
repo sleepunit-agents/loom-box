@@ -75,18 +75,40 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
   const packing = new Map(); // id -> {parts: [string], next}
   const heard = new Map();   // id -> Set of follow-up ids fed to it (each is fed once, however often it's sent)
   let acks = {};             // id -> [follow-up ids] fed since the last answered sync: sent until one is answered
+  const sentUsage = {};      // harness -> the last reading sent (JSON): the same one isn't sent twice
+  // Each turn that ended: its harness's own reading (runners.mjs, usage), through the house's `usage` path, as a house
+  // run-task's is. A body that had none (no status line yet, a rollout without token_count) sends nothing.
+  async function reportUsage(over) {
+    for (const t of over) {
+      let reading = null;
+      try { reading = runner(t.harness).usage?.(t.body) ?? null; } catch { reading = null; }
+      if (!reading) continue;
+      const sig = JSON.stringify(reading);
+      if (sentUsage[t.harness] === sig) continue;
+      try {
+        await client('usage', { harness: t.harness, reading: { ...reading, checked: reading.checked ?? Math.floor(now() / 1000) } });
+        sentUsage[t.harness] = sig;
+        log(`usage from ${t.id}: ${t.harness} ${Object.entries(reading.windows).map(([w, v]) => `${w} ${Math.round(v * 100)}%`).join(', ')}`);
+      } catch (e) { log(`couldn't report ${t.id}'s usage: ${String(e.message).split('\n')[0].slice(0, 200)}`); }
+    }
+  }
   let lastBusy = now();
   for (let beat = 0; beat < beats; beat++) {
     const bodies = {};
+    const turnsOver = [];
     for (const [id, b] of mine) {
       const r = runner(b.harness);
       let status = 'unknown';
       try { status = b.ended ? 'ended' : r.status({ id }); } catch { /* it can't say */ }
+      // A turn just over (it was working, or just started, and isn't now): its account's usage goes to the runtime.
+      if (['working', 'started'].includes(b.seen) && (status === 'idle' || status === 'ended')) turnsOver.push({ id, harness: b.harness, body: { id, ...(b.slot ? { slot: b.slot } : {}) } });
+      if (status !== 'unknown') b.seen = status;
       const slot = (() => { try { return r.slotOf({ id }); } catch { return null; } })();
       // What its inbox still holds (ids only): fed, never taken by its hook. The runtime keeps their text.
       const pending = (() => { try { return (r.inbox?.pending?.(id) ?? []).map((p) => p?.id).filter((k) => typeof k === 'string').slice(0, 64); } catch { return []; } })();
       bodies[id] = { harness: b.harness, status, ...(slot?.session ? { session: slot.session } : {}), feedable: !!r.inbox, pending };
     }
+    await reportUsage(turnsOver);
     const packed = {};
     for (const [id, p] of [...packing]) {
       // Nobody's taking it (its stop was dropped, the runtime moved on): given up, so the house can idle out.
@@ -123,7 +145,7 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
         try {
           if (q.resume) { written = restoreFiles(r, q.files); b = await r.resume({ harness: q.harness, session: q.resume }, o); } else b = await r.start(o);
         } catch (e) { for (const w of written) rmSync(w, { recursive: true, force: true }); throw e; }
-        mine.set(b.id, { harness: q.harness, ...(cv ? { cv, key: q.key } : {}) });
+        mine.set(b.id, { harness: q.harness, seen: 'started', ...(b.slot ? { slot: b.slot } : {}), ...(cv ? { cv, key: q.key } : {}) });
         done[rid] = { id: b.id };
         log(`started ${b.id} for ${rid}`);
       } catch (e) { done[rid] = { error: String(e.message).split('\n')[0].slice(0, 300) }; }
