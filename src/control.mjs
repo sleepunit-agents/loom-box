@@ -168,9 +168,15 @@ function mayHostValue(v) {
   return listOf(v, 'may host', AGENT_NAME, 40);
 }
 
+/**
+ * A house's task as anyone is shown it: a body host's one-time boot key never (houserunner.mjs, hostTask). Only the box
+ * that claims the house is handed its task whole.
+ */
+export const shownTask = (t) => (typeof t === 'string' ? t.replace(/(--host-key )[0-9a-f]+/g, '$1…') : t);
+
 function houseView(h) {
   const { tokenLabel: _t, ...rest } = h;
-  return rest;
+  return { ...rest, task: shownTask(rest.task) };
 }
 
 // ------------------------------------------------------------- the owner's

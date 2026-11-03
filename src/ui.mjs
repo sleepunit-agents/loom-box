@@ -8,10 +8,11 @@ import { join } from 'node:path';
 import { StateError, load, localBoxName, stateDir } from './state.mjs';
 import { sessionsBusy } from './busy.mjs';
 import { allowJoin, blockAllJoins, blockJoin, pendingJoins } from './enroll.mjs';
-import { addBox, assertBoxOwner, isBoxOwner, boxLabelOf, boxOfCall, boxUpdateNow, loginOver, factsOf, lendBox, list, loginCancel, loginCode, loginStart, loginView, primaryOf, remoteDown, remoteUp, revokeBox, serviceDown, serviceMove, serviceRestart, serviceUp, setAgent, setBoxOwner, setMayHost, setPrimary, up, down, LIVE } from './control.mjs';
+import { addBox, assertBoxOwner, isBoxOwner, boxLabelOf, boxOfCall, boxUpdateNow, loginOver, factsOf, lendBox, list, loginCancel, loginCode, loginStart, loginView, primaryOf, remoteDown, remoteUp, revokeBox, shownTask, serviceDown, serviceMove, serviceRestart, serviceUp, setAgent, setBoxOwner, setMayHost, setPrimary, up, down, LIVE } from './control.mjs';
 import { LOGIN_HARNESSES } from './logins.mjs';
 import { ownCommit, swapCommand } from './version.mjs';
 import { stateAccounts } from './accounts.mjs';
+import { deliveryNotices } from './delivery.mjs';
 import { loomStore } from './store.mjs';
 import { asks as gateAsks, answer as gateAnswer, gatesPage, mergePeople, status as gatesStatus, proposals as gateProposals } from './gates.mjs';
 import { GRANTS, KEY as GRANTS_KEY, grantsProblem, setPiece } from './grants.mjs';
@@ -110,7 +111,8 @@ export function manifest(env) {
     // ...and a person a body proposes for an agent's gates (gates.mjs): the household owner's to allow or deny.
     asks: [...pendingJoins(s).slice(0, 5).map((j) => joinAsk(j)), ...permsAsks(env)],
     agents: agentReports(s, Date.now(), { ...reportedBusy(s), ...sessionsBusy(join(stateDir(env), 'session-cpu.json')) }),
-    notices: boxNotices(s),
+    // A delivery the runtime gave up on (its body never started, after its retries): the owner hears of it.
+    notices: [...deliveryNotices(env), ...boxNotices(s)].sort((x, y) => Date.parse(y.at) - Date.parse(x.at)).slice(0, 20),
   };
 }
 
@@ -237,7 +239,7 @@ function wakeOf(task) {
 
 /** What a task house is doing, in a line: a wake's note (the clock puts it in the prompt), else the task's start. */
 export function taskLine(task) {
-  const w = wakeOf(task);
+  const w = wakeOf(shownTask(task));
   if (RESUMED_HEAD.test(w.t)) {
     // Never the approval's or request's id: the resumed agent needs it, Jonathan doesn't.
     const r = w.note !== undefined ? RESUMED_NOTE.exec(w.note.trim()) : null;

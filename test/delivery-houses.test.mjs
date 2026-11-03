@@ -93,10 +93,10 @@ test('a delivered body is a session in its agent\'s own house: placed, woken by 
   const local = () => Object.keys(load(env).boxes).find((k) => load(env).boxes[k].local);
   try {
     const msg = (id, place, text) => JSON.stringify({ source: 'slack', id, agent: 'art', venue: 'slack', place, label: 'Loren (DM)', from: { kind: 'person', slug: 'loren' }, kind: 'message', at: new Date().toISOString(), text });
-    // No box reports Claude logged in: no house is asked for, and the body is failed, saying why.
+    // No box reports Claude logged in: no house is asked for, and the body couldn't start, saying why (it's tried again later).
     const none = JSON.parse((await run(['deliver'], msg('1.1', 'dm:U0', 'anyone?'), env)).stdout);
     assert.equal(none.seq, 1);
-    await until(() => loadConv(env, none.conversation)?.outcomes && Object.values(loadConv(env, none.conversation).outcomes)[0]?.body === 'failed');
+    await until(() => /no body could start/.test(Object.values(loadConv(env, none.conversation)?.outcomes ?? {})[0]?.reason ?? ''));
     assert.match(Object.values(loadConv(env, none.conversation).outcomes)[0].reason, /no box owned by art's owner reports claude logged in/);
     assert.deepEqual(Object.keys(load(env).houses), []);
 
@@ -377,4 +377,30 @@ test('a house that\'s stopping is never handed a body, however fresh its host\'s
   await assert.rejects(hr.warm('art'), /didn't start its body host/);
   assert.deepEqual(asked, ['art'], 'a new house was asked for, not the stopping one');
   assert.equal(hostOf(env, 'art').house, 'h-11');
+});
+
+test('a body host\'s boot key never shows: not in list, down or the page, only in the house\'s own record its box claims (t-1744)', async () => {
+  const { list, down, up } = await import('../src/control.mjs');
+  const { hostTask } = await import('../src/houserunner.mjs');
+  const { manifest, houseName } = await import('../src/ui.mjs');
+  const D = scratch('rt-bootkey-');
+  const env = { PATH: process.env.PATH, HOME: D, LOOM_HOME: join(D, 'loomhome'), LOOM_BOX_LOCAL_NAME: 'one', LOOM_BOX_HOME: join(D, 'state'), LOOM_BOX_DATA: join(D, 'data') };
+  mkdirSync(env.LOOM_HOME, { recursive: true });
+  setAgent(env, { now: () => new Date() }, { agent: 'art', repo: 'https://example.com/art.git' });
+  const key = 'ab'.repeat(24);
+  const fx = { now: () => new Date() };
+  const r = up(env, fx, { kind: 'owner' }, { agent: 'art', box: Object.keys(load(env).boxes).find((k) => load(env).boxes[k].local), task: hostTask(env, key) });
+  assert.equal(JSON.stringify(r).includes(key), false, 'up\'s answer');
+  assert.equal(load(env).houses[r.id].task.includes(key), true, 'the record keeps it, for its box\'s claim');
+  const shown = list(env, { kind: 'owner' }).houses.find((h) => h.id === r.id);
+  assert.equal(shown.task, 'loom-runtime body-host --piece box --host-key …');
+  assert.equal(JSON.stringify(down(env, fx, { kind: 'owner' }, { id: r.id })).includes(key), false, 'down\'s answer');
+  assert.equal(houseName(load(env).houses[r.id]).includes(key), false);
+  assert.equal(JSON.stringify(manifest(env)).includes(key), false);
+  // The CLI's list, as the owner runs it.
+  const cli = join(here, '..', 'src', 'cli.mjs');
+  const out = spawnSync(process.execPath, [cli, 'list'], { env, encoding: 'utf-8' });
+  assert.equal(out.status, 0, out.stderr);
+  assert.ok(out.stdout.includes(r.id));
+  assert.equal(out.stdout.includes(key.slice(0, 10)), false);
 });
