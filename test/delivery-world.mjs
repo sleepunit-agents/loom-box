@@ -69,8 +69,11 @@ export function fakeRunner(log, root, harness = 'claude', { inboxDir } = {}) {
     alive: (b) => !r.dead.has(b.id),
     slotOf: (b) => (session[b.id] ? { harness, session: session[b.id] } : null),
     sessionFiles(slot) { return { keep: slot && existsSync(tfile(slot.session)) ? [{ root: 'sess', rel: `${slot.session}.jsonl` }] : [], drop: [] }; },
-    /** The test's hand: this body's turn is over. */
-    finish(ref) { state[ref.split(':')[1]] = 'idle'; },
+    /** How a turn went, as its harness says (runners.mjs, turn): what finish(ref, turn) was given, else nothing. */
+    turns: {},
+    turn: (b) => r.turns[b.id] ?? null,
+    /** The test's hand: this body's turn is over (and, given, how it went). */
+    finish(ref, turn) { state[ref.split(':')[1]] = 'idle'; if (turn) r.turns[ref.split(':')[1]] = turn; },
     transcript: tfile,
   };
   return r;

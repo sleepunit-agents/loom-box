@@ -17,6 +17,9 @@
 //   roots                                  → {name: dir}: where `keep` paths are relative to (and restored into).
 //   usage(body)                            → how full its account was at its last turn ({windows, resets, checked}),
 //                                            or null: what the body host reports when a turn ends (t-1754).
+//   turn(body)                             → how its turn went, once it's over: {failed, worked, error?} (worked: it
+//                                            did any tool work; null when the harness doesn't say), or null. What
+//                                            the loop check reads (loops.mjs, t-1763).
 //
 // Two harnesses today, ported from the bridges piece's runners (shuttle/runner.py, shuttle/runners/codex.py):
 // Claude Code as `claude --bg`, and Codex as `codex exec --json`. Feeding goes through a body's inbox: the layout
@@ -182,6 +185,18 @@ export class ClaudeRunner {
     return 'working';
   }
 
+  /**
+   * Its job's state says failed; its timeline (<jobs>/<id8>/timeline.jsonl) has a line for what it was doing at each
+   * step while it worked ("Reading …", "Running …"): any such line is tool work.
+   */
+  turn(body) {
+    const job = this.job(body.id);
+    if (!job || !['done', 'stopped', 'failed', 'blocked'].includes(job.state)) return null;
+    const tl = lines(join(this.jobsDir, String(body.id).slice(0, 8), 'timeline.jsonl'));
+    const worked = tl.length ? tl.some((l) => l.state === 'working' && typeof l.detail === 'string' && l.detail.trim() !== '') : null;
+    return { failed: job.state === 'failed', worked, ...(job.state === 'failed' && typeof job.detail === 'string' && job.detail ? { error: job.detail.slice(0, 200) } : {}) };
+  }
+
   slotOf(body) {
     const session = body.slot?.session ?? this.job(body.id)?.sessionId;
     return session ? { harness: 'claude', session } : null;
@@ -291,6 +306,16 @@ export class CodexRunner {
     const over = ev.some((e) => e.type === 'turn.completed' || e.type === 'turn.failed');
     if (this.alive(body.id) && !over) return 'working';
     return over ? 'idle' : 'ended';
+  }
+
+  /** Its events: turn.failed (and its error), and any tool item (a command, an MCP call, a file change, a search). */
+  turn(body) {
+    const ev = this.events(body.id);
+    const end = ev.find((e) => e.type === 'turn.completed' || e.type === 'turn.failed');
+    if (!end) return null;
+    const worked = ev.some((e) => e.type === 'item.completed' && ['command_execution', 'mcp_tool_call', 'file_change', 'web_search'].includes(e.item?.type));
+    const err = end.type === 'turn.failed' ? String(end.error?.message ?? end.error ?? '').slice(0, 200) : '';
+    return { failed: end.type === 'turn.failed', worked, ...(err ? { error: err } : {}) };
   }
 
   slotOf(body) {

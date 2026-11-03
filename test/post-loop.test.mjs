@@ -104,51 +104,6 @@ test('a post that fails while its body is still mid-turn is fed to it, and nothi
   delete process.env.FAKE_SEND;
 });
 
-const AGENT = { from: { kind: 'agent', id: 'mark' } };
-
-test('the backstop: at most 6 bodies in an hour for a conversation\'s machine messages; past it, one notice, it waits, and starts once the hour is over', async () => {
-  const { w } = setup();
-  const cv = cvOf('art', 'slack', 'dm:CAP');
-  const bodies = () => w.log.filter((l) => l[0] === 'start' || l[0] === 'resume').length;
-  for (let i = 1; i <= 6; i++) {
-    const a = await deliver(w.env, w.msg('dm:CAP', `m${i}`, AGENT), w.o);
-    assert.match(a.body, /^(started|resumed)$/, `message ${i}: ${JSON.stringify(a)}`);
-    w.runner.finish(loadConv(w.env, cv).body);
-    w.clock.advance(60_000);
-  }
-  assert.equal(bodies(), 6);
-  const seventh = await deliver(w.env, w.msg('dm:CAP', 'm7', AGENT), w.o);
-  assert.equal(seventh.body, 'queued');
-  assert.match(seventh.reason, /6 bodies started for this conversation in the last hour for no person's message \(at most 6\)/);
-  const notices = () => deliveryNotices(w.env, w.clock.now().getTime()).filter((x) => x.meta.includes(cv) && /bodies in an hour/.test(x.text));
-  assert.equal(notices().length, 1);
-  // The tick tries again; still within the hour: nothing starts, no second notice.
-  w.clock.advance(10 * 60_000);
-  await tick(w.env, w.o);
-  assert.equal(bodies(), 6);
-  assert.equal(notices().length, 1);
-  // The first start an hour old: it goes.
-  w.clock.advance(45 * 60_000);
-  await tick(w.env, w.o);
-  assert.equal(bodies(), 7, 'started once the hour was over');
-  assert.equal(loadConv(w.env, cv).queue.length, 0);
-});
-
-test('the backstop never holds back a person: a lively chat (each reply after the turn is over) gets every body', async () => {
-  const { w } = setup();
-  const cv = cvOf('art', 'slack', 'dm:CHAT');
-  for (let i = 1; i <= 12; i++) {
-    const a = await deliver(w.env, w.msg('dm:CHAT', `m${i}`), w.o);
-    assert.match(a.body, /^(started|resumed)$/, `message ${i}: ${JSON.stringify(a)}`);
-    w.runner.finish(loadConv(w.env, cv).body);
-    w.clock.advance(60_000);
-  }
-  // Six machine starts in the hour hold back the seventh; a person's message still goes.
-  for (let i = 1; i <= 6; i++) { await deliver(w.env, w.msg('dm:CHAT', `a${i}`, AGENT), w.o); w.runner.finish(loadConv(w.env, cv).body); }
-  assert.equal((await deliver(w.env, w.msg('dm:CHAT', 'a7', AGENT), w.o)).body, 'queued');
-  assert.match((await deliver(w.env, w.msg('dm:CHAT', 'me again'), w.o)).body, /^(started|resumed)$/);
-});
-
 test('a note an older runtime left on a queue (note-…, no mark) starts no body either, and rides with the next message', async () => {
   const { w, bodies, ticks } = setup();
   await deliver(w.env, w.msg('dm:OLD', 'hi'), w.o);
@@ -165,11 +120,4 @@ test('a note an older runtime left on a queue (note-…, no mark) starts no body
   assert.equal(bodies().length, 2);
   assert.ok(bodies().at(-1).at(-1).includes(text));
   delete process.env.FAKE_SEND;
-});
-
-test('the backstop is a setting (LOOM_RUNTIME_STARTS_PER_HOUR)', async () => {
-  const { w } = setup({ LOOM_RUNTIME_STARTS_PER_HOUR: '2' });
-  const cv = cvOf('art', 'slack', 'dm:CAP2');
-  for (let i = 1; i <= 2; i++) { await deliver(w.env, w.msg('dm:CAP2', `m${i}`, AGENT), w.o); w.runner.finish(loadConv(w.env, cv).body); }
-  assert.equal((await deliver(w.env, w.msg('dm:CAP2', 'm3', AGENT), w.o)).body, 'queued');
 });
