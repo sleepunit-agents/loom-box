@@ -108,6 +108,7 @@ import { bodyKeyFor, runBodyHost } from './bodyhost.mjs';
 import { runnerFor } from './runners.mjs';
 import { applyUpgrade, carrySettings, loadCarried, recoverUpgrade } from './version.mjs';
 import { gatesCli, grantsCli, policyCli } from './perms-cli.mjs';
+import { startStatusReporter } from './statusreport.mjs';
 
 /**
  * Whether this box's houses should outlive it: LOOM_BOX_ON_EXIT=keep|stop says so; else it's whether the systemd
@@ -350,6 +351,8 @@ async function main(argv, env) {
         const caller = { kind: 'piece', subject: localBoxName(env) };
         client = { async call(path, body) { const r = api(env, effects, { caller, path, body }); if (r.status !== 200) throw new BoxError(`${path}: ${r.body.error}`); return r.body; } };
         loomUrl = setting(env, 'LOOM_URL') || 'http://127.0.0.1:8787/mcp';
+        // The off-box status board, when the owner set one (statusreport.mjs): each agent's board, every few seconds.
+        startStatusReporter(env, effects);
       } else {
         const c = loadConfig(env);
         client = remoteClient(c.url, readFileSync(`${stateDir(env)}/credential`, 'utf-8').trim(), fetch, c.piece);
