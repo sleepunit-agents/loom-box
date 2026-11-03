@@ -257,8 +257,31 @@ test('the control plane: a house\'s build from its box\'s report, the current on
   // Another agent's image is never art's build.
   ok(api(env, fx, { caller: box, path: 'build-report', body: { id, current: 'loom-house-mark:ccccccccccccdddddddd' } }));
   assert.equal(load(env).builds.art.id, NEW);
+  // A box that may no longer host art (the owner narrowed it): no repo secret, no say in art's current build, and its
+  // report of a house's build is no build that ran for art.
+  ok(api(env, fx, { caller: owner, path: 'may-host', body: { name: 'one', mayHost: 'mark' } }));
+  const n = secrets.length;
+  assert.equal(api(env, fx, { caller: box, path: 'build-check', body: { id } }).status, 403);
+  assert.equal(secrets.length, n, 'the repo secret wasn\'t asked for');
+  assert.equal(api(env, fx, { caller: box, path: 'build-report', body: { id, current: 'loom-house-art:999999999999aaaaaaaa' } }).status, 403);
+  update(env, (s) => { s.houses[task].claimedAt = new Date(Date.now() + 60_000).toISOString(); delete s.houses[task].build; s.houses[task].state = 'starting'; });
+  ok(api(env, fx, { caller: box, path: 'report', body: { id: task, state: 'running', build: 'loom-house-art:999999999999aaaaaaaa' } }));
+  assert.equal(load(env).builds.art.id, NEW, 'a box that may not host art never moves its current build');
+  assert.equal(load(env).houses[task].build, undefined);
+  ok(api(env, fx, { caller: owner, path: 'may-host', body: { name: 'one', mayHost: '*' } }));
+  // A house's own build, once known, is never overwritten by a later report.
+  ok(api(env, fx, { caller: box, path: 'build-report', body: { id, house: NEW } }));
+  assert.equal(load(env).houses[id].build, OLD);
+  // The agent's repo secret changed since the house's claim: its check is refused, and nothing is handed out.
+  ok(api(env, fx, { caller: owner, path: 'set-agent', body: { agent: 'art', repo: 'https://example.com/art.git', repoSecret: 'gh-art-2' } }));
+  const m = secrets.length;
+  const changed = api(env, fx, { caller: box, path: 'build-check', body: { id } });
+  assert.equal(changed.status, 409);
+  assert.match(changed.body.error, /another repo, house file, branch or repo secret/);
+  assert.equal(secrets.length, m);
+  assert.equal(api(env, fx, { caller: box, path: 'build-report', body: { id, current: NEW } }).status, 409);
   // The owner points art at another house file: the current build isn't known until a box says.
-  ok(api(env, fx, { caller: owner, path: 'set-agent', body: { agent: 'art', repo: 'https://example.com/art.git', repoSecret: 'gh-art', houseFile: 'house2/house.json' } }));
+  ok(api(env, fx, { caller: owner, path: 'set-agent', body: { agent: 'art', repo: 'https://example.com/art.git', repoSecret: 'gh-art-2', houseFile: 'house2/house.json' } }));
   assert.equal(load(env).builds?.art, undefined);
   assert.equal(outdatedHouse(load(env), id), false);
 });

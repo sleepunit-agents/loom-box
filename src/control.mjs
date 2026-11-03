@@ -541,6 +541,8 @@ export function claim(env, effects, caller, { id }) {
       h.logins = logins;
       const repoAuth = a.repoSecret ? effects.secret(a.repoSecret, { agent: h.agent, house: h.id }) : null;
       h.state = 'starting'; h.tokenLabel = label; h.updated = now(effects); h.claimedAt = h.updated;
+      // What it was made from: a build check of this house checks this repo, with this secret, and nothing since.
+      h.made = madeOf(a);
       const key = stateKeyOf(h);
       const saved = key ? stateMeta(env, s, key) : undefined;
       // The state itself comes after, a part at a time (state-part): just its shape here.
@@ -585,6 +587,23 @@ function noteBuild(s, agent, tag, at) {
   if (cur && Date.parse(cur.at) > Date.parse(at)) return;
   (s.builds ??= {})[agent] = { id: tag, at };
 }
+/** How an agent's house is made, as a check of its repo needs it (and as its claim saw it). */
+const madeOf = (a) => ({ repo: a.repo, houseFile: a.houseFile || 'house/house.json', branch: a.branch ?? null, repoSecret: a.repoSecret ?? null });
+const sameMade = (x, y) => !!x && !!y && ['repo', 'houseFile', 'branch', 'repoSecret'].every((k) => x[k] === y[k]);
+/**
+ * A running body host's house on this box, of an agent this box may host, made the way the agent's house is made now:
+ * the only house a box may check the repo of, or say the agent's current build from.
+ */
+function checkableHouse(env, s, caller, id) {
+  const h = s.houses[id];
+  if (!h || h.box !== caller.subject || h.state !== 'running' || !isHostTask(h.task)) fail(`no running body host's house ${id} for this box`, 404);
+  if (!mayHost(s.boxes[caller.subject], h.agent, membersOf(env))) fail(`this box may not host ${h.agent}`, 403);
+  const a = s.agents[h.agent];
+  if (!a) fail(`${h.agent} has no house config`, 409);
+  if (!sameMade(h.made, madeOf(a))) fail(`${id} was made from another repo, house file, branch or repo secret than ${h.agent}'s house is now: its next house says its build`, 409);
+  return { h, a };
+}
+
 /** A body host's house: its task is the runtime's own (houserunner.mjs, hostTask). */
 export const isHostTask = (t) => typeof t === 'string' && /^loom-runtime body-host --piece [a-z][a-z0-9-]{0,39} --host-key /.test(t);
 /** Whether a house runs an older image than its agent's current build. Unknown either way: not outdated. */
@@ -602,12 +621,11 @@ export function outdatedHouse(s, id) {
 export function buildCheck(env, effects, caller, { id }) {
   return update(env, (s) => {
     boxOf(s, caller);
-    const h = s.houses[id];
-    if (!h || h.box !== caller.subject || h.state !== 'running' || !isHostTask(h.task)) fail(`no running body host's house ${id} for this box`, 404);
-    const a = s.agents[h.agent];
-    if (!a) fail(`${h.agent} has no house config`, 409);
-    const repoAuth = a.repoSecret ? effects.secret(a.repoSecret, { agent: h.agent, house: h.id }) : null;
-    return { id, agent: h.agent, repo: a.repo, houseFile: a.houseFile || 'house/house.json', branch: a.branch ?? null, repoAuth, known: !!h.build };
+    const { h } = checkableHouse(env, s, caller, id);
+    // The repo and secret its claim was made with (the same as the agent's now, or refused above).
+    const m = h.made;
+    const repoAuth = m.repoSecret ? effects.secret(m.repoSecret, { agent: h.agent, house: h.id }) : null;
+    return { id, agent: h.agent, repo: m.repo, houseFile: m.houseFile, branch: m.branch, repoAuth, known: !!h.build };
   });
 }
 
@@ -615,8 +633,9 @@ export function buildCheck(env, effects, caller, { id }) {
 export function buildReport(env, effects, caller, { id, house, current }) {
   return update(env, (s) => {
     boxOf(s, caller);
-    const h = s.houses[id];
-    if (!h || h.box !== caller.subject || !LIVE.has(h.state)) fail(`no house ${id} for this box`, 404);
+    // Only a running body host's house of an agent this box may host, made as the agent's house is now (checkableHouse).
+    const { h } = checkableHouse(env, s, caller, id);
+    // Its own image, once: never overwritten by a later report.
     const own = buildTag(house, h.agent);
     if (own && !h.build) h.build = own;
     const cur = buildTag(current, h.agent);
@@ -640,8 +659,9 @@ export function report(env, effects, caller, { id, state, exit, log, build }) {
     if (!NEXT[h.state]?.has(state)) fail(`house ${id} can't go from ${h.state} to ${state}`, 409);
     // The image the box just ran it from (box.mjs, image): this house's build, and, as the newest build its agent's
     // repo makes, the agent's current one (unless a box has said a newer one since this house's checkout).
+    // Only a box that may host the agent, for a house it claimed (and so built): a build that actually ran.
     const tag = buildTag(build, h.agent);
-    if (state === 'running' && tag) { h.build = tag; noteBuild(s, h.agent, tag, h.claimedAt ?? now(effects)); }
+    if (state === 'running' && tag && h.claimedAt && mayHost(s.boxes[caller.subject], h.agent, membersOf(env))) { h.build ??= tag; noteBuild(s, h.agent, tag, h.claimedAt); }
     // A house asked to stop stays "stopping" while it's still up.
     if (!(h.state === 'stopping' && state === 'running')) h.state = state;
     h.updated = now(effects);
