@@ -63,6 +63,12 @@
 // From a house (its loom token):
 //   loom runtime usage report --harness claude|codex < output.jsonl    how full its account is, from the harness's run
 //                                                                      output (stream-json, or a Codex rollout)
+// Permissions (agent-runtime.md, section 6; the runtime is the grants authority, and holds the gates):
+//   loom runtime grants ask | list [--json] | seed [--dry-run] [--force] | set <piece> <agents|*> [--paths p,p] | paired <a> <b>
+//   loom runtime gates people --agent a | status | propose --agent a --slug S --entry J … | export --json
+//   loom runtime gates import [--force]                  the owner's run: loom shuttle gates export --json | loom runtime gates import
+//   loom runtime gates follow-merge <from> <into>        the owner's: after a card merge, every agent's gates follow
+//   loom runtime secrets-map --json                      which secret each agent's houses get (for: | loom secrets policy houses-import)
 // For loom (the piece contract):
 //   loom runtime ui --json | ui page --json | ui act --json | api --json
 //   loom runtime bundle export | bundle import [--force]       its part of loom's bundle
@@ -74,7 +80,7 @@ import { addBox, api, down, list, remoteDown, remoteUp, revokeBox, setAgent, set
 import { realEffects } from './effects.mjs';
 import { act, manifest, page } from './ui.mjs';
 import { askToJoin, BoxError, joinLoom, loadConfig, packState, POLL_MS, remoteClient, restoreState, runner, runMode } from './box.mjs';
-import { localBoxName, renameLocal, stateDir } from './state.mjs';
+import { load as loadState, localBoxName, renameLocal, stateDir } from './state.mjs';
 import { exportPart, importPart } from './bundle.mjs';
 import { pieceName, setting } from './piece.mjs';
 import { accountsFrom } from './accounts.mjs';
@@ -87,6 +93,7 @@ import { deliver, listConvs, post, send, tick } from './delivery.mjs';
 import { runBodyHost } from './bodyhost.mjs';
 import { runnerFor } from './runners.mjs';
 import { applyUpgrade, carrySettings, loadCarried, recoverUpgrade } from './version.mjs';
+import { gatesCli, grantsCli } from './perms-cli.mjs';
 
 /**
  * Whether this box's houses should outlive it: LOOM_BOX_ON_EXIT=keep|stop says so; else it's whether the systemd
@@ -181,7 +188,7 @@ async function main(argv, env) {
       const sub = rest[0] === '--json' ? '' : rest[0];
       if (sub === '') return out(manifest(env));
       if (sub === 'page') return out(page(env, JSON.parse(await readStdin())));
-      if (sub === 'act') return out(act(env, realEffects(env), JSON.parse(await readStdin()), setting(env, 'PUBLIC_URL')));
+      if (sub === 'act') return out(await act(env, realEffects(env), JSON.parse(await readStdin()), setting(env, 'PUBLIC_URL')));
       throw new Fail(USAGE, 2);
     }
     case 'api': {
@@ -382,6 +389,19 @@ async function main(argv, env) {
       return;
     }
     case 'models': return models(rest, env, json);
+    case 'grants': return grantsCli(rest, env);
+    case 'secrets-map': {
+      // Which secret each agent's houses got from the runtime's own map, for the secrets piece's policy to take over
+      // (agent-runtime.md, section 6, Secrets): loom runtime secrets-map --json | loom secrets policy houses-import.
+      const s = loadState(env);
+      const m = {};
+      for (const [agent, a] of Object.entries(s.agents ?? {})) {
+        const names = [...Object.values(a.secrets ?? {}).filter((v) => typeof v === 'string' && !v.startsWith('sub:')), ...(a.repoSecret ? [a.repoSecret] : [])];
+        if (names.length) m[agent] = [...new Set(names)].sort();
+      }
+      return out(m);
+    }
+    case 'gates': return gatesCli(rest, env);
     case 'accounts': {
       const a = accountsFrom(env);
       if (rest[0] === 'usage') {
@@ -590,8 +610,8 @@ if (isMain) {
   main(process.argv.slice(2), process.env).then(
     () => {},
     (err) => {
-      process.stderr.write(`loom ${/loom-box$/.test(process.argv[1] ?? '') ? 'box' : 'runtime'}: ${err.message}\n`);
-      process.exit(err instanceof Fail ? err.code : 1);
+      if (err.message) process.stderr.write(`loom ${/loom-box$/.test(process.argv[1] ?? '') ? 'box' : 'runtime'}: ${err.message}\n`);
+      process.exit(typeof err.code === 'number' ? err.code : 1);
     },
   );
 }

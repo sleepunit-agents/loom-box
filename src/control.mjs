@@ -520,7 +520,7 @@ export function claim(env, effects, caller, { id }) {
         // A mapping from before the brokers went (sub:<provider>): nothing is issued; the house file's logins say
         // which of the box's own logins it uses.
         if (SUB_SOURCE.test(from)) continue;
-        secrets[as] = effects.secret(from);
+        secrets[as] = effects.secret(from, { agent: h.agent, house: h.id });
       }
       // Which of this box's logins the house may have mounted: logged in here (the box's own report), granted to
       // the agent (loginsOf), and only on a box its owner owns. A box lent to the agent runs its work, not on its
@@ -528,7 +528,7 @@ export function claim(env, effects, caller, { id }) {
       const members = membersOf(env);
       const logins = LOGIN_NAMES.filter((k) => mayUseLogin(s.boxes[caller.subject], a, h.agent, k, members));
       h.logins = logins;
-      const repoAuth = a.repoSecret ? effects.secret(a.repoSecret) : null;
+      const repoAuth = a.repoSecret ? effects.secret(a.repoSecret, { agent: h.agent, house: h.id }) : null;
       h.state = 'starting'; h.tokenLabel = label; h.updated = now(effects);
       const key = stateKeyOf(h);
       const saved = key ? stateMeta(env, s, key) : undefined;
@@ -1246,6 +1246,11 @@ export function api(env, effects, { caller, path, body }) {
       if (caller.kind !== 'agent') fail('send is a body\'s, as its own agent', 403);
       return import('./delivery.mjs').then((m) => m.send(env, { conversation: b.conversation, text: b.text, key: b.key }, { caller, detach: true }))
         .then((r) => ({ status: r.accepted ? 200 : 409, body: r }), apiError);
+    }
+    // The runtime's remote CLI for an agent's bodies (loom's `run` path): its own agent's gates, and proposing a person.
+    if (path === 'run') {
+      if (caller.kind !== 'agent') fail('run is a body\'s, as its own agent (the owner uses `loom runtime` at loom\'s machine)', 403);
+      return import('./gates-api.mjs').then((m) => ({ status: 200, body: m.runFor(env, caller, b.argv) })).catch(apiError);
     }
     if (path === 'up') return { status: 200, body: up(env, effects, caller, b) };
     if (path === 'down') return { status: 200, body: down(env, effects, caller, b) };

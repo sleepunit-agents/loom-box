@@ -267,6 +267,32 @@ Anything addressed to an agent arrives through core's `deliver`, which runs this
 - **Answering:** a body pipes its message to `loom runtime send --conversation <cv>`, which goes through the piece API as its own agent with its run key. Only the body holding the conversation now can speak in it. It answers `{accepted, ref}` at once, and the runtime then runs the venue's `send` with its full 15 s. It retries only when the adapter answered no, never after a timeout, because a post that timed out may have landed. The reply turn is recorded as `answered` or `failed`, and a failure goes back to the body through its inbox.
 - **Every end leaves nothing in the clear:** a body that ends is either packed into a slot or has its harness's session files deleted.
 
+## Permissions
+
+The runtime is the household's grants authority (loom docs/specs/agent-runtime.md, section 6). It offers `grants`,
+so core asks `loom-runtime grants ask` ({agent, piece, path} on stdin, 2 s) before an agent's call to any piece, a
+venue render as the agent, and a delivery a piece makes for an agent. Owner calls never ask. The grants are one
+owner-written document (`grants`/`household` in the runtime's store): which agent may use which piece and path, and
+who may relay to whom (from household.json's `relay`). Until it's seeded, every ask is allowed and each piece
+decides by its own list, as before.
+
+    loom runtime grants seed [--dry-run]     each piece's own *_AGENTS list imported (others: every agent), and the relay pairs
+    loom runtime grants list | set <piece> <agents|*> [--paths p,p] | paired <from> <to>
+
+**Gates** (who a platform id is, and what each person may do with each agent) are the runtime's too: collection
+`gates`, one document per agent, each entry keyed by the person's card slug. Importing or allowing someone ensures
+their person card in core (`POST /api/loom/people/ensure`); merging two entries merges their cards and every agent's
+gates follow. A body's proposal (`piece-call runtime propose-person …`, or shuttle's, which hands it here) waits in
+the Inbox for the owner's Allow or Deny. The bridges read their gates through shuttle, which answers from here.
+
+    loom shuttle gates export --json | loom runtime gates import     the owner's run, once
+    loom runtime gates status | people --agent a | export --json | follow-merge <from> <into>
+
+**Secrets:** the runtime says where a secret lands in a house (an agent's `--secret as=from`); the secrets piece
+decides whether the agent may have it (`loom secrets may <agent> <name>`), and hands it over with `issue` to the
+runtime's own process. No environment flag unlocks reading. `loom runtime secrets-map --json | loom secrets policy
+houses-import` moves the old map's answers into the secrets policy.
+
 ## Model choice
 
 ```bash

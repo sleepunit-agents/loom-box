@@ -12,6 +12,8 @@
 //                                      the venues registry, as core keeps it (conversations.md, "Venues"; agent-runtime.md,
 //                                      "Outbound"). A piece reads only its own store, so the runtime asks core, never the
 //                                      other pieces' files; a venue's send runs as core answered its argv.
+//   POST /api/loom/people/ensure, /people/merge   a person's card, for the gates (person-cards.md; gates.mjs)
+//   POST /api/loom/deliver             a delivery the runtime makes itself (an allowed proposal's follow-up)
 // The turn write carries `key` ("<source>:<id>", loom#426): the same key and turn answer the first write.
 import { readFileSync } from 'node:fs';
 import { setting } from './piece.mjs';
@@ -47,6 +49,11 @@ export function coreFrom(env, { fetchImpl = fetch, timeoutMs = 5000 } = {}) {
       return { conversation: out.conversation, seq: out.seq };
     },
     audit: (a) => post('audit', a),
+    // A person's card (person-cards.md, "Ensure" and "Merge"): the gates' seam (gates.mjs).
+    ensure: (b) => post('people/ensure', b),
+    merge: (b) => post('people/merge', b),
+    // A delivery the runtime itself makes (a gate's follow-up relay): core's deliver route, as the runtime.
+    deliver: (b) => post('deliver', b),
     venues: async () => venuesOf(await call('GET', 'venues')),
   };
 }

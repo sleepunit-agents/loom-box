@@ -95,6 +95,22 @@
     "strangers": [
       "join-request",
       "join-poll"
-    ]
+    ],
+    "grants": [
+      "loom-runtime",
+      "grants",
+      "ask"
+    ],
+    "store": {
+      "grants": {
+        "writers": "owner"
+      },
+      "gates": {
+        "writers": "owner"
+      },
+      "gate-proposals": {
+        "writers": "piece"
+      }
+    }
   }
 }
