@@ -67,9 +67,9 @@
 //   loom runtime review status [--json]                                the schedule and the last runs (counts only)
 // From a house (its loom token):
 //   loom runtime usage report --harness claude|codex < output.jsonl    how full its account is, from the harness's run
+//                                                                      output (stream-json, or a Codex rollout)
 //   loom runtime usage report --harness claude --session <id>         … from a Claude session's status line (usage statusline)
 //   loom runtime usage statusline                                      a Claude status line command: keeps its rate limits
-//                                                                      output (stream-json, or a Codex rollout)
 // Permissions (agent-runtime.md, section 6; the runtime is the grants authority, and holds the gates):
 //   loom runtime grants ask | list [--json] | seed [--dry-run] [--force] | set <piece> <agents|*> [--paths p,p] | paired <a> <b>
 //   loom runtime gates people --agent a | status | propose --agent a --from w --stdin < proposal | export --json
