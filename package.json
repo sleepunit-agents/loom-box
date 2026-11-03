@@ -92,16 +92,6 @@
         "name": "LOOM_RUNTIME_RELAY_HEADS_UP",
         "label": "A relay thread this long is a heads-up",
         "hint": "messages in one thread within a day, on loom's Inbox (default 8); never a stop"
-      },
-      {
-        "name": "LOOM_RUNTIME_STATUS_URL",
-        "label": "An off-box status board the runtime reports to",
-        "hint": "its report endpoint, e.g. https://status.example.com/api/report: each agent's bridges from its now board, every 10 s; unset: none"
-      },
-      {
-        "name": "LOOM_RUNTIME_STATUS_TOKENS",
-        "label": "Which agents report to the status board, and the secret holding each one's token",
-        "hint": "agent:secret, comma-separated (default: each agent with a board, secret <agent>-status-token); that agent must be let have it: loom secrets policy houses <secret> <agent>"
       }
     ],
     "services": [
