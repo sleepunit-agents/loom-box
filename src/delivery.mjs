@@ -138,8 +138,10 @@ export function windowMs(env, venue, kind) {
 const BODY_ENV = /^(PATH|HOME|USER|LOGNAME|SHELL|LANG|LANGUAGE|LC_[A-Z_]+|TERM|COLORTERM|TZ|TMPDIR)$/;
 const NEVER = /^(LOOM_|ANTHROPIC_|OPENAI_|CLAUDE|CODEX_|GEMINI_|GOOGLE_|MISTRAL_|AWS_|GH_|GITHUB_)/;
 export const BODY_KEY = 'LOOM_BODY_KEY';
+/** Which conversation a body's run key speaks in: its house's host keeps the key by it (bodyhost.mjs, keyFile). */
+export const BODY_CONVERSATION = 'LOOM_BODY_CONVERSATION';
 
-export function bodyEnvOf(env, { key } = {}) {
+export function bodyEnvOf(env, { key, conversation } = {}) {
   const extra = new Set(String(setting(env, 'BODY_ENV') ?? '').split(',').map((x) => x.trim()).filter(Boolean));
   const out = {};
   for (const [k, v] of Object.entries(env)) {
@@ -148,6 +150,7 @@ export function bodyEnvOf(env, { key } = {}) {
   }
   // Its run's own key: `send` answers only the body holding its conversation's current one.
   if (key) out[BODY_KEY] = key;
+  if (key && CV.test(conversation ?? '')) out[BODY_CONVERSATION] = conversation;
   return out;
 }
 
@@ -169,7 +172,7 @@ export function depsOf(env, o = {}) {
     fetchImpl: o.fetchImpl,
     venues: o.venues ?? (() => core.venues()),
     sendMs: o.sendMs ?? SEND_MS,
-    bodyEnv: (key) => bodyEnvOf(env, { key }),
+    bodyEnv: (key, conversation) => bodyEnvOf(env, { key, conversation }),
     cwd: o.cwd ?? setting(env, 'BODY_CWD'),
     warn: o.warn ?? ((m) => process.stderr.write(`loom-runtime deliver: ${m}\n`)),
   };
@@ -538,7 +541,7 @@ async function execute(env, op, d, mem) {
     const v0 = await venueOf(d, c0.venue);
     const sends = v0?.send ? 'post' : recordsOnly(v0) ? 'record' : null;
     const runKey = randomBytes(24).toString('hex');
-    const bodyDeps = { runner: d.runner, accounts: d.accounts, now: d.now, fetchImpl: d.fetchImpl, bodyEnv: d.bodyEnv(runKey) };
+    const bodyDeps = { runner: d.runner, accounts: d.accounts, now: d.now, fetchImpl: d.fetchImpl, bodyEnv: d.bodyEnv(runKey, op.cv) };
     const base = { agent: c0.agent, venue: c0.venue, venueKind: c0.kind, cwd: d.cwd };
     if (op.type === 'start') {
       r = await startBody(env, { ...base, place: c0.place, brief: startBrief(c0, msgs, run, sends) }, bodyDeps);

@@ -274,7 +274,7 @@ export class HouseRunner {
     if (!AGENT_NAME.test(o.agent ?? '')) throw new RunnerError('a body in a house is some agent\'s: say which');
     const house = await this.warm(o.agent);
     const rid = randomBytes(8).toString('hex');
-    const ask = { harness: this.harness, model: o.model, deny: o.deny ?? [], brief: o.brief, key: o.env?.LOOM_BODY_KEY, ...(resume ? { resume: resume.session, files: o.files ?? [] } : {}) };
+    const ask = { harness: this.harness, model: o.model, deny: o.deny ?? [], brief: o.brief, key: o.env?.LOOM_BODY_KEY, ...(o.env?.LOOM_BODY_CONVERSATION ? { conversation: o.env.LOOM_BODY_CONVERSATION } : {}), ...(resume ? { resume: resume.session, files: o.files ?? [] } : {}) };
     hostLocked(this.env, () => {
       const h = loadHost(this.env, o.agent);
       (h.req ??= {})[rid] = { at: this.now().getTime(), sealed: this.transit.seal(Buffer.from(JSON.stringify(ask))) };

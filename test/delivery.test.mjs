@@ -360,7 +360,8 @@ test('D. nothing of the runtime\'s environment reaches a body: no token, no key 
   await deliver(w.env, w.msg('dm:E', 'hi'), w.o);
   const e = w.runner.envs[loadConv(w.env, cvOf('art', 'slack', 'dm:E')).body.split(':')[1]];
   for (const k of ['FOO_SECRET', 'ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'ANTHROPIC_BASE_URL', 'LOOM_RUNTIME_TOKEN_FILE', 'LOOM_RUNTIME_LOOM_URL', 'LOOM_BOX_DATA', 'LOOM_BOX_HOME']) assert.equal(e[k], undefined, k);
-  assert.deepEqual(Object.keys(e).sort(), ['HOME', 'LANG', 'LOOM_BODY_KEY', 'PATH', 'SOMETHING_ELSE'], 'the basics, what BODY_ENV may name, and its run\'s key');
+  assert.deepEqual(Object.keys(e).sort(), ['HOME', 'LANG', 'LOOM_BODY_CONVERSATION', 'LOOM_BODY_KEY', 'PATH', 'SOMETHING_ELSE'], 'the basics, what BODY_ENV may name, and its run\'s key and conversation');
+  assert.equal(e.LOOM_BODY_CONVERSATION, cvOf('art', 'slack', 'dm:E'));
 });
 
 test('E. a warm body\'s inbox isn\'t lost to a resume that fails: what it held goes back on the queue', async () => {
