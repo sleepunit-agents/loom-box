@@ -46,6 +46,26 @@ test('Claude Code: a body starts with its brief on stdin (never argv), is found 
   assert.equal(r.status(b), 'working');
 });
 
+test('Claude Code: a turn that ended on "I\'ll check back" (state working, tempo idle, nothing in flight) is over; tempo active is mid-turn (t-1764)', () => {
+  const h = harness();
+  const r = new ClaudeRunner({ claude: join(here, 'fake-claude.mjs'), jobsDir: join(h.D, 'jobs'), inboxDir: h.inbox, sleep: () => {} });
+  const b = r.start({ brief: 'hello', model: 'm', cwd: h.D, env: h.env });
+  const job = join(h.D, 'jobs', b.id, 'state.json');
+  const set = (x) => writeFileSync(job, JSON.stringify({ ...JSON.parse(readFileSync(job, 'utf-8')), ...x }));
+  set({ state: 'working', tempo: 'active', inFlight: { tasks: 0, queued: 0 } });
+  assert.equal(r.status(b), 'working');
+  assert.equal(r.turn(b), null);
+  // As h-876's body was left (2026-11-03): its last line said a check was armed, and it waits for nothing here.
+  set({ state: 'working', tempo: 'idle', detail: 'PR #38 still untouched; round 23 check armed', inFlight: { tasks: 0, queued: 0, kinds: [], drainableMonitors: 0 } });
+  assert.equal(r.status(b), 'idle');
+  assert.equal(r.turn(b).failed, false);
+  // Idle, but with a background task or a monitor of its own still going: not over.
+  set({ inFlight: { tasks: 1, queued: 0 } });
+  assert.equal(r.status(b), 'working');
+  set({ inFlight: { tasks: 0, queued: 0, drainableMonitors: 1 } });
+  assert.equal(r.status(b), 'working');
+});
+
 test('Claude Code: fed mid-turn through its inbox (the hook\'s layout and lock); a turn that\'s over is resumed from its slot', () => {
   const h = harness();
   const r = new ClaudeRunner({ claude: join(here, 'fake-claude.mjs'), jobsDir: join(h.D, 'jobs'), inboxDir: h.inbox, sleep: () => {} });

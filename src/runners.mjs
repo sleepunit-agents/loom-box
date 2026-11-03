@@ -181,8 +181,7 @@ export class ClaudeRunner {
   status(body) {
     const job = this.job(body.id);
     if (!job) return 'unknown';
-    if (job.state === 'done' || job.state === 'stopped' || job.state === 'failed' || job.state === 'blocked') return 'idle';
-    return 'working';
+    return turnOver(job) ? 'idle' : 'working';
   }
 
   /**
@@ -191,7 +190,7 @@ export class ClaudeRunner {
    */
   turn(body) {
     const job = this.job(body.id);
-    if (!job || !['done', 'stopped', 'failed', 'blocked'].includes(job.state)) return null;
+    if (!job || !turnOver(job)) return null;
     const tl = lines(join(this.jobsDir, String(body.id).slice(0, 8), 'timeline.jsonl'));
     const worked = tl.length ? tl.some((l) => l.state === 'working' && typeof l.detail === 'string' && l.detail.trim() !== '') : null;
     return { failed: job.state === 'failed', worked, ...(job.state === 'failed' && typeof job.detail === 'string' && job.detail ? { error: job.detail.slice(0, 200) } : {}) };
@@ -206,6 +205,18 @@ export class ClaudeRunner {
     this.run(this.claude, ['stop', body.id], { env, stdio: 'ignore', timeout: 20_000 });
     this.inbox?.close(body.id);
   }
+}
+
+/**
+ * Whether a background job's turn is over. Its state is terminal (done, stopped, failed, blocked), or its tempo is idle
+ * with nothing in flight. Claude Code leaves a turn that ended on "I'll check back", "waiting on CI" or "result, then
+ * next: …" as state working, tempo idle (t-1764, 2026-11-03: every delivered wake's body read as mid-turn for good, so it
+ * never reported its usage and its house never idled out). Mid-turn its tempo is active.
+ */
+function turnOver(job) {
+  if (['done', 'stopped', 'failed', 'blocked'].includes(job.state)) return true;
+  const f = job.inFlight ?? {};
+  return job.tempo === 'idle' && !(f.tasks > 0) && !(f.queued > 0) && !(f.drainableMonitors > 0);
 }
 
 // The env keys a Claude Code launcher leaves behind: a Codex body must not look like a Claude session to its tools.
