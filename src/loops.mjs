@@ -19,8 +19,9 @@ import { createHash } from 'node:crypto';
 
 export const FAIL_RUNS = 4;
 export const REPEAT_RUNS = 4;
-/** Repeats count only when each run starts this soon after the one before it ended (a crash loop is quick). */
-export const REPEAT_GAP_MS = 10 * 60_000;
+/** Repeats count only when each run starts this soon after the one before it ended: a crash loop is quick, and a lane
+ * that reports the same quiet "nothing new" every few minutes is a quiet lane. */
+export const REPEAT_GAP_MS = 2 * 60_000;
 export const PINGPONG_TRIPS = 4;
 export const PINGPONG_MS = 30 * 60_000;
 export const CHURN_RUNS = 4;

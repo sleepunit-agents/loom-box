@@ -154,7 +154,7 @@ describe('each pattern pauses its conversation (live delivery, the fake runner a
 
   test('repeated output: 4 runs in a row, for an agent, each soon after the last, posting the same words', async () => {
     const { w, run, bodies, done } = setup();
-    for (let i = 1; i <= 4; i++) { await run(fromMark(w, 'dm:REP', `status? ${i}`), { reply: 'I can\'t reach the repo.\n' }); w.clock.advance(2 * MIN); }
+    for (let i = 1; i <= 4; i++) { await run(fromMark(w, 'dm:REP', `status? ${i}`), { reply: 'I can\'t reach the repo.\n' }); w.clock.advance(MIN); }
     const a = await deliver(w.env, fromMark(w, 'dm:REP', 'status? 5'), w.o);
     assert.equal(a.body, 'queued');
     assert.match(a.reason, /4 runs in a row posted the same words/);
@@ -288,6 +288,16 @@ describe('never a loop, either', () => {
     for (let i = 1; i <= 10; i++) { assert.match((await run(fromMark(w, 'dm:FAST', `do step ${i}`))).body, /^(started|resumed)$/); w.clock.advance(30_000); }
     assert.equal(bodies(), 10);
     assert.equal(conv('dm:FAST').paused, undefined);
+    done();
+  });
+});
+
+describe('a quiet heartbeat', () => {
+  test('a lane waking every 5 minutes to post the same "nothing new" is a quiet lane, not a loop', async () => {
+    const { w, conv, run, bodies, done } = setup();
+    for (let i = 1; i <= 8; i++) { await run(wake(w, 'lane:watch', `wake ${i}`), { reply: 'Nothing new.', after: 20_000 }); w.clock.advance(5 * MIN); }
+    assert.equal(bodies(), 8);
+    assert.equal(conv('lane:watch').paused, undefined);
     done();
   });
 });
