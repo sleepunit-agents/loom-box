@@ -15,7 +15,8 @@ import { stateAccounts } from './accounts.mjs';
 import { deliveryNotices } from './delivery.mjs';
 import { loomStore } from './store.mjs';
 import { asks as gateAsks, answer as gateAnswer, gatesPage, mergePeople, status as gatesStatus, proposals as gateProposals } from './gates.mjs';
-import { GRANTS, KEY as GRANTS_KEY, grantsProblem, setPiece } from './grants.mjs';
+import { GRANTS, KEY as GRANTS_KEY, GrantsError, grantsProblem, householdOf, setPiece, setRelay } from './grants.mjs';
+import { relayNotices } from './relay.mjs';
 import { coreFrom } from './core.mjs';
 
 /**
@@ -112,7 +113,8 @@ export function manifest(env) {
     asks: [...pendingJoins(s).slice(0, 5).map((j) => joinAsk(j)), ...permsAsks(env)],
     agents: agentReports(s, Date.now(), { ...reportedBusy(s), ...sessionsBusy(join(stateDir(env), 'session-cpu.json')) }),
     // A delivery the runtime gave up on (its body never started, after its retries): the owner hears of it.
-    notices: [...deliveryNotices(env), ...boxNotices(s)].sort((x, y) => Date.parse(y.at) - Date.parse(x.at)).slice(0, 20),
+    // ...and a relay thread between agents that's run long today: a heads-up, never a stop (relay.mjs).
+    notices: [...deliveryNotices(env), ...relayNotices(env), ...boxNotices(s)].sort((x, y) => Date.parse(y.at) - Date.parse(x.at)).slice(0, 20),
   };
 }
 
@@ -154,7 +156,14 @@ function permissionsPage(env) {
         fields: [{ name: 'piece', label: 'Piece', kind: 'text', required: true }, { name: 'agents', label: 'Agents', kind: 'text' }, { name: 'paths', label: 'Paths', kind: 'text', value: '*' }],
         hidden: { rev: String(g.rev) } }] });
     const relay = Object.entries(g.doc.relay ?? {});
-    sections.push({ id: 'relay', title: 'Who may relay to whom', blocks: [relay.length ? { type: 'kv', items: relay.map(([a, to]) => ({ label: a, value: to.join(', ') || 'no one' })) } : { type: 'text', tone: 'muted', text: 'No pairs.' }] });
+    const agents = householdOf(env)?.agents ?? [];
+    sections.push({ id: 'relay', title: 'Who may relay to whom', blocks: [
+      relay.length ? { type: 'kv', items: relay.map(([a, to]) => ({ label: a, value: to.join(', ') || 'no one' })) } : { type: 'text', tone: 'muted', text: 'No pairs.' },
+      { type: 'text', tone: 'muted', text: 'An agent relays to these without asking (the relay tool). To any other, it asks you first: an approval on your Inbox, spent once.' },
+      ...(agents.length > 1 ? [{ type: 'form', action: 'relay-set', submit: 'Save', note: 'One agent\'s pairs: the agents it may relay to without asking, comma-separated. Empty: it asks you before every relay.',
+        fields: [{ name: 'agent', label: 'Agent', kind: 'text', required: true, hint: agents.join(', ') }, { name: 'to', label: 'Relays to', kind: 'text' }],
+        hidden: { rev: String(g.rev) } }] : []),
+    ] });
   }
   let held = {};
   try { held = gatesStatus(st); } catch { held = {}; }
@@ -918,9 +927,21 @@ export function act(env, effects, { action, fields: raw = {}, caller: c }, publi
         const r = serviceMove(env, effects, OWNER, fields);
         return { ok: true, message: r.moving ? `${r.service}: stopping on ${label(r.box)}; it starts on ${label(r.moveTo)} once that's confirmed.` : `${r.service} is on ${label(r.box)}.`, page: '' };
       }
-      case 'gates-allow': case 'gates-deny': case 'gates-merge': case 'grants-set': {
+      case 'gates-allow': case 'gates-deny': case 'gates-merge': case 'grants-set': case 'relay-set': {
         const st = permsStore(env);
         if (!st) return { ok: false, message: 'The runtime reads its permissions from loom\'s store when loom runs it.' };
+        if (action === 'relay-set') {
+          const g = st.get(GRANTS, GRANTS_KEY);
+          if (String(g?.rev ?? 0) !== String(fields.rev ?? '0')) return { ok: false, message: 'The grants changed since you opened this: open it again.', page: 'permissions' };
+          const agent = String(fields.agent ?? '').trim();
+          const to = String(fields.to ?? '').split(',').map((x) => x.trim()).filter(Boolean);
+          let rev;
+          try { rev = setRelay(st, { agent, to, agents: householdOf(env)?.agents ?? [] }); } catch (e) {
+            if (e instanceof GrantsError) return { ok: false, message: e.message, page: 'permissions' };
+            throw e;
+          }
+          return { ok: true, message: `${agent} ${to.length ? `relays to ${[...new Set(to)].sort().join(', ')} without asking` : 'asks you before every relay'} (revision ${rev}).`, page: 'permissions' };
+        }
         if (action === 'grants-set') {
           const g = st.get(GRANTS, GRANTS_KEY);
           if (String(g?.rev ?? 0) !== String(fields.rev ?? '0')) return { ok: false, message: 'The grants changed since you opened this: open it again.', page: 'permissions' };

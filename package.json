@@ -88,6 +88,11 @@
         "label": "Which agents review their own day after grading",
         "default": "all",
         "hint": "all (every agent the runtime hosts), none, or agent ids, comma-separated; each runs as itself, in its own house"
+      },
+      {
+        "name": "LOOM_RUNTIME_RELAY_HEADS_UP",
+        "label": "A relay thread this long is a heads-up",
+        "hint": "messages in one thread within a day, on loom's Inbox (default 8); never a stop"
       }
     ],
     "services": [
@@ -118,6 +123,49 @@
       "relay": {
         "label": "Relay",
         "kind": "agent"
+      }
+    },
+    "mcp_tools": {
+      "relay": {
+        "description": "Ask another agent in this household something: it reaches a body of theirs with your words, framed as a peer's request (none of the owner's authority). Their answer comes back the same way, as a relay to you. Without asking only between agents the household pairs (the runtime's permissions); for any other, ask the owner first (approvals request --kind relay --target <you>-><them>) and pass the allowed approval. The same words twice within the hour are refused. Answer a relay with reply_to set to its id.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "to": {
+              "type": "string",
+              "description": "The other agent, e.g. \"mark\""
+            },
+            "say": {
+              "type": "string",
+              "description": "What to tell or ask them (8000 characters at most; point at a PR or file for more)"
+            },
+            "why": {
+              "type": "string",
+              "description": "One line: why you are asking"
+            },
+            "reply_to": {
+              "type": "string",
+              "description": "The relay id (r-…) this answers"
+            },
+            "from": {
+              "type": "string",
+              "description": "Where it was asked, e.g. \"discord:#workshop\", so the answer can go back there"
+            },
+            "approval": {
+              "type": "string",
+              "description": "An approval id (a-…) the owner allowed, for a relay the household doesn't pair"
+            }
+          },
+          "required": [
+            "to",
+            "say"
+          ]
+        },
+        "argv": [
+          "loom-runtime",
+          "relay",
+          "tool"
+        ]
       }
     },
     "strangers": [

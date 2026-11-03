@@ -110,15 +110,16 @@ describe('the ask (the `grants` offer core runs)', () => {
     assert.throws(() => ask(broken, JSON.stringify({ agent: 'art', piece: 'tasks', path: 'run' })), /no answer/);
   });
 
-  test('a piece\'s grant set by the owner; pairing from the grants once seeded, else household.json', () => {
+  test('a piece\'s grant set by the owner; pairing from the grants only, never household.json', () => {
     const st = memStore();
     st.put(GRANTS, KEY, doc);
     setPiece(st, { piece: 'approvals', agents: ['art'], paths: ['*'] });
     assert.equal(decide(st.get(GRANTS, KEY).doc, { agent: 'art', piece: 'approvals', path: 'run' }).allow, true);
     setPiece(st, { piece: 'approvals', agents: [] });
     assert.equal(decide(st.get(GRANTS, KEY).doc, { agent: 'art', piece: 'approvals', path: 'run' }).allow, false);
-    assert.equal(paired(doc, { relay: { mark: ['art'] } }, 'mark', 'art'), false);
-    assert.equal(paired(null, { relay: { mark: ['art'] } }, 'mark', 'art'), true);
+    assert.equal(paired(doc, 'mark', 'art'), false);
+    assert.equal(paired(null, 'mark', 'art'), false);
+    assert.equal(paired({ ...doc, relay: { mark: ['art'] } }, 'mark', 'art'), true);
   });
 });
 
