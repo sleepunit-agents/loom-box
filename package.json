@@ -65,6 +65,23 @@
         "name": "LOOM_RUNTIME_BODY_ENV",
         "label": "More of the runtime's environment a body may have",
         "hint": "variable names, comma-separated; never LOOM_*, a harness's settings or a provider's key (a body in a house runs in the house's own environment)"
+      },
+      {
+        "name": "LOOM_RUNTIME_GRADER_IMAGE",
+        "label": "The review's grader image, pinned by digest",
+        "hint": "name@sha256:\u2026, built from grader/Containerfile on loom's machine; without it the review grades nothing (never in an agent's house image)"
+      },
+      {
+        "name": "LOOM_RUNTIME_REVIEW_LIMIT",
+        "label": "Audit entries the daily review grades, at most",
+        "default": "200",
+        "hint": "1-2000; the review runs at 04:00 in the household's time zone (household.json tz and review, read from core)"
+      },
+      {
+        "name": "LOOM_RUNTIME_REVIEW_INTROSPECT",
+        "label": "Which agents review their own day after grading",
+        "default": "all",
+        "hint": "all (every agent the runtime hosts), none, or agent ids, comma-separated; each runs as itself, in its own house"
       }
     ],
     "services": [

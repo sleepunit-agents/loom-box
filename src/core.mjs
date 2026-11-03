@@ -15,6 +15,13 @@
 //   POST /api/loom/people/ensure, /people/merge   a person's card, for the gates (person-cards.md; gates.mjs)
 //   POST /api/loom/deliver             a delivery the runtime makes itself (an allowed proposal's follow-up)
 // The turn write carries `key` ("<source>:<id>", loom#426): the same key and turn answer the first write.
+//
+// The review job's (conversations.md, "Review"; review.mjs):
+//   GET  /api/loom/review/config       → {review: 'on'|'off'|[argv], tz}           (the runtime's token)
+//   POST /api/loom/review/token        → {token, expires}: a `review` token for one run, 2 hours
+//   POST /api/loom/audit/take {limit}  → {entries: [{ref, agent, venue, kind, family, text, only_families?}]}
+//   POST /api/loom/scores {ref, grader_family, score}, /findings {ref, text}, /audit/done {refs}
+// the last four with the run's review token, held in memory only: never written, logged or shown.
 import { readFileSync } from 'node:fs';
 import { setting } from './piece.mjs';
 
@@ -25,21 +32,26 @@ export class CoreError extends Error {
 /** loom's API base, from the MCP URL the runtime is given. */
 export const apiBase = (env) => (setting(env, 'LOOM_URL') || 'http://127.0.0.1:8787/mcp').replace(/\/mcp\/?$/, '').replace(/\/+$/, '');
 
+/** One call to core's API with a bearer token: its JSON answer, or a CoreError keeping core's status (a 5xx as 503). */
+async function callCore(env, token, method, path, body, { fetchImpl = fetch, timeoutMs = 5000 } = {}) {
+  let r;
+  try {
+    r = await fetchImpl(`${apiBase(env)}/api/loom/${path}`, {
+      method, headers: { ...(body !== undefined ? { 'content-type': 'application/json' } : {}), authorization: `Bearer ${token}` }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (e) { throw new CoreError(`core didn't answer ${path}: ${e.name === 'TimeoutError' ? `no answer in ${timeoutMs / 1000}s` : e.message}`); }
+  const out = await r.json().catch(() => ({}));
+  if (!r.ok) throw new CoreError(`core refused ${path}: ${out.error ?? `${r.status}`}`, r.status >= 500 ? 503 : r.status);
+  return out;
+}
+
 export function coreFrom(env, { fetchImpl = fetch, timeoutMs = 5000 } = {}) {
   const call = async (method, path, body) => {
     const tokenFile = setting(env, 'TOKEN_FILE');
     if (!tokenFile) throw new CoreError('no runtime token (LOOM_RUNTIME_TOKEN_FILE): the runtime can\'t write to core');
     let token;
     try { token = readFileSync(tokenFile, 'utf-8').trim(); } catch { throw new CoreError(`can't read the runtime token file ${tokenFile}`); }
-    let r;
-    try {
-      r = await fetchImpl(`${apiBase(env)}/api/loom/${path}`, {
-        method, headers: { ...(body !== undefined ? { 'content-type': 'application/json' } : {}), authorization: `Bearer ${token}` }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(timeoutMs),
-      });
-    } catch (e) { throw new CoreError(`core didn't answer ${path}: ${e.name === 'TimeoutError' ? `no answer in ${timeoutMs / 1000}s` : e.message}`); }
-    const out = await r.json().catch(() => ({}));
-    if (!r.ok) throw new CoreError(`core refused ${path}: ${out.error ?? `${r.status}`}`, r.status >= 500 ? 503 : r.status);
-    return out;
+    return callCore(env, token, method, path, body, { fetchImpl, timeoutMs });
   };
   const post = (path, body) => call('POST', path, body);
   return {
@@ -55,7 +67,38 @@ export function coreFrom(env, { fetchImpl = fetch, timeoutMs = 5000 } = {}) {
     // A delivery the runtime itself makes (a gate's follow-up relay): core's deliver route, as the runtime.
     deliver: (b) => post('deliver', b),
     venues: async () => venuesOf(await call('GET', 'venues')),
+    // The review job's: its settings, and a token for one run.
+    reviewConfig: async () => reviewConfigOf(await call('GET', 'review/config')),
+    async reviewToken() {
+      const out = await post('review/token', {});
+      if (typeof out.token !== 'string' || !out.token) throw new CoreError('core answered a review token request without a token');
+      return { token: out.token, expires: typeof out.expires === 'string' ? out.expires : null };
+    },
   };
+}
+
+/** A review run's calls, as that run (its review token, held only here). */
+export function reviewFrom(env, token, { fetchImpl = fetch, timeoutMs = 60_000 } = {}) {
+  const post = (path, body) => callCore(env, token, 'POST', path, body, { fetchImpl, timeoutMs });
+  return {
+    async take(limit) {
+      const out = await post('audit/take', { limit });
+      if (!Array.isArray(out.entries)) throw new CoreError('core answered a take without entries');
+      return out.entries;
+    },
+    score: (ref, graderFamily, score) => post('scores', { ref, grader_family: graderFamily, score }),
+    finding: (ref, text) => post('findings', { ref, text }),
+    done: (refs) => post('audit/done', { refs }),
+  };
+}
+
+/** Core's review settings, checked: {review: 'on'|'off'|[argv], tz}. Anything else is 'on' in UTC, as core's defaults. */
+export function reviewConfigOf(raw) {
+  const r = raw?.review;
+  const review = r === 'off' ? 'off' : Array.isArray(r) && r.length >= 1 && r.length <= 16 && r.every((a) => typeof a === 'string' && a && a.length <= 200) ? [...r] : 'on';
+  let tz = typeof raw?.tz === 'string' && raw.tz ? raw.tz : 'UTC';
+  try { new Intl.DateTimeFormat('en-US', { timeZone: tz }); } catch { tz = 'UTC'; }
+  return { review, tz };
 }
 
 const VENUE = /^[a-z][a-z0-9-]{0,31}$/;
