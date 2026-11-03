@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { api, buildTag, outdatedHouse, setAgent } from '../src/control.mjs';
+import { api, buildTag, outdatedHouse, setAgent, up } from '../src/control.mjs';
 import { HouseRunner, hostOf, hostTask } from '../src/houserunner.mjs';
 import { runBodyHost } from '../src/bodyhost.mjs';
 import { houseBadge } from '../src/ui.mjs';
@@ -229,7 +229,9 @@ test('the control plane: a house\'s build from its box\'s report, the current on
   const owner = { kind: 'owner' };
   const box = { kind: 'piece', subject: 'one' };
   ok(api(env, fx, { caller: owner, path: 'set-agent', body: { agent: 'art', repo: 'https://example.com/art.git', repoSecret: 'gh-art' } }));
-  const id = ok(api(env, fx, { caller: owner, path: 'up', body: { agent: 'art', box: 'one', task: hostTask(env, 'ab'.repeat(24)) } })).id;
+  // A body host's house is the runtime's own to ask for (houserunner.mjs): through the API, its task is refused.
+  assert.equal(api(env, fx, { caller: owner, path: 'up', body: { agent: 'art', box: 'one', task: hostTask(env, 'ab'.repeat(24)) } }).status, 400);
+  const id = up(env, fx, owner, { agent: 'art', box: 'one', task: hostTask(env, 'ab'.repeat(24)) }, { kind: 'body-host' }).id;
   ok(api(env, fx, { caller: box, path: 'claim', body: { id } }));
   ok(api(env, fx, { caller: box, path: 'report', body: { id, state: 'running', build: OLD } }));
   assert.equal(load(env).houses[id].build, OLD);

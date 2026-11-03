@@ -296,7 +296,7 @@ export class HouseRunner {
         const at = bodyBox(s, agent, this.harness, this.env);
         if (!at.box) throw new RunnerError(at.reason);
         const boot = randomBytes(24).toString('hex');
-        const r = this.up(this.env, { now: () => this.now() }, { kind: 'owner' }, { agent, box: at.box, task: hostTask(this.env, boot) });
+        const r = this.up(this.env, { now: () => this.now() }, { kind: 'owner' }, { agent, box: at.box, task: hostTask(this.env, boot) }, { kind: 'body-host' });
         // A new house: what was asked of the last one (and what it claimed) isn't this one's, nor is its host's key.
         hostLocked(this.env, () => { const x = loadHost(this.env, agent); x.house = r.id; delete x.report; delete x.hostHash; delete x.cancel; x.bootHash = keyHash(boot); x.req = {}; x.stop = {}; x.inbox = {}; x.claimed = {}; pruneDraining(this.env, x); writeJson(hostFile(this.env, agent), x); });
       }

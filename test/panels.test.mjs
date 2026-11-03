@@ -6,9 +6,9 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { act, page } from '../src/ui.mjs';
+import { act, manifest, page } from '../src/ui.mjs';
 import { load } from '../src/state.mjs';
-import { api } from '../src/control.mjs';
+import { api, list, up } from '../src/control.mjs';
 import { memStore } from '../src/store.mjs';
 import { GRANTS, KEY } from '../src/grants.mjs';
 import { scratch } from './scratch.mjs';
@@ -36,7 +36,7 @@ const valid = (what, p) => { if (vocab) { const v = vocab.parsePage(p); assert.n
 test('Boxes is a status screen: a headline in words and tiles first; a body host is named, never its command', () => {
   const { env } = setup();
   // A body host's house: before, its row read "loom-runtime body-host --piece runtime --host-key …".
-  api(env, fx, { caller: { kind: 'agent', agent: 'art' }, path: 'up', body: { task: `loom-runtime body-host --piece runtime --host-key ${'f'.repeat(32)}` } });
+  up(env, fx, { kind: 'owner' }, { agent: 'art', task: `loom-runtime body-host --piece runtime --host-key ${'f'.repeat(32)}` }, { kind: 'body-host' });
   const p = page(env, { path: '' });
   valid('boxes', p);
   const [health, stats] = section(p, 'status').blocks;
@@ -117,4 +117,40 @@ test('a lane house reads as its lane, not its prompt\'s first words', async () =
   // Before: "You are running the landscape lane in a fresh house. Its pr…".
   assert.equal(houseName(h), 'Landscape lane');
   assert.deepEqual([doingOf(h, load(setup().env)).text, doingOf(h, load(setup().env)).kind], ['Landscape lane', 'lane']);
+});
+
+test('a body host is the runtime\'s mark, never its task\'s text: an agent can\'t ask for one, and an old look-alike still shows', () => {
+  const { env } = setup();
+  const task = `loom-runtime body-host --piece runtime --host-key ${'e'.repeat(48)}`;
+  // Asked for by an agent (or anyone but delivery): refused, so no one passes their work off as a body host.
+  const r = api(env, fx, { caller: { kind: 'agent', agent: 'art' }, path: 'up', body: { task } });
+  assert.equal(r.status, 400);
+  assert.match(r.body.error, /only delivery starts one/);
+  assert.equal(act(env, fx, { action: 'up', fields: { agent: 'art', task: `  ${task}` } }).ok, false);
+  // A field in the body doesn't make one either.
+  assert.equal(api(env, fx, { caller: { kind: 'agent', agent: 'art' }, path: 'up', body: { task: 'real work', kind: 'body-host' } }).status, 200);
+  assert.equal(Object.values(load(env).houses).find((h) => h.task === 'real work').kind, undefined);
+  // One an agent asked for before the mark (no kind): an ordinary house on the page and on Home's card, never hidden.
+  const st = load(env);
+  st.houses['h-77'] = { id: 'h-77', agent: 'art', box: 'one', state: 'running', created: new Date().toISOString(), started: new Date().toISOString(), updated: new Date().toISOString(), by: 'art', task };
+  writeFileSync(join(env.LOOM_BOX_HOME, 'state.json'), JSON.stringify(st));
+  const tab = page({ ...env, LOOM_SCOPE: 'art' }, { path: '' });
+  const rows = section(tab, 'houses').blocks.find((b) => b.type === 'panel').rows;
+  const row = rows.find((x) => x.act?.fields?.id === 'h-77');
+  assert.ok(row, 'the look-alike shows');
+  assert.notEqual(row.label, "Art's body host");
+  assert.equal(JSON.stringify(tab).includes('e'.repeat(48)), false, 'its key masked all the same');
+  assert.ok(manifest(env).agents.art.doing.length >= 1, 'it counts as something Art is doing');
+  // A real one from before the mark (delivery asked for it, as the owner): still named as one.
+  const st2 = load(env);
+  st2.houses['h-78'] = { ...st2.houses['h-77'], id: 'h-78', by: 'owner' };
+  writeFileSync(join(env.LOOM_BOX_HOME, 'state.json'), JSON.stringify(st2));
+  const rows2 = section(page({ ...env, LOOM_SCOPE: 'art' }, { path: '' }), 'houses').blocks.find((b) => b.type === 'panel').rows;
+  assert.deepEqual(['h-77', 'h-78'].map((id) => rows2.find((x) => x.act?.fields?.id === id).label === "Art's body host"), [false, true]);
+  st2.houses['h-78'].state = 'stopped';
+  writeFileSync(join(env.LOOM_BOX_HOME, 'state.json'), JSON.stringify(st2));
+  // And the box doesn't take it for a body host either (its build checks).
+  const poll = api(env, fx, { caller: { kind: 'piece', subject: 'one' }, path: 'poll', body: {} });
+  assert.deepEqual(poll.body.bodyHosts, []);
+  void list;
 });

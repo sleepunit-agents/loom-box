@@ -325,7 +325,13 @@ export const householdOwner = (caller) => caller.kind === 'owner' && !Array.isAr
 /** Who a record says acted: the agent, the member who's an owner, or 'owner'. */
 const actor = (caller) => (caller.kind === 'agent' ? caller.agent : typeof caller.who === 'string' && /^[a-z0-9]+(-[a-z0-9]+)*$/.test(caller.who) ? caller.who : 'owner');
 
-export function up(env, effects, caller, { agent, box, needs, task, session, slot }) {
+/**
+ * Ask for a house. `own` is the runtime's own say, never a caller's: houserunner.mjs passes {kind: 'body-host'} for a
+ * body host's house, and that field, set here, is what marks one (the page names it, the box checks its build). A
+ * task that reads like a body host's from anyone else is refused, so no one can pass their work off as one.
+ */
+export function up(env, effects, caller, { agent, box, needs, task, session, slot }, own = {}) {
+  const hostHouse = own.kind === 'body-host';
   let a;
   if (caller.kind === 'agent') {
     if (agent && agent !== caller.agent) fail(`this token is ${caller.agent}'s; it can only ask for its own house`, 403);
@@ -338,6 +344,8 @@ export function up(env, effects, caller, { agent, box, needs, task, session, slo
   // A session house has no task: it waits for someone to attach (loom box session).
   const sess = session === true;
   const t = sess ? '(an interactive session)' : str(task, 'the task', MAX_TASK);
+  if (hostHouse && !isHostTask(t)) fail('a body host\'s house runs the runtime\'s body host');
+  if (!hostHouse && isHostTask(t.trim())) fail('that task is the runtime\'s own body host: only delivery starts one', 400);
   const n = listOf(needs, 'needs', FACT);
   // A slot: a lane's own bookkeeping, restored into the house and saved when it ends.
   const sl = slot === undefined || slot === null || slot === '' ? null : str(slot, 'the slot', 40);
@@ -351,7 +359,7 @@ export function up(env, effects, caller, { agent, box, needs, task, session, slo
     const where = placeHouse(s, a, { box: box || undefined, needs: n }, env);
     const id = nextHouseId(s);
     const at = now(effects);
-    s.houses[id] = { id, agent: a, box: where, task: t, needs: n, state: 'wanted', created: at, updated: at, by: actor(caller), ...(sess ? { session: true } : {}), ...(sl ? { slot: sl } : {}) };
+    s.houses[id] = { id, agent: a, box: where, task: t, needs: n, state: 'wanted', created: at, updated: at, by: actor(caller), ...(sess ? { session: true } : {}), ...(sl ? { slot: sl } : {}), ...(hostHouse ? { kind: 'body-host' } : {}) };
     return { id, agent: a, box: where, boxName: boxLabelOf(s, where), state: 'wanted', ...(sess ? { session: true } : {}), ...(sl ? { slot: sl } : {}) };
   });
 }
@@ -477,7 +485,7 @@ export function poll(env, effects, caller, { facts, sessions, harnesses, usage, 
       }),
       stop: mine.filter((h) => h.state === 'stopping').map((h) => h.id),
       // Its body hosts' houses, running: the box checks their agents' repos for a newer image (build-check).
-      bodyHosts: mine.filter((h) => h.state === 'running' && isHostTask(h.task)).map((h) => ({ id: h.id, agent: h.agent, known: !!h.build })),
+      bodyHosts: mine.filter((h) => h.state === 'running' && isHostHouse(h, s)).map((h) => ({ id: h.id, agent: h.agent, known: !!h.build })),
       // Taken by this box and not over: one the box doesn't have (it restarted) is lost.
       active: mine.filter((h) => ['starting', 'running', 'stopping'].includes(h.state)).map((h) => h.id),
       // Its box sessions: up or down, as the owner wants them.
@@ -596,7 +604,7 @@ const sameMade = (x, y) => !!x && !!y && ['repo', 'houseFile', 'branch', 'repoSe
  */
 function checkableHouse(env, s, caller, id, { repo = true } = {}) {
   const h = s.houses[id];
-  if (!h || h.box !== caller.subject || h.state !== 'running' || !isHostTask(h.task)) fail(`no running body host's house ${id} for this box`, 404);
+  if (!h || h.box !== caller.subject || h.state !== 'running' || !isHostHouse(h, s)) fail(`no running body host's house ${id} for this box`, 404);
   if (!mayHost(s.boxes[caller.subject], h.agent, membersOf(env))) fail(`this box may not host ${h.agent}`, 403);
   const a = s.agents[h.agent];
   if (!a) fail(`${h.agent} has no house config`, 409);
@@ -604,8 +612,14 @@ function checkableHouse(env, s, caller, id, { repo = true } = {}) {
   return { h, a };
 }
 
-/** A body host's house: its task is the runtime's own (houserunner.mjs, hostTask). */
+/** A body host's task: the runtime's own (houserunner.mjs, hostTask). Text anyone could write: see isHostHouse. */
 export const isHostTask = (t) => typeof t === 'string' && /^loom-runtime body-host --piece [a-z][a-z0-9-]{0,39} --host-key /.test(t);
+/**
+ * A body host's house, by the runtime's own mark (kind, set by up for houserunner.mjs). One from before the mark: its
+ * task, and only if no agent asked for it (an agent can't ask for that task now, but could before).
+ */
+export const isHostHouse = (h, s) => !!h && (h.kind === 'body-host'
+  || (h.kind === undefined && isHostTask(h.task) && typeof h.by === 'string' && !(s?.agents && Object.hasOwn(s.agents, h.by))));
 /** Whether a house runs an older image than its agent's current build. Unknown either way: not outdated. */
 export function outdatedHouse(s, id) {
   const h = s.houses?.[id];

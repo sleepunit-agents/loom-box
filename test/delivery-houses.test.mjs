@@ -394,7 +394,7 @@ test('a body host\'s boot key never shows: not in list, down or the page, only i
   setAgent(env, { now: () => new Date() }, { agent: 'art', repo: 'https://example.com/art.git' });
   const key = 'ab'.repeat(24);
   const fx = { now: () => new Date() };
-  const r = up(env, fx, { kind: 'owner' }, { agent: 'art', box: Object.keys(load(env).boxes).find((k) => load(env).boxes[k].local), task: hostTask(env, key) });
+  const r = up(env, fx, { kind: 'owner' }, { agent: 'art', box: Object.keys(load(env).boxes).find((k) => load(env).boxes[k].local), task: hostTask(env, key) }, { kind: 'body-host' });
   assert.equal(JSON.stringify(r).includes(key), false, 'up\'s answer');
   assert.equal(load(env).houses[r.id].task.includes(key), true, 'the record keeps it, for its box\'s claim');
   const shown = list(env, { kind: 'owner' }).houses.find((h) => h.id === r.id);
