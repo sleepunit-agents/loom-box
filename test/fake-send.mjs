@@ -21,6 +21,11 @@ appendFileSync(join(D, 'calls.log'), JSON.stringify({ argv: process.argv.slice(2
 // $FAKE_SEND/delay: how long it takes to post, in ms (a slow platform).
 const delay = existsSync(join(D, 'delay')) ? Number(readFileSync(join(D, 'delay'), 'utf-8')) : 0;
 if (delay > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay);
+// $FAKE_SEND/refuse: an answer it gives every post, as it is (a venue in shadow mode: {ok: false, reason, permanent}).
+if (existsSync(join(D, 'refuse'))) {
+  process.stdout.write(readFileSync(join(D, 'refuse'), 'utf-8').trim() + '\n');
+  process.exit(1);
+}
 const f = join(D, 'fail');
 const left = existsSync(f) ? Number(readFileSync(f, 'utf-8')) : 0;
 if (left > 0) {
