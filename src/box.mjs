@@ -497,7 +497,12 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
           if (r?.outdated) log(`${x.id} runs ${r.build}, older than ${x.agent}'s ${r.current}: it drains (no new bodies), then idles out`);
         }
         checked.add(x.id);
-      } catch (e) { log(`build check for ${x.id}: ${e.message}`); }
+      } catch (e) {
+        // Not again before its pace (an older control plane has no build-check; a secret that couldn't be had).
+        checked.add(x.id);
+        agentAt.set(x.agent, clock());
+        log(`build check for ${x.id}: ${e.message}`);
+      }
     }
   }
 
