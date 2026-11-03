@@ -310,6 +310,13 @@ the same agent within the hour are refused, an answer is a relay back with `repl
 day is a heads-up on loom's Inbox (`LOOM_RUNTIME_RELAY_HEADS_UP`). From a house, `loom runtime relay --to <b> --say
 <text>` and `loom runtime relays` do the same over the piece API.
 
+**The now board** (agent-runtime.md, "The sources"; `src/nowboard.mjs`): live state, the runtime's own. A bridge in a
+house writes its board through loom's piece API as its agent (shuttle's nowlog with `SHUTTLE_NOW_REMOTE=runtime/now`):
+`now/snapshot` `{bridge, snap}` and `now/event` `{record}`, into `<LOOM_RUNTIME_NOW_DIR>/<agent>-now` (the layout
+loom-now kept). `loom runtime now talking` from a house reads its own. The runtime's page **Now** shows each agent's
+bridges, who they're talking with, what waits, and the accounts' quota. Its manifest makes a bridge gone dark an alert
+on loom's Inbox and each live conversation its agent's `doing`. A board holds no message text.
+
 **Gates** (who a platform id is, and what each person may do with each agent) are the runtime's too: collection
 `gates`, one document per agent, each entry keyed by the person's card slug. Importing or allowing someone ensures
 their person card in core (`POST /api/loom/people/ensure`); merging two entries merges their cards and every agent's

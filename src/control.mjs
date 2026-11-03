@@ -1253,6 +1253,11 @@ export function api(env, effects, { caller, path, body }) {
       return import('./delivery.mjs').then((m) => m.send(env, { conversation: b.conversation, text: b.text, key: b.key, session: typeof b.session === 'string' ? b.session : undefined, ...(b.person !== undefined ? { person: b.person } : {}), ...(b.via !== undefined ? { via: b.via } : {}) }, { caller, detach: true }))
         .then((r) => ({ status: r.accepted ? 200 : 409, body: r }), apiError);
     }
+    // The now board's inbox (nowboard.mjs): a bridge's snapshot and events, as its agent (or the owner).
+    if (path === 'now/snapshot' || path === 'now/event') {
+      return import('./nowboard.mjs').then((m) => ({ status: 200, body: m.inbox(env, caller, path, b) }))
+        .catch((e) => (e?.constructor?.name === 'NowError' ? { status: e.status, body: { error: e.message } } : apiError(e)));
+    }
     // The runtime's remote CLI for an agent's bodies (loom's `run` path): its own agent's gates, and proposing a person.
     if (path === 'run') {
       if (caller.kind !== 'agent') fail('run is a body\'s, as its own agent (the owner uses `loom runtime` at loom\'s machine)', 403);

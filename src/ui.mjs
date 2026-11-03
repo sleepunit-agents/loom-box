@@ -17,6 +17,7 @@ import { loomStore } from './store.mjs';
 import { asks as gateAsks, answer as gateAnswer, gatesPage, mergePeople, status as gatesStatus, proposals as gateProposals } from './gates.mjs';
 import { GRANTS, KEY as GRANTS_KEY, GrantsError, grantsProblem, householdOf, setPiece, setRelay } from './grants.mjs';
 import { relayNotices } from './relay.mjs';
+import { nowManifest, nowPage } from './nowboard.mjs';
 import { coreFrom } from './core.mjs';
 
 /**
@@ -93,6 +94,11 @@ function sessionsSection(env, s, view, only) {
 
 export function manifest(env) {
   const s = load(env);
+  // The now board (nowboard.mjs): a bridge gone dark is an alert, and what each agent's bodies are in is its doing.
+  let board = { asks: [], agents: {} };
+  try { board = nowManifest(env); } catch { /* a board that can't be read leaves the rest of the manifest */ }
+  const reports = agentReports(s, Date.now(), { ...reportedBusy(s), ...sessionsBusy(join(stateDir(env), 'session-cpu.json')) });
+  for (const [a, doing] of Object.entries(board.agents)) reports[a] = { readings: [], ...reports[a], doing: [...(reports[a]?.doing ?? []), ...doing].slice(0, 8) };
   const boxes = Object.values(s.boxes).filter((b) => !b.revoked);
   const live = Object.values(s.houses).filter((h) => LIVE.has(h.state));
   return {
@@ -110,8 +116,8 @@ export function manifest(env) {
     },
     // A box asking to join is the owner's call: the code is the one on the box's own terminal.
     // ...and a person a body proposes for an agent's gates (gates.mjs): the household owner's to allow or deny.
-    asks: [...pendingJoins(s).slice(0, 5).map((j) => joinAsk(j)), ...permsAsks(env)],
-    agents: agentReports(s, Date.now(), { ...reportedBusy(s), ...sessionsBusy(join(stateDir(env), 'session-cpu.json')) }),
+    asks: [...pendingJoins(s).slice(0, 5).map((j) => joinAsk(j)), ...permsAsks(env), ...board.asks],
+    agents: reports,
     // A delivery the runtime gave up on (its body never started, after its retries): the owner hears of it.
     // ...and a relay thread between agents that's run long today: a heads-up, never a stop (relay.mjs).
     notices: [...deliveryNotices(env), ...relayNotices(env), ...boxNotices(s)].sort((x, y) => Date.parse(y.at) - Date.parse(x.at)).slice(0, 20),
@@ -492,7 +498,8 @@ function boxesPage(env, nowMs, caller = OWNER) {
   sections.push({ id: 'new-agent', side: true, title: '', blocks: [
     { type: 'details', summary: 'Give an agent a house', blocks: [agentForm('', null)] },
     // Which agent may use which piece, who may relay to whom, and each agent's gates (agent-runtime.md, section 6).
-    { type: 'list', items: [{ text: 'Permissions', meta: 'grants, relay pairs, gates', page: 'permissions' }] }] });
+    { type: 'list', items: [{ text: 'Permissions', meta: 'grants, relay pairs, gates', page: 'permissions' },
+      { text: 'Now', meta: 'the bridges: who they\'re talking with, what waits, and the quota', page: 'now' }] }] });
   return { title: 'Boxes', intro: `${live_boxes.length} box${live_boxes.length === 1 ? '' : 'es'}, ${live.length} house${live.length === 1 ? '' : 's'} up${waiting ? ' or waiting' : ''}. A house is an agent's container, started for a task.`, sections };
 }
 
@@ -830,6 +837,11 @@ export function page(env, { path, caller: c }, nowMs = Date.now()) {
   if (path === '' || path === undefined) return boxesPage(env, nowMs, caller);
   if (path === 'agents') return agentsPage(env);
   if (path === 'permissions') return permissionsPage(env);
+  if (path === 'now') {
+    let usage = [];
+    try { usage = stateAccounts(env).usage(); } catch { usage = []; }
+    return nowPage(env, { usage, nowS: nowMs / 1000 });
+  }
   if (typeof path === 'string' && /^gates\/[a-z][a-z0-9-]{0,39}$/.test(path)) {
     const st = permsStore(env);
     return st ? gatesPage(st, path.slice(6)) : { title: 'Not found', sections: [] };

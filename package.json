@@ -90,6 +90,11 @@
         "hint": "all (every agent the runtime hosts), none, or agent ids, comma-separated; each runs as itself, in its own house"
       },
       {
+        "name": "LOOM_RUNTIME_NOW_DIR",
+        "label": "Where the now board's files are",
+        "hint": "a directory: each agent's board in <agent>-now under it (the bridges' snapshots and events, no message text); default the runtime's own data"
+      },
+      {
         "name": "LOOM_RUNTIME_RELAY_HEADS_UP",
         "label": "A relay thread this long is a heads-up",
         "hint": "messages in one thread within a day, on loom's Inbox (default 8); never a stop"
