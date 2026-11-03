@@ -7,6 +7,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { staticAccounts } from '../src/accounts.mjs';
 import { CoreError } from '../src/core.mjs';
+import { loadConv, send } from '../src/delivery.mjs';
 import { setModels } from '../src/models.mjs';
 import { RunnerError, inbox } from '../src/runners.mjs';
 import { readdirSync, statSync } from 'node:fs';
@@ -134,7 +135,10 @@ export function world(extra = {}, { inboxDir } = {}) {
   };
   let n = 0;
   const msg = (place, text, more = {}) => ({ source: 'test-source', id: `m-${++n}`, agent: 'art', venue: 'slack', place, label: `Loren (${place})`, from: { kind: 'person', slug: 'loren' }, kind: 'message', at: clock.now().toISOString(), text, ...more });
-  return { env, log, runner, core, clock, o, msg, kinds: () => log.map((l) => l[0]) };
+  // A body's send, as its harness makes it: with the session it runs in (Claude Code sets CLAUDE_CODE_SESSION_ID).
+  const sessionFor = (cv) => { const c = loadConv(env, cv); return c?.body ? runner.slotOf({ id: c.body.split(':')[1] })?.session : undefined; };
+  const sendAs = (b, oo = o) => send(env, { ...b, ...(b.session === undefined ? { session: sessionFor(b.conversation) } : {}) }, oo);
+  return { env, log, runner, core, clock, o, msg, sessionFor, send: sendAs, kinds: () => log.map((l) => l[0]) };
 }
 
 
