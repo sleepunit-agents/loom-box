@@ -328,6 +328,30 @@ The resolver, in order:
 2. **The agent's preference** among those: this body's `--prefer`, then the agent's `prefer`, then the list's order.
 3. **Scorecards** demote the preference when another allowed model's `graded` value for the venue's kind (`live`, `scheduled`, `agent`) is at least 1.0 higher, over the last 14 days, with at least 5 graded samples each. They're read from loom's `GET /api/loom/scorecards` with a runtime token (`LOOM_RUNTIME_TOKEN_FILE`), or a file of rows (`LOOM_RUNTIME_SCORECARDS`). None readable is no demotion.
 
+## The review
+
+The household's daily review (loom's `docs/specs/conversations.md`, "Review"): grading by bare models, then each agent's own introspection. It runs at 04:00 in the household's time zone. household.json's `tz` and `review` are read from core (`GET /api/loom/review/config`), never from the file. The delivery service's tick starts it. A service that was down at 04:00 runs it when it's back that day. A runtime seeing the clock for the first time waits for the next 04:00.
+
+```bash
+loom runtime review run --limit 5 --introspect art   # one run now, by hand
+loom runtime review status                           # the schedule, and what the last runs did
+```
+
+- **Grading.** A review token for the run, kept in memory only. Up to `LOOM_RUNTIME_REVIEW_LIMIT` entries (default 200) taken from the audit log, redacted by core. Each entry carries its producer's family, never its model.
+  - **Graders.** Each entry gets models from the families allowed to grade it: two other families where the household has them, else one. A household of one family uses a different model of that family (`same_family`). A conversation with someone other than the owner is graded only by the families that already processed it.
+  - **What a grader can run on.** A model whose harness is logged in on loom's own box (a household owner's), with room in its account.
+  - **What a grader is.** `claude -p` or `codex exec` in a throwaway container under that box's own login. It has no tools, MCP, settings or session, and gets the sample on stdin. It answers a score and at most one finding (one line, ≤ 200 characters).
+  - **The grader image.** Graders run only in the image the box's owner built from `grader/Containerfile` and pinned by digest (`LOOM_RUNTIME_GRADER_IMAGE`; else an owner-set `LOOM_RUNTIME_LOGIN_IMAGE`, pinned the same way). It's checked on the box and run by that digest with `--pull never`. It's never an agent's house image: an agent builds its own, and could put a CLI in it that reads the samples or bends the scores. Without it nothing is graded, and the record says "no grader image". To build it:
+
+    ```bash
+    podman build -t localhost/loom-grader:1 grader/
+    loom pieces set runtime LOOM_RUNTIME_GRADER_IMAGE=localhost/loom-grader@$(podman image inspect localhost/loom-grader:1 --format '{{.Digest}}')
+    ```
+  - **Its network.** None (`--network none`). Its only way out is an egress proxy the review runs for each grading, on a unix socket mounted into the container. The proxy tunnels CONNECT to the CLI's own provider hosts on 443 (Claude: `api.anthropic.com`, `console.anthropic.com`, `platform.claude.com`, `claude.ai`; Codex: `chatgpt.com`, `auth.openai.com`, `api.openai.com`) and refuses everything else: loom, the box, the LAN.
+  - **After grading.** Scores go to core by ref, findings too (core keeps one per conversation per day), and what was processed is marked done. When no allowed family has room, nothing is taken, and the run's record says why nothing was graded.
+- **Introspection.** Each agent the runtime hosts (`LOOM_RUNTIME_REVIEW_INTROSPECT`: `all`, `none`, or a list) gets a wake through the runtime's own delivery: venue `wake`, place `review`. Its body starts the normal way, in its own house, as itself. It reads its own conversations, digests and findings, and writes what it learns through its own memory tools. The runtime keeps only that the wake was delivered.
+- **The record** (`<LOOM_BOX_DATA>/review/runs.jsonl`) holds counts, grader families and short reasons. It never holds a sample, a grader's words, a finding's text or a token.
+
 ## Model accounts
 
 **Read [docs/model-accounts.md](docs/model-accounts.md).** In short: each box signs in to the real `claude` and `codex` with its owner's own subscription, from the box's page (**Log in Claude**, **Log in Codex**: the CLI's own login, run on that box). The box reports, from the CLIs' own status commands, which harnesses it has and whether each is logged in. The accounts are a view of those reports: boxes on one account share it. Usage comes from the harness's own run output. loom never reads, stores, copies, refreshes or issues a model token, and never calls a provider's API. An API key is a plain secret (`anthropic-api-key`, `openai-api-key`). An agent's work runs only on boxes its owner owns, or ones lent to it.

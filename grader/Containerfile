@@ -1,0 +1,16 @@
+# The grader image (src/grader.mjs; README, "The review"): the review job's bare graders run in it, and in nothing
+# an agent built. It holds only the two harness CLIs, at pinned versions, on a base pinned by digest. The box's owner
+# builds it and sets its digest as LOOM_RUNTIME_GRADER_IMAGE:
+#
+#   podman build -t localhost/loom-grader:1 grader/
+#   loom pieces set runtime LOOM_RUNTIME_GRADER_IMAGE=localhost/loom-grader@$(podman image inspect localhost/loom-grader:1 --format '{{.Digest}}')
+#
+# Bump a version here, rebuild, and set the new digest: the runtime runs a grader only in the image that digest names.
+FROM docker.io/library/node:24-bookworm-slim@sha256:a43f7fc3e52e87d12a905f46eea0275def84ca8f2981a5b53fed44d7fb398ee0
+# Codex verifies TLS with the system's roots (node, and so Claude Code, carries its own).
+RUN apt-get -o APT::Sandbox::User=root update -qq \
+ && apt-get -o APT::Sandbox::User=root install -y -qq --no-install-recommends ca-certificates=20250419~deb12u2 \
+ && rm -rf /var/lib/apt/lists/*
+RUN npm install -g --no-fund --no-audit --no-update-notifier @anthropic-ai/claude-code@2.1.309 @openai/codex@0.162.1 \
+ && npm cache clean --force && claude --version && codex --version
+LABEL org.opencontainers.image.title="loom-grader" org.opencontainers.image.source="https://github.com/sleepunit-agents/loom-box"

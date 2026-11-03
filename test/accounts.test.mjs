@@ -283,6 +283,13 @@ test('the runtime holds no credential: no token endpoint, refresh, client id, pr
     for (const m of markers) {
       // logins.mjs names the two credential files, to move them unread between the box's CLI home and the shared dir.
       if (f === 'logins.mjs' && (String(m) === String(/\.credentials\.json/) || String(m) === String(/auth\.json/))) continue;
+      // grader.mjs names the provider hosts its egress proxy lets a grader's CLI reach (a CONNECT tunnel it never
+      // reads into); it calls none of them itself. Its egress test pins that only CONNECT to those hosts passes.
+      if (f === 'grader.mjs' && (String(m) === String(/api\.anthropic\.com/) || String(m) === String(/api\.openai\.com/))) {
+        assert.equal(text.match(/api\.(anthropic|openai)\.com/g).length, 2, 'grader.mjs names each provider host once, in EGRESS');
+        assert.equal(/fetch\(|https?\.request|https?:\/\/api\./.test(text), false, 'grader.mjs makes no request of its own');
+        continue;
+      }
       assert.equal(m.test(text), false, `${f} matches ${m}`);
     }
   }

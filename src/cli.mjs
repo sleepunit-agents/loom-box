@@ -61,6 +61,10 @@
 //   loom runtime logins [--json]                                       each box's harnesses: installed, logged in
 //   loom runtime login <box> claude|codex                              log a box in (its CLI's own login; prints the link)
 //   loom runtime carry-settings [--from box --to runtime]             after swapping the old box piece by hand: its settings, renamed
+// The review job (agent-runtime.md, section 7; conversations.md, "Review"): daily at 04:00 in the household's tz,
+// started by the delivery service's tick; grading by bare models, then each agent's own introspection:
+//   loom runtime review run [--limit n] [--introspect all|none|a,b] [--json]   one run now, by hand
+//   loom runtime review status [--json]                                the schedule and the last runs (counts only)
 // From a house (its loom token):
 //   loom runtime usage report --harness claude|codex < output.jsonl    how full its account is, from the harness's run
 //                                                                      output (stream-json, or a Codex rollout)
@@ -92,6 +96,7 @@ import { readModels, resolveFor, setModels } from './models.mjs';
 import { endBody, feedBody, listBodies, resumeBody, startBody } from './bodies.mjs';
 import { PART_RAW, joinParts, partsOf } from './blobs.mjs';
 import { deliver, listConvs, post, send, tick } from './delivery.mjs';
+import { reviewStatus, reviewTick, runReview } from './review.mjs';
 import { bodyKeyFor, runBodyHost } from './bodyhost.mjs';
 import { runnerFor } from './runners.mjs';
 import { applyUpgrade, carrySettings, loadCarried, recoverUpgrade } from './version.mjs';
@@ -375,6 +380,7 @@ async function main(argv, env) {
     }
     case 'body': return body(rest, env, json);
     case 'deliver': return delivery(rest, env, json);
+    case 'review': return reviewCli(rest, env, json);
     case 'send': {
       // From a body in its house: through the piece API, as its own agent (its house's token), with its run's key.
       // The key for that conversation as its house keeps it (bodyhost.mjs), else this body's environment's.
@@ -531,6 +537,8 @@ async function delivery(rest, env, json) {
     const every = Number(flag(rest, '--every')) || 5000;
     for (;;) {
       try { await tick(env); } catch (err) { process.stderr.write(`loom-runtime deliver: tick: ${err.message}\n`); }
+      // The day's review, once it's due (review.mjs): started detached, so the tick never waits on it.
+      try { const r = await reviewTick(env); if (r?.started) process.stderr.write(`loom-runtime deliver: started the review for ${r.started}\n`); } catch (err) { process.stderr.write(`loom-runtime deliver: review tick: ${err.message}\n`); }
       if (rest.includes('--once')) return;
       await sleep(every);
     }
@@ -544,6 +552,35 @@ async function delivery(rest, env, json) {
   }
   throw new Fail('usage: loom runtime deliver [tick|run|list] …', 2);
 }
+
+/** loom runtime review …: a run by hand, and what the runs did (counts and families, never text). */
+async function reviewCli(rest, env, json) {
+  const [sub] = positional(rest);
+  if (sub === 'run') {
+    const limit = flag(rest, '--limit');
+    const r = await runReview(env, {
+      ...(limit !== undefined ? { limit: Number(limit) } : {}), ...(flag(rest, '--introspect') !== undefined ? { introspect: flag(rest, '--introspect') } : {}),
+      trigger: rest.includes('--scheduled') ? 'scheduled' : 'by-hand', ...(flag(rest, '--day') ? { day: flag(rest, '--day') } : {}),
+    });
+    if (r.error) process.exitCode = 1;
+    if (json) return out(r);
+    return process.stdout.write(reviewLine(r));
+  }
+  if (sub === 'status') {
+    const st = reviewStatus(env);
+    if (json) return out(st);
+    process.stdout.write(st.schedule ? `schedule: ${st.schedule.day ? `last run for ${st.schedule.day}` : 'armed for the next 04:00'}\n` : 'schedule: not seen yet\n');
+    for (const r of st.runs) process.stdout.write(reviewLine(r));
+    return;
+  }
+  throw new Fail('usage: loom runtime review run|status …', 2);
+}
+
+const reviewLine = (r) => `${r.at} ${r.day ?? ''} (${r.trigger}): ${r.error ? `failed: ${r.error}` : r.off ? 'off' : r.replaced ? `replaced by the household's command (exit ${r.exit})`
+  : `${r.taken} taken, ${r.graded} graded (${Object.entries(r.graders ?? {}).map(([f, n]) => `${f} ${n}`).join(', ') || 'no graders'}${r.same_family ? `, ${r.same_family} same-family` : ''}), `
+  + `${r.scores} scores, ${r.findings} findings${r.findings_refused ? ` (${r.findings_refused} past the day's cap)` : ''}, ${r.unscorable} unscorable, ${r.ungraded} ungraded, ${r.failed} failed, ${r.done} done`
+  + `${r.nothing_graded ? `; nothing graded: ${r.nothing_graded}` : ''}${r.introspection ? `; introspection: ${r.introspection.map((x) => `${x.agent} ${x.body}`).join(', ') || 'none'}` : ''}`}\n`
+  + (r.why?.length ? r.why.map((w) => `  ${w}\n`).join('') : '');
 
 /** loom runtime models …: the list, each agent's settings, and the resolver. */
 async function models(rest, env, json) {
