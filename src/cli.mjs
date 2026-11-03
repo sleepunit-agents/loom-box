@@ -67,6 +67,8 @@
 //   loom runtime review status [--json]                                the schedule and the last runs (counts only)
 // From a house (its loom token):
 //   loom runtime usage report --harness claude|codex < output.jsonl    how full its account is, from the harness's run
+//   loom runtime usage report --harness claude --session <id>         … from a Claude session's status line (usage statusline)
+//   loom runtime usage statusline                                      a Claude status line command: keeps its rate limits
 //                                                                      output (stream-json, or a Codex rollout)
 // Permissions (agent-runtime.md, section 6; the runtime is the grants authority, and holds the gates):
 //   loom runtime grants ask | list [--json] | seed [--dry-run] [--force] | set <piece> <agents|*> [--paths p,p] | paired <a> <b>
@@ -105,7 +107,8 @@ import { PART_RAW, joinParts, partsOf } from './blobs.mjs';
 import { deliver, listConvs, post, send, tick } from './delivery.mjs';
 import { reviewStatus, reviewTick, runReview } from './review.mjs';
 import { bodyKeyFor, runBodyHost } from './bodyhost.mjs';
-import { runnerFor } from './runners.mjs';
+import { runnerFor, usageDirOf } from './runners.mjs';
+import { capture as captureStatusline, keptReading, lineOf as statuslineText } from './statusline.mjs';
 import { applyUpgrade, carrySettings, loadCarried, recoverUpgrade } from './version.mjs';
 import { gatesCli, grantsCli, policyCli } from './perms-cli.mjs';
 import { startStatusReporter } from './statusreport.mjs';
@@ -469,14 +472,23 @@ async function main(argv, env) {
       return out(st);
     }
     case 'usage': {
+      // A Claude session's status line (statusline.mjs): its rate limits kept by session, for `report --session`.
+      if (rest[0] === 'statusline') {
+        const got = (() => { try { return captureStatusline(usageDirOf(env), process.stdin.isTTY ? '' : readFileSync(0, 'utf-8')); } catch { return null; } })();
+        process.stdout.write(`${statuslineText(got?.reading)}\n`);
+        return;
+      }
       const h = flag(rest, '--harness');
-      if (rest[0] !== 'report' || !h) throw new Fail('usage: loom runtime usage report --harness claude|codex < output.jsonl', 2);
+      if (rest[0] !== 'report' || !h) throw new Fail('usage: loom runtime usage report --harness claude|codex [--session <id>] < output.jsonl', 2);
+      // A Claude session whose status line kept its reading (a `claude --bg` body: it has no stream-json to pipe).
+      const session = flag(rest, '--session');
       // Codex with nothing piped: its own newest session rollout ($CODEX_HOME/sessions).
-      const piped = process.stdin.isTTY ? '' : await readStdin();
-      const reading = piped.trim() ? lastRateLimit(h, piped)
+      const piped = session || process.stdin.isTTY ? '' : await readStdin();
+      const reading = session ? (h === 'claude' ? keptReading(usageDirOf(env), session) : null)
+        : piped.trim() ? lastRateLimit(h, piped)
         : h === 'codex' ? codexUsageOnBox(env, { root: join(env.CODEX_HOME || join(env.HOME, '.codex'), 'sessions') }) : null;
       if (!reading) { process.stderr.write('no rate-limit reading in that output\n'); return; }
-      return out(await ownerOrRemote(env)('usage', { harness: h, reading: { ...reading, checked: Math.floor(Date.now() / 1000) } }));
+      return out(await ownerOrRemote(env)('usage', { harness: h, reading: { ...reading, checked: reading.checked ?? Math.floor(Date.now() / 1000) } }));
     }
     case undefined: case '-h': case '--help': case 'help':
       process.stdout.write(USAGE);

@@ -15,6 +15,8 @@
 //                                            (its transcript: what a resume needs, packed into a continuity slot)
 //                                            and {drop: [path]} (the body's job or run dir: its brief, its events).
 //   roots                                  → {name: dir}: where `keep` paths are relative to (and restored into).
+//   usage(body)                            → how full its account was at its last turn ({windows, resets, checked}),
+//                                            or null: what the body host reports when a turn ends (t-1754).
 //
 // Two harnesses today, ported from the bridges piece's runners (shuttle/runner.py, shuttle/runners/codex.py):
 // Claude Code as `claude --bg`, and Codex as `codex exec --json`. Feeding goes through a body's inbox: the layout
@@ -25,6 +27,9 @@ import { randomBytes } from 'node:crypto';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { keptReading } from './statusline.mjs';
+import { lastRateLimit, tailOf } from './logins.mjs';
 
 export class RunnerError extends Error {}
 
@@ -90,8 +95,8 @@ export class ClaudeRunner {
   harness = 'claude';
   static TOKEN_LINE = '(bridge spawn token {token}: ignore this line)';
 
-  constructor({ claude = 'claude', jobsDir = join(homedir(), '.claude', 'jobs'), projectsDir, args = [], inboxDir, run = spawnSync, sleep = sleepMs, claimPolls = 10, token = hex8 } = {}) {
-    Object.assign(this, { claude, jobsDir, args, run, sleep, claimPolls, token });
+  constructor({ claude = 'claude', jobsDir = join(homedir(), '.claude', 'jobs'), projectsDir, args = [], inboxDir, usageDir = usageDirOf(), node = process.execPath, run = spawnSync, sleep = sleepMs, claimPolls = 10, token = hex8 } = {}) {
+    Object.assign(this, { claude, jobsDir, args, usageDir, node, run, sleep, claimPolls, token });
     this.inbox = inboxDir ? inbox(inboxDir, { run }) : null;
     // Claude Code keeps a session's transcript at <config>/projects/<cwd, slugged>/<session>.jsonl (and its tool
     // results beside it, <session>/): the config dir is the jobs dir's parent.
@@ -126,7 +131,7 @@ export class ClaudeRunner {
     // A Codex body's key, inherited by a launcher started under one: a Claude body must never key its inbox on it.
     const { SHUTTLE_BODY: _drop, ...clean } = env ?? process.env;
     const before = new Set((this.agents(clean) ?? []).map((a) => a.id));
-    const argv = ['--bg', ...(model ? ['--model', model] : []), ...this.args, ...(deny.length ? ['--disallowedTools', ...deny] : []), ...(resume ? ['--resume', resume] : [])];
+    const argv = ['--bg', ...(model ? ['--model', model] : []), ...this.statusLine(), ...this.args, ...(deny.length ? ['--disallowedTools', ...deny] : []), ...(resume ? ['--resume', resume] : [])];
     const r = this.run(this.claude, argv, { cwd, env: clean, input: prompt, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 60_000 });
     if (r.error || r.status !== 0) throw new RunnerError(`claude --bg didn't start: ${(r.stderr || r.error?.message || '').trim().split('\n').pop() || `exit ${r.status}`}`);
     // Claim: a new agent whose job intent carries this launch's token.
@@ -144,6 +149,23 @@ export class ClaudeRunner {
       this.sleep(1000);
     }
     throw new RunnerError('claude --bg started nothing this runner could find');
+  }
+
+  /**
+   * How a body's usage is read: its status line (statusline.mjs), which Claude Code runs for a background session too,
+   * keeping the session's rate_limits in usageDir. Not when the runtime's args bring their own --settings (Claude
+   * Code takes one), and never with a path a shell would read as more than a word.
+   */
+  statusLine() {
+    if (!this.usageDir || this.args.includes('--settings')) return [];
+    const script = fileURLToPath(new URL('./statusline.mjs', import.meta.url));
+    if (![this.node, script, this.usageDir].every((p) => /^\/[A-Za-z0-9._\/+-]+$/.test(p))) return [];
+    return ['--settings', JSON.stringify({ statusLine: { type: 'command', command: `${this.node} ${script} ${this.usageDir}` } })];
+  }
+
+  usage(body) {
+    const session = this.slotOf(body)?.session;
+    return session ? keptReading(this.usageDir, session) : null;
   }
 
   start(o) { return this.launch(o); }
@@ -238,6 +260,17 @@ export class CodexRunner {
   }
   feed(body, message) { return feedVia(this, body, message); }
 
+  /** Its thread's rollout (where Codex writes token_count; `exec --json` doesn't): the last reading in its end. */
+  usage(body) {
+    for (const k of this.sessionFiles(this.slotOf(body)).keep) {
+      const f = join(this.roots[k.root], k.rel);
+      const text = tailOf(f);
+      const got = text === null ? null : lastRateLimit('codex', text);
+      if (got) { let checked; try { checked = Math.floor(statSync(f).mtimeMs / 1000); } catch { /* gone */ } return { ...got, ...(checked ? { checked } : {}) }; }
+    }
+    return null;
+  }
+
   events(id) {
     try {
       return readFileSync(join(this.runsDir, id, 'events.jsonl'), 'utf-8').split('\n').flatMap((l) => { try { const e = JSON.parse(l); return e && typeof e === 'object' ? [e] : []; } catch { return []; } });
@@ -275,12 +308,15 @@ export class CodexRunner {
   ids() { try { return readdirSync(this.runsDir).filter((d) => statSync(join(this.runsDir, d)).isDirectory()); } catch { return []; } }
 }
 
+/** Where Claude bodies' status lines keep their readings (statusline.mjs): the runner's and `usage statusline`'s. */
+export const usageDirOf = (env = process.env) => env.LOOM_RUNTIME_USAGE_DIR || join(env.HOME || homedir(), '.local', 'state', 'loom-runtime', 'usage');
+
 /** The runner for a harness, from the runtime's settings (LOOM_RUNTIME_CLAUDE, …) and what a test passes in. */
 export function runnerFor(harness, env = process.env, opts = {}) {
   const argv = (v) => { try { const a = JSON.parse(v); return Array.isArray(a) && a.every((x) => typeof x === 'string') ? a : []; } catch { return []; } };
   const inboxDir = env.LOOM_RUNTIME_INBOX_DIR || undefined;
   if (harness === 'claude') {
-    return new ClaudeRunner({ claude: env.LOOM_RUNTIME_CLAUDE || 'claude', ...(env.LOOM_RUNTIME_CLAUDE_JOBS ? { jobsDir: env.LOOM_RUNTIME_CLAUDE_JOBS } : {}), ...(env.LOOM_RUNTIME_CLAUDE_PROJECTS ? { projectsDir: env.LOOM_RUNTIME_CLAUDE_PROJECTS } : {}), args: argv(env.LOOM_RUNTIME_CLAUDE_ARGS), inboxDir, ...opts });
+    return new ClaudeRunner({ claude: env.LOOM_RUNTIME_CLAUDE || 'claude', usageDir: usageDirOf(env), ...(env.LOOM_RUNTIME_CLAUDE_JOBS ? { jobsDir: env.LOOM_RUNTIME_CLAUDE_JOBS } : {}), ...(env.LOOM_RUNTIME_CLAUDE_PROJECTS ? { projectsDir: env.LOOM_RUNTIME_CLAUDE_PROJECTS } : {}), args: argv(env.LOOM_RUNTIME_CLAUDE_ARGS), inboxDir, ...opts });
   }
   if (harness === 'codex') {
     return new CodexRunner({ codex: env.LOOM_RUNTIME_CODEX || 'codex', profile: env.LOOM_RUNTIME_CODEX_PROFILE || undefined, ...(env.LOOM_RUNTIME_CODEX_RUNS ? { runsDir: env.LOOM_RUNTIME_CODEX_RUNS } : {}), ...(env.LOOM_RUNTIME_CODEX_SESSIONS ? { sessionsDir: env.LOOM_RUNTIME_CODEX_SESSIONS } : {}), inboxDir, ...opts });
