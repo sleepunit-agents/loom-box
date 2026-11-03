@@ -339,3 +339,15 @@ test('a post goes only where send() allowed it: a forged DM target posts nothing
   assert.equal((await post(w.env, a.conversation, ref2, 'Green again.', { to: { venue: 'slack', place: 'dm:U9', label: 'DM with Loren' } }, w.o)).ok, true);
   assert.deepEqual(calls().map((x) => x.argv), [['--place', 'dm:U9', '--agent', 'art']]);
 });
+
+test('a venue\'s bare bin name is run from loom\'s pieces bin dir, which a piece\'s own processes don\'t have on PATH', async () => {
+  const { pieceArgv } = await import('../src/delivery.mjs');
+  const home = scratch('rt-pieces-');
+  mkdirSync(join(home, 'pieces', 'bin'), { recursive: true });
+  writeFileSync(join(home, 'pieces', 'bin', 'loom-discord'), '#!/bin/sh\n', { mode: 0o755 });
+  const env = { LOOM_PIECE_HOME: join(home, 'pieces', 'runtime') };
+  assert.deepEqual(pieceArgv(env, ['loom-discord', 'send']), [join(home, 'pieces', 'bin', 'loom-discord'), 'send']);
+  assert.deepEqual(pieceArgv(env, ['loom-slack', 'send']), ['loom-slack', 'send'], 'not a piece bin there: as declared');
+  assert.deepEqual(pieceArgv(env, ['/usr/bin/x']), ['/usr/bin/x']);
+  assert.deepEqual(pieceArgv({}, ['loom-discord', 'send']), ['loom-discord', 'send']);
+});

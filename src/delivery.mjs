@@ -253,8 +253,20 @@ export function depsOf(env, o = {}) {
     policy: o.policy ?? ((agent) => policyOf(storeOf(env, o), agent).doc),
     gates: o.gates ?? ((agent) => cachedGates(env, o, agent)),
     card: o.card ?? ((slug) => personCard(env, slug)),
-    adapter: o.adapter ?? ((argv, c, args) => adapterCall(argv, c, args, o.adapterMs ?? ADAPTER_MS)),
+    adapter: o.adapter ?? ((argv, c, args) => adapterCall(pieceArgv(env, argv), c, args, o.adapterMs ?? ADAPTER_MS)),
   };
+}
+
+/**
+ * A venue's declared argv as the runtime runs it: a bare bin name is a piece's bin, in loom's pieces bin dir
+ * ($LOOM_HOME/pieces/bin, the runtime's own LOOM_PIECE_HOME's sibling), which core searches before PATH and which a
+ * piece's own processes (core's API runs, its daemon's PATH) don't have on theirs. Else as declared.
+ */
+export function pieceArgv(env, argv) {
+  const [bin, ...rest] = argv;
+  if (typeof bin !== 'string' || bin.includes('/') || !env.LOOM_PIECE_HOME) return argv;
+  const p = join(dirname(env.LOOM_PIECE_HOME), 'bin', bin);
+  return existsSync(p) ? [p, ...rest] : argv;
 }
 
 let store;
@@ -1224,8 +1236,8 @@ export async function post(env, conversation, ref, text, { body, run, to } = {},
   const at = dm ? { agent: c.agent, venue: dm.venue, place: dm.place, label: dm.label } : c;
   const v = await venueOf(d, at.venue);
   // A scheduled venue with no send (a wake) posts nowhere: its message is only recorded.
-  let r = v?.send ? await sendOnce(d, v.send, at, text) : !dm && recordsOnly(v) ? { ok: true, recorded: true } : { ok: false, answered: true, reason: `venue ${at.venue} declares no send` };
-  if (!r.ok && r.answered && v?.send) r = await sendOnce(d, v.send, at, text);
+  let r = v?.send ? await sendOnce(d, pieceArgv(env, v.send), at, text) : !dm && recordsOnly(v) ? { ok: true, recorded: true } : { ok: false, answered: true, reason: `venue ${at.venue} declares no send` };
+  if (!r.ok && r.answered && v?.send) r = await sendOnce(d, pieceArgv(env, v.send), at, text);
   let rec = null;
   try { rec = body ? readBody(env, body) : null; } catch { /* its body is gone: the turn says no model */ }
   const turn = {
