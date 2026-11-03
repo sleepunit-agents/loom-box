@@ -782,7 +782,23 @@ function sendOnce(d, argv, c, text) {
  * Errors before acceptance are {ok: false, reason}. `o.caller`: who's asking: an agent speaks only in its own
  * conversations, and only the body holding it, in its current run (LOOM_BODY_KEY).
  */
-export async function send(env, { conversation, text, key }, o = {}) {
+/** A harness session id, as `send` carries it (the harness's own, per session: CLAUDE_CODE_SESSION_ID). */
+const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{3,127}$/;
+
+/**
+ * The harness session of the body holding a conversation now, as its runner sees it (in a house, its host's report),
+ * or null when its runner can't say. A body's key alone isn't enough in a house: each conversation's key is a file
+ * there (bodyhost.mjs), so a sibling body of the same agent could read it; its session is its own.
+ */
+function sessionOf(d, ref) {
+  try {
+    const rec = readBody(d.env, ref);
+    const s = d.runner(rec.harness).slotOf(bodyOf(ref, rec))?.session ?? rec.slot?.session;
+    return typeof s === 'string' && SESSION_ID.test(s) ? s : null;
+  } catch { return null; }
+}
+
+export async function send(env, { conversation, text, key, session }, o = {}) {
   const d = depsOf(env, o);
   const c = loadConv(env, conversation);
   if (!c) return { ok: false, reason: `no conversation ${conversation} here` };
@@ -790,6 +806,12 @@ export async function send(env, { conversation, text, key }, o = {}) {
   const want = typeof c.sendKey === 'string' && /^[0-9a-f]{64}$/.test(c.sendKey) ? Buffer.from(c.sendKey, 'hex') : null;
   if (!want || !c.body || typeof key !== 'string' || !key || !timingSafeEqual(keyHash(key), want)) {
     return { ok: false, reason: `only the body holding ${conversation} speaks in it (its run's ${BODY_KEY} doesn't match)` };
+  }
+  // Its harness session too, where the runner knows the body's: a sibling body holding this conversation's key (its
+  // house's file) is another session. A sender that names no session is refused once the body's is known.
+  const own = sessionOf({ ...d, env }, c.body);
+  if (own && session !== own) {
+    return { ok: false, reason: `only the body holding ${conversation} speaks in it (${session ? 'another session is' : 'no session is named'}: ${conversation} is a session of its own)` };
   }
   if (!str(text, MAX_TEXT)) return { ok: false, reason: `a message is 1-${MAX_TEXT} characters` };
   const v = await venueOf(d, c.venue);

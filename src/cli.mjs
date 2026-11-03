@@ -370,7 +370,10 @@ async function main(argv, env) {
       // From a body in its house: through the piece API, as its own agent (its house's token), with its run's key.
       // The key for that conversation as its house keeps it (bodyhost.mjs), else this body's environment's.
       const conversation = flag(rest, '--conversation');
-      const msg = { conversation, text: await textOf(rest, '--text'), key: bodyKeyFor(env, conversation) };
+      // And its harness's own session id (Claude Code sets it per session, under a shared daemon too): the runtime
+      // checks it's the session holding the conversation.
+      const session = env.CLAUDE_CODE_SESSION_ID || undefined;
+      const msg = { conversation, text: await textOf(rest, '--text'), key: bodyKeyFor(env, conversation), ...(session ? { session } : {}) };
       const r = env.LOOM_URL && env.LOOM_TOKEN_FILE ? await pieceCall(env, flag(rest, '--piece'))('send', msg) : await send(env, msg, { detach: true });
       out(r);
       if (!r.accepted) process.exitCode = 1;

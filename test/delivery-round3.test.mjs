@@ -81,7 +81,7 @@ test('4. send answers at once, and the runtime posts with the full 15 s: an 8 s 
   const key = w.runner.envs[c.body.split(':')[1]].LOOM_BODY_KEY;
   let sent;
   const t0 = Date.now();
-  const r = await send(w.env, { conversation: c.conversation, text: 'slow post', key }, { ...w.o, onSend: (p) => { sent = p; } });
+  const r = await w.send({ conversation: c.conversation, text: 'slow post', key }, { ...w.o, onSend: (p) => { sent = p; } });
   assert.ok(Date.now() - t0 < 1000, 'answered at once');
   assert.equal(r.accepted, true);
   assert.match(r.ref, /^out-[0-9a-f]{12}$/);
@@ -91,7 +91,7 @@ test('4. send answers at once, and the runtime posts with the full 15 s: an 8 s 
   assert.equal(w.core.turns.at(-1).outcome, 'answered');
   // A post that timed out may have landed: never retried; recorded failed, and the body is told through its inbox.
   writeFileSync(join(S, 'delay'), '3000');
-  const r2 = await send(w.env, { conversation: c.conversation, text: 'timed out', key }, { ...w.o, sendMs: 500, onSend: (p) => { sent = p; } });
+  const r2 = await w.send({ conversation: c.conversation, text: 'timed out', key }, { ...w.o, sendMs: 500, onSend: (p) => { sent = p; } });
   await sent;
   assert.equal(readFileSync(join(S, 'calls.log'), 'utf-8').trim().split('\n').length, 2, 'not retried after a timeout');
   assert.equal(w.core.turns.at(-1).outcome, 'failed');

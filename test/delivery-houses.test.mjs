@@ -134,7 +134,10 @@ test('a delivered body is a session in its agent\'s own house: placed, woken by 
       assert.ok(hostOf(env, 'art').report.bodies[c.body.split(':')[1].replace(/^h-1-/, '')]);
 
       // The body answers as a real one does: `loom runtime send`, its env only its house's token and its run's key.
-      const bodyCli = { PATH: process.env.PATH, HOME: H, LOOM_URL: loom.url, LOOM_TOKEN_FILE: join(H, 'token'), LOOM_BODY_KEY: bodyEnv.key };
+      // Its harness's own session id, as Claude Code sets it in a session (CLAUDE_CODE_SESSION_ID): its host reported it.
+      const session = hostOf(env, 'art').report.bodies[c.body.split(':')[1].replace(/^h-1-/, '')].session;
+      assert.ok(session);
+      const bodyCli = { PATH: process.env.PATH, HOME: H, LOOM_URL: loom.url, LOOM_TOKEN_FILE: join(H, 'token'), LOOM_BODY_KEY: bodyEnv.key, CLAUDE_CODE_SESSION_ID: session };
       const ok = await run(['send', '--conversation', a.conversation, '--piece', 'box', '--text', 'Yes, Thursday at 3.'], '', bodyCli, H);
       assert.equal(ok.status, 0, ok.stdout + ok.stderr);
       assert.equal(JSON.parse(ok.stdout).accepted, true, 'accepted at once; posted by the runtime');
@@ -152,6 +155,12 @@ test('a delivered body is a session in its agent\'s own house: placed, woken by 
       // And Art's house with a wrong key can't either (one with no key file for it: the house keeps the right one).
       const wrong = await run(['send', '--conversation', a.conversation, '--piece', 'box', '--text', 'x'], '', { ...bodyCli, HOME: join(H, 'elsewhere'), LOOM_BODY_KEY: 'f'.repeat(48) }, H);
       assert.equal(wrong.status, 1);
+      // A sibling body in the same house: it can read this conversation's key file, but it's another session.
+      const sibling = await run(['send', '--conversation', a.conversation, '--piece', 'box', '--text', 'not mine'], '', { ...bodyCli, CLAUDE_CODE_SESSION_ID: 'another-session-id' }, H);
+      assert.equal(sibling.status, 1);
+      assert.match(JSON.parse(sibling.stdout).reason, /another session/);
+      const unnamed = await run(['send', '--conversation', a.conversation, '--piece', 'box', '--text', 'whose?'], '', { ...bodyCli, CLAUDE_CODE_SESSION_ID: '' }, H);
+      assert.equal(unnamed.status, 1);
       assert.equal(lines(join(S, 'calls.log')).length, 1);
     } finally { host.kill(); }
   } finally {
