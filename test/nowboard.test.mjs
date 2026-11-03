@@ -111,10 +111,13 @@ describe('the board on the runtime\'s page and in its manifest', () => {
     assert.equal(full.agents.art.doing[0].text, 'Talking with Grace Aquino');
     assert.deepEqual(full.tile.label, 'Boxes', 'the runtime\'s tile is still its boxes');
     const p = nowPage(env, { usage: [{ account: 'max', provider: 'anthropic', label: 'Claude Max', windows: { '5h': 0.4, '7d': 0.97 }, resets: { '5h': now + 3600 } }], nowS: now });
-    const stats = p.sections[0].blocks[0].items;
-    assert.deepEqual(stats.map((x) => [x.label, x.value]), [['Bridges', '1 live'], ['Talking', '1'], ['Waiting', '0']]);
+    // A status screen: the headline in words (a dark bridge first), then tiles, the fullest quota window a meter.
+    assert.deepEqual(p.sections[0].blocks[0], { type: 'health', tone: 'bad', text: 'A bridge has gone quiet', detail: '1 live · 1 talking · 0 waiting' });
+    const stats = p.sections[0].blocks[1].items;
+    assert.deepEqual(stats.map((x) => [x.label, x.value]), [['Bridges', '1 live'], ['Talking', '1'], ['Waiting', '0'], ['Quota', '97%']]);
     assert.equal(stats[0].detail, '1 dark');
-    assert.deepEqual(p.sections[1].blocks[0].items.map((x) => x.label), ['Claude Max · 5h', 'Claude Max · 7d']);
+    assert.deepEqual([stats[3].meter, stats[3].tone, stats[3].detail], [0.97, 'bad', 'Claude Max, week']);
+    assert.deepEqual(p.sections[1].blocks[0].items.map((x) => x.label), ['Claude Max · 5 hours', 'Claude Max · week']);
     assert.equal(p.sections[1].blocks[0].items[1].tone, 'bad');
     assert.deepEqual(p.sections.map((s) => s.id), ['now', 'quota', 'board-art', 'board-mark']);
   });

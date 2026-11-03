@@ -82,12 +82,15 @@ test('doing (loom\'s summary card): each running task house by its note, a lane 
   s.houses['h-130'] = { id: 'h-130', agent: 'art', box: 'loom', state: 'running', created: ago(3), started: ago(2),
     task: JSON.stringify({ prompt: 'You are Art, waking from a self-set alarm in a fresh house (loom-box) (wake id w-ab12cd, kind schedule, set 2026-10-27 08:00:00, note: schedule reflect: nightly retro). Go.' }) };
   s.remotes.art.name = 'art';
+  // A body host's house isn't something Art is doing (before: "Loom-runtime body-host --piece runtime --host-key …", once per host).
+  s.houses['h-131'] = { id: 'h-131', agent: 'art', box: 'loom', state: 'running', created: ago(1), started: ago(1), task: `loom-runtime body-host --piece runtime --host-key ${'f'.repeat(32)}` };
   const r = agentReports(s, now, { 'box:art': true });
   assert.deepEqual(r.art.doing, [
     { text: 'Reflect: nightly retro', kind: 'lane', where: 'a house on loom', since: ago(2) },   // newest first
     { text: 'Pond rollup (part a) (t-1486)', kind: 'task', where: 'a house on one', since: ago(7) },
-    { text: 'A remote session', kind: 'session', where: 'box session on loom' },
+    { text: 'Working in a Claude session', kind: 'session', where: 'Box session on loom' },
   ]);
+  assert.ok(!JSON.stringify(r.art).includes('body-host'), 'no command line on the card');
   // Starting isn't doing yet; an idle session isn't either; and Mark, with nothing going, has no doing at all.
   assert.ok(!r.art.doing.some((d) => d.text === 'check CI'));
   assert.ok(!r.art.doing.some((d) => /\b[hw]-[0-9a-f]+\b/.test(`${d.text} ${d.where}`)), 'no house or wake id in doing');

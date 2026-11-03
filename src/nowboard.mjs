@@ -205,28 +205,41 @@ export function nowManifest(env, nowS = Date.now() / 1000) {
 }
 
 /** The Now page: the old status board's tiles (bridges, talking, waiting, quota), then each agent's board. */
+/** A usage window in words: "7d" -> "week", "5h" -> "5 hours". */
+const windowName = (k) => (k === '7d' ? 'week' : /^\d+h$/.test(k) ? `${k.slice(0, -1)} hours` : /^\d+d$/.test(k) ? `${k.slice(0, -1)} days` : k);
+
 export function nowPage(env, { usage = [], nowS = Date.now() / 1000 } = {}) {
   const all = boards(env, nowS);
   const flat = Object.values(all).flat();
   const live = flat.filter((b) => !b.dark);
   const sections = [];
+  const dark = flat.length - live.length;
+  const talking = live.reduce((n, b) => n + b.talking.length, 0);
+  const waiting = live.reduce((n, b) => n + b.waiting.length, 0);
+  // The quota, as the boxes report it (accounts.mjs): each window a meter; the fullest one a tile.
+  const windows = usage.filter((u) => Object.keys(u.windows ?? {}).length).flatMap((u) => Object.entries(u.windows).filter(([, v]) => typeof v === 'number').map(([w, v]) => ({ u, w, v: Math.max(0, Math.min(1, v)) })));
+  const fullest = windows.reduce((m, x) => (!m || x.v > m.v ? x : m), null);
+  const toneOfUse = (v) => (v >= 0.95 ? { tone: 'bad' } : v >= 0.8 ? { tone: 'warn' } : {});
+  // The headline: the bridges in a word, then the quota if it's running out.
+  const health = dark
+    ? { tone: 'bad', text: `${dark === 1 ? 'A bridge has' : `${dark} bridges have`} gone quiet`, detail: `${live.length} live · ${talking} talking · ${waiting} waiting` }
+    : fullest && fullest.v >= 0.95 ? { tone: 'bad', text: `${fullest.u.label} is nearly out`, detail: `${Math.round(fullest.v * 100)}% of its ${windowName(fullest.w)} used` }
+      : !flat.length ? { tone: 'muted', text: 'No bridge reports yet', detail: 'A bridge writes here once it\'s up.' }
+        : { tone: fullest && fullest.v >= 0.8 ? 'warn' : 'ok', text: `${flat.length === 1 ? 'The bridge is' : `All ${flat.length} bridges are`} live`, detail: `${talking} talking · ${waiting} waiting${fullest && fullest.v >= 0.8 ? ` · ${fullest.u.label} at ${Math.round(fullest.v * 100)}%` : ''}` };
   const stats = [
-    { label: 'Bridges', value: `${live.length} live`, ...(flat.length > live.length ? { detail: `${flat.length - live.length} dark`, tone: 'bad' } : { tone: 'ok' }) },
-    { label: 'Talking', value: String(live.reduce((n, b) => n + b.talking.length, 0)) },
-    { label: 'Waiting', value: String(live.reduce((n, b) => n + b.waiting.length, 0)) },
+    { label: 'Bridges', value: `${live.length} live`, ...(dark ? { detail: `${dark} dark`, tone: 'bad' } : { tone: live.length ? 'ok' : 'muted' }) },
+    { label: 'Talking', value: String(talking), detail: 'conversations' },
+    { label: 'Waiting', value: String(waiting), ...(waiting ? { tone: 'warn', detail: 'for a body' } : { detail: 'nothing' }) },
+    ...(fullest ? [{ label: 'Quota', value: `${Math.round(fullest.v * 100)}%`, detail: `${fullest.u.label}, ${windowName(fullest.w)}`, meter: fullest.v, ...toneOfUse(fullest.v) }] : []),
   ];
-  sections.push({ id: 'now', title: 'Now', blocks: [{ type: 'stats', items: stats }] });
-  // The quota, as the boxes report it (accounts.mjs): what the old board's quota tile showed.
-  const meters = usage.filter((u) => Object.keys(u.windows ?? {}).length).flatMap((u) => Object.entries(u.windows).filter(([, v]) => typeof v === 'number').map(([w, v]) => ({
-    label: `${u.label} · ${w}`, value: Math.max(0, Math.min(1, v)), detail: `${Math.round(v * 100)}%${u.resets?.[w] ? `, resets ${clock(u.resets[w])}` : ''}`,
-    ...(v >= 0.95 ? { tone: 'bad' } : v >= 0.8 ? { tone: 'warn' } : {}),
-  })));
+  sections.push({ id: 'now', blocks: [{ type: 'health', ...health }, { type: 'stats', items: stats }] });
+  const meters = windows.map(({ u, w, v }) => ({ label: `${u.label} · ${windowName(w)}`, value: v, detail: `${Math.round(v * 100)}%${u.resets?.[w] ? `, resets ${clock(u.resets[w])}` : ''}`, ...toneOfUse(v) }));
   sections.push({ id: 'quota', title: 'Quota', side: true, blocks: [meters.length ? { type: 'meter', items: meters.slice(0, 12) } : { type: 'text', tone: 'muted', text: 'No account has reported its usage yet.' }] });
   for (const [agent, bs] of Object.entries(all)) {
     const rows = bs.map((b) => ({
-      text: `${cap(b.name)}`, agent,
+      text: `${cap(b.name)} bridge`, agent,
       meta: b.dark ? `dark: no word for ${ago(nowS - b.at)}` : [`${b.talking.length} talking`, `${b.waiting.length} waiting`, ...(b.slots ? [`${b.slots.used ?? 0} of ${b.slots.cap ?? '?'} slots`] : []), ...(b.socket?.state ? [`socket ${b.socket.state}`] : [])].join(' · '),
-      badge: b.dark ? 'dark' : 'live', tone: b.dark ? 'bad' : 'ok',
+      badge: b.dark ? 'quiet' : 'live', tone: b.dark ? 'bad' : 'ok',
     }));
     const talk = bs.filter((b) => !b.dark).flatMap((b) => b.talking.map((t) => ({ text: withWhom(t), meta: b.name })));
     const wait = bs.filter((b) => !b.dark).flatMap((b) => b.waiting.map((w) => ({ text: withWhom(w), meta: [b.name, why(w)].filter(Boolean).join(' · '), tone: 'warn' })));
@@ -236,7 +249,6 @@ export function nowPage(env, { usage = [], nowS = Date.now() / 1000 } = {}) {
       ...(wait.length ? [{ type: 'text', tone: 'muted', text: 'Waiting' }, { type: 'list', items: wait.slice(0, 20) }] : []),
     ] });
   }
-  if (!Object.keys(all).length) sections.push({ id: 'none', blocks: [{ type: 'text', tone: 'muted', text: 'No bridge has written to the board yet.' }] });
   return { title: 'Now', intro: 'Live state: each agent\'s bridges, who they\'re talking with and what waits. Nothing anyone said is kept here.', sections };
 }
 
