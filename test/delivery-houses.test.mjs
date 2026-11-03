@@ -301,7 +301,10 @@ test('a house\'s body id fits a body ref with its house in front, or it\'s refus
   const env = { HOME: D, LOOM_BOX_DATA: join(D, 'data'), LOOM_BOX_HOME: join(D, 'state'), LOOM_BOX_LOCAL_NAME: 'one' };
   const hr = new HouseRunner(env, 'claude', { poll: 5, sealer: { seal: (b) => b, open: (b) => b } });
   hr.warm = async () => 'h-1';
-  const answering = (raw) => { hr.host = () => ({ report: { done: new Proxy({}, { get: () => ({ id: raw }) }) } }); };
+  // The agent's record names h-1 (the request is asked of it), and its host answers every request with `raw`.
+  mkdirSync(join(env.LOOM_BOX_DATA, 'delivery', 'hosts'), { recursive: true });
+  writeFileSync(join(env.LOOM_BOX_DATA, 'delivery', 'hosts', 'art.json'), JSON.stringify({ agent: 'art', house: 'h-1', req: {}, stop: {}, inbox: {} }));
+  const answering = (raw) => { hr.host = () => ({ house: 'h-1', report: { done: new Proxy({}, { get: () => ({ id: raw }) }) } }); };
   const room = MAX_BODY_ID - 'h-1-'.length;
   answering('a'.repeat(room));
   const b = await hr.start({ agent: 'art', brief: 'x', model: 'm' });

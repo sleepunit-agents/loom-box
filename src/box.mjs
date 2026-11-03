@@ -202,6 +202,15 @@ function git(args, opts) {
  * house, so houses never share a working tree.
  */
 function checkout(env, house, workdir, repoAuth) {
+  const { mirror } = syncMirror(env, house, workdir, repoAuth, (gitEnv, m) => git(['clone', '-q', ...(house.branch ? ['--branch', house.branch] : []), m, pathJoin(workdir, 'repo')], { env: gitEnv }));
+  return { repo: realpathSync(pathJoin(workdir, 'repo')), mirror };
+}
+
+/**
+ * The box's mirror of an agent's repo, fetched (or cloned) now, with the repo's secret if it has one; `then` runs with
+ * git's environment while the secret's helper is still there.
+ */
+function syncMirror(env, house, workdir, repoAuth, then = () => {}) {
   const mirrors = pathJoin(dataDir(env), 'repos');
   mkdirSync(mirrors, { recursive: true, mode: 0o700 });
   const mirror = pathJoin(mirrors, `${house.agent}.git`);
@@ -220,11 +229,11 @@ function checkout(env, house, workdir, repoAuth) {
     if (existsSync(mirror)) git([...noHelper, '-C', mirror, 'remote', 'set-url', 'origin', house.repo], { env: gitEnv });
     if (existsSync(mirror)) git([...noHelper, '-C', mirror, 'fetch', '-q', '--prune', 'origin'], { env: gitEnv });
     else git([...noHelper, 'clone', '-q', '--mirror', house.repo, mirror], { env: gitEnv });
-    git(['clone', '-q', ...(house.branch ? ['--branch', house.branch] : []), mirror, pathJoin(workdir, 'repo')], { env: gitEnv });
+    then(gitEnv, mirror);
   } finally {
     if (askpass) { rmSync(askpass, { force: true }); rmSync(pathJoin(workdir, '.repo-auth'), { force: true }); }
   }
-  return { repo: realpathSync(pathJoin(workdir, 'repo')), mirror };
+  return { mirror, gitEnv };
 }
 
 /** A path inside the clone, or an error: a symlink can't point a build outside it. */
@@ -243,6 +252,46 @@ function pod(env, args, opts = {}) {
 }
 
 /**
+ * The image tag a house of `agent` gets from the repo (a clone, or the box's mirror) at `ref`: the git tree of its
+ * build context and the blob of its Containerfile. The same for a clone at HEAD and for the mirror at the branch the
+ * clone checks out, so a check (buildNow) names the image the next house would build, without building it.
+ */
+export function buildTagAt(repo, ref, agent, build) {
+  const rev = (spec) => {
+    const r = spawnSync('git', ['-C', repo, 'rev-parse', '--verify', '-q', spec], { encoding: 'utf-8' });
+    if (r.status !== 0) throw new BoxError(`git rev-parse ${spec}: ${(r.stderr || '').trim() || 'no such path'}`);
+    return r.stdout.trim();
+  };
+  return `loom-house-${agent}:${rev(`${ref}:${build.context}`).slice(0, 12)}${rev(`${ref}:${build.containerfile}`).slice(0, 8)}`;
+}
+
+/**
+ * The image an agent's next house would be built from, worked out on the box's mirror of its repo (fetched now) and
+ * not built: its house file at the branch's head, then its build's tag (buildTagAt). `c` is build-check's answer.
+ */
+export function buildNow(env, c) {
+  const work = pathJoin(dataDir(env), 'build-check', c.agent);
+  rmSync(work, { recursive: true, force: true });
+  mkdirSync(work, { recursive: true, mode: 0o700 });
+  try {
+    const { mirror } = syncMirror(env, { agent: c.agent, repo: c.repo }, work, c.repoAuth);
+    const ref = c.branch ? `refs/heads/${c.branch}` : 'HEAD';
+    const shown = spawnSync('git', ['-C', mirror, 'show', `${ref}:${c.houseFile || 'house/house.json'}`], { encoding: 'utf-8', maxBuffer: 4 * 1024 * 1024 });
+    if (shown.status !== 0) throw new BoxError(`the repo has no ${c.houseFile} at ${ref}`);
+    return buildTagAt(mirror, ref, c.agent, parseHouseFile(shown.stdout).build);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+}
+
+/** The image a running house's container was made from, as box.mjs tags it (podman's localhost/ dropped): else null. */
+function imageOf(env, id) {
+  const r = pod(env, ['inspect', '--format', '{{.ImageName}}', containerName(id)]);
+  const m = r.status === 0 ? /^(?:localhost\/)?(loom-house-[a-z][a-z0-9-]*:[0-9a-f]{20})$/.exec(r.stdout.trim()) : null;
+  return m ? m[1] : null;
+}
+
+/**
  * The house's image: built from its Containerfile, tagged by the git tree of
  * its build context and the Containerfile's blob, so an unchanged house file
  * reuses the image and any change builds a new one.
@@ -250,12 +299,7 @@ function pod(env, args, opts = {}) {
 function image(env, h, house, repo, logFd) {
   const ctx = inside(repo, house.build.context, 'build context');
   const cf = inside(repo, house.build.containerfile, 'Containerfile');
-  const rev = (spec) => {
-    const r = spawnSync('git', ['-C', repo, 'rev-parse', spec], { encoding: 'utf-8' });
-    if (r.status !== 0) throw new BoxError(`git rev-parse ${spec}: ${(r.stderr || '').trim()}`);
-    return r.stdout.trim();
-  };
-  const tag = `loom-house-${h.agent}:${rev(`HEAD:${house.build.context}`).slice(0, 12)}${rev(`HEAD:${house.build.containerfile}`).slice(0, 8)}`;
+  const tag = buildTagAt(repo, 'HEAD', h.agent, house.build);
   if (pod(env, ['image', 'exists', tag]).status === 0) return tag;
   const b = pod(env, ['build', '-t', tag, '-f', cf, ctx], { stdio: ['ignore', logFd, logFd] });
   if (b.status !== 0) throw new BoxError(`the image didn't build (exit ${b.status}); see the house log`);
@@ -375,7 +419,8 @@ function rootless(env) {
  */
 export function runner(env, client, { loomUrl, labels = [], log = (m) => process.stderr.write(`loom-box: ${m}\n`), hasSocket = (p) => existsSync(p), hasCdi = () => CDI_SPECS.some((p) => existsSync(p)), upgrade = maybeUpgrade,
   status = (agents) => harnessStatus(env, { agents }), login = (h, o) => startLogin(env, h, o), codexUsage = () => null, clock = () => Date.now(), secureChannel = true,
-  sweep = () => sweepCliContainers(env), runtime = () => ({ commit: ownCommit(), piece: ownPiece() }) }) {
+  sweep = () => sweepCliContainers(env), runtime = () => ({ commit: ownCommit(), piece: ownPiece() }),
+  buildOf = (c) => buildNow(env, c), houseImage = (id) => imageOf(env, id) }) {
   const houses = new Map(); // id -> { child, dir, stopAt? }
   // This runner, as the control plane tells it from one before it: a login handed to another run is one a restart
   // dropped (control.mjs, settleLogins).
@@ -422,6 +467,45 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
     }
   }
   const sessions = boxSessions(env, client, { dataDir: dataDir(env), log });
+
+  // Its warm body hosts' agents' repos, checked for a newer image: each house when it's first seen here (its own image
+  // too, if the control plane doesn't know it: one adopted after a restart), then each agent at the harness status's
+  // pace (STATUS_MS). Only the tag is worked out; nothing is built.
+  const checked = new Set(); // house ids checked
+  const agentAt = new Map(); // agent -> when its repo was last checked
+  async function checkBuilds(hosts) {
+    if (!Array.isArray(hosts)) return;
+    const live = new Set(hosts.map((x) => x?.id));
+    for (const id of [...checked]) if (!live.has(id)) checked.delete(id);
+    const round = new Map(); // agent -> its current build, this round
+    for (const x of hosts.slice(0, 16)) {
+      if (!x || typeof x.id !== 'string' || typeof x.agent !== 'string') continue;
+      const due = clock() - (agentAt.get(x.agent) ?? -Infinity) >= STATUS_MS || (!x.known && !checked.has(x.id)) || round.has(x.agent);
+      if (!due) continue;
+      try {
+        const c = await client.call('build-check', { id: x.id });
+        const house = c.known ? null : houseImage(x.id);
+        // A house from before its claim kept how it was made: only its own image (control.mjs, buildCheck).
+        let current = c.check === false ? null : round.get(x.agent);
+        if (current === undefined) {
+          current = null;
+          try { current = buildOf(c); } catch (e) { log(`checking ${x.agent}'s image: ${e.message}`); }
+          round.set(x.agent, current);
+          agentAt.set(x.agent, clock());
+        }
+        if (house || current) {
+          const r = await client.call('build-report', { id: x.id, ...(house ? { house } : {}), ...(current ? { current } : {}) });
+          if (r?.outdated) log(`${x.id} runs ${r.build}, older than ${x.agent}'s ${r.current}: it drains (no new bodies), then idles out`);
+        }
+        checked.add(x.id);
+      } catch (e) {
+        // Not again before its pace (an older control plane has no build-check; a secret that couldn't be had).
+        checked.add(x.id);
+        agentAt.set(x.agent, clock());
+        log(`build check for ${x.id}: ${e.message}`);
+      }
+    }
+  }
 
   /** Everything a house leaves behind but its log. */
   function clean(h, dir, secretNames) {
@@ -502,7 +586,8 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
       made = [];
       houses.set(h.id, { child, dir });
       log(`started ${h.id} (${h.agent})`);
-      await client.call('report', { id: h.id, state: 'running' }).catch((e) => log(`report ${h.id}: ${e.message}`));
+      // With the image it runs: the control plane drains a body host's house on an older one (houserunner.mjs).
+      await client.call('report', { id: h.id, state: 'running', build: tag }).catch((e) => log(`report ${h.id}: ${e.message}`));
       child.on('exit', (code, signal) => ended(h, dir, secretNames, code, signal));
     } catch (err) {
       clean(h, dir, made);
@@ -664,6 +749,7 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
     }
     for (const id of want.stop || []) stop(id);
     for (const h of want.start || []) if (!houses.has(h.id)) await start(h);
+    await checkBuilds(want.bodyHosts);
     await sessions(want.remotes);
     // On another loom-box than loom's: install that one, between house starts (version.mjs).
     try {
