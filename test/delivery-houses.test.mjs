@@ -360,3 +360,21 @@ test('a body speaks with its own run\'s key even when its harness gives every se
     await host;
   }
 });
+
+test('a house that\'s stopping is never handed a body, however fresh its host\'s last report: a new house is asked for (t-1744)', async () => {
+  const { HouseRunner } = await import('../src/houserunner.mjs');
+  const D = scratch('rt-house-stopping-');
+  const env = { PATH: process.env.PATH, HOME: D, LOOM_HOME: join(D, 'loomhome'), LOOM_BOX_LOCAL_NAME: 'one', LOOM_BOX_HOME: join(D, 'state'), LOOM_BOX_DATA: join(D, 'data') };
+  mkdirSync(env.LOOM_HOME, { recursive: true });
+  setAgent(env, { now: () => new Date() }, { agent: 'art', repo: 'https://example.com/art.git' });
+  update(env, (s) => { const k = Object.keys(s.boxes).find((x) => s.boxes[x].local); s.boxes[k].harnesses = { claude: { loggedIn: true } }; });
+  const asked = [];
+  const hr = new HouseRunner(env, 'claude', { poll: 10, warmMs: 300, up: (e, fx, who, b) => { asked.push(b.agent); const id = `h-${10 + asked.length}`; update(env, (s) => { s.houses[id] = { id, agent: 'art', state: 'wanted', task: b.task }; }); return { id }; } });
+  // Its house is stopping (the owner took it down, or it idled out), and its host reported a moment ago.
+  update(env, (s) => { s.houses['h-1'] = { id: 'h-1', agent: 'art', state: 'stopping' }; });
+  mkdirSync(join(env.LOOM_BOX_DATA, 'delivery', 'hosts'), { recursive: true });
+  writeFileSync(join(env.LOOM_BOX_DATA, 'delivery', 'hosts', 'art.json'), JSON.stringify({ agent: 'art', house: 'h-1', report: { at: Date.now(), house: 'h-1', bodies: {}, done: {} }, req: {}, stop: {}, inbox: {} }));
+  await assert.rejects(hr.warm('art'), /didn't start its body host/);
+  assert.deepEqual(asked, ['art'], 'a new house was asked for, not the stopping one');
+  assert.equal(hostOf(env, 'art').house, 'h-11');
+});
