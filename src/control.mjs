@@ -1199,13 +1199,15 @@ export function setBoxOwner(env, effects, { name, owner }) {
  * for a login the house was given at claim. Marked as the house's: the resolver prefers the box's own reading.
  */
 export function usage(env, effects, caller, { harness, reading }) {
-  if (caller.kind !== 'agent' || !caller.house) fail('usage comes from a house', 403);
+  // A house's token names its house; a service house's names its service (its token outlives any one house), so its
+  // house is the one that service runs in now (shuttle's body host is one: t-1754).
+  if (caller.kind !== 'agent' || (!caller.house && !caller.service)) fail('usage comes from a house', 403);
   if (!LOGIN_NAMES.includes(harness)) fail(`harness is one of ${LOGIN_NAMES.join(', ')}`);
   const r = readingOf(reading, Math.floor(Date.parse(now(effects)) / 1000));
   if (!r) fail('a reading is {windows: {"7d": 0.6}, resets?, checked?}');
   return update(env, (s) => {
-    const h = s.houses[caller.house];
-    if (!h || h.agent !== caller.agent || !['starting', 'running'].includes(h.state)) fail('no such house running', 404);
+    const h = s.houses[caller.house ?? s.services?.[serviceKey(caller.agent, caller.service)]?.house];
+    if (!h || h.agent !== caller.agent || (caller.service && h.service !== caller.service) || !['starting', 'running'].includes(h.state)) fail('no such house running', 404);
     if (!(h.logins ?? []).includes(harness)) fail(`this house wasn't given the box's ${harness} login, so it can't speak for it`, 403);
     const b = s.boxes[h.box];
     if (!b) fail('the house\'s box is gone', 404);

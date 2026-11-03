@@ -210,3 +210,17 @@ test('a service house\'s token is minted as that service (agent:art/discord), so
   assert.deepEqual(minted.map((r) => r.slice(-2)[0]), ['--house', '--house']);
   assert.ok(minted.every((r) => /^h-\d+$/.test(r.at(-1))));
 });
+
+test('a service house reports its account\'s usage with its service\'s token (no house in it): onto the house that service runs in now (t-1754)', () => {
+  const hs = { claude: { installed: true, loggedIn: true, method: 'claude.ai', plan: 'max', account: 'claude-0123456789' } };
+  ok(call(art, 'service-up', { name: 'discord-bodies' }));
+  const p = ok(call(box('one'), 'poll', { harnesses: hs })).start[0];
+  assert.deepEqual(ok(call(box('one'), 'claim', { id: p.id })).logins, ['claude']);
+  ok(call(box('one'), 'report', { id: p.id, state: 'running' }));
+  const reading = { windows: { '7d': 0.11 }, resets: { '7d': 1793300000 } };
+  ok(call({ ...art, service: 'discord-bodies' }, 'usage', { harness: 'claude', reading }));
+  assert.deepEqual(load(env).boxes[idOf('one')].usage.claude.house, { ...reading, checked: Math.floor(clock / 1000), source: 'house', house: p.id });
+  // A service with no house running, and an agent token with neither, are refused.
+  assert.equal(call({ ...art, service: 'slack' }, 'usage', { harness: 'claude', reading }).status, 404);
+  assert.equal(call(art, 'usage', { harness: 'claude', reading }).status, 403);
+});
