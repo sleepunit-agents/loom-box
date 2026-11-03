@@ -23,10 +23,11 @@ import { coreFrom } from './core.mjs';
  * household's store by accident.
  */
 export function permsStore(env) {
-  if (env?.LOOM_RUNTIME_TEST_STORE) return env.LOOM_RUNTIME_TEST_STORE;
+  // A test hands in a store object; a real environment's string never is one.
+  if (env?.LOOM_RUNTIME_TEST_STORE && typeof env.LOOM_RUNTIME_TEST_STORE === 'object') return env.LOOM_RUNTIME_TEST_STORE;
   return env?.LOOM_PIECE_NAME ? loomStore(env) : null;
 }
-const permsCore = (env) => env?.LOOM_RUNTIME_TEST_CORE ?? coreFrom(env, { timeoutMs: 8_000 });
+const permsCore = (env) => (env?.LOOM_RUNTIME_TEST_CORE && typeof env.LOOM_RUNTIME_TEST_CORE === 'object' ? env.LOOM_RUNTIME_TEST_CORE : coreFrom(env, { timeoutMs: 8_000 }));
 
 const OWNER = { kind: 'owner' };
 const ago = (iso, nowMs = Date.now()) => {
