@@ -299,6 +299,9 @@ export function setAgent(env, effects, { agent, repo, houseFile, nested, gpu, br
   if (lg !== undefined && (!Array.isArray(lg) || !lg.every((x) => LOGIN_NAMES.includes(x)))) fail(`logins is a list of ${LOGIN_NAMES.join(', ')} (or empty for none)`);
   return update(env, (s) => {
     const keep = lg !== undefined ? [...new Set(lg)] : reset ? undefined : s.agents[a]?.logins;
+    // Another repo, house file or branch: the image its next house builds isn't known any more (until a box says).
+    const was = s.agents[a];
+    if (!was || was.repo !== r || (was.houseFile || 'house/house.json') !== file || (was.branch ?? null) !== br) delete s.builds?.[a];
     s.agents[a] = { repo: r, houseFile: file, nested: nest, gpu: gp, branch: br, repoSecret: rs, secrets: sec, ports: pt, tailnets: tn, ...(keep !== undefined ? { logins: keep } : {}) };
     return { agent: a, ...s.agents[a] };
   });
@@ -473,6 +476,8 @@ export function poll(env, effects, caller, { facts, sessions, harnesses, usage, 
           gpu: (h.needs ?? []).some((n) => /^gpu(:|$)/.test(n)) };
       }),
       stop: mine.filter((h) => h.state === 'stopping').map((h) => h.id),
+      // Its body hosts' houses, running: the box checks their agents' repos for a newer image (build-check).
+      bodyHosts: mine.filter((h) => h.state === 'running' && isHostTask(h.task)).map((h) => ({ id: h.id, agent: h.agent, known: !!h.build })),
       // Taken by this box and not over: one the box doesn't have (it restarted) is lost.
       active: mine.filter((h) => ['starting', 'running', 'stopping'].includes(h.state)).map((h) => h.id),
       // Its box sessions: up or down, as the owner wants them.
@@ -535,7 +540,7 @@ export function claim(env, effects, caller, { id }) {
       const logins = LOGIN_NAMES.filter((k) => mayUseLogin(s.boxes[caller.subject], a, h.agent, k, members));
       h.logins = logins;
       const repoAuth = a.repoSecret ? effects.secret(a.repoSecret, { agent: h.agent, house: h.id }) : null;
-      h.state = 'starting'; h.tokenLabel = label; h.updated = now(effects);
+      h.state = 'starting'; h.tokenLabel = label; h.updated = now(effects); h.claimedAt = h.updated;
       const key = stateKeyOf(h);
       const saved = key ? stateMeta(env, s, key) : undefined;
       // The state itself comes after, a part at a time (state-part): just its shape here.
@@ -559,6 +564,67 @@ export function claim(env, effects, caller, { id }) {
   });
 }
 
+// ------------------------------------------------------------ builds
+//
+// Which image each house runs (its build: the tag box.mjs's image() gives it, the git tree of its build context and
+// its Containerfile's blob) and which image the agent's next house would run (s.builds[agent]: the newest a box has
+// said). A body host's house on an older image than its agent's current one is drained (houserunner.mjs, warm): it
+// gets no new bodies, finishes the ones it has, and idles out. The current build is cached here, refreshed when a box
+// builds a house for the agent, and when a box checks the agent's repo for a warm body host's house it runs (its
+// mirror fetched, the tag worked out, nothing built: build-check, build-report). A delivery only compares the two.
+
+const BUILD_TAG = /^(?:localhost\/)?(loom-house-([a-z][a-z0-9-]{0,39}):[0-9a-f]{20})$/;
+/** A build tag the box reported, as box.mjs names it (podman's localhost/ dropped), for this agent's image: else null. */
+export function buildTag(v, agent) {
+  const m = typeof v === 'string' ? BUILD_TAG.exec(v) : null;
+  return m && m[2] === agent ? m[1] : null;
+}
+/** The agent's current build: this one, unless one said since `at` (an ISO time) is already newer. */
+function noteBuild(s, agent, tag, at) {
+  const cur = s.builds?.[agent];
+  if (cur && Date.parse(cur.at) > Date.parse(at)) return;
+  (s.builds ??= {})[agent] = { id: tag, at };
+}
+/** A body host's house: its task is the runtime's own (houserunner.mjs, hostTask). */
+export const isHostTask = (t) => typeof t === 'string' && /^loom-runtime body-host --piece [a-z][a-z0-9-]{0,39} --host-key /.test(t);
+/** Whether a house runs an older image than its agent's current build. Unknown either way: not outdated. */
+export function outdatedHouse(s, id) {
+  const h = s.houses?.[id];
+  const cur = h && s.builds?.[h.agent]?.id;
+  return !!(h?.build && cur && h.build !== cur);
+}
+
+/**
+ * A box asks how to check the repo of a warm body host's house it runs: the repo, its branch, its house file, and the
+ * repo secret the house's own claim got (for this house, from the secrets piece, as a claim asks). `known`: whether its
+ * own build is known (an older box, or one adopted after a restart, didn't say).
+ */
+export function buildCheck(env, effects, caller, { id }) {
+  return update(env, (s) => {
+    boxOf(s, caller);
+    const h = s.houses[id];
+    if (!h || h.box !== caller.subject || h.state !== 'running' || !isHostTask(h.task)) fail(`no running body host's house ${id} for this box`, 404);
+    const a = s.agents[h.agent];
+    if (!a) fail(`${h.agent} has no house config`, 409);
+    const repoAuth = a.repoSecret ? effects.secret(a.repoSecret, { agent: h.agent, house: h.id }) : null;
+    return { id, agent: h.agent, repo: a.repo, houseFile: a.houseFile || 'house/house.json', branch: a.branch ?? null, repoAuth, known: !!h.build };
+  });
+}
+
+/** What the box found: the house's own image (`house`, if it wasn't known), and the image the repo builds now (`current`). */
+export function buildReport(env, effects, caller, { id, house, current }) {
+  return update(env, (s) => {
+    boxOf(s, caller);
+    const h = s.houses[id];
+    if (!h || h.box !== caller.subject || !LIVE.has(h.state)) fail(`no house ${id} for this box`, 404);
+    const own = buildTag(house, h.agent);
+    if (own && !h.build) h.build = own;
+    const cur = buildTag(current, h.agent);
+    if (cur) noteBuild(s, h.agent, cur, now(effects));
+    return { id, build: h.build ?? null, current: s.builds?.[h.agent]?.id ?? null, outdated: outdatedHouse(s, id) };
+  });
+}
+
 const NEXT = {
   starting: new Set(['running', 'done', 'failed']),
   running: new Set(['done', 'failed']),
@@ -566,12 +632,16 @@ const NEXT = {
 };
 
 /** The box reports on a house. Ending one revokes its token. */
-export function report(env, effects, caller, { id, state, exit, log }) {
+export function report(env, effects, caller, { id, state, exit, log, build }) {
   return update(env, (s) => {
     boxOf(s, caller);
     const h = s.houses[id];
     if (!h || h.box !== caller.subject) fail(`no house ${id} for this box`, 404);
     if (!NEXT[h.state]?.has(state)) fail(`house ${id} can't go from ${h.state} to ${state}`, 409);
+    // The image the box just ran it from (box.mjs, image): this house's build, and, as the newest build its agent's
+    // repo makes, the agent's current one (unless a box has said a newer one since this house's checkout).
+    const tag = buildTag(build, h.agent);
+    if (state === 'running' && tag) { h.build = tag; noteBuild(s, h.agent, tag, h.claimedAt ?? now(effects)); }
     // A house asked to stop stays "stopping" while it's still up.
     if (!(h.state === 'stopping' && state === 'running')) h.state = state;
     h.updated = now(effects);
@@ -1224,7 +1294,7 @@ const OWNER_ONLY = {
 };
 /** The box's own owner's (assertBoxOwner): its logins and Update now. */
 export const BOX_OWNER_ONLY = { 'login-start': loginStart, 'login-code': loginCode, 'login-cancel': loginCancel, 'box-update-now': boxUpdateNow };
-const BOX_ONLY = { hello, poll, claim, report, 'save-state': saveState, 'state-part': statePart, 'remote-report': remoteReport, 'login-report': loginReport };
+const BOX_ONLY = { hello, poll, claim, report, 'build-check': buildCheck, 'build-report': buildReport, 'save-state': saveState, 'state-part': statePart, 'remote-report': remoteReport, 'login-report': loginReport };
 
 /** One API call, as loom's piece API hands it over: {caller, path, body} → {status, body}. */
 export function api(env, effects, { caller, path, body }) {

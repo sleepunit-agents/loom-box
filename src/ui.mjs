@@ -43,6 +43,9 @@ const ago = (iso, nowMs = Date.now()) => {
   return `${Math.round(s / 86400)}d ago`;
 };
 const toneOf = (state) => ({ running: 'ok', starting: 'ok', wanted: 'warn', stopping: 'warn', failed: 'bad', lost: 'bad' }[state] ?? 'muted');
+/** A house's badge: its state, or, for a running body host's house on an older image than its agent's, that it's draining. */
+export const houseBadge = (h) => (h.draining && h.state === 'running' ? `draining (${h.draining.reason ?? 'outdated image'})` : h.state);
+const houseTone = (h) => (h.draining && h.state === 'running' ? 'warn' : toneOf(h.state));
 const short = (t, n = 80) => (t.length > n ? `${t.slice(0, n - 1)}…` : t);
 const mayHostText = (m) => (m === '*' ? 'anyone' : (m || []).join(', ') || 'no one');
 const dataDir = (env) => env.LOOM_BOX_DATA || join(env.HOME || '', '.local', 'share', 'loom-box');
@@ -447,7 +450,7 @@ function boxesPage(env, nowMs, caller = OWNER) {
       ...runtimeHelp(env, b),
       ...(disk ? [{ type: 'meter', items: [{ label: 'Disk', value: disk.used, detail: `${disk.free} free`, ...(disk.used >= 0.95 ? { tone: 'bad' } : disk.used >= 0.85 ? { tone: 'warn' } : {}) }] }] : []),
       here.length
-        ? { type: 'list', items: here.slice(0, 20).map((h) => ({ text: svcOf.has(h.id) ? `${h.agent}'s ${svcOf.get(h.id)}` : `${h.agent}'s house`, ...(svcOf.has(h.id) ? {} : { meta: short(houseName(h)) }), badge: h.state, tone: toneOf(h.state), agent: h.agent })) }
+        ? { type: 'list', items: here.slice(0, 20).map((h) => ({ text: svcOf.has(h.id) ? `${h.agent}'s ${svcOf.get(h.id)}` : `${h.agent}'s house`, ...(svcOf.has(h.id) ? {} : { meta: short(houseName(h)) }), badge: houseBadge(h), tone: houseTone(h), agent: h.agent })) }
         : { type: 'text', tone: 'muted', text: 'No houses on it now.' },
       { type: 'details', summary: 'Machine', meta: b.local ? 'here' : '', blocks: [{ type: 'kv', items: [
         ...b.facts.map(factRow),
@@ -712,7 +715,7 @@ function agentTabPage(env, agent, caller, nowMs) {
   const live_boxes = view.boxes.filter((b) => !b.revoked).map((b) => ({ ...b, label: boxLabelOf(s, b.id) }));
   const sections = [{ id: 'houses', title: 'Houses', blocks: [
     live.length
-      ? { type: 'list', items: live.slice(0, 30).map((h) => ({ text: short(houseName(h)), meta: nameOf(h.box), badge: h.state, tone: toneOf(h.state),
+      ? { type: 'list', items: live.slice(0, 30).map((h) => ({ text: short(houseName(h)), meta: nameOf(h.box), badge: houseBadge(h), tone: houseTone(h),
         ...(h.state === 'wanted' || h.state === 'running' || h.state === 'starting' ? { act: { action: 'down', label: 'Stop', tone: 'danger', fields: { id: h.id }, confirm: 'This house stops.' } } : {}) })) }
       : { type: 'text', tone: 'muted', text: 'No houses up now.' },
     ...(houses.length > live.length ? [{ type: 'details', summary: 'Recent', blocks: [{ type: 'table', columns: ['House', 'Box', 'State', 'Updated'],
