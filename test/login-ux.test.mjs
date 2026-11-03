@@ -38,7 +38,8 @@ const loginPage = (id) => page(env, { path: `login/${id}` });
 const blocksOf = (p) => p.sections[0].blocks;
 const calloutOf = (p) => blocksOf(p).find((b) => b.type === 'callout');
 const boxCard = () => page(env, { path: '' }).sections.find((x) => x.id === 'box-one');
-const rowsOf = (card) => card.blocks.find((b) => b.type === 'list' && b.items.some((i) => i.text === 'Claude')).items;
+// The card's panel: a row per thing (State, Machine, Runtime, each harness), its state in words.
+const rowsOf = (card) => card.blocks.find((b) => b.type === 'panel' && b.rows.some((i) => i.label === 'Claude')).rows;
 
 beforeEach(() => {
   const home = scratch('loom-login-ux-');
@@ -68,7 +69,7 @@ const boxRunner = (o = {}) => runner(env, client, { loomUrl: 'http://loom.test/m
 test('Claude: the page spins through each step by itself and flips to "✓ Claude logged in (claude.ai, Max)"', async () => {
   const box = boxRunner();
   await box.tick();
-  assert.deepEqual(rowsOf(boxCard()).find((i) => i.text === 'Claude').act, { action: 'login-start', label: 'Log in Claude', tone: 'primary', fields: { box: 'one', harness: 'claude' } });
+  assert.deepEqual(rowsOf(boxCard()).find((i) => i.label === 'Claude').act, { action: 'login-start', label: 'Log in Claude', tone: 'primary', fields: { box: 'one', harness: 'claude' } });
   // Pressing Log in goes straight to the sign-in page, which says what's happening and reloads itself.
   const started = act(env, fx, { action: 'login-start', fields: { box: 'one', harness: 'claude' } });
   assert.match(started.page, /^login\/l-[0-9a-f]{12}$/);
@@ -96,7 +97,8 @@ test('Claude: the page spins through each step by itself and flips to "✓ Claud
   assert.equal(JSON.stringify(p).includes('good-code'), false);
   assert.equal(logged.some((m) => /oauth|authorize|good-code/.test(m)), false, logged.join('\n'));
   // And the box's card says so up front.
-  assert.deepEqual([rowsOf(boxCard()).find((i) => i.text === 'Claude').meta, rowsOf(boxCard()).find((i) => i.text === 'Claude').tone], ['✓ logged in (claude.ai, Max)', 'ok']);
+  const claude = rowsOf(boxCard()).find((i) => i.label === 'Claude');
+  assert.deepEqual([claude.value, claude.detail, claude.tone], ['Logged in', 'claude.ai, Max', 'ok']);
 });
 
 test('Codex: the page shows the code and the link, then flips to logged in by itself once the box sees it', async () => {
@@ -132,9 +134,9 @@ test('a code the provider turns down: the page says why in a line, shows the CLI
   assert.deepEqual(blocksOf(p).find((b) => b.type === 'buttons').items, [{ action: 'login-start', label: 'Try again', tone: 'primary', fields: { box: 'one', harness: 'claude' } }]);
   assert.equal(p.refresh, undefined);
   // The box's card: not logged in, the reason, and Try again.
-  const row = rowsOf(boxCard()).find((i) => i.text === 'Claude');
-  assert.deepEqual([row.tone, row.act.label], ['bad', 'Try again']);
-  assert.match(row.meta, /^not logged in · last try: Anthropic didn't accept that code/);
+  const row = rowsOf(boxCard()).find((i) => i.label === 'Claude');
+  assert.deepEqual([row.value, row.tone, row.act.label], ['Not logged in', 'bad', 'Try again']);
+  assert.match(row.detail, /^Last try: Anthropic didn't accept that code/);
   // Try again is a fresh sign-in.
   const again = act(env, fx, { action: 'login-start', fields: { box: 'one', harness: 'claude' } }).page.slice(6);
   assert.notEqual(again, id);
@@ -232,25 +234,28 @@ test('the box\'s card: its runtime against loom\'s (one source: ownCommit), upda
   const thor = ok(control.api(env, fx, { caller: owner, path: 'add-box', body: { name: 'thor', mayHost: 'art' } })).box;
   const boxCall = (path, body = {}) => control.api(env, fx, { caller: { kind: 'piece', subject: thor }, path, body });
   const boxCard = () => ui.page(env, { path: '' }).sections.find((x) => x.id === `box-${thor}`);
-  const runtimeRow = () => boxCard().blocks.find((b) => b.type === 'list').items.find((i) => i.text === 'Runtime');
+  const rows = () => boxCard().blocks.find((b) => b.type === 'panel').rows;
+  const runtimeRow = () => rows().find((i) => i.label === 'Runtime');
+  const sheetBlock = (row, type) => row.sheet?.blocks.find((b) => b.type === type);
   // What loom tells the box to run is what the page compares against.
   assert.equal(ok(boxCall('poll', { harnesses: { claude: { installed: true, loggedIn: true, method: 'claude.ai', plan: 'max' } } })).version, LOOM);
   // Too old to say: the old box piece, and the line to run on it once.
-  assert.deepEqual([runtimeRow().meta, runtimeRow().tone], [`too old to say which · loom's ccccccc`, 'warn']);
-  const help = boxCard().blocks.find((b) => b.type === 'callout');
-  assert.equal(help.title, 'This box is on the old box piece');
-  assert.equal(boxCard().blocks.find((b) => b.type === 'code').text, swapCommand(LOOM));
+  // Before (a list row): "too old to say which · loom's ccccccc", the callout and command on the card. After: words, the command a tap away.
+  assert.deepEqual([runtimeRow().value, runtimeRow().tone], ['On the old box piece', 'warn']);
+  assert.equal(sheetBlock(runtimeRow(), 'callout').title, 'This box is on the old box piece');
+  assert.equal(sheetBlock(runtimeRow(), 'code').text, swapCommand(LOOM));
+  assert.ok(!JSON.stringify(rows().map((r) => [r.label, r.value, r.detail])).includes('ccccccc'), 'no commit on a row');
   // Behind, an install under way.
   ok(boxCall('poll', { runtime: { commit: OLD, piece: 'box', upgrade: { commit: LOOM, from: OLD, state: 'installing', at: new Date().toISOString() } } }));
-  assert.deepEqual([runtimeRow().meta, runtimeRow().badge, runtimeRow().act], [`aaaaaaa · loom's ccccccc · updating…, swapping its box piece for runtime`, 'updating…', undefined]);
-  assert.equal(boxCard().blocks.some((b) => b.type === 'code'), false);
+  assert.deepEqual([runtimeRow().value, runtimeRow().detail, runtimeRow().act], ['Updating…', 'Swapping its box piece for runtime', undefined]);
+  assert.deepEqual(sheetBlock(runtimeRow(), 'kv').items.slice(0, 2), [{ label: 'This box', value: 'aaaaaaa' }, { label: 'loom', value: 'ccccccc' }]);
   // It failed: why, when it tries again, what the install said, and Update now.
   const retryAt = new Date(Date.now() + 5 * 3600_000).toISOString();
   ok(boxCall('poll', { runtime: { commit: OLD, piece: 'box', upgrade: { commit: LOOM, from: OLD, state: 'failed', at: new Date().toISOString(), retryAt,
     error: 'installing runtime failed (exit 1); the box piece is back as it was', detail: 'npm ERR! EEXIST: bin loom-box' } } }));
-  assert.equal(runtimeRow().meta, `aaaaaaa · loom's ccccccc · the update didn't work: installing runtime failed (exit 1); the box piece is back as it was · tries again in 5h`);
+  assert.deepEqual([runtimeRow().value, runtimeRow().detail], ['The update didn\'t work', 'installing runtime failed (exit 1); the box piece is back as it was · tries again in 5h']);
   assert.deepEqual([runtimeRow().tone, runtimeRow().act], ['bad', { action: 'box-update-now', label: 'Update now', fields: { name: thor }, tone: 'primary' }]);
-  assert.equal(boxCard().blocks.find((b) => b.type === 'details' && b.summary === 'What the install said').blocks[0].text, 'npm ERR! EEXIST: bin loom-box');
+  assert.equal(sheetBlock(rows().find((r) => r.label === 'What the install said'), 'code').text, 'npm ERR! EEXIST: bin loom-box');
   // Update now: loom keeps asking, poll after poll, until the box's record says an attempt started on it.
   assert.equal(ui.act(env, fx, { action: 'box-update-now', fields: { name: thor } }).message, 'thor tries loom\'s runtime on its next poll.');
   const token = ok(boxCall('poll', {})).upgradeNow;
@@ -260,18 +265,18 @@ test('the box\'s card: its runtime against loom\'s (one source: ownCommit), upda
   assert.equal(ok(boxCall('poll', {})).upgradeNow, undefined);
   // Rolling back: said, and no button (the recovery timer has it).
   ok(boxCall('poll', { runtime: { commit: OLD, piece: 'box', upgrade: { commit: LOOM, from: OLD, state: 'rolling-back', at: new Date().toISOString(), error: 'installing runtime failed (exit 1)' } } }));
-  assert.deepEqual([runtimeRow().badge, runtimeRow().act], ['rolling back', undefined]);
+  assert.deepEqual([runtimeRow().value, runtimeRow().act], ['Putting the box piece back', undefined]);
   // Not for an agent owner.
   assert.equal(ui.act(env, fx, { action: 'box-update-now', fields: { name: thor }, caller: { kind: 'owner', who: 'loren', agents: ['art'] } }).ok, false);
   // Caught up.
   ok(boxCall('poll', { runtime: { commit: LOOM, piece: 'runtime' } }));
-  assert.deepEqual([runtimeRow().meta, runtimeRow().tone], ['ccccccc · up to date with loom\'s', 'ok']);
+  assert.deepEqual([runtimeRow().value, runtimeRow().tone], ['Up to date', 'ok']);
   // And the harnesses, up front on the same card.
-  const claude = boxCard().blocks.find((b) => b.type === 'list').items.find((i) => i.text === 'Claude');
-  assert.deepEqual([claude.meta, claude.act.label], ['✓ logged in (claude.ai, Max)', 'Log in again']);
+  const claude = rows().find((i) => i.label === 'Claude');
+  assert.deepEqual([claude.value, claude.detail, claude.act.label], ['Logged in', 'claude.ai, Max', 'Log in again']);
   // A dev checkout (this repo's own code) has no commit: "loom's version unknown", nothing to press.
-  const dev = page(env, { path: '' }).sections.find((x) => x.id === `box-${thor}`).blocks.find((b) => b.type === 'list').items.find((i) => i.text === 'Runtime');
-  assert.deepEqual([dev.meta, dev.act], ['ccccccc · loom\'s version unknown', undefined]);
+  const dev = page(env, { path: '' }).sections.find((x) => x.id === `box-${thor}`).blocks.find((b) => b.type === 'panel').rows.find((i) => i.label === 'Runtime');
+  assert.deepEqual([dev.value, dev.act], ['Can\'t compare: loom\'s version is unknown', undefined]);
 });
 
 test('a box\'s logins and Update now are its owner\'s: another household owner gets 403', () => {
@@ -292,7 +297,7 @@ test('a box\'s logins and Update now are its owner\'s: another household owner g
   assert.equal(act(env, fx, { action: 'box-update-now', fields: { name: 'one' }, caller: bob }).ok, false);
   ok(as(alice, 'box-update-now', { name: 'one' }));
   // Bob sees the box's card, with nothing to press on it.
-  const claudeRow = (c) => page(env, { path: '', caller: c }).sections.find((x) => x.id === 'box-one').blocks.find((b) => b.type === 'list').items.find((r) => r.text === 'Claude');
+  const claudeRow = (c) => page(env, { path: '', caller: c }).sections.find((x) => x.id === 'box-one').blocks.find((b) => b.type === 'panel').rows.find((r) => r.label === 'Claude');
   ok(as(alice, 'login-cancel', { id: l.id }));
   ok(boxCall('poll', {}));
   assert.equal(claudeRow(bob).act, undefined);

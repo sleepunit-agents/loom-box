@@ -24,7 +24,8 @@ test('the agent form carries the tailnet grant, so saving it keeps it', () => {
   const { env, fx } = setup();
   assert.deepEqual(load(env).agents.art.tailnets, [{ name: 'fleet', socket: '/run/tailscale-fleet/tailscaled.sock' }]);
   const tab = page({ ...env, LOOM_SCOPE: 'art' }, { path: '' });
-  const form = section(tab, 'agent-art').blocks.find((b) => b.type === 'details').blocks.find((b) => b.type === 'form' && b.action === 'set-agent');
+  // The house panel's last row opens the whole form in a sheet.
+  const form = section(tab, 'agent-art').blocks.find((b) => b.type === 'panel').rows.find((r) => r.edit?.action === 'set-agent').edit;
   const f = form.fields.find((x) => x.name === 'tailnets');
   assert.equal(f.value, 'fleet=/run/tailscale-fleet/tailscaled.sock');
   // Saving the form as it is keeps the grant.
@@ -42,23 +43,23 @@ test("an agent's Houses tab: its houses, services with Restart, its sessions wit
   const board = page(env, { path: '' });
   const bids = board.sections.map((x) => x.id);
   for (const gone of ['services', 'sessions', 'houses', 'up', 'primaries']) assert.ok(!bids.includes(gone), `the board has no ${gone}: ${bids}`);
-  assert.deepEqual(section(board, 'agents').blocks[0].items.map((i) => i.page), ['agent:art']);
+  assert.deepEqual(section(board, 'agents').blocks[0].rows.map((i) => [i.label, i.agent, i.page]), [['Art', 'art', 'agent:art']]);
   const p = page({ ...env, LOOM_SCOPE: 'art' }, { path: '' });
   const ids = p.sections.map((x) => x.id);
   assert.deepEqual(ids, ['houses', 'services', 'sessions', 'up', 'agent-art']);
   const sess = section(p, 'sessions');
   const items = sess.blocks.find((b) => b.type === 'list').items;
-  assert.deepEqual(items.map((i) => [i.text, i.href, i.agent, i.act.action, i.act.tone]), [["art's house: house session", 'https://claude.ai/code?environment=env_01ABCdef', 'art', 'service-down', 'danger']]);
+  assert.deepEqual(items.map((i) => [i.text, i.href, i.agent, i.act.action, i.act.tone]), [['House session', 'https://claude.ai/code?environment=env_01ABCdef', 'art', 'service-down', 'danger']]);
   // No box session yet: where it runs is a form, behind a details.
   assert.ok(sess.blocks.some((b) => b.type === 'details' && /first box session/.test(b.summary)));
   // A card for the box: its houses with their agent, and the machine's facts folded.
-  assert.ok(section(board, 'box-one').blocks.some((b) => b.type === 'details' && b.summary === 'Machine'));
+  assert.ok(section(board, 'box-one').blocks[0].rows.some((r) => r.label === 'Machine' && r.sheet));
   // From art's tab: art's things only, none of the household's.
   const scoped = { ...env, LOOM_SCOPE: 'art' };
   assert.match(act(scoped, fx, { action: 'service-restart', fields: { agent: 'mark', name: 'remote' } }).message, /art's page/);
   assert.match(act(scoped, fx, { action: 'revoke-box', fields: { name: 'one' } }).message, /art's page/);
   // Each service up has Restart at its row.
-  assert.deepEqual(section(p, 'services').blocks[0].items.map((i) => i.act?.action), ['service-restart']);
+  assert.deepEqual(section(p, 'services').blocks[0].rows.map((i) => [i.label, i.act?.action]), [['House session', 'service-restart']]);
   // Not running yet: already a fresh start.
   assert.match(act(env, fx, { action: 'service-restart', fields: { agent: 'art', name: 'remote' } }).message, /already starting fresh/);
   // Running: Restart stops it, and once the box says it stopped, a fresh house is wanted (no back-off).
@@ -105,16 +106,18 @@ test("the Houses tab names each house by what it is (its service, its wake), no 
   const bridge = s.services['art/discord'].house;
   const task = Object.values(s.houses).find((h) => !h.service).id;
   const p = page({ ...env, LOOM_SCOPE: 'art' }, { path: '' });
-  const rows = section(p, 'houses').blocks[0].items;
-  assert.deepEqual(rows.map((r) => [r.text, r.meta]).sort(), [
+  // A headline, then a panel: each house by what it is, its state in words, its box.
+  assert.equal(section(p, 'houses').blocks[0].type, 'health');
+  const rows = section(p, 'houses').blocks.find((b) => b.type === 'panel').rows;
+  assert.deepEqual(rows.map((r) => [r.label, r.value, r.detail, r.agent]).sort(), [
     // Before (#42): "one · h-…". After: the box alone.
-    ["Art's Discord bridge", 'one'],
-    ['Wake: cadence runner build round 1 (t-1689)', 'one'],
+    ["Art's Discord bridge", 'Waiting for a box', 'On one', 'art'],
+    ['Wake: cadence runner build round 1 (t-1689)', 'Waiting for a box', 'On one', 'art'],
   ].sort());
   assert.ok(rows.every((r) => r.act.confirm === 'This house stops.'));
   // The id stays where it works: the Stop action's field.
   assert.deepEqual(rows.map((r) => r.act.fields.id).sort(), [bridge, task].sort());
-  assert.ok(!JSON.stringify(section(p, 'houses').blocks.map((b) => (b.items ?? []).map((r) => [r.text, r.meta]))).match(/\bh-\d+/), 'no house id in a row');
+  assert.ok(!JSON.stringify(section(p, 'houses').blocks.map((b) => (b.rows ?? []).map((r) => [r.label, r.value, r.detail]))).match(/\bh-\d+/), 'no house id in a row');
   // A stopped house goes to Recent: named the same, its age "just now", no Id column (before: [..., 'Updated', 'Id']).
   assert.equal(act(env, fx, { action: 'down', fields: { id: task } }).ok, true);
   const box = { caller: { kind: 'piece', subject: 'one' } };
@@ -131,7 +134,9 @@ test("the Houses tab names each house by what it is (its service, its wake), no 
   const st = load(env);
   st.boxes.one.facts = ['os:linux', 'arch:x86_64', 'cpus:64', 'mem:94g', 'gpu:nvidia-geforce-rtx-5090', 'runtime:podman'];
   writeFileSync(join(env.LOOM_BOX_HOME, 'state.json'), JSON.stringify(st));
-  const kv = section(page(env, { path: '' }), 'box-one').blocks.find((b) => b.summary === 'Machine').blocks[0].items;
+  const machine = section(page(env, { path: '' }), 'box-one').blocks[0].rows.find((r) => r.label === 'Machine');
+  assert.equal(machine.value, 'Linux · 64 CPUs · 94 GB · NVIDIA GeForce RTX 5090');
+  const kv = machine.sheet.blocks[0].items;
   assert.deepEqual(kv.slice(0, 6), [
     { label: 'System', value: 'Linux' }, { label: 'Architecture', value: 'x86-64' }, { label: 'CPUs', value: '64' },
     { label: 'Memory', value: '94 GB' }, { label: 'GPU', value: 'NVIDIA GeForce RTX 5090' }, { label: 'Runtime', value: 'podman' },
