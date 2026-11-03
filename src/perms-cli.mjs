@@ -64,7 +64,7 @@ export async function grantsCli(rest, env, { store = loomStore(env), stdin = rea
     case 'paired': {
       const [from, to] = args;
       if (!from || !to) throw new Fail('usage: loom runtime grants paired <from> <to>', 2);
-      const ok = paired(store.get(GRANTS, KEY)?.doc, householdOf(env), from, to);
+      const ok = paired(store.get(GRANTS, KEY)?.doc, from, to);
       process.stdout.write(`${ok ? 'paired' : 'not paired'}\n`);
       if (!ok) throw new Fail('', 1);
       return;

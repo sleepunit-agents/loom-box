@@ -10,7 +10,8 @@
 //
 // A path pattern is "*" (every path), an exact path ("run", "people/art"), or a prefix ending in "/*". "*" for an
 // agent is every agent of the household. A piece with no entry is no agent's. `relay` is who may relay to whom
-// (the pairing rules, from household.json's `relay`, agent-runtime.md "Agent-to-agent relay").
+// (the pairing rules, agent-runtime.md "Agent-to-agent relay": imported once from household.json's `relay` by the
+// seed, the owner's on the Permissions page since; household.json's is never read for them again).
 //
 // Until the owner seeds it (`loom runtime grants seed`), there's no document, and every ask is allowed: each piece
 // decides by its own agent list, exactly as before the runtime was the authority. The seed reads every installed
@@ -95,9 +96,12 @@ export function ask(store, input) {
   return decide(got?.doc ?? null, q);
 }
 
-/** May `from` relay to `to`? The runtime's pairing rules once seeded, else household.json's (as core reads them). */
-export function paired(doc, household, from, to) {
-  const rules = doc?.relay ?? household?.relay ?? {};
+/**
+ * May `from` relay to `to` without asking? The runtime's pairing rules only (agent-runtime.md: pairing moves out of
+ * household.json; the seed imported its pairs once). No grants, no pairs: every relay asks the owner.
+ */
+export function paired(doc, from, to) {
+  const rules = doc?.relay ?? {};
   return Array.isArray(rules[from]) && rules[from].includes(to);
 }
 
@@ -178,7 +182,23 @@ export function setPiece(store, { piece, agents, paths = ['*'] }) {
   return store.put(GRANTS, KEY, doc, cur ? cur.rev : 0);
 }
 
-/** The household's members' household.json, for the pairs before the grants have them. */
+/** Who `agent` may relay to without asking, set by the owner (the Permissions page): the household's other agents. */
+export function setRelay(store, { agent, to, agents }) {
+  if (!AGENT.test(agent ?? '') || !agents.includes(agent)) throw new GrantsError(`no agent ${agent} in this household`);
+  const bad = to.filter((a) => a === agent || !agents.includes(a));
+  if (bad.length) throw new GrantsError(`${bad.join(', ')}: not another agent of this household`);
+  const cur = store.get(GRANTS, KEY);
+  if (!cur?.doc) throw new GrantsError('no grants yet: seed them first (loom runtime grants seed)', 409);
+  const doc = structuredClone(cur.doc);
+  doc.relay = { ...(doc.relay ?? {}) };
+  if (to.length) doc.relay[agent] = [...new Set(to)].sort();
+  else delete doc.relay[agent];
+  const why = grantsProblem(doc);
+  if (why) throw new GrantsError(why);
+  return store.put(GRANTS, KEY, doc, cur.rev);
+}
+
+/** The household's household.json (its agents, its owner). */
 export function householdOf(env) { return readJson(join(loomHome(env), 'household.json')); }
 
 export const grantsExistSync = (p) => existsSync(p);

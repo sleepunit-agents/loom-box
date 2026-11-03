@@ -292,11 +292,23 @@ The runtime is the household's grants authority (loom docs/specs/agent-runtime.m
 so core asks `loom-runtime grants ask` ({agent, piece, path} on stdin, 2 s) before an agent's call to any piece, a
 venue render as the agent, and a delivery a piece makes for an agent. Owner calls never ask. The grants are one
 owner-written document (`grants`/`household` in the runtime's store): which agent may use which piece and path, and
-who may relay to whom (from household.json's `relay`). Until it's seeded, every ask is allowed and each piece
-decides by its own list, as before.
+who may relay to whom (imported once from household.json's `relay` by the seed; the owner's on the Permissions page
+since, and never read from household.json again). Until it's seeded, every ask is allowed and each piece decides by
+its own list, as before; there are no relay pairs then, so every relay asks the owner.
 
     loom runtime grants seed [--dry-run]     each piece's own *_AGENTS list imported (others: every agent), and the relay pairs
     loom runtime grants list | set <piece> <agents|*> [--paths p,p] | paired <from> <to>
+
+**Relay** (agent-runtime.md, "Agent-to-agent relay"; `src/relay.mjs`): the runtime offers core an MCP tool, `relay`
+(`mcp_tools` in its loom block), so an agent's session has it only while the runtime is installed. Core runs
+`loom-runtime relay tool --agent <a>` with the arguments on stdin (`{to, say, why?, reply_to?, from?, approval?}`). A
+paired relay is delivered at once on the runtime's `relay` venue, `from: {kind: agent}`, to the other agent's
+conversation with this one (place: the sender), so its body starts, resumes or is fed like any delivery. An unpaired
+one goes only with an approval the owner allowed (`approvals request --kind relay --target art->mark`, spent here with
+`loom approvals use … --as <the calling body>`), and is refused when no approvals piece is installed. The same words to
+the same agent within the hour are refused, an answer is a relay back with `reply_to`, and a thread of 8 or more in a
+day is a heads-up on loom's Inbox (`LOOM_RUNTIME_RELAY_HEADS_UP`). From a house, `loom runtime relay --to <b> --say
+<text>` and `loom runtime relays` do the same over the piece API.
 
 **Gates** (who a platform id is, and what each person may do with each agent) are the runtime's too: collection
 `gates`, one document per agent, each entry keyed by the person's card slug. Importing or allowing someone ensures

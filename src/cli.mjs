@@ -75,6 +75,11 @@
 //   loom runtime gates follow-merge <from> <into>        the owner's: after a card merge, every agent's gates follow
 //   loom runtime policy --agent a [--json] | policy set --agent a < doc   what an agent's bodies may use and are told (policy.mjs)
 //   loom runtime secrets-map --json                      which secret each agent's houses get (for: | loom secrets policy houses-import)
+// Relay (agent-runtime.md, section 5, "Agent-to-agent relay"; relay.mjs):
+//   loom runtime relay tool --agent a [--house h] [--service s] < {to, say, why?, reply_to?, from?, approval?}
+//                      the relay MCP tool core offers an agent's session: {text, isError?}
+//   loom runtime relay --to b --say <text> [--why w] [--reply-to r-…] [--from discord:#x] [--approval a-…]   from a house
+//   loom runtime relays [--thread r-…]                  from a house: its agent's relays, sent and received
 // For loom (the piece contract):
 //   loom runtime ui --json | ui page --json | ui act --json | api --json
 //   loom runtime bundle export | bundle import [--force]       its part of loom's bundle
@@ -406,6 +411,14 @@ async function main(argv, env) {
     }
     case 'models': return models(rest, env, json);
     case 'grants': return grantsCli(rest, env);
+    case 'relay': {
+      if (rest[0] !== 'tool') throw new Fail('loom runtime relay is a body\'s, from its house (its token): loom runtime relay --to <agent> --say <text>; the tool core runs is `relay tool`', 2);
+      const { relayTool } = await import('./relay.mjs');
+      const r = await relayTool(env, rest.slice(1), await readStdin());
+      process.stdout.write(`${JSON.stringify(r.answer)}\n`);
+      process.exitCode = r.exit;
+      return;
+    }
     case 'secrets-map': {
       // Which secret each agent's houses got from the runtime's own map, for the secrets piece's policy to take over
       // (agent-runtime.md, section 6, Secrets): loom runtime secrets-map --json | loom secrets policy houses-import.
