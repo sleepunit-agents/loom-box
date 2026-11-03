@@ -18,6 +18,7 @@ import { loadConv } from '../src/delivery.mjs';
 import { hostOf } from '../src/houserunner.mjs';
 import { load, update } from '../src/state.mjs';
 import { scratch } from './scratch.mjs';
+import { fakeLoomBin } from './delivery-world.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const cli = join(here, '..', 'src', 'cli.mjs');
@@ -81,6 +82,7 @@ test('a delivered body is a session in its agent\'s own house: placed, woken by 
     ANTHROPIC_API_KEY: 'sk-ant-runtimes-own', CLAUDE_CONFIG_DIR: join(D, 'loom', '.claude'), FOO_SECRET: 'hunter2',
   };
   mkdirSync(env.LOOM_HOME, { recursive: true });
+  env.LOOM_BIN = fakeLoomBin(D);
   writeFileSync(env.LOOM_RUNTIME_TOKEN_FILE, `${TOKENS.runtime}\n`);
   const loom = await loomServer(env);
   env.LOOM_RUNTIME_LOOM_URL = loom.url;

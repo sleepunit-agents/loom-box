@@ -14,7 +14,7 @@ import { HouseRunner, bodySync, hostOf } from '../src/houserunner.mjs';
 import { setModels } from '../src/models.mjs';
 import { ageSealer } from '../src/sealed.mjs';
 import { load, update } from '../src/state.mjs';
-import { cvOf, hasAge, here, pkg, testSealer, world } from './delivery-world.mjs';
+import { cvOf, hasAge, here, pkg, testSealer, world, plain } from './delivery-world.mjs';
 import { scratch } from './scratch.mjs';
 
 import { bodyInHouse, everything, houseWorld, sleep, until } from './delivery-world.mjs';
@@ -66,7 +66,7 @@ test('1c. a house body that dies with follow-ups it never acknowledged: they go 
   await tick(w.env, w.o);
   const next = w.log.filter((l) => l[0] === 'start').at(-1);
   assert.notEqual(next[1], id);
-  assert.ok(next[2].endsWith('loren: two, in flight'), 'the next body has it');
+  assert.ok(plain(next[2]).endsWith('loren: two, in flight'), 'the next body has it');
 });
 
 test('2a. a body that leaves no session files leaves no slot: the next message starts fresh, from digests', async () => {
@@ -104,7 +104,7 @@ test('2b. a slot that won\'t resume is cleared, and the same delivery starts a f
   assert.equal(r.body, 'started');
   assert.equal(loadConv(w.env, A).slot, undefined);
   assert.equal(existsSync(join(deliveryDir(w.env), 'slots', `${A}.age`)), false);
-  assert.ok(w.log.at(-1)[2].endsWith('loren: two'));
+  assert.ok(plain(w.log.at(-1)[2]).endsWith('loren: two'));
 });
 
 test('3. a session coming back in parts is never on disk in the clear, and a transfer that stops is swept after an hour', async () => {

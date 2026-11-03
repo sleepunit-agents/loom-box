@@ -2,7 +2,8 @@
 // picks the model (models.mjs), starts the body on that model's harness (runners.mjs), and keeps a record of it on
 // this machine, so the body can be fed, resumed and ended by its id.
 //
-//   startBody   {agent, brief, venue, venueKind?, prefer?, cwd?, deny?} → the body's record, with why that model
+//   startBody   {agent, brief, venue, venueKind?, prefer?, cwd?, deny?, guest?} → the body's record, with why that model
+//               (a brief is text, or parts naming the agent's files: briefs.mjs)
 //   feedBody    a message mid-turn, where the harness allows
 //   resumeBody  a body (or a slot) continued, on a model of the same harness
 //   endBody     stopped
@@ -15,6 +16,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { accountsFrom } from './accounts.mjs';
+import { checkParts, composeBrief, isParts } from './briefs.mjs';
 import { resolveFor } from './models.mjs';
 import { runnerFor } from './runners.mjs';
 import { StateError } from './state.mjs';
@@ -40,20 +42,36 @@ export function readBody(env, ref) {
 const deps = (env, o) => ({ accounts: o.accounts ?? accountsFrom(env), runner: o.runner ?? ((h) => runnerFor(h, env)), now: o.now ?? (() => new Date()), fetchImpl: o.fetchImpl });
 
 const brief = (b) => {
+  if (isParts(b)) {
+    try { b = checkParts(b); } catch (e) { fail(e.message); }
+    if (b.reduce((n, p) => n + (p.text?.length ?? 0), 0) > MAX_BRIEF) fail(`a brief is at most ${MAX_BRIEF} characters`);
+    return b;
+  }
   if (typeof b !== 'string' || !b.trim()) fail('a body needs a brief');
   if (b.length > MAX_BRIEF) fail(`a brief is at most ${MAX_BRIEF} characters`);
   return b;
 };
 
-export async function startBody(env, { agent, brief: b, venue, venueKind, prefer = [], cwd, deny = [], place }, o = {}) {
+/**
+ * The brief as the runner takes it: a house's runner carries parts to its host, which reads the agent's files in its
+ * repo; any other runner gets the text, its files read here from the body's cwd (briefs.mjs). Fails closed.
+ */
+function forRunner(runner, b, cwd) {
+  if (!isParts(b) || runner.remote) return b;
+  try { return composeBrief(b, cwd); } catch (e) { fail(e.message, 422); }
+}
+
+export async function startBody(env, { agent, brief: b, venue, venueKind, prefer = [], cwd, deny = [], place, guest }, o = {}) {
   const d = deps(env, o);
   const text = brief(b);
   if (typeof venue !== 'string' || !/^[a-z][a-z0-9-]{0,39}$/.test(venue)) fail('which venue (wake, relay, session, discord, slack, …)');
   const pick = await resolveFor(env, { agent, venue, venueKind, prefer, accounts: d.accounts, now: d.now(), fetchImpl: d.fetchImpl });
   const runner = d.runner(pick.harness);
-  const body = await runner.start({ agent, brief: text, model: pick.model, cwd, env: o.bodyEnv, deny });
+  const body = await runner.start({ agent, brief: forRunner(runner, text, cwd), model: pick.model, cwd, env: o.bodyEnv, deny });
   const rec = {
     body: `${body.harness}:${body.id}`, agent, venue, kind: pick.kind, ...(place ? { place: String(place).slice(0, 200) } : {}),
+    // What it was started with of its rules (tool names, never the brief): for the owner's `loom runtime bodies`.
+    ...(deny.length ? { deny: [...deny] } : {}), ...(guest ? { guest: true } : {}),
     harness: body.harness, model: pick.model, family: pick.family, ...(pick.account ? { account: pick.account } : {}),
     started: d.now().toISOString(), ...(body.slot ? { slot: body.slot } : {}), ...(body.house ? { house: body.house } : {}),
   };
@@ -68,7 +86,7 @@ export function feedBody(env, ref, message, o = {}) {
 }
 
 /** A body continued: by its id (its slot, from the harness), or by a slot ({harness, session}) another machine kept. */
-export async function resumeBody(env, { body: ref, slot, agent, venue, venueKind, brief: b, prefer = [], cwd, deny = [], files }, o = {}) {
+export async function resumeBody(env, { body: ref, slot, agent, venue, venueKind, brief: b, prefer = [], cwd, deny = [], files, guest }, o = {}) {
   const d = deps(env, o);
   let rec = null;
   if (ref) {
@@ -82,9 +100,10 @@ export async function resumeBody(env, { body: ref, slot, agent, venue, venueKind
   // A resume keeps the slot's harness; its model is chosen again, among that harness's (quota may have moved).
   const pick = await resolveFor(env, { agent: who, venue: where, venueKind: rec?.kind ?? venueKind, prefer: [...prefer, ...(rec ? [rec.model] : [])], harness: slot.harness, accounts: d.accounts, now: d.now(), fetchImpl: d.fetchImpl });
   const runner = d.runner(slot.harness);
-  const body = await runner.resume(slot, { agent: who, brief: brief(b), model: pick.model, cwd, env: o.bodyEnv, deny, ...(files ? { files } : {}) });
+  const body = await runner.resume(slot, { agent: who, brief: forRunner(runner, brief(b), cwd), model: pick.model, cwd, env: o.bodyEnv, deny, ...(files ? { files } : {}) });
   const next = {
     body: `${body.harness}:${body.id}`, agent: who, venue: where, kind: pick.kind, ...(rec?.place ? { place: rec.place } : {}),
+    ...(deny.length ? { deny: [...deny] } : {}), ...(guest ? { guest: true } : {}),
     harness: body.harness, model: pick.model, family: pick.family, ...(pick.account ? { account: pick.account } : {}),
     started: d.now().toISOString(), slot: body.slot ?? slot, ...(ref ? { resumed: ref } : {}), ...(body.house ? { house: body.house } : {}),
   };

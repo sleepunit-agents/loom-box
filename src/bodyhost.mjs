@@ -10,6 +10,7 @@
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { composeBrief } from './briefs.mjs';
 import { packSession, dropSession, restoreFiles } from './sessions.mjs';
 import { PART_CHARS } from './houserunner.mjs';
 import { LOGIN_HARNESSES } from './logins.mjs';
@@ -94,7 +95,7 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
     }
     let got;
     const sent = acks;
-    try { got = await client('body-sync', { hostKey: key, report: { bodies, done, packed, inboxAck: sent } }); } catch (e) { log(`sync failed: ${e.message}`); await sleep(SYNC_MS); continue; }
+    try { got = await client('body-sync', { hostKey: key, report: { bodies, done, packed, inboxAck: sent, caps: ['parts'] } }); } catch (e) { log(`sync failed: ${e.message}`); await sleep(SYNC_MS); continue; }
     if (typeof got.hostKey === 'string') key = got.hostKey;
     // Answered: what it acknowledged is the runtime's to forget now. (A lost answer: they go again next beat.)
     if (acks === sent) acks = {};
@@ -111,7 +112,10 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
         if (!houseHasLogin(env, q.harness)) throw new Error(`this house doesn't declare the ${q.harness} harness (its house file's "harnesses"), so it has no ${q.harness} login: add it there`);
         const r = runner(q.harness);
         const cv = q.key && CV.test(q.conversation ?? '') ? q.conversation : null;
-        const o = { brief: q.brief, model: q.model, deny: q.deny ?? [], cwd, env: { ...bodyEnv, ...(q.key ? { LOOM_BODY_KEY: q.key } : {}), ...(cv ? { LOOM_BODY_CONVERSATION: cv } : {}) } };
+        // A brief in parts names the agent's own files (briefs.mjs): read here, from its repo (this house's cwd).
+        // A file that isn't there fails the start: never a body without what its brief must carry.
+        const brief = q.parts !== undefined ? composeBrief(q.parts, cwd) : q.brief;
+        const o = { brief, model: q.model, deny: q.deny ?? [], cwd, env: { ...bodyEnv, ...(q.key ? { LOOM_BODY_KEY: q.key } : {}), ...(cv ? { LOOM_BODY_CONVERSATION: cv } : {}) } };
         // Kept by its conversation before the body starts, so its first `send` finds it.
         if (cv) keepKey(env, cv, q.key);
         let written = [];
