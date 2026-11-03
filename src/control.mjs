@@ -1244,7 +1244,7 @@ export function api(env, effects, { caller, path, body }) {
     // accepted at once ({accepted, ref}); the post runs detached, with its full 15 s, outside this call.
     if (path === 'send') {
       if (caller.kind !== 'agent') fail('send is a body\'s, as its own agent', 403);
-      return import('./delivery.mjs').then((m) => m.send(env, { conversation: b.conversation, text: b.text, key: b.key }, { caller, detach: true }))
+      return import('./delivery.mjs').then((m) => m.send(env, { conversation: b.conversation, text: b.text, key: b.key, session: typeof b.session === 'string' ? b.session : undefined }, { caller, detach: true }))
         .then((r) => ({ status: r.accepted ? 200 : 409, body: r }), apiError);
     }
     // The runtime's remote CLI for an agent's bodies (loom's `run` path): its own agent's gates, and proposing a person.

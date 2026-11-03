@@ -18,7 +18,7 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { LIVE, up } from './control.mjs';
+import { up } from './control.mjs';
 import { pieceName } from './piece.mjs';
 import { bodyBox } from './placement.mjs';
 import { RunnerError } from './runners.mjs';
@@ -108,8 +108,10 @@ function writeJson(p, v) {
 const hostLocked = (env, f) => withLock(hostsDir(env), 'lock', f, 'the body hosts', 10_000);
 const loadHost = (env, agent) => readJson(hostFile(env, agent)) ?? { agent, req: {}, stop: {}, inbox: {} };
 export const hostOf = loadHost;
-const houseLive = (env, id) => { try { return LIVE.has(load(env).houses[id]?.state) && load(env).houses[id]; } catch { return false; } };
 const fresh = (h, now) => !!h.report && now - h.report.at < HOST_STALE_MS && h.report.house === h.house;
+/** A house a body may still be handed to: asked for, starting or running. One stopping (or gone) never is, however fresh its host's last report. */
+const TAKES = new Set(['wanted', 'starting', 'running']);
+const houseTakes = (env, id) => { try { return TAKES.has(load(env).houses[id]?.state); } catch { return false; } };
 
 /** What a house runs as its task to be the agent's body host. */
 export const hostTask = (env, bootKey) => `loom-runtime body-host --piece ${pieceName(env)} --host-key ${bootKey}`;
@@ -255,8 +257,9 @@ export class HouseRunner {
     for (;;) {
       const now = this.now().getTime();
       const h = this.host(agent);
-      if (fresh(h, now)) return h.house;
-      if (!h.house || !houseLive(this.env, h.house)) {
+      const takes = !!h.house && houseTakes(this.env, h.house);
+      if (fresh(h, now) && takes) return h.house;
+      if (!takes) {
         const s = load(this.env);
         const at = bodyBox(s, agent, this.harness, this.env);
         if (!at.box) throw new RunnerError(at.reason);
@@ -274,7 +277,7 @@ export class HouseRunner {
     if (!AGENT_NAME.test(o.agent ?? '')) throw new RunnerError('a body in a house is some agent\'s: say which');
     const house = await this.warm(o.agent);
     const rid = randomBytes(8).toString('hex');
-    const ask = { harness: this.harness, model: o.model, deny: o.deny ?? [], brief: o.brief, key: o.env?.LOOM_BODY_KEY, ...(resume ? { resume: resume.session, files: o.files ?? [] } : {}) };
+    const ask = { harness: this.harness, model: o.model, deny: o.deny ?? [], brief: o.brief, key: o.env?.LOOM_BODY_KEY, ...(o.env?.LOOM_BODY_CONVERSATION ? { conversation: o.env.LOOM_BODY_CONVERSATION } : {}), ...(resume ? { resume: resume.session, files: o.files ?? [] } : {}) };
     hostLocked(this.env, () => {
       const h = loadHost(this.env, o.agent);
       (h.req ??= {})[rid] = { at: this.now().getTime(), sealed: this.transit.seal(Buffer.from(JSON.stringify(ask))) };

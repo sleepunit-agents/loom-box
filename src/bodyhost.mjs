@@ -7,7 +7,9 @@
 // whether its harness can be fed), what it started, and a stopped body's session files in parts; it's answered what to
 // start, stop and feed. It never reports what it can't see. It leaves when it's had no live body and nothing asked
 // for its idle time (the next delivery asks for a house again), or when the runtime says its bodies are another house's.
-import { rmSync } from 'node:fs';
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { packSession, dropSession, restoreFiles } from './sessions.mjs';
 import { PART_CHARS } from './houserunner.mjs';
 import { LOGIN_HARNESSES } from './logins.mjs';
@@ -19,6 +21,38 @@ import { LOGIN_HARNESSES } from './logins.mjs';
 export function houseHasLogin(env, harness) {
   const def = LOGIN_HARNESSES[harness];
   return !!def && Object.keys(def.houseEnv('')).every((k) => typeof env[k] === 'string' && env[k] !== '');
+}
+
+const CV = /^cv-[0-9a-f]{12}$/;
+
+/**
+ * Where a house keeps each conversation's current run key (0600 files in a 0700 dir), for `loom runtime send`.
+ * Not the environment alone: a harness whose sessions run under a daemon (`claude --bg`) gives every session the
+ * daemon's environment, which is the first body's, so a later body would hold another run's key (t-1744, h-784).
+ */
+export const keysDir = (env) => env.LOOM_RUNTIME_KEYS_DIR || join(env.HOME || homedir(), '.local', 'state', 'loom-runtime', 'keys');
+export const keyFile = (env, conversation) => (CV.test(conversation ?? '') ? join(keysDir(env), `${conversation}.key`) : null);
+
+/** The run key a body speaks with in `conversation`: its house's file for it, else the body's own environment. */
+export function bodyKeyFor(env, conversation) {
+  const f = keyFile(env, conversation);
+  if (f) { try { const k = readFileSync(f, 'utf-8').trim(); if (k) return k; } catch { /* none kept here */ } }
+  return env.LOOM_BODY_KEY;
+}
+
+function keepKey(env, conversation, key) {
+  const f = keyFile(env, conversation);
+  if (!f || typeof key !== 'string' || !key) return;
+  mkdirSync(keysDir(env), { recursive: true, mode: 0o700 });
+  const tmp = `${f}.${process.pid}.tmp`;
+  writeFileSync(tmp, key, { mode: 0o600 });
+  renameSync(tmp, f);
+}
+
+function dropKey(env, conversation, key) {
+  const f = keyFile(env, conversation);
+  if (!f) return;
+  try { if (readFileSync(f, 'utf-8').trim() === key) rmSync(f, { force: true }); } catch { /* gone */ }
 }
 
 export const SYNC_MS = 2000;
@@ -76,13 +110,16 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
       try {
         if (!houseHasLogin(env, q.harness)) throw new Error(`this house doesn't declare the ${q.harness} harness (its house file's "harnesses"), so it has no ${q.harness} login: add it there`);
         const r = runner(q.harness);
-        const o = { brief: q.brief, model: q.model, deny: q.deny ?? [], cwd, env: { ...bodyEnv, ...(q.key ? { LOOM_BODY_KEY: q.key } : {}) } };
+        const cv = q.key && CV.test(q.conversation ?? '') ? q.conversation : null;
+        const o = { brief: q.brief, model: q.model, deny: q.deny ?? [], cwd, env: { ...bodyEnv, ...(q.key ? { LOOM_BODY_KEY: q.key } : {}), ...(cv ? { LOOM_BODY_CONVERSATION: cv } : {}) } };
+        // Kept by its conversation before the body starts, so its first `send` finds it.
+        if (cv) keepKey(env, cv, q.key);
         let written = [];
         let b;
         try {
           if (q.resume) { written = restoreFiles(r, q.files); b = await r.resume({ harness: q.harness, session: q.resume }, o); } else b = await r.start(o);
         } catch (e) { for (const w of written) rmSync(w, { recursive: true, force: true }); throw e; }
-        mine.set(b.id, { harness: q.harness });
+        mine.set(b.id, { harness: q.harness, ...(cv ? { cv, key: q.key } : {}) });
         done[rid] = { id: b.id };
         log(`started ${b.id} for ${rid}`);
       } catch (e) { done[rid] = { error: String(e.message).split('\n')[0].slice(0, 300) }; }
@@ -92,6 +129,7 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
       if (!b || b.ended) continue;
       const r = runner(b.harness);
       try { r.end({ id }); } catch { /* already gone */ }
+      if (b.cv) dropKey(env, b.cv, b.key);
       heard.delete(id);
       b.ended = true;
       if (s.pack) {

@@ -138,8 +138,10 @@ export function windowMs(env, venue, kind) {
 const BODY_ENV = /^(PATH|HOME|USER|LOGNAME|SHELL|LANG|LANGUAGE|LC_[A-Z_]+|TERM|COLORTERM|TZ|TMPDIR)$/;
 const NEVER = /^(LOOM_|ANTHROPIC_|OPENAI_|CLAUDE|CODEX_|GEMINI_|GOOGLE_|MISTRAL_|AWS_|GH_|GITHUB_)/;
 export const BODY_KEY = 'LOOM_BODY_KEY';
+/** Which conversation a body's run key speaks in: its house's host keeps the key by it (bodyhost.mjs, keyFile). */
+export const BODY_CONVERSATION = 'LOOM_BODY_CONVERSATION';
 
-export function bodyEnvOf(env, { key } = {}) {
+export function bodyEnvOf(env, { key, conversation } = {}) {
   const extra = new Set(String(setting(env, 'BODY_ENV') ?? '').split(',').map((x) => x.trim()).filter(Boolean));
   const out = {};
   for (const [k, v] of Object.entries(env)) {
@@ -148,6 +150,7 @@ export function bodyEnvOf(env, { key } = {}) {
   }
   // Its run's own key: `send` answers only the body holding its conversation's current one.
   if (key) out[BODY_KEY] = key;
+  if (key && CV.test(conversation ?? '')) out[BODY_CONVERSATION] = conversation;
   return out;
 }
 
@@ -169,13 +172,20 @@ export function depsOf(env, o = {}) {
     fetchImpl: o.fetchImpl,
     venues: o.venues ?? (() => core.venues()),
     sendMs: o.sendMs ?? SEND_MS,
-    bodyEnv: (key) => bodyEnvOf(env, { key }),
+    bodyEnv: (key, conversation) => bodyEnvOf(env, { key, conversation }),
     cwd: o.cwd ?? setting(env, 'BODY_CWD'),
     warn: o.warn ?? ((m) => process.stderr.write(`loom-runtime deliver: ${m}\n`)),
   };
 }
 
 // ─── The deliver body ───────────────────────────────────────────────────────
+
+/**
+ * A scheduled venue with no send (core's own `wake`): there's nowhere to post, and the body's message is its run's
+ * reply all the same. It's recorded (the agent's `reply` turn, answered, and its text in the audit log) and posted
+ * nowhere, so a scheduled run has the agent turn its measures read (conversations.md, "What each kind is measured on").
+ */
+export const recordsOnly = (v) => !v?.send && !v?.orphaned && v?.kind === 'scheduled';
 
 /** A venue as core has it ({kind, piece, send?}), or undefined: none, or core couldn't say. */
 async function venueOf(d, name) {
@@ -372,11 +382,14 @@ const render = (msgs) => msgs.map((x) => (x.kind === 'wake' ? x.text : `${who(x.
 
 /** The brief a new body starts with: where it is, its conversation and run (for identity), and the messages. */
 function startBrief(c, msgs, run, sends) {
+  const how = sends === 'record'
+    ? `When you're done, pipe a short account of what you did to \`loom runtime send --conversation ${c.conversation}\`: on ${c.venue} nothing is posted; it's recorded as this run's reply.`
+    : `To say something there, pipe it to \`loom runtime send --conversation ${c.conversation}\`; it answers {ok, id?} and, when it couldn't post, why.`;
   return [
     `You are ${c.agent}, in a conversation on ${c.venue}: ${c.label ?? c.place}.`,
     `Its conversation is ${c.conversation} and this run is ${run}: call identity with {conversation: "${c.conversation}", run: "${run}"} first.`,
     ...(c.runs > 0 ? [`It has history this session doesn't: read it with conversation({id: "${c.conversation}"}) (its digests) before you answer.`] : []),
-    ...(sends ? [`To say something there, pipe it to \`loom runtime send --conversation ${c.conversation}\`; it answers {ok, id?} and, when it couldn't post, why.`] : []),
+    ...(sends ? [how] : []),
     '',
     render(msgs),
   ].join('\n');
@@ -525,9 +538,10 @@ async function execute(env, op, d, mem) {
   try {
     const msgs = op.msgs.map((x) => ({ ...x, text: open(d, x, mem) })).filter((x) => x.text !== null);
     if (!msgs.length) throw new DeliveryError('its messages\' text is gone');
-    const sends = !!(await venueOf(d, c0.venue))?.send;
+    const v0 = await venueOf(d, c0.venue);
+    const sends = v0?.send ? 'post' : recordsOnly(v0) ? 'record' : null;
     const runKey = randomBytes(24).toString('hex');
-    const bodyDeps = { runner: d.runner, accounts: d.accounts, now: d.now, fetchImpl: d.fetchImpl, bodyEnv: d.bodyEnv(runKey) };
+    const bodyDeps = { runner: d.runner, accounts: d.accounts, now: d.now, fetchImpl: d.fetchImpl, bodyEnv: d.bodyEnv(runKey, op.cv) };
     const base = { agent: c0.agent, venue: c0.venue, venueKind: c0.kind, cwd: d.cwd };
     if (op.type === 'start') {
       r = await startBody(env, { ...base, place: c0.place, brief: startBrief(c0, msgs, run, sends) }, bodyDeps);
@@ -768,7 +782,23 @@ function sendOnce(d, argv, c, text) {
  * Errors before acceptance are {ok: false, reason}. `o.caller`: who's asking: an agent speaks only in its own
  * conversations, and only the body holding it, in its current run (LOOM_BODY_KEY).
  */
-export async function send(env, { conversation, text, key }, o = {}) {
+/** A harness session id, as `send` carries it (the harness's own, per session: CLAUDE_CODE_SESSION_ID). */
+const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{3,127}$/;
+
+/**
+ * The harness session of the body holding a conversation now, as its runner sees it (in a house, its host's report),
+ * or null when its runner can't say. A body's key alone isn't enough in a house: each conversation's key is a file
+ * there (bodyhost.mjs), so a sibling body of the same agent could read it; its session is its own.
+ */
+function sessionOf(d, ref) {
+  try {
+    const rec = readBody(d.env, ref);
+    const s = d.runner(rec.harness).slotOf(bodyOf(ref, rec))?.session ?? rec.slot?.session;
+    return typeof s === 'string' && SESSION_ID.test(s) ? s : null;
+  } catch { return null; }
+}
+
+export async function send(env, { conversation, text, key, session }, o = {}) {
   const d = depsOf(env, o);
   const c = loadConv(env, conversation);
   if (!c) return { ok: false, reason: `no conversation ${conversation} here` };
@@ -777,9 +807,15 @@ export async function send(env, { conversation, text, key }, o = {}) {
   if (!want || !c.body || typeof key !== 'string' || !key || !timingSafeEqual(keyHash(key), want)) {
     return { ok: false, reason: `only the body holding ${conversation} speaks in it (its run's ${BODY_KEY} doesn't match)` };
   }
+  // Its harness session too, where the runner knows the body's: a sibling body holding this conversation's key (its
+  // house's file) is another session. A sender that names no session is refused once the body's is known.
+  const own = sessionOf({ ...d, env }, c.body);
+  if (own && session !== own) {
+    return { ok: false, reason: `only the body holding ${conversation} speaks in it (${session ? 'another session is' : 'no session is named'}: ${conversation} is a session of its own)` };
+  }
   if (!str(text, MAX_TEXT)) return { ok: false, reason: `a message is 1-${MAX_TEXT} characters` };
   const v = await venueOf(d, c.venue);
-  if (!v?.send) return { ok: false, reason: `venue ${c.venue} declares no send: nothing posts there` };
+  if (!v?.send && !recordsOnly(v)) return { ok: false, reason: `venue ${c.venue} declares no send: nothing posts there` };
   const ref = `out-${randomBytes(6).toString('hex')}`;
   const out = { body: c.body, run: c.run };
   if (o.detach) (o.spawnSender ?? ((...a) => spawnSender(env, ...a)))(conversation, ref, text, out);
@@ -809,7 +845,8 @@ export async function post(env, conversation, ref, text, { body, run } = {}, o =
   const c = loadConv(env, conversation);
   if (!c) return { ok: false, reason: `no conversation ${conversation} here` };
   const v = await venueOf(d, c.venue);
-  let r = v?.send ? await sendOnce(d, v.send, c, text) : { ok: false, answered: true, reason: `venue ${c.venue} declares no send` };
+  // A scheduled venue with no send (a wake) posts nowhere: its message is only recorded.
+  let r = v?.send ? await sendOnce(d, v.send, c, text) : recordsOnly(v) ? { ok: true, recorded: true } : { ok: false, answered: true, reason: `venue ${c.venue} declares no send` };
   if (!r.ok && r.answered && v?.send) r = await sendOnce(d, v.send, c, text);
   let rec = null;
   try { rec = body ? readBody(env, body) : null; } catch { /* its body is gone: the turn says no model */ }
