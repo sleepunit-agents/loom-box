@@ -44,6 +44,25 @@ describe('the inbox: a bridge in a house writes its board through the runtime', 
     });
   });
 
+  test('an agent owner reaches only their own agents\' boards; only a household owner gets the default agent\'s', async () => {
+    const env = world();
+    const pollock = { kind: 'owner', who: 'pollock', agents: ['mark'] };
+    // Without naming an agent, an agent owner isn't handed the household's default agent's (art's) board.
+    assert.equal((await api(env, fx, { caller: pollock, path: 'now/snapshot', body: { bridge: 'discord', snap: snap(1) } })).status, 403);
+    assert.equal((await api(env, fx, { caller: pollock, path: 'now/snapshot', body: { agent: 'art', bridge: 'discord', snap: snap(1) } })).status, 403);
+    assert.equal((await api(env, fx, { caller: pollock, path: 'now/event', body: { agent: 'art', record: { bridge: 'discord' } } })).status, 403);
+    assert.equal(existsSync(join(env.LOOM_RUNTIME_NOW_DIR, 'art-now')), false, 'nothing of art\'s board is touched');
+    assert.equal((await api(env, fx, { caller: pollock, path: 'now/snapshot', body: { agent: 'mark', bridge: 'discord', snap: snap(2) } })).status, 200);
+    assert.equal(JSON.parse(readFileSync(join(env.LOOM_RUNTIME_NOW_DIR, 'mark-now', 'discord.json'), 'utf-8')).at, 2);
+    // The household owner (no agents list, or '*' resolved as none) gets the default agent's, as loom-now did.
+    assert.equal((await api(env, fx, { caller: { kind: 'owner', who: 'jonathan' }, path: 'now/snapshot', body: { bridge: 'discord', snap: snap(3) } })).status, 200);
+    assert.equal(JSON.parse(readFileSync(join(env.LOOM_RUNTIME_NOW_DIR, 'art-now', 'discord.json'), 'utf-8')).at, 3);
+    // The read, too: an agent owner's `now talking` isn't the default agent's.
+    const r = await runFor(env, pollock, ['now', 'talking'], memStore());
+    assert.equal(r.exit, 1);
+    assert.match(r.stderr, /only their own agents/);
+  });
+
   test('an event is appended to its month; anything else is refused and writes nothing', async () => {
     const env = world();
     const t = Date.parse('2026-11-03T10:00:00Z') / 1000;

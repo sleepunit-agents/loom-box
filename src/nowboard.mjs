@@ -47,9 +47,17 @@ function defaultAgent(env) {
   } catch { return undefined; }
 }
 
-/** Whose board a call writes: an agent's own; the owner's is the household's default agent's (loom-now's "art"). */
-function boardOf(env, caller) {
+/**
+ * Whose board a call reaches: an agent's own. A household owner's is the household's default agent's (loom-now's
+ * "art"). An agent owner (an owner caller with an `agents` list, loom docs/specs/owners.md) reaches only an agent of
+ * theirs, named as `agent`: never the default agent's or another member's.
+ */
+function boardOf(env, caller, want) {
   if (caller?.kind === 'agent' && AGENT_NAME.test(caller.agent ?? '')) return caller.agent;
+  if (caller?.kind === 'owner' && Array.isArray(caller.agents)) {
+    if (typeof want === 'string' && AGENT_NAME.test(want) && caller.agents.includes(want)) return want;
+    throw new NowError('an agent owner reaches only their own agents\' boards: name one of them (agent)', 403);
+  }
   if (caller?.kind === 'owner') {
     const a = defaultAgent(env);
     if (a) return a;
@@ -79,7 +87,7 @@ export function talking(dir, nowS = Date.now() / 1000) {
 /** The inbox's three calls. `path` is what follows /api/<runtime>/. */
 export function inbox(env, caller, path, body, nowMs = Date.now()) {
   const b = body && typeof body === 'object' && !Array.isArray(body) ? body : {};
-  const dir = ensureDir(boardDir(env, boardOf(env, caller)));
+  const dir = ensureDir(boardDir(env, boardOf(env, caller, b.agent)));
   if (path === 'now/snapshot') {
     if (!BRIDGE.test(b.bridge ?? '') || !b.snap || typeof b.snap !== 'object' || Array.isArray(b.snap)) throw new NowError('snapshot is {bridge, snap}: a plain bridge name and an object');
     const text = JSON.stringify(b.snap);
@@ -105,7 +113,11 @@ export function inbox(env, caller, path, body, nowMs = Date.now()) {
 /** `loom runtime now talking` over the run path: the caller's own board. */
 export function runNow(env, caller, argv) {
   if (argv.length !== 2 || argv[1] !== 'talking') return { exit: 2, stdout: '', stderr: 'the board\'s one read is: now talking\n' };
-  const dir = boardDir(env, boardOf(env, caller));
+  let dir;
+  try { dir = boardDir(env, boardOf(env, caller)); } catch (e) {
+    if (e instanceof NowError) return { exit: 1, stdout: '', stderr: `${e.message}\n` };
+    throw e;
+  }
   return { exit: 0, stdout: `${JSON.stringify(talking(dir))}\n`, stderr: '' };
 }
 
