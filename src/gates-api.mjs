@@ -11,6 +11,8 @@ const no = (stderr, exit = 1) => ({ exit, stdout: '', stderr: `${stderr}\n` });
 export async function runFor(env, caller, argv, store = loomStore(env), core = coreFrom(env, { timeoutMs: 8_000 }), relayDeps = undefined) {
   if (!Array.isArray(argv) || !argv.every((a) => typeof a === 'string')) return no('argv is a list of strings', 2);
   const [a, b, ...rest] = argv;
+  // The now board's one read: the caller's bridges (nowboard.mjs).
+  if (a === 'now') return (await import('./nowboard.mjs')).runNow(env, caller, argv);
   // A relay from a house's CLI (the same as the relay tool, as this caller), and its agent's relays.
   if (a === 'relay' || a === 'relays') {
     const r = await import('./relay.mjs');

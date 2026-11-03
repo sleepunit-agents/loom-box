@@ -80,6 +80,8 @@
 //                      the relay MCP tool core offers an agent's session: {text, isError?}
 //   loom runtime relay --to b --say <text> [--why w] [--reply-to r-…] [--from discord:#x] [--approval a-…]   from a house
 //   loom runtime relays [--thread r-…]                  from a house: its agent's relays, sent and received
+// The now board (nowboard.mjs): a bridge's POST /api/runtime/now/snapshot | now/event, and from a house:
+//   loom runtime now talking                            its agent's bridges: talking, waiting, how fresh
 // For loom (the piece contract):
 //   loom runtime ui --json | ui page --json | ui act --json | api --json
 //   loom runtime bundle export | bundle import [--force]       its part of loom's bundle
