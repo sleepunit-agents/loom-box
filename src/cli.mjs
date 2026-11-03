@@ -49,6 +49,7 @@
 //   loom runtime deliver < {source, id, agent, venue, place, label?, from, kind, at, text}   (core adds source)
 //                      the turn to core, then the conversation's body: {conversation, seq, body, reason?}
 //   loom runtime send --conversation <cv> --text <text|->              a body's message out, in its venue: {accepted, ref}
+//        [--person <slug> --via <venue>]                               … or one DM to a person there, through its adapter
 //                                                                        at once; a failed post comes back through its inbox
 //   loom runtime deliver tick [--conversation <cv>] | deliver run [--every <ms>] | deliver list [--json]
 //   loom runtime body-host [--piece <name>] --host-key <boot key>   in an agent's house, as its task: the bodies delivery asks for
@@ -68,6 +69,7 @@
 //   loom runtime gates people --agent a | status | propose --agent a --from w --stdin < proposal | export --json
 //   loom runtime gates import [--force]                  the owner's run: loom shuttle gates export --json | loom runtime gates import
 //   loom runtime gates follow-merge <from> <into>        the owner's: after a card merge, every agent's gates follow
+//   loom runtime policy --agent a [--json] | policy set --agent a < doc   what an agent's bodies may use and are told (policy.mjs)
 //   loom runtime secrets-map --json                      which secret each agent's houses get (for: | loom secrets policy houses-import)
 // For loom (the piece contract):
 //   loom runtime ui --json | ui page --json | ui act --json | api --json
@@ -93,7 +95,7 @@ import { deliver, listConvs, post, send, tick } from './delivery.mjs';
 import { bodyKeyFor, runBodyHost } from './bodyhost.mjs';
 import { runnerFor } from './runners.mjs';
 import { applyUpgrade, carrySettings, loadCarried, recoverUpgrade } from './version.mjs';
-import { gatesCli, grantsCli } from './perms-cli.mjs';
+import { gatesCli, grantsCli, policyCli } from './perms-cli.mjs';
 
 /**
  * Whether this box's houses should outlive it: LOOM_BOX_ON_EXIT=keep|stop says so; else it's whether the systemd
@@ -380,7 +382,10 @@ async function main(argv, env) {
       // And its harness's own session id (Claude Code sets it per session, under a shared daemon too): the runtime
       // checks it's the session holding the conversation.
       const session = env.CLAUDE_CODE_SESSION_ID || undefined;
-      const msg = { conversation, text: await textOf(rest, '--text'), key: bodyKeyFor(env, conversation), ...(session ? { session } : {}) };
+      // --person <slug> --via <venue>: one DM to that person instead, through that venue's adapter (delivery.mjs).
+      const person = flag(rest, '--person');
+      const via = flag(rest, '--via');
+      const msg = { conversation, text: await textOf(rest, '--text'), key: bodyKeyFor(env, conversation), ...(session ? { session } : {}), ...(person !== undefined ? { person } : {}), ...(via !== undefined ? { via } : {}) };
       const r = env.LOOM_URL && env.LOOM_TOKEN_FILE ? await pieceCall(env, flag(rest, '--piece'))('send', msg) : await send(env, msg, { detach: true });
       out(r);
       if (!r.accepted) process.exitCode = 1;
@@ -407,6 +412,7 @@ async function main(argv, env) {
       return out(m);
     }
     case 'gates': return gatesCli(rest, env);
+    case 'policy': return policyCli(rest, env);
     case 'accounts': {
       const a = accountsFrom(env);
       if (rest[0] === 'usage') {
@@ -519,7 +525,7 @@ async function delivery(rest, env, json) {
     let m = {};
     try { m = JSON.parse((await readStdin()) || '{}'); } catch { m = {}; }
     if (typeof m.text !== 'string') throw new Fail('post takes {text, body?, run?} on stdin');
-    return out(await post(env, flag(rest, '--conversation'), flag(rest, '--ref'), m.text, { body: m.body, run: m.run }));
+    return out(await post(env, flag(rest, '--conversation'), flag(rest, '--ref'), m.text, { body: m.body, run: m.run, ...(m.to !== undefined ? { to: m.to } : {}) }));
   }
   if (sub === 'run') {
     const every = Number(flag(rest, '--every')) || 5000;

@@ -27,10 +27,20 @@
 // <data>/delivery: conversations/<cv>.json (which body, which run, what waits: each message's text sealed), slots/,
 // seen/ (each delivery's turn and answer for 24 h: the same (source, id) answers the same and writes nothing).
 //
+// Who may do what (t-1756; policy.mjs): each message's sender tier is read from the runtime's gates when it's
+// delivered; a body's rules (tier, guest venue or not, its readers' cards, the owner, peers, the agent's own brief
+// files, the deny list its harness starts with) are resolved when it starts. A guest's message is never fed to a body
+// that isn't a guest venue's, and a session (a warm body or a slot) is resumed only under the rules it began with.
+//
+// Presence and the stop word: when a message reaches a body, the venue's adapter is told (`<send> --place --agent
+// --status working --message <id>`): it shows the platform's "on it" (typing, 👀). The tick says so again every
+// PRESENCE_MS while the body works, and `--status done` when its turn is over. The adapter's answer carries
+// `stop: true` when a person said the stop word there: the body is ended, what waited is dropped.
+//
 // Outbound (`send`): only the body holding the conversation, in its current run (LOOM_BODY_KEY), through the piece
 // API as its own agent. The venue's declared send argv, `--place <place> --agent <agent>`, the text on stdin, a time
 // limit, `{ok, id?}`, one retry; then the agent's turn (`reply`, outcome answered or failed) and its text, to core.
-import { spawn as nodeSpawn } from 'node:child_process';
+import { spawn as nodeSpawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -44,6 +54,10 @@ import { venueKind as kindOf } from './models.mjs';
 import { setting } from './piece.mjs';
 import { dropSession, packSession, restoreFiles } from './sessions.mjs';
 import { ageSealer } from './sealed.mjs';
+import { RulesError, policyOf, rulesFor, tierOf } from './policy.mjs';
+import { gatesOf } from './gates.mjs';
+import { loomStore } from './store.mjs';
+import { namesFiles } from './briefs.mjs';
 import { AGENT_NAME, StateError, alive, withLock } from './state.mjs';
 
 const DAY_MS = 86_400_000;
@@ -66,6 +80,14 @@ export const SEND_MS = 15_000;
 /** A start or resume that's been "starting" this long, its process gone or not, is given up (a cold house is slow). */
 const STARTING_MS = 240_000;
 const OUTCOME_MS = 3_600_000;
+/** How often a working body's presence is said again to its adapter (and its stop word asked after). */
+export const PRESENCE_MS = 15_000;
+/** A presence or describe call to an adapter has this long. */
+const ADAPTER_MS = 15_000;
+/** The same words to the same person from one conversation within this long: once. */
+const RELAY_SAME_MS = 600_000;
+/** An agent's gates, as delivery reads them, kept this long in a process. */
+const GATES_MS = 30_000;
 /**
  * A body that fails to start is the runtime's to try again, on its tick: after each of these waits (about 15 minutes
  * in all), then given up, with a `failed` note on the conversation and a notice for the owner. A source never polls.
@@ -224,7 +246,60 @@ export function depsOf(env, o = {}) {
     bodyEnv: (key, conversation) => bodyEnvOf(env, { key, conversation }),
     cwd: o.cwd ?? setting(env, 'BODY_CWD'),
     warn: o.warn ?? ((m) => process.stderr.write(`loom-runtime deliver: ${m}\n`)),
+    // Who may do what (policy.mjs): the owner's policy and the gates, from the runtime's own store; a person's card,
+    // from core's CLI; and the venue's adapter, through its declared send argv (describe, presence).
+    policy: o.policy ?? ((agent) => policyOf(storeOf(env, o), agent).doc),
+    gates: o.gates ?? ((agent) => cachedGates(env, o, agent)),
+    card: o.card ?? ((slug) => personCard(env, slug)),
+    adapter: o.adapter ?? ((argv, c, args) => adapterCall(argv, c, args, o.adapterMs ?? ADAPTER_MS)),
   };
+}
+
+let store;
+const storeOf = (env, o) => o.store ?? (store ??= loomStore(env));
+const gatesCache = new Map();
+function cachedGates(env, o, agent) {
+  const hit = gatesCache.get(agent);
+  if (hit && Date.now() - hit.at < GATES_MS) return hit.doc;
+  const doc = gatesOf(storeOf(env, o), agent).doc;
+  if (!doc || typeof doc !== 'object') throw new DeliveryError(`the runtime holds no gates for ${agent}`, 503);
+  gatesCache.set(agent, { at: Date.now(), doc });
+  return doc;
+}
+
+/** A person's card as loom renders it (`loom person show <slug>`), or null: none, archived, or loom can't say. */
+function personCard(env, slug) {
+  if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(slug ?? '')) return null;
+  const { LOOM_STORE_GRANT: _g, ...clean } = env;
+  const r = spawnSync(env.LOOM_BIN || 'loom', ['person', 'show', slug], { env: clean, encoding: 'utf-8', timeout: 20_000, stdio: ['ignore', 'pipe', 'ignore'] });
+  const t = (r.stdout ?? '').trim();
+  return r.status === 0 && t.startsWith('## ') ? t.slice(0, 8000) : null;
+}
+
+/**
+ * One call of a venue adapter's declared send argv that posts nothing (`--describe`, `--status …`): the argv, then
+ * `--place <place> --agent <agent>`, then `args`, with nothing on stdin. Its answer, `{ok: true, …}`; anything else
+ * throws, with the adapter's reason.
+ */
+function adapterCall(argv, c, args, ms) {
+  return new Promise((resolve, reject) => {
+    let out = '';
+    let done = false;
+    const finish = (f, v) => { if (!done) { done = true; clearTimeout(timer); f(v); } };
+    let child;
+    try { child = nodeSpawn(argv[0], [...argv.slice(1), '--place', c.place, '--agent', c.agent, ...args], { stdio: ['pipe', 'pipe', 'ignore'] }); } catch (e) { reject(e); return; }
+    const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* gone */ } finish(reject, new Error(`no answer in ${ms / 1000}s`)); }, ms);
+    child.on('error', (e) => finish(reject, e));
+    child.stdout.on('data', (x) => { if (out.length < 256 * 1024) out += x; });
+    child.on('close', (status) => {
+      let a;
+      try { a = JSON.parse(out.trim().split('\n').pop()); } catch { return finish(reject, new Error(`it answered no JSON (exit ${status})`)); }
+      if (a?.ok === true) return finish(resolve, a);
+      finish(reject, new Error(typeof a?.reason === 'string' ? a.reason.slice(0, 300) : `it said no (exit ${status})`));
+    });
+    child.stdin.on('error', () => {});
+    child.stdin.end('');
+  });
 }
 
 // ─── The deliver body ───────────────────────────────────────────────────────
@@ -345,6 +420,11 @@ async function deliverOnce(env, raw, o) {
 
     // 2. The body. The message joins its conversation's queue (sealed; without age, only in memory, on its way to
     // the worker), and the queue is drained: from a detached worker (the CLI), or here; never waited on past 2 s.
+    // Its sender's tier, by the runtime's gates, now: what decides whether a body that isn't a guest venue's may hear
+    // it (plan). A person whose tier can't be read waits for a body that resolves it at its start.
+    let tier = null;
+    let tierUnread = false;
+    if (m.from.kind === 'person') { try { tier = tierOf(d.gates(m.agent), m.from); } catch { tierUnread = true; } }
     let sealed = null;
     try { sealed = d.sealer.seal(Buffer.from(m.text, 'utf-8')).toString('base64'); } catch (e) { d.warn(`can't seal the message (${e.message}): it goes to the body from memory, and can't wait`); }
     const venueInfo = await venueOf(d, m.venue);
@@ -354,7 +434,7 @@ async function deliverOnce(env, raw, o) {
       const c = loadConv(env, turn.conversation) ?? { conversation: turn.conversation, agent: m.agent, venue: m.venue, place: m.place, kind, queue: [], outcomes: {}, runs: 0, started: d.now().toISOString() };
       if (m.label !== undefined) c.label = m.label;
       // A retry after a crash may find its message already queued (or already answered): never twice.
-      if (!c.queue.some((x) => x.key === key) && !c.outcomes?.[key]) c.queue.push({ key, id: m.id, at: m.at, from: m.from, kind: m.kind, ...(sealed ? { sealed } : { mem: true }) });
+      if (!c.queue.some((x) => x.key === key) && !c.outcomes?.[key]) c.queue.push({ key, id: m.id, at: m.at, from: m.from, kind: m.kind, ...(tier ? { tier } : {}), ...(tierUnread ? { tierUnread: true } : {}), ...(sealed ? { sealed } : { mem: true }) });
       c.last = d.now().toISOString();
       saveConv(env, c);
     });
@@ -427,21 +507,31 @@ function census(env, agent, d, now) {
 }
 
 const who = (from) => (from?.kind === 'person' ? from.slug : from?.kind === 'agent' ? from.id : from?.kind === 'schedule' ? 'the schedule' : 'someone');
-const render = (msgs) => msgs.map((x) => (x.kind === 'wake' ? x.text : `${who(x.from)}: ${x.text}`)).join('\n\n');
+const tierTag = (x) => (Number.isInteger(x.tier) ? ` [tier ${x.tier}]` : '');
+const render = (msgs) => msgs.map((x) => (x.kind === 'wake' ? x.text : `${who(x.from)}${tierTag(x)}: ${x.text}`)).join('\n\n');
 
-/** The brief a new body starts with: where it is, its conversation and run (for identity), and the messages. */
-function startBrief(c, msgs, run, sends) {
+/**
+ * The brief a new body starts with: where it is, its conversation and run (for identity), its rules (policy.mjs: who
+ * wrote, the owner, a guest venue's floor and cards, the agent's own files), and the messages. Text, or parts when
+ * its rules name the agent's files (briefs.mjs).
+ */
+function startBrief(c, msgs, run, sends, rules = { sections: [] }) {
   const how = sends === 'record'
     ? `When you're done, pipe a short account of what you did to \`loom runtime send --conversation ${c.conversation}\`: on ${c.venue} nothing is posted; it's recorded as this run's reply.`
     : `To say something there, pipe it to \`loom runtime send --conversation ${c.conversation}\`; it answers {ok, id?} and, when it couldn't post, why.`;
-  return [
+  const relay = `To message one person directly instead (one DM, posted as you, in a venue that has DMs), add \`--person <their slug> --via <venue>\`${rules.guest ? ': from a guest venue, only to your owner' : ''}.`;
+  const head = [
     `You are ${c.agent}, in a conversation on ${c.venue}: ${c.label ?? c.place}.`,
     `Its conversation is ${c.conversation} and this run is ${run}: call identity with {conversation: "${c.conversation}", run: "${run}"} first.`,
     ...(c.runs > 0 ? [`It has history this session doesn't: read it with conversation({id: "${c.conversation}"}) (its digests) before you answer.`] : []),
     ...(sends ? [how] : []),
-    '',
-    render(msgs),
+    ...(sends === 'post' ? [relay] : []),
   ].join('\n');
+  const tail = `\n${render(msgs)}`;
+  if (!rules.sections.length) return `${head}\n${tail}`;
+  const parts = [{ text: `${head}\n` }, ...rules.sections, { text: tail }];
+  // Only the agent's own files need the repo; with none, it's one text, as it always was.
+  return namesFiles(parts) ? parts : parts.map((p) => p.text).join('');
 }
 
 /** What a resumed body is given: the new messages, and its new run. */
@@ -492,16 +582,20 @@ function plan(env, cv, d, mem) {
   const begin = (op) => { c.starting = mark(now); saveConv(env, c); return { cv, mark: c.starting.op, ...op }; };
   const st = statusOf(env, c, d);
   if (st === 'working') {
+    // A guest's message never reaches a body that isn't a guest venue's (its tools aren't narrowed, its brief has no
+    // floor): that body is ended, its session not kept, and a body under a guest venue's rules starts for it.
+    if (!c.bodyRules?.guest && c.queue.some((x) => x.tier === 1)) return begin({ type: 'reseat', body: c.body });
     // Mid-turn: into its inbox, where its harness hears it (shuttle's hand_over).
     const rec = readBody(env, c.body);
     const runner = d.runner(rec.harness);
     const left = [];
     for (const x of c.queue) {
+      if (x.tierUnread && !c.bodyRules?.guest) { left.push({ x, reason: 'its sender\'s tier couldn\'t be read' }); continue; }
       const text = open(d, x, mem);
       const r = text === null ? { fed: false, reason: 'its text is gone' } : runner.feed(bodyOf(c.body, rec), { id: x.key, text: render([{ ...x, text }]) });
       // The runtime's own copy of what it fed (sealed): the inbox's files are the body's to write, so they only ever
       // say which ids it never took, never what they said (shuttle's drop_inner).
-      if (r.fed) { outcome(c, [x.key], { body: 'fed' }, now); if (x.sealed) (c.fed ??= []).push(x); } else left.push({ x, reason: r.reason });
+      if (r.fed) { outcome(c, [x.key], { body: 'fed' }, now); if (x.sealed) (c.fed ??= []).push(x); ack(c, [x]); } else left.push({ x, reason: r.reason });
     }
     c.queue = left.map((l) => l.x);
     c.idleSince = undefined;
@@ -539,9 +633,89 @@ export async function drain(env, cv, d = depsOf(env), mem = new Map()) {
   if (!CV.test(cv ?? '')) return;
   for (let i = 0; i < 6; i++) {
     const op = locked(env, () => plan(env, cv, d, mem));
-    if (!op) return;
+    if (!op) break;
     await execute(env, op, d, mem);
   }
+  await announce(env, cv, d);
+}
+
+// ─── Rules, presence and the stop word ──────────────────────────────────────
+
+/** What policy.mjs's rulesFor reads, for one conversation in its venue. */
+const rulesDeps = (d, v, c) => ({
+  policy: d.policy, gates: d.gates, card: d.card,
+  describe: () => (v?.send ? d.adapter(v.send, c, ['--describe']) : {}),
+});
+
+/** Messages that reached a body: the adapter is told, on the drain's way out (announce). */
+function ack(c, msgs) {
+  const ids = msgs.filter((x) => x.kind === 'message' && typeof x.id === 'string').map((x) => x.id);
+  if (ids.length) c.acks = [...new Set([...(c.acks ?? []), ...ids])].slice(-20);
+}
+
+/**
+ * The adapter hears which messages a body has taken (`--status working --message <id>…`): its "on it" (typing, 👀)
+ * starts there. Best effort: a venue that can't show it is told nothing more, and nothing waits on it.
+ */
+async function announce(env, cv, d) {
+  const c = loadConv(env, cv);
+  if (!c?.acks?.length) return;
+  const ids = c.acks;
+  const v = await venueOf(d, c.venue);
+  if (v?.send) {
+    try { await d.adapter(v.send, c, ['--status', 'working', ...ids.flatMap((i) => ['--message', i])]); } catch (e) { d.warn(`${c.venue} couldn't show ${cv}'s body at work: ${e.message}`); }
+  }
+  const now = d.now().getTime();
+  locked(env, () => {
+    const x = loadConv(env, cv);
+    if (!x) return;
+    x.acks = (x.acks ?? []).filter((i) => !ids.includes(i));
+    if (!x.acks.length) delete x.acks;
+    if (v?.send) x.presence = { since: x.presence?.since ?? now, last: now };
+    saveConv(env, x);
+  });
+}
+
+/**
+ * The tick's presence pass, for a conversation the adapter was told is worked on: said again while its body works
+ * (the answer may carry the stop word), `done` once it doesn't. A stop ends the body (its session kept in its slot,
+ * as any end) and drops what waited.
+ */
+async function presencePass(env, c, d, now) {
+  const v = await venueOf(d, c.venue);
+  if (!v?.send) { locked(env, () => { const x = loadConv(env, c.conversation); if (x) { delete x.presence; saveConv(env, x); } }); return; }
+  const working = isStarting(c, now) || statusOf(env, c, d) === 'working';
+  if (working) {
+    if (now - (c.presence.last ?? 0) < PRESENCE_MS) return;
+    let a = null;
+    try { a = await d.adapter(v.send, c, ['--status', 'working']); } catch (e) { d.warn(`${c.venue} couldn't show ${c.conversation}'s body at work: ${e.message}`); }
+    if (a?.stop === true && c.body && !isStarting(c, now)) return stopBody(env, c, d, v);
+    locked(env, () => { const x = loadConv(env, c.conversation); if (x?.presence) { x.presence.last = now; saveConv(env, x); } });
+    return;
+  }
+  try { await d.adapter(v.send, c, ['--status', 'done']); } catch (e) { d.warn(`${c.venue} couldn't clear ${c.conversation}'s presence: ${e.message}`); }
+  locked(env, () => { const x = loadConv(env, c.conversation); if (x) { delete x.presence; saveConv(env, x); } });
+}
+
+/** A person said the stop word where this body works: it's ended (a slot kept), and nothing that waited goes on. */
+async function stopBody(env, c, d, v) {
+  const now = d.now().getTime();
+  const op = locked(env, () => {
+    const x = loadConv(env, c.conversation);
+    if (!x?.body || x.starting) return null;
+    outcome(x, (x.queue ?? []).map((q) => q.key), { body: 'failed', reason: 'stopped: a person said the stop word there' }, now);
+    x.queue = [];
+    delete x.waiting;
+    x.starting = mark(now);
+    saveConv(env, x);
+    return { cv: x.conversation, mark: x.starting.op, type: 'evict', body: x.body };
+  });
+  if (!op) return;
+  await execute(env, op, d, new Map());
+  // What its inbox held when it stopped isn't asked for any more either.
+  locked(env, () => { const x = loadConv(env, c.conversation); if (x) { x.queue = []; delete x.presence; delete x.acks; saveConv(env, x); } });
+  d.warn(`${c.conversation}: stopped by the stop word`);
+  try { await d.adapter(v.send, c, ['--status', 'done']); } catch { /* best effort */ }
 }
 
 const newRun = () => `run-${randomBytes(6).toString('hex')}`;
@@ -558,9 +732,26 @@ async function execute(env, op, d, mem) {
       const c = loadConv(env, op.cv);
       if (!c) return;
       if (c.body === op.body) { c.body = undefined; c.idleSince = undefined; }
-      if (saved.slot) c.slot = saved.slot; else delete c.slot;
+      if (saved.slot) c.slot = { ...saved.slot, rules: c.bodyRules ?? { guest: false } }; else delete c.slot;
       requeue(c, [...saved.pending, ...op.msgs]);
       if (ours(c, op)) delete c.starting;
+      saveConv(env, c);
+    });
+    return;
+  }
+  if (op.type === 'reseat') {
+    // A body whose rules aren't what its next message needs (a guest's, to a body that isn't a guest venue's): ended,
+    // its session not kept (no slot), what its inbox held back on the queue, and the next plan starts a fresh one.
+    let saved = { slot: null, pending: [] };
+    try { saved = await retire(env, op.cv, op.body, d, true); } catch (e) { d.warn(`ending ${op.body}: ${e.message}`); }
+    locked(env, () => {
+      rmSync(slotFile(env, op.cv), { force: true });
+      const c = loadConv(env, op.cv);
+      if (!c) return;
+      if (c.body === op.body) { c.body = undefined; c.idleSince = undefined; delete c.bodyRules; }
+      delete c.slot;
+      if (ours(c, op)) delete c.starting;
+      requeue(c, saved.pending);
       saveConv(env, c);
     });
     return;
@@ -573,7 +764,7 @@ async function execute(env, op, d, mem) {
       if (!c) return;
       if (c.body === op.body) { c.body = undefined; c.idleSince = undefined; }
       if (ours(c, op)) delete c.starting;
-      if (saved.slot) c.slot = saved.slot; else if (c.body === undefined) delete c.slot;
+      if (saved.slot) c.slot = { ...saved.slot, rules: c.bodyRules ?? { guest: false } }; else if (c.body === undefined) delete c.slot;
       // What its inbox still held goes to its next body (shuttle's drop: pending becomes a fresh batch).
       requeue(c, saved.pending);
       saveConv(env, c);
@@ -586,16 +777,33 @@ async function execute(env, op, d, mem) {
   let restored = [];
   const pending = [];
   let r;
+  let rules;
   try {
     const msgs = op.msgs.map((x) => ({ ...x, text: open(d, x, mem) })).filter((x) => x.text !== null);
     if (!msgs.length) throw new DeliveryError('its messages\' text is gone');
     const v0 = await venueOf(d, c0.venue);
     const sends = v0?.send ? 'post' : recordsOnly(v0) ? 'record' : null;
+    // Its rules (policy.mjs): what it's told and what it may use. Any that can't be had is no body (fail closed).
+    rules = await rulesFor(c0, msgs, rulesDeps(d, v0, c0), { platform: !!v0?.send });
+    if (op.type === 'resume' && (op.slot?.rules?.guest ?? false) !== rules.guest) {
+      // A session is resumed only under the rules it began with: a guest venue's never as anyone else's, nor the other
+      // way. Its slot goes, and its messages go back for a fresh body, in this same drain.
+      locked(env, () => {
+        rmSync(slotFile(env, op.cv), { force: true });
+        const c = loadConv(env, op.cv);
+        if (!c) return;
+        delete c.slot;
+        if (ours(c, op)) delete c.starting;
+        requeue(c, op.msgs);
+        saveConv(env, c);
+      });
+      return;
+    }
     const runKey = randomBytes(24).toString('hex');
     const bodyDeps = { runner: d.runner, accounts: d.accounts, now: d.now, fetchImpl: d.fetchImpl, bodyEnv: d.bodyEnv(runKey, op.cv) };
-    const base = { agent: c0.agent, venue: c0.venue, venueKind: c0.kind, cwd: d.cwd };
+    const base = { agent: c0.agent, venue: c0.venue, venueKind: c0.kind, cwd: d.cwd, deny: rules.deny, guest: rules.guest };
     if (op.type === 'start') {
-      r = await startBody(env, { ...base, place: c0.place, brief: startBrief(c0, msgs, run, sends) }, bodyDeps);
+      r = await startBody(env, { ...base, place: c0.place, brief: startBrief(c0, msgs, run, sends, rules) }, bodyDeps);
     } else {
       const pack = JSON.parse(d.sealer.open(readFileSync(slotFile(env, op.cv))).toString('utf-8'));
       if (pack?.v !== 1 || !Array.isArray(pack.files)) throw new DeliveryError('its slot isn\'t one this runtime wrote');
@@ -617,6 +825,8 @@ async function execute(env, op, d, mem) {
       }
       c.body = r.body;
       c.run = run;
+      c.bodyRules = { guest: rules.guest, key: rules.key };
+      ack(c, op.msgs);
       delete c.retryAt; delete c.startFails; delete c.retryReason;
       c.sendKey = keyHash(runKey).toString('hex');
       c.runs = (c.runs ?? 0) + 1;
@@ -816,6 +1026,7 @@ export async function tick(env, o = {}, only, mem = new Map()) {
     }
   });
   for (const op of ops) await execute(env, op, d, new Map());
+  for (const c of listConvs(env)) if (c.presence) { try { await presencePass(env, c, d, now); } catch (e) { d.warn(`presence for ${c.conversation}: ${e.message}`); } }
   for (const c of listConvs(env)) if (c.queue?.length) await drain(env, c.conversation, d);
 }
 
@@ -869,7 +1080,7 @@ function sessionOf(d, ref) {
   } catch { return null; }
 }
 
-export async function send(env, { conversation, text, key, session }, o = {}) {
+export async function send(env, { conversation, text, key, session, person, via }, o = {}) {
   const d = depsOf(env, o);
   const c = loadConv(env, conversation);
   if (!c) return { ok: false, reason: `no conversation ${conversation} here` };
@@ -885,14 +1096,66 @@ export async function send(env, { conversation, text, key, session }, o = {}) {
     return { ok: false, reason: `only the body holding ${conversation} speaks in it (${session ? 'another session is' : 'no session is named'}: ${conversation} is a session of its own)` };
   }
   if (!str(text, MAX_TEXT)) return { ok: false, reason: `a message is 1-${MAX_TEXT} characters` };
-  const v = await venueOf(d, c.venue);
-  if (!v?.send && !recordsOnly(v)) return { ok: false, reason: `venue ${c.venue} declares no send: nothing posts there` };
+  // To a person (a DM), not the conversation's own place: the relay to a person, through that venue's adapter.
+  let to;
+  if (person !== undefined || via !== undefined) {
+    const r = await dmPlace(env, c, { person, via, text }, d);
+    if (!r.ok) return r;
+    to = r.to;
+  } else {
+    const v = await venueOf(d, c.venue);
+    if (!v?.send && !recordsOnly(v)) return { ok: false, reason: `venue ${c.venue} declares no send: nothing posts there` };
+  }
   const ref = `out-${randomBytes(6).toString('hex')}`;
-  const out = { body: c.body, run: c.run };
+  const out = { body: c.body, run: c.run, ...(to ? { to } : {}) };
   if (o.detach) (o.spawnSender ?? ((...a) => spawnSender(env, ...a)))(conversation, ref, text, out);
   else { const p = post(env, conversation, ref, text, out, o).catch((e) => d.warn(`posting ${ref}: ${e.message}`)); o.onSend?.(p); }
   return { accepted: true, ref, conversation: c.conversation };
 }
+
+/** A platform id from a gate entry's ids for a venue: a list, one id, or (Slack) {team: [ids]}; the first. */
+function firstId(v) {
+  const one = (x) => ((typeof x === 'string' || typeof x === 'number') && /^[A-Za-z0-9]{1,24}$/.test(String(x)) ? String(x) : null);
+  if (Array.isArray(v)) return v.map(one).find(Boolean) ?? null;
+  if (v && typeof v === 'object') return Object.values(v).map(firstId).find(Boolean) ?? null;
+  return one(v);
+}
+
+/**
+ * Where a message to a person goes: their DM place on `via` (`dm:<their id there>`, by the agent's gates), checked.
+ * Only a person at tier 2 or up (from a guest venue's body, only the owner, tier 3); the same words to the same
+ * person from one conversation once in 10 minutes. {ok, to: {venue, place, label}} | {ok: false, reason}.
+ */
+async function dmPlace(env, c, { person, via, text }, d) {
+  if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(person ?? '') || !VENUE.test(via ?? '')) return { ok: false, reason: 'a message to a person names --person <their slug> and --via <venue>' };
+  const v = await venueOf(d, via);
+  if (!v?.send) return { ok: false, reason: `venue ${via} declares no send: nothing posts there` };
+  let gates;
+  try { gates = d.gates(c.agent); } catch (e) { return { ok: false, reason: `${c.agent}'s gates can't be read (${e.message}): no DM goes out` }; }
+  const tier = tierOf(gates, { kind: 'person', slug: person });
+  if (!tier || tier < 2) return { ok: false, reason: `${person} isn't in ${c.agent}'s gates at tier 2 or up: no DM goes to them` };
+  if (c.bodyRules?.guest && tier !== 3) return { ok: false, reason: 'from a guest venue, a DM goes only to your owner (tier 3)' };
+  const e = gates.people[person];
+  const id = firstId(e?.[via]);
+  if (!id) return { ok: false, reason: `${person} has no ${via} id in ${c.agent}'s gates` };
+  const h = createHash('sha256').update(`${person}\0${via}\0${text}`).digest('hex').slice(0, 16);
+  const now = d.now().getTime();
+  const dup = locked(env, () => {
+    const x = loadConv(env, c.conversation);
+    if (!x) return true;
+    x.relays = (x.relays ?? []).filter((r) => now - r.at < RELAY_SAME_MS);
+    if (x.relays.some((r) => r.h === h)) return true;
+    x.relays.push({ h, at: now });
+    saveConv(env, x);
+    return false;
+  });
+  if (dup) return { ok: false, reason: `the same words went to ${person} on ${via} already: once is enough` };
+  const name = typeof e.name === 'string' && e.name.trim() ? e.name.trim().slice(0, 60) : person;
+  return { ok: true, to: { venue: via, place: `dm:${id}`, label: `DM with ${name}` } };
+}
+
+/** A post's other place (a DM), as the detached sender is handed it: checked again. */
+const cleanTo = (t) => (t && VENUE.test(t.venue ?? '') && typeof t.place === 'string' && /^dm:[A-Za-z0-9]{1,24}$/.test(t.place) ? { venue: t.venue, place: t.place, ...(str(t.label, MAX_LABEL) ? { label: t.label } : {}) } : null);
 
 /** `loom-runtime deliver post --conversation <cv> --ref <ref> --stdin`: the post, detached; its text on stdin, never a file. */
 function spawnSender(env, cv, ref, text, out) {
@@ -911,25 +1174,29 @@ function spawnSender(env, cv, ref, text, out) {
  * landed, so it's never posted twice), then the agent's turn (`reply`, answered or failed) and its text; a failure is
  * told to the body that sent it, through its inbox (or, its turn over, as a message waiting for its next one).
  */
-export async function post(env, conversation, ref, text, { body, run } = {}, o = {}) {
+export async function post(env, conversation, ref, text, { body, run, to } = {}, o = {}) {
   const d = depsOf(env, o);
   const c = loadConv(env, conversation);
   if (!c) return { ok: false, reason: `no conversation ${conversation} here` };
-  const v = await venueOf(d, c.venue);
+  // Where it goes: the conversation's own place, or a person's DM (dmPlace), whose turn is that DM's conversation's.
+  const dm = to === undefined ? null : cleanTo(to);
+  if (to !== undefined && !dm) return { ok: false, reason: 'not a DM place' };
+  const at = dm ? { agent: c.agent, venue: dm.venue, place: dm.place, label: dm.label } : c;
+  const v = await venueOf(d, at.venue);
   // A scheduled venue with no send (a wake) posts nowhere: its message is only recorded.
-  let r = v?.send ? await sendOnce(d, v.send, c, text) : recordsOnly(v) ? { ok: true, recorded: true } : { ok: false, answered: true, reason: `venue ${c.venue} declares no send` };
-  if (!r.ok && r.answered && v?.send) r = await sendOnce(d, v.send, c, text);
+  let r = v?.send ? await sendOnce(d, v.send, at, text) : !dm && recordsOnly(v) ? { ok: true, recorded: true } : { ok: false, answered: true, reason: `venue ${at.venue} declares no send` };
+  if (!r.ok && r.answered && v?.send) r = await sendOnce(d, v.send, at, text);
   let rec = null;
   try { rec = body ? readBody(env, body) : null; } catch { /* its body is gone: the turn says no model */ }
   const turn = {
-    agent: c.agent, venue: c.venue, place: c.place, at: d.now().toISOString(), from: { kind: 'agent', id: c.agent }, kind: 'reply',
+    agent: c.agent, venue: at.venue, place: at.place, ...(dm?.label ? { label: dm.label } : {}), at: d.now().toISOString(), from: { kind: 'agent', id: c.agent }, kind: 'reply',
     run: run ?? c.run ?? newRun(), ...(rec?.model ? { model: rec.model } : {}), ...(rec?.harness ? { harness: rec.harness } : {}), outcome: r.ok ? 'answered' : 'failed',
   };
   try {
-    const { seq } = await d.core.turn(turn);
-    try { await d.core.audit({ conversation: c.conversation, seq, text }); } catch (e) { d.warn(`the reply's turn stands without its audit text: ${e.message}`); }
+    const t = await d.core.turn(turn);
+    try { await d.core.audit({ conversation: t.conversation, seq: t.seq, text }); } catch (e) { d.warn(`the reply's turn stands without its audit text: ${e.message}`); }
   } catch (e) { d.warn(`${ref} went out but its turn wasn't recorded: ${e.message}`); }
-  if (!r.ok) tellBody(env, conversation, body, `(couldn't post your message ${ref} in ${c.venue}: ${r.reason})`, d);
+  if (!r.ok) tellBody(env, conversation, body, `(couldn't post your message ${ref} in ${dm ? `${dm.venue} ${dm.label ?? dm.place}` : c.venue}: ${r.reason})`, d);
   locked(env, () => { const x = loadConv(env, conversation); if (x) { x.last = d.now().toISOString(); saveConv(env, x); } });
   return { ...r, ref };
 }

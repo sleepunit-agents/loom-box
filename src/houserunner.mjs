@@ -21,6 +21,7 @@ import { dirname, join } from 'node:path';
 import { up } from './control.mjs';
 import { pieceName } from './piece.mjs';
 import { bodyBox } from './placement.mjs';
+import { isParts } from './briefs.mjs';
 import { RunnerError } from './runners.mjs';
 import { ageSealer } from './sealed.mjs';
 import { AGENT_NAME, StateError, load, withLock } from './state.mjs';
@@ -136,7 +137,9 @@ function cleanReport(r) {
     if (typeof d.id === 'string' && BODY_ID.test(d.id)) done[rid] = { id: d.id };
     else done[rid] = { error: String(d.error ?? 'its host couldn\'t start it').slice(0, 300) };
   }
-  return { bodies, done };
+  // What this host can do beyond the first version's: `parts`, a brief that names the agent's files (briefs.mjs).
+  const caps = Array.isArray(r?.caps) ? r.caps.filter((c) => c === 'parts') : [];
+  return { bodies, done, caps };
 }
 
 /**
@@ -165,7 +168,7 @@ export function bodySync(env, caller, body, o = {}) {
       h.hostHash = keyHash(issued);
       delete h.bootHash;
     }
-    const { bodies, done } = cleanReport(body?.report);
+    const { bodies, done, caps } = cleanReport(body?.report);
     // An id this house already gave one request is never another's (a second claim of the same body is refused).
     h.claimed ??= {};
     for (const [rid, d] of Object.entries(done)) {
@@ -173,7 +176,7 @@ export function bodySync(env, caller, body, o = {}) {
       if (h.claimed[d.id] && h.claimed[d.id] !== rid) done[rid] = { error: `${house} reported ${d.id} for a second request` };
       else h.claimed[d.id] = rid;
     }
-    h.report = { at: now, house, bodies, done };
+    h.report = { at: now, house, bodies, done, caps };
     // A request given up on whose body the house started late: stopped, never run.
     h.cancel ??= {};
     for (const [rid, at] of Object.entries(h.cancel)) {
@@ -276,8 +279,12 @@ export class HouseRunner {
   async launch(o, resume) {
     if (!AGENT_NAME.test(o.agent ?? '')) throw new RunnerError('a body in a house is some agent\'s: say which');
     const house = await this.warm(o.agent);
+    // A brief that names the agent's files goes as `parts`, never as `brief`: only a host that says it reads them
+    // gets one (an older host would start the body without them).
+    const parts = isParts(o.brief);
+    if (parts && !this.host(o.agent).report?.caps?.includes('parts')) throw new RunnerError(`${o.agent}'s house ${house} runs a body host too old to read its brief files: update the house's loom-runtime`);
     const rid = randomBytes(8).toString('hex');
-    const ask = { harness: this.harness, model: o.model, deny: o.deny ?? [], brief: o.brief, key: o.env?.LOOM_BODY_KEY, ...(o.env?.LOOM_BODY_CONVERSATION ? { conversation: o.env.LOOM_BODY_CONVERSATION } : {}), ...(resume ? { resume: resume.session, files: o.files ?? [] } : {}) };
+    const ask = { harness: this.harness, model: o.model, deny: o.deny ?? [], ...(parts ? { parts: o.brief } : { brief: o.brief }), key: o.env?.LOOM_BODY_KEY, ...(o.env?.LOOM_BODY_CONVERSATION ? { conversation: o.env.LOOM_BODY_CONVERSATION } : {}), ...(resume ? { resume: resume.session, files: o.files ?? [] } : {}) };
     hostLocked(this.env, () => {
       const h = loadHost(this.env, o.agent);
       (h.req ??= {})[rid] = { at: this.now().getTime(), sealed: this.transit.seal(Buffer.from(JSON.stringify(ask))) };

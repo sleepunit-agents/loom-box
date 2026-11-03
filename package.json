@@ -115,6 +115,9 @@
       },
       "gate-proposals": {
         "writers": "piece"
+      },
+      "policy": {
+        "writers": "owner"
       }
     }
   }

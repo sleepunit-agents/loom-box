@@ -77,7 +77,7 @@ test('a delivered body is a session in its agent\'s own house: placed, woken by 
   // The control plane, on loom's machine: the runtime's own env, with things a body must never get.
   const env = {
     PATH: process.env.PATH, HOME: join(D, 'loom'), LOOM_HOME: join(D, 'loom', '.config', 'loom'), LOOM_BOX_LOCAL_NAME: 'one', LOOM_BOX_HOME: join(D, 'state'), LOOM_BOX_DATA: join(D, 'data'),
-    LOOM_RUNTIME_TOKEN_FILE: join(D, 'runtime-token'), LOOM_RUNTIME_ACCOUNTS: 'none', LOOM_RUNTIME_SCORECARDS: 'off',
+    LOOM_RUNTIME_TOKEN_FILE: join(D, 'runtime-token'), LOOM_RUNTIME_ACCOUNTS: 'none', LOOM_RUNTIME_SCORECARDS: 'off', LOOM_BIN: join(here, 'fake-loom.mjs'),
     ANTHROPIC_API_KEY: 'sk-ant-runtimes-own', CLAUDE_CONFIG_DIR: join(D, 'loom', '.claude'), FOO_SECRET: 'hunter2',
   };
   mkdirSync(env.LOOM_HOME, { recursive: true });

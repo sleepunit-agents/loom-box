@@ -12,10 +12,13 @@
 //   gates export --json                   the runtime's gates, in the export's shape
 //   gates import [--force] < export       the owner's run: `loom shuttle gates export --json | loom runtime gates import`
 //   gates follow-merge <from> <into>      the owner's: after a card merge made elsewhere, every agent's gates follow
+//   policy --agent <a> [--json]           an agent's body policy ({doc, rev}): deny lists, brief files (policy.mjs)
+//   policy set --agent <a> < policy       the owner's run: set it, whole
 import { loomStore } from './store.mjs';
 import { ask, GRANTS, KEY, paired, householdOf, seed, setPiece } from './grants.mjs';
 import { AGENT as AGENT_NAME, annotate, exportGates, followMerge, gatesOf, importGates, ownersRunOf, propose, status } from './gates.mjs';
 import { coreFrom } from './core.mjs';
+import { policyOf, setPolicy } from './policy.mjs';
 
 class Fail extends Error { constructor(m, code = 1) { super(m); this.code = code; } }
 const flag = (args, name) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : undefined; };
@@ -118,6 +121,23 @@ export async function gatesCli(rest, env, { store = loomStore(env), core = coreF
     }
     default: throw new Fail('usage: loom runtime gates people | status | propose | export | import | follow-merge', 2);
   }
+}
+
+/**
+ * `loom runtime policy --agent a [--json]`: an agent's policy ({doc, rev}); `policy set --agent a < doc`: the owner's
+ * run sets it, whole (policy.mjs): what every body may not use, a guest venue's bodies too, and the agent's brief files.
+ */
+export async function policyCli(rest, env, { store = loomStore(env), stdin = readStdin } = {}) {
+  const set = rest[0] === 'set';
+  const args = set ? rest.slice(1) : rest;
+  const agent = flag(args, '--agent');
+  if (!agent) throw new Fail('usage: loom runtime policy --agent <a> [--json] | policy set --agent <a> < policy', 2);
+  if (!set) { out(policyOf(store, agent)); return; }
+  const own = ownersRunOf(env, grantIn(env));
+  if (own !== true) throw new Fail(`policy set is the owner's run only (${own})`, 5);
+  let doc;
+  try { doc = JSON.parse(await stdin()); } catch { throw new Fail('policy set: the policy on stdin isn\'t JSON', 2); }
+  try { out({ rev: setPolicy(store, agent, doc) }); } catch (e) { throw new Fail(`policy set: ${e.message}`, 1); }
 }
 
 export { Fail as PermsFail };

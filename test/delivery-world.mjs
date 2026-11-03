@@ -33,7 +33,7 @@ export function fakeRunner(log, root, harness = 'claude', { inboxDir } = {}) {
   mkdirSync(roots.sess, { recursive: true });
   const tfile = (s) => join(roots.sess, `${s}.jsonl`);
   const r = {
-    harness, roots, inbox: inboxDir ? inbox(inboxDir) : null, failStart: null, failResume: null, envs: {}, dead: new Set(), delay: 0,
+    harness, roots, inbox: inboxDir ? inbox(inboxDir) : null, failStart: null, failResume: null, envs: {}, denies: {}, dead: new Set(), delay: 0,
     start(o) {
       if (r.failStart) throw new RunnerError(r.failStart);
       if (r.delay) { const ms = r.delay; r.delay = 0; return new Promise((res) => setTimeout(res, ms)).then(() => r.start(o)); }
@@ -42,6 +42,7 @@ export function fakeRunner(log, root, harness = 'claude', { inboxDir } = {}) {
       writeFileSync(tfile(session[id]), `transcript of ${id}: ${o.brief}\n`);
       log.push(['start', id, o.brief]);
       r.envs[id] = o.env;
+      r.denies[id] = o.deny ?? [];
       state[id] = 'working';
       r.inbox?.open(id, {});
       return { id, harness, model: o.model, slot: { harness, session: session[id] } };
@@ -52,6 +53,7 @@ export function fakeRunner(log, root, harness = 'claude', { inboxDir } = {}) {
       session[id] = slot.session;
       log.push(['resume', id, slot.session, existsSync(tfile(slot.session)) ? readFileSync(tfile(slot.session), 'utf-8') : null, o.brief]);
       r.envs[id] = o.env;
+      r.denies[id] = o.deny ?? [];
       state[id] = 'working';
       r.inbox?.open(id, {});
       return { id, harness, model: o.model, slot };
@@ -120,10 +122,11 @@ export const testSealer = {
 
 export function world(extra = {}, { inboxDir } = {}) {
   const HOME = scratch('rt-deliver-');
-  const env = { HOME, PATH: '/usr/bin:/bin', LANG: 'C.UTF-8', LOOM_RUNTIME_TOKEN_FILE: join(HOME, 'runtime-token'), LOOM_RUNTIME_LOOM_URL: 'http://127.0.0.1:1/mcp', ANTHROPIC_BASE_URL: 'http://proxy', SOMETHING_ELSE: 'x', LOOM_BOX_LOCAL_NAME: 'one', LOOM_BOX_HOME: join(HOME, 'state'), LOOM_BOX_DATA: join(HOME, 'data'), LOOM_RUNTIME_SCORECARDS: 'off', ...extra };
+  const env = { HOME, PATH: '/usr/bin:/bin', LANG: 'C.UTF-8', LOOM_RUNTIME_TOKEN_FILE: join(HOME, 'runtime-token'), LOOM_RUNTIME_LOOM_URL: 'http://127.0.0.1:1/mcp', ANTHROPIC_BASE_URL: 'http://proxy', SOMETHING_ELSE: 'x', LOOM_BOX_LOCAL_NAME: 'one', LOOM_BOX_HOME: join(HOME, 'state'), LOOM_BOX_DATA: join(HOME, 'data'), LOOM_RUNTIME_SCORECARDS: 'off', LOOM_BIN: join(here, 'fake-loom.mjs'), ...extra };
   setModels(env, { list: [{ id: 'opus', harness: 'claude', family: 'anthropic' }], agent: 'art', prefer: ['opus'] });
   setModels(env, { agent: 'mark', prefer: ['opus'] });
   const log = [];
+  const adapterCalls = [];
   const runner = fakeRunner(log, HOME, 'claude', { inboxDir: inboxDir ? join(HOME, 'inbox') : undefined });
   let t = Date.parse('2026-11-02T12:00:00Z');
   const clock = { now: () => new Date(t), advance: (ms) => { t += ms; } };
@@ -132,13 +135,19 @@ export function world(extra = {}, { inboxDir } = {}) {
     core, runner: () => runner, sealer: testSealer, now: clock.now, warn: () => {},
     accounts: staticAccounts({ accounts: [{ name: 'max', provider: 'anthropic', harness: 'claude', kind: 'login', agents: ['art', 'mark', 'pip'], credentials: [{ kind: 'login', status: 'valid' }], usage: {} }] }),
     venues: () => ({ slack: { kind: 'live', send: [process.execPath, join(here, 'fake-send.mjs')] }, relay: { kind: 'agent' } }),
+    // Who may do what (policy.mjs): no policy, gates that name no one, an adapter that describes every place as an
+    // ordinary one and takes every presence call. A test hands in its own.
+    policy: () => null,
+    gates: () => ({ people: {} }),
+    card: () => null,
+    adapter: async (argv, c, args) => { adapterCalls.push({ place: c.place, agent: c.agent, args }); return { ok: true }; },
   };
   let n = 0;
   const msg = (place, text, more = {}) => ({ source: 'test-source', id: `m-${++n}`, agent: 'art', venue: 'slack', place, label: `Loren (${place})`, from: { kind: 'person', slug: 'loren' }, kind: 'message', at: clock.now().toISOString(), text, ...more });
   // A body's send, as its harness makes it: with the session it runs in (Claude Code sets CLAUDE_CODE_SESSION_ID).
   const sessionFor = (cv) => { const c = loadConv(env, cv); return c?.body ? runner.slotOf({ id: c.body.split(':')[1] })?.session : undefined; };
   const sendAs = (b, oo = o) => send(env, { ...b, ...(b.session === undefined ? { session: sessionFor(b.conversation) } : {}) }, oo);
-  return { env, log, runner, core, clock, o, msg, sessionFor, send: sendAs, kinds: () => log.map((l) => l[0]) };
+  return { env, log, runner, core, clock, o, msg, sessionFor, send: sendAs, adapterCalls, kinds: () => log.map((l) => l[0]) };
 }
 
 
@@ -173,9 +182,9 @@ export function houseWorld({ sealer, claimMs = 5000, warmMs = 5000 } = {}) {
   mkdirSync(sess, { recursive: true });
   const transcript = (id) => join(sess, `s-${id}.jsonl`);
   const local = {
-    harness: 'claude', roots: { sess }, startDelay: 0, envs: {}, transcript,
+    harness: 'claude', roots: { sess }, startDelay: 0, envs: {}, briefs: {}, denies: {}, transcript,
     inbox: { pending: () => [], taken: () => [], close() {}, remove() {} },
-    async start(o) { if (local.startDelay) await sleep(local.startDelay); const id = `b000000${n++}`; st[id] = 'working'; local.envs[id] = o.env; started.push(id); writeFileSync(transcript(id), `transcript of ${id}\n`); return { id, harness: 'claude' }; },
+    async start(o) { if (local.startDelay) await sleep(local.startDelay); const id = `b000000${n++}`; st[id] = 'working'; local.envs[id] = o.env; local.briefs[id] = o.brief; local.denies[id] = o.deny; started.push(id); writeFileSync(transcript(id), `transcript of ${id}\n`); return { id, harness: 'claude' }; },
     status: (b) => st[b.id] ?? 'unknown', slotOf: (b) => ({ harness: 'claude', session: `s-${b.id}` }),
     feed(b, m) { fed.push([b.id, m.id, m.text]); return { fed: true }; },
     end(b) { ended.push(b.id); st[b.id] = 'ended'; },
@@ -186,7 +195,7 @@ export function houseWorld({ sealer, claimMs = 5000, warmMs = 5000 } = {}) {
   let left = false;
   // The house declares claude (its login's env is set); a test can take it away.
   const houseEnv = { CLAUDE_SECURESTORAGE_CONFIG_DIR: '/run/loom/login/claude', HOUSE_TASK: 'the task', PATH: '/usr/bin' };
-  const host = ({ idleS = 0 } = {}) => {
+  const host = ({ idleS = 0, cwd } = {}) => {
     const client = async (p, b) => {
       const r = await api(env, { now: () => new Date() }, { caller: { kind: 'agent', agent: 'art', house: 'h-1' }, path: p, body: b });
       if (r.status !== 200) throw new Error(r.body.error);
@@ -195,7 +204,7 @@ export function houseWorld({ sealer, claimMs = 5000, warmMs = 5000 } = {}) {
     };
     // The host's boot key is in its house's task (as the house runs it: `loom-runtime body-host … --host-key K`).
     const hostKey = /--host-key ([0-9a-f]{48})/.exec(load(env).houses['h-1']?.task ?? '')?.[1];
-    const done = runBodyHost({ client, runner: () => local, env: houseEnv, hostKey, sleep: () => sleep(10), beats: 100_000, idleS, packMs: 2000 });
+    const done = runBodyHost({ client, runner: () => local, env: houseEnv, hostKey, sleep: () => sleep(10), beats: 100_000, idleS, packMs: 2000, ...(cwd ? { cwd } : {}) });
     done.then(() => { left = true; });
     return done;
   };
