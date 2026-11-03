@@ -12,7 +12,7 @@ import { addBox, assertBoxOwner, isBoxOwner, boxLabelOf, boxOfCall, boxUpdateNow
 import { LOGIN_HARNESSES } from './logins.mjs';
 import { ownCommit, swapCommand } from './version.mjs';
 import { stateAccounts } from './accounts.mjs';
-import { deliveryNotices } from './delivery.mjs';
+import { answerLoop, deliveryNotices, loopAsks } from './delivery.mjs';
 import { loomStore } from './store.mjs';
 import { asks as gateAsks, answer as gateAnswer, gatesPage, mergePeople, status as gatesStatus, proposals as gateProposals } from './gates.mjs';
 import { GRANTS, KEY as GRANTS_KEY, GrantsError, grantsProblem, householdOf, setPiece, setRelay } from './grants.mjs';
@@ -116,7 +116,8 @@ export function manifest(env) {
     },
     // A box asking to join is the owner's call: the code is the one on the box's own terminal.
     // ...and a person a body proposes for an agent's gates (gates.mjs): the household owner's to allow or deny.
-    asks: [...pendingJoins(s).slice(0, 5).map((j) => joinAsk(j)), ...permsAsks(env), ...board.asks],
+    // ...and a conversation paused as a loop (delivery.mjs, loops.mjs): Resume or Dismiss.
+    asks: [...pendingJoins(s).slice(0, 5).map((j) => joinAsk(j)), ...permsAsks(env), ...board.asks, ...loopAsksOf(env)],
     agents: reports,
     // A delivery the runtime gave up on (its body never started, after its retries): the owner hears of it.
     // ...and a relay thread between agents that's run long today: a heads-up, never a stop (relay.mjs).
@@ -136,6 +137,9 @@ function joinAsk(j) {
       ],
   };
 }
+
+/** Conversations paused as loops; never one that breaks the manifest. */
+function loopAsksOf(env) { try { return loopAsks(env); } catch { return []; } }
 
 /** Proposals waiting in the gates; never one that breaks the manifest. */
 function permsAsks(env) {
@@ -964,6 +968,12 @@ export function act(env, effects, { action, fields: raw = {}, caller: c }, publi
         }
         return (action === 'gates-merge' ? mergePeople(st, permsCore(env), fields) : gateAnswer(st, permsCore(env), action, fields))
           .catch((err) => ({ ok: false, message: `The runtime failed (${String(err.message || err).slice(0, 160)}).` }));
+      }
+      case 'loop-resume': case 'loop-dismiss': {
+        const answer = action === 'loop-resume' ? 'resume' : 'dismiss';
+        return answerLoop(env, String(fields.conversation ?? ''), answer, { detach: true })
+          .then((r) => ({ ok: true, message: answer === 'resume' ? `Resumed${r.waiting ? `: ${r.waiting} waiting start${r.waiting === 1 ? 's' : ''} now` : ''}.` : `Dismissed${r.waiting ? `: ${r.waiting} waiting dropped` : ''}; its next message starts it fresh.`, page: '' }))
+          .catch((e) => ({ ok: false, message: String(e.message || e).slice(0, 200) }));
       }
       default: return { ok: false, message: `No action ${action}.` };
     }

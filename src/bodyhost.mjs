@@ -106,7 +106,12 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
       const slot = (() => { try { return r.slotOf({ id }); } catch { return null; } })();
       // What its inbox still holds (ids only): fed, never taken by its hook. The runtime keeps their text.
       const pending = (() => { try { return (r.inbox?.pending?.(id) ?? []).map((p) => p?.id).filter((k) => typeof k === 'string').slice(0, 64); } catch { return []; } })();
-      bodies[id] = { harness: b.harness, status, ...(slot?.session ? { session: slot.session } : {}), feedable: !!r.inbox, pending };
+      // Its turn over: how it went (runners.mjs, turn), for the runtime's loop check (t-1763).
+      // Read once when its turn is over, and kept (a turn that's over stays as it was).
+      if (status === 'working') delete b.turn;
+      else if ((status === 'idle' || status === 'ended') && b.turn === undefined) { try { b.turn = r.turn?.({ id, ...(b.slot ? { slot: b.slot } : {}) }) ?? null; } catch { b.turn = null; } }
+      const turn = status === 'idle' || status === 'ended' ? b.turn : null;
+      bodies[id] = { harness: b.harness, status, ...(slot?.session ? { session: slot.session } : {}), feedable: !!r.inbox, pending, ...(turn ? { turn } : {}) };
     }
     await reportUsage(turnsOver);
     const packed = {};

@@ -52,6 +52,7 @@
 //        [--person <slug> --via <venue>]                               … or one DM to a person there, through its adapter
 //                                                                        at once; a failed post comes back through its inbox
 //   loom runtime deliver tick [--conversation <cv>] | deliver run [--every <ms>] | deliver list [--json]
+//   loom runtime deliver resume|dismiss <cv>   a conversation paused as a loop (loops.mjs): start what waited, or drop it
 //   loom runtime body-host [--piece <name>] --host-key <boot key>   in an agent's house, as its task: the bodies delivery asks for
 // Models and accounts (the owner's, on loom's machine):
 //   loom runtime models [--json]                                         the model list and each agent's settings
@@ -104,7 +105,7 @@ import { join } from 'node:path';
 import { readModels, resolveFor, setModels } from './models.mjs';
 import { endBody, feedBody, listBodies, resumeBody, startBody } from './bodies.mjs';
 import { PART_RAW, joinParts, partsOf } from './blobs.mjs';
-import { deliver, listConvs, post, send, tick } from './delivery.mjs';
+import { answerLoop, deliver, listConvs, post, send, tick } from './delivery.mjs';
 import { reviewStatus, reviewTick, runReview } from './review.mjs';
 import { bodyKeyFor, runBodyHost } from './bodyhost.mjs';
 import { runnerFor, usageDirOf } from './runners.mjs';
@@ -577,10 +578,18 @@ async function delivery(rest, env, json) {
     // Names and states only: a waiting message's text stays sealed.
     const l = listConvs(env).map(({ outcomes: _o, queue, ...c }) => ({ ...c, queued: queue?.length ?? 0 }));
     if (json) return out(l);
-    for (const c of l) process.stdout.write(`${c.conversation} ${c.agent} ${c.venue} ${c.label ?? c.place}: ${c.body ?? (c.slot ? `slot until ${c.slot.until}` : 'no body')}${c.queued ? `, ${c.queued} waiting (${c.waiting})` : ''}\n`);
+    for (const c of l) process.stdout.write(`${c.conversation} ${c.agent} ${c.venue} ${c.label ?? c.place}: ${c.paused ? `PAUSED (${c.paused.reason}), ` : ''}${c.body ?? (c.slot ? `slot until ${c.slot.until}` : 'no body')}${c.queued ? `, ${c.queued} waiting (${c.waiting})` : ''}\n`);
     return;
   }
-  throw new Fail('usage: loom runtime deliver [tick|run|list] …', 2);
+  if (sub === 'resume' || sub === 'dismiss') {
+    // A conversation paused as a loop (loops.mjs): resume starts what waited; dismiss drops it.
+    const cv = positional(rest)[1];
+    const r = await answerLoop(env, cv, sub, { detach: true }).catch((e) => { throw new Fail(e.message); });
+    if (json) return out(r);
+    process.stdout.write(`${cv}: ${sub === 'resume' ? `resumed, ${r.waiting} waiting starts` : `dismissed, ${r.waiting} waiting dropped`}\n`);
+    return;
+  }
+  throw new Fail('usage: loom runtime deliver [tick|run|list|resume <cv>|dismiss <cv>] …', 2);
 }
 
 /** loom runtime review …: a run by hand, and what the runs did (counts and families, never text). */

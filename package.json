@@ -57,12 +57,6 @@
         "hint": "JSON by venue or venue kind, e.g. {\"slack\": 7, \"scheduled\": 1}; at most 14 (default live 14, scheduled 1, agent 3)"
       },
       {
-        "name": "LOOM_RUNTIME_STARTS_PER_HOUR",
-        "label": "Bodies one conversation may start in an hour for anything but a person's message, at most",
-        "default": "6",
-        "hint": "1-60 (notes, wakes, an agent's relays: what could loop); past it the owner is told and none of those starts there until the hour is over"
-      },
-      {
         "name": "LOOM_RUNTIME_RETRY_S",
         "label": "How long a body that couldn't start waits before each new try",
         "hint": "a JSON list of seconds, 1-5 of them (default [60, 240, 600]: about 15 minutes); after the last, it's given up and the owner is told"

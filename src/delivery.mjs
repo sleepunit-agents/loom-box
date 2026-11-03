@@ -43,8 +43,13 @@
 // A post that fails never starts a body (t-1760): the body is told if it's still mid-turn; else it's the
 // conversation's one pending note, which rides along with its next real message. A refusal the adapter says is for
 // good (`{ok: false, reason, permanent: true}`: shadow mode, no bot, a place it can't post in) isn't retried or
-// queued at all: it's kept on the conversation (`refused`) and the owner hears of it once a day. And a backstop: at
-// most STARTS_PER_HOUR bodies for one conversation in an hour for anything but a person's message.
+// queued at all: it's kept on the conversation (`refused`) and the owner hears of it once a day.
+//
+// Loops (t-1763, loops.mjs): no cap on how many bodies a conversation starts, or how fast. Each run (a body started or
+// resumed) is kept on its conversation (`runLog`: for whom, what it sent, how its turn ended), and a conversation whose
+// runs look like a crash loop (a failure streak, the same output again and again, relay ping-pong, start-stop churn)
+// is paused before its next body: what comes is recorded and waits; a note on the conversation says why, and the owner
+// gets one ask with Resume (what waited starts) and Dismiss (what waited is dropped). Nothing else is ever paused.
 import { spawn as nodeSpawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
@@ -64,6 +69,8 @@ import { gatesOf } from './gates.mjs';
 import { loomStore } from './store.mjs';
 import { namesFiles } from './briefs.mjs';
 import { AGENT_NAME, StateError, alive, withLock } from './state.mjs';
+import { RUNS_KEPT, causeOf, detectLoop, textHash } from './loops.mjs';
+import { readRelays } from './relay.mjs';
 
 const DAY_MS = 86_400_000;
 export const MAX_TEXT = 40_000;
@@ -104,14 +111,6 @@ export const RETRY_DELAYS_MS = [60_000, 240_000, 600_000];
 /** Given-up deliveries, as the owner's notices: this many, for this long. */
 const NOTICE_MS = 86_400_000;
 const NOTICES_MAX = 20;
-/**
- * Bodies started (or resumed) for one conversation in an hour for anything but a person's message (a note, a wake, an
- * agent's relay), at most (t-1760): a backstop against anything that starts body after body. Past it, the owner hears
- * of it once and none of those starts until the hour is over; what came waits. A person's message always goes (a
- * lively chat resumes its body for each reply). LOOM_RUNTIME_STARTS_PER_HOUR changes it (1-60).
- */
-export const STARTS_PER_HOUR = 6;
-const HOUR_MS = 3_600_000;
 
 const KINDS = ['message', 'wake'];
 const FROM_KINDS = ['person', 'agent', 'schedule', 'unknown'];
@@ -162,7 +161,6 @@ export function limitsOf(env) {
   return {
     busy: Math.max(1, Math.floor(num(setting(env, 'BUSY_LIMIT'), BUSY_LIMIT))),
     warmIdleS: num(setting(env, 'WARM_IDLE_S'), WARM_IDLE_S),
-    startsPerHour: Math.min(60, Math.max(1, Math.floor(num(setting(env, 'STARTS_PER_HOUR'), STARTS_PER_HOUR)))),
     continuity,
   };
 }
@@ -558,8 +556,6 @@ export const FENCE_NOTE = (n) => `(The runtime fences each message: only a \`<<<
  * delivery's key is 32 hex characters), so one left on disk by an older runtime can't start a body either.
  */
 const isNote = (x) => x?.note === true || /^note-[0-9a-f]{12}$/.test(x?.key ?? '');
-/** A batch with a person's message in it: what the hourly backstop never holds back (a person writes at a person's pace). */
-const byPerson = (q) => q.some((x) => !isNote(x) && x.from?.kind === 'person');
 // A wake's text is the schedule's, and a post-failure note the runtime's own: neither is a sender's, unfenced.
 const own = (x) => x.kind === 'wake' || isNote(x);
 const render = (msgs) => {
@@ -671,39 +667,32 @@ function plan(env, cv, d, mem) {
     if (!c.queue.length) { delete c.waiting; saveConv(env, c); return null; }
     return wait(`its body is mid-turn and can't hear it yet (${left[0].reason}): it waits for the turn to end`);
   }
-  const { busy, idle } = census(env, c.agent, d, now);
-  const limits = limitsOf(env);
-  // The backstop (t-1760): this many bodies for this conversation in the last hour for anything but a person's message
-  // (a note, a wake, an agent's relay: what could loop), and no more of those until the hour is over.
-  const starts = (c.bodyStarts ?? []).filter((t) => now - t < HOUR_MS);
-  const over = starts.length >= limits.startsPerHour && !byPerson(c.queue);
-  const capped = () => {
-    const until = Math.min(...starts) + HOUR_MS;
-    if (!(c.capNoticeAt > now - HOUR_MS)) {
-      c.capNoticeAt = now;
-      addNotice(env, {
-        text: `${cap(c.agent)}'s ${c.venue} ${c.label ?? c.place} started ${starts.length} bodies in an hour for no person's message: no more start for it until ${new Date(until).toISOString().slice(11, 16)} UTC`.slice(0, 300),
-        meta: `at most ${limits.startsPerHour} an hour · ${c.conversation}`,
-        at: new Date(now).toISOString(), agent: c.agent, tone: 'warn', page: '',
-      }, now);
-      d.warn(`${cv}: ${starts.length} bodies in an hour; none starts until ${new Date(until).toISOString()}`);
-    }
-    return wait(`${starts.length} bodies started for this conversation in the last hour for no person's message (at most ${limits.startsPerHour}): it waits until ${new Date(until).toISOString()}`);
-  };
-  if (st === 'idle') {
-    // Its own body, warm, its turn over: resumed in the same session, if the agent has a slot free.
-    if (busy.length >= limits.busy) return wait(`every body is busy (${busy.length} of ${limits.busy} mid-turn)`);
-    // Capped, its warm body is ended all the same (its session kept in its slot): it isn't held warm for the hour.
-    return begin({ type: 'resume-warm', body: c.body, msgs: take() });
-  }
+  // Its last run's turn is over: how it went goes on its record, for the loop check (loops.mjs).
+  if (st !== 'none') closeRun(env, c, d, now);
   if (st === 'ended' || st === 'unknown') {
     // Gone on its own: what it leaves is saved, then this conversation is planned again.
     return begin({ type: 'retire', body: c.body });
   }
+  // Paused as a loop: whatever comes is recorded and waits for the owner (Resume or Dismiss), a person's message too.
+  if (c.paused) return wait(`paused: it looks like a loop (${c.paused.reason}); the owner can resume it`);
+  // About to start a body: its runs so far are a loop? Then it's paused here, before one more.
+  const loop = loopOf(env, c, now);
+  if (loop) {
+    c.paused = { at: now, pattern: loop.pattern, reason: loop.reason };
+    d.warn(`${cv}: paused, it looks like a loop: ${loop.reason}`);
+    wait(`paused: it looks like a loop (${loop.reason}); the owner can resume it`);
+    return { cv, type: 'loop-note', reason: loop.reason };
+  }
+  const { busy, idle } = census(env, c.agent, d, now);
+  const limits = limitsOf(env);
+  if (st === 'idle') {
+    // Its own body, warm, its turn over: resumed in the same session, if the agent has a slot free.
+    if (busy.length >= limits.busy) return wait(`every body is busy (${busy.length} of ${limits.busy} mid-turn)`);
+    return begin({ type: 'resume-warm', body: c.body, msgs: take() });
+  }
   // A start that failed is tried again at its time, on the tick: until then it waits (what it was told stands).
   if (c.retryAt && now < c.retryAt) return null;
   if (busy.length >= limits.busy) return wait(`every body is busy (${busy.length} of ${limits.busy} mid-turn)`);
-  if (over) return capped();
   if (busy.length + idle.length >= limits.busy) {
     // Over the limit with a warm idle body: it makes room (the least recently active), its conversation saved.
     const victim = idle.filter((v) => v.conversation !== cv && !v.queue?.length).sort((a, b) => String(a.last).localeCompare(String(b.last)))[0];
@@ -809,8 +798,111 @@ async function stopBody(env, c, d, v) {
 
 const newRun = () => `run-${randomBytes(6).toString('hex')}`;
 
+// ─── Runs, and loops (loops.mjs) ────────────────────────────────────────────
+
+/** One run on the conversation's record, the oldest dropped past RUNS_KEPT. */
+function logRun(c, r) { c.runLog = [...(Array.isArray(c.runLog) ? c.runLog : []), r].slice(-RUNS_KEPT); }
+
+/** A body started (or resumed) for these messages: its run begins (the one before it, over, if it wasn't yet). */
+function openRun(c, run, msgs, now) {
+  for (const r of c.runLog ?? []) if (!Number.isFinite(r.end)) r.end = now;
+  logRun(c, { run, at: now, ...causeOf(msgs), sent: 0, posts: [] });
+}
+
+/** How a harness says a turn went (runners.mjs, turn): {failed, worked, error?}, checked; null when it can't say. */
+export function cleanTurn(t) {
+  if (!t || typeof t !== 'object') return null;
+  return { failed: t.failed === true, worked: typeof t.worked === 'boolean' ? t.worked : null, ...(t.failed === true && typeof t.error === 'string' && t.error ? { error: t.error.slice(0, 200) } : {}) };
+}
+
+/** The conversation's current run is over (its body idle, ended or gone): when, and how its harness says it went. */
+function closeRun(env, c, d, now) {
+  const r = (c.runLog ?? []).findLast((x) => x.run === c.run);
+  if (!r || Number.isFinite(r.end)) return false;
+  r.end = now;
+  try {
+    const rec = readBody(env, c.body);
+    const t = cleanTurn(d.runner(rec.harness).turn?.(bodyOf(c.body, rec)));
+    if (t) r.turn = t;
+  } catch { /* its harness can't say: never a failure for that */ }
+  return true;
+}
+
+/** Its runs since the owner last resumed it, as a loop or null. */
+function loopOf(env, c, now) {
+  const since = Number.isFinite(c.loopSince) ? c.loopSince : -Infinity;
+  const runs = (c.runLog ?? []).filter((r) => r.at >= since);
+  const relay = c.venue === 'relay' && AGENT_NAME.test(c.place ?? '');
+  // The relay log: for ping-pong (a relay conversation), and for what any run said by relaying.
+  let relays = [];
+  try { relays = readRelays(env, now).filter((x) => x.at >= since && (x.from === c.agent || x.to === c.agent)); } catch { relays = []; }
+  return detectLoop({ runs, relays, agent: c.agent, peer: relay ? c.place : null, now });
+}
+
+/** What the owner is asked about a paused conversation: where, and why. */
+const loopWhere = (c) => `${cap(c.agent)}'s ${c.venue}:${c.label ?? c.place}`;
+
+/** A pause, on the conversation's record: a note turn (deferred), its reason as the audit text. */
+async function loopNote(env, op, d) {
+  const c = loadConv(env, op.cv);
+  if (!c) return;
+  const at = d.now().toISOString();
+  try {
+    const { seq } = await d.core.turn({ agent: c.agent, venue: c.venue, place: c.place, at, from: { kind: 'agent', id: c.agent }, kind: 'note', run: newRun(), outcome: 'deferred', ...(c.label !== undefined ? { label: c.label } : {}) });
+    try { await d.core.audit({ conversation: c.conversation, seq, text: `Paused: it looks like a loop (${op.reason}). Nothing starts here until the owner resumes it.` }); } catch (e) { d.warn(`the pause note on ${c.conversation} stands without its reason: ${e.message}`); }
+  } catch (e) { d.warn(`couldn't record the pause note on ${c.conversation}: ${e.message}`); }
+}
+
+/** The owner's asks: each paused conversation, once, with Resume and Dismiss (ui.mjs). */
+export function loopAsks(env) {
+  return listConvs(env).filter((c) => c.paused).sort((a, b) => b.paused.at - a.paused.at).slice(0, 10).map((c) => ({
+    text: `Looks like a loop in ${loopWhere(c)}: ${c.paused.reason}. Paused.`.slice(0, 300),
+    meta: `${c.queue?.length ? `${c.queue.length} waiting` : 'nothing waiting yet'} · ${c.conversation}`,
+    at: new Date(c.paused.at).toISOString(), agent: c.agent, tone: 'warn', page: '', kind: 'decision',
+    actions: [
+      { action: 'loop-resume', label: 'Resume', tone: 'primary', fields: { conversation: c.conversation } },
+      { action: 'loop-dismiss', label: 'Dismiss', fields: { conversation: c.conversation }, confirm: 'What waited there is dropped; its next message starts it fresh.' },
+    ],
+  }));
+}
+
+/**
+ * The owner's answer to a pause: `resume` clears it and starts what waited (from a detached worker with `o.detach`,
+ * else here); `dismiss` clears it and drops what waited, so the conversation's next message starts it fresh. Either
+ * way the loop check starts over from now. {conversation, resumed|dismissed, waiting}, or a DeliveryError.
+ */
+export async function answerLoop(env, cv, answer, o = {}) {
+  if (!CV.test(cv ?? '')) fail('not a conversation id');
+  if (!['resume', 'dismiss'].includes(answer)) fail('the answer is resume or dismiss');
+  const d = depsOf(env, o);
+  const now = d.now().getTime();
+  const r = locked(env, () => {
+    const c = loadConv(env, cv);
+    if (!c) fail(`no conversation ${cv} here`, 404);
+    if (!c.paused) fail(`${cv} isn't paused`, 409);
+    const waiting = c.queue?.length ?? 0;
+    if (answer === 'dismiss') {
+      outcome(c, (c.queue ?? []).map((x) => x.key), { body: 'failed', reason: 'dropped: the owner dismissed a loop here' }, now);
+      c.queue = [];
+      delete c.retryAt; delete c.startFails; delete c.retryReason;
+    }
+    delete c.paused;
+    delete c.waiting;
+    c.loopSince = now;
+    saveConv(env, c);
+    return { waiting, agent: c.agent };
+  });
+  d.warn(`${cv}: ${answer === 'resume' ? 'resumed' : 'dismissed'} by the owner (${r.waiting} waiting)`);
+  if (answer === 'resume' && r.waiting) {
+    if (o.detach) (o.spawnWorker ?? ((x) => spawnWorker(env, x)))(cv);
+    else await drain(env, cv, d);
+  }
+  return { conversation: cv, [answer === 'resume' ? 'resumed' : 'dismissed']: true, waiting: r.waiting };
+}
+
 async function execute(env, op, d, mem) {
   const now = () => d.now().getTime();
+  if (op.type === 'loop-note') return loopNote(env, op, d);
   if (op.type === 'resume-warm') {
     // Its own warm body, its turn over: its session is sealed into its slot first (so a resume that fails leaves no
     // transcript in the clear), and what it was given goes back on the queue; the next plan resumes from that slot,
@@ -919,8 +1011,7 @@ async function execute(env, op, d, mem) {
       delete c.retryAt; delete c.startFails; delete c.retryReason;
       c.sendKey = keyHash(runKey).toString('hex');
       c.runs = (c.runs ?? 0) + 1;
-      const recent = (c.bodyStarts ?? []).filter((t) => now() - t < HOUR_MS);
-      if (byPerson(op.msgs)) { if (recent.length) c.bodyStarts = recent; else delete c.bodyStarts; } else c.bodyStarts = [...recent, now()];
+      openRun(c, run, op.msgs, now());
       if (op.type === 'resume') delete c.slot;
       delete c.starting;
       c.idleSince = undefined;
@@ -947,6 +1038,12 @@ async function execute(env, op, d, mem) {
         // A body that fails to start: the turn stands, and the runtime tries again on its tick, after a wait that
         // grows. Only a message it keeps sealed can wait; one it can't (no age) is failed now.
         const reason = String(e.message).split('\n')[0].slice(0, 300);
+        // A run that never was: a failure, on the conversation's record (loops.mjs). The runtime's own tries again for
+        // the same messages are that one run, not more: an outage that's given up on is one failure, not four.
+        const batch = textHash(keys.join(' '));
+        const last = (c.runLog ?? []).at(-1);
+        if (last?.fail && last.batch === batch) Object.assign(last, { end: now(), fail: `it couldn't start: ${reason}`, tries: (last.tries ?? 1) + 1 });
+        else logRun(c, { run: `start-${randomBytes(4).toString('hex')}`, at: now(), end: now(), ...causeOf(op.msgs), batch, fail: `it couldn't start: ${reason}` });
         const delays = retryDelaysOf(env);
         const tries = (c.startFails ?? 0) + 1;
         const keep = op.msgs.filter((x) => x.sealed);
@@ -1099,8 +1196,11 @@ export async function tick(env, o = {}, only, mem = new Map()) {
           if (!c.idleSince) { c.idleSince = now; dirty = true; }
           if (now - c.idleSince >= warm && !c.queue?.length) { c.starting = mark(now); ops.push({ cv: c.conversation, mark: c.starting.op, type: 'evict', body: c.body }); dirty = true; }
         }
+        if (st !== 'working' && closeRun(env, c, d, now)) dirty = true;
         if (st === 'ended' || st === 'unknown') { c.starting = mark(now); ops.push({ cv: c.conversation, mark: c.starting.op, type: 'retire', body: c.body }); dirty = true; }
       }
+      // The hourly backstop's (t-1760, gone with t-1763): nothing reads it now.
+      if ('bodyStarts' in c || 'capNoticeAt' in c) { delete c.bodyStarts; delete c.capNoticeAt; dirty = true; }
       if (c.slot && !c.body && Date.parse(c.slot.until) <= now) { expireSlot(env, c, d); delete c.slot; dirty = true; }
       for (const [k, v] of Object.entries(c.outcomes ?? {})) if (now - v.at > OUTCOME_MS) { delete c.outcomes[k]; dirty = true; }
       // Nothing left of it here (no body, no slot, nothing waiting) for 14 days: the record is core's, this was mechanism.
@@ -1200,6 +1300,12 @@ export async function send(env, { conversation, text, key, session, person, via 
   }
   const ref = `out-${randomBytes(6).toString('hex')}`;
   const out = { body: c.body, run: c.run, ...(to ? { to } : {}) };
+  // Its run said something (loops.mjs): a run that sends is never "no reply".
+  locked(env, () => {
+    const x = loadConv(env, conversation);
+    const r = (x?.runLog ?? []).findLast((y) => y.run === c.run);
+    if (r) { r.sent = (r.sent ?? 0) + 1; saveConv(env, x); }
+  });
   // A DM's target, as dmPlace approved it, kept on the conversation by its ref: the post goes only there, whatever
   // its worker is handed (post never takes a target it wasn't given here).
   if (to) {
@@ -1314,7 +1420,16 @@ export async function post(env, conversation, ref, text, { body, run, to } = {},
   const where = dm ? `${dm.venue} ${dm.label ?? dm.place}` : c.venue;
   if (!r.ok && r.permanent) refused(env, conversation, body, ref, where, r.reason, d);
   else if (!r.ok) tellBody(env, conversation, body, ref, where, r.reason, d);
-  locked(env, () => { const x = loadConv(env, conversation); if (x) { x.last = d.now().toISOString(); if (r.ok && !dm) delete x.refused; saveConv(env, x); } });
+  locked(env, () => {
+    const x = loadConv(env, conversation);
+    if (!x) return;
+    x.last = d.now().toISOString();
+    if (r.ok && !dm) delete x.refused;
+    // How its run's post went, as a hash of its words (never the words), for the loop check (loops.mjs).
+    const k = (x.runLog ?? []).findLast((y) => y.run === (run ?? x.run));
+    if (k) k.posts = [...(k.posts ?? []), { ok: !!r.ok, h: textHash(text), ...(!r.ok ? { reason: String(r.reason ?? '').slice(0, 200) } : {}) }].slice(-5);
+    saveConv(env, x);
+  });
   return { ...r, ref };
 }
 

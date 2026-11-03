@@ -129,6 +129,8 @@ function cleanReport(r) {
       ...(typeof b.session === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{3,127}$/.test(b.session) ? { session: b.session } : {}),
       feedable: b.feedable === true,
       pending: Array.isArray(b.pending) ? b.pending.filter((k) => typeof k === 'string' && k.length <= 64).slice(0, 64) : [],
+      // How its turn went, once over (runners.mjs, turn): a host before t-1763 says nothing.
+      ...(b.turn && typeof b.turn === 'object' ? { turn: { failed: b.turn.failed === true, worked: typeof b.turn.worked === 'boolean' ? b.turn.worked : null, ...(typeof b.turn.error === 'string' && b.turn.error ? { error: b.turn.error.slice(0, 200) } : {}) } } : {}),
     };
   }
   const done = {};
@@ -331,6 +333,8 @@ export class HouseRunner {
   /** Its harness is still there: its house's host reports it. */
   alive(body) { const e = this.entry(body); return !!e && e.status !== 'ended'; }
   slotOf(body) { const s = this.entry(body)?.session; return s ? { harness: this.harness, session: s } : null; }
+  /** How its turn went, as its house's host reports it: null from a host that doesn't say. */
+  turn(body) { return this.entry(body)?.turn ?? null; }
 
   feed(body, message) {
     const e = this.entry(body);

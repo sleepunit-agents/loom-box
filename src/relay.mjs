@@ -14,8 +14,8 @@
 // thread; a loop is caught by its shape (the same words to the same agent within the hour), and a long thread is a
 // heads-up for the owner on loom's Inbox, never a stop.
 //
-// What's kept here is mechanism: <data>/delivery/relays.jsonl, one line a relay ({id, from, to, at, digest, reply_to?,
-// thread?, where?, conversation, why}), never the words (they're the turn's, in core's audit), kept 30 days.
+// What's kept here is mechanism: <data>/delivery/relays.jsonl, one line a relay ({id, from, to, at, digest, shape,
+// reply_to?, thread?, where?, conversation, why}), never the words (they're the turn's, in core's audit), kept 30 days.
 import { spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync, appendFileSync, mkdirSync } from 'node:fs';
@@ -26,6 +26,7 @@ import { GRANTS, KEY, householdOf, paired } from './grants.mjs';
 import { setting } from './piece.mjs';
 import { loomStore } from './store.mjs';
 import { AGENT_NAME, withLock } from './state.mjs';
+import { shapeOf } from './loops.mjs';
 
 export const SAY_MAX = 8000;
 export const WHY_MAX = 300;
@@ -158,7 +159,9 @@ export async function relay(env, caller, args, d = depsOf(env)) {
     if (why) no(`relay: approval ${approval} isn't allowed for a relay from ${from} to ${to}: ${why}`);
   }
 
-  const entry = { id: `r-${randomBytes(4).toString('hex')}`, from, to, say, why: plain(a.why, WHY_MAX), where, at: now, digest, ...(replyTo ? { reply_to: replyTo, thread: threadId } : {}) };
+  // Its words' shape too (loops.mjs, shapeOf: a hash, never the words): near-identical relays back and forth are a
+  // loop the runtime pauses (relay ping-pong, t-1763).
+  const entry = { id: `r-${randomBytes(4).toString('hex')}`, from, to, say, why: plain(a.why, WHY_MAX), where, at: now, digest, shape: shapeOf(say), ...(replyTo ? { reply_to: replyTo, thread: threadId } : {}) };
   let out;
   try {
     out = await d.core.deliver({
