@@ -89,10 +89,10 @@ test('2. delivery records first, and once; a body that fails to start leaves the
   assert.equal((await deliver(w.env, again, w.o)).body, 'started');
   assert.equal(w.core.turns.length, turnsBefore + 1);
 
-  // A body that fails to start: `failed`, with the reason; the turn stands.
+  // A body that fails to start: the turn stands, and the runtime will try again (queued, saying why).
   w.runner.failStart = 'claude --bg didn\'t start: Error: not logged in';
   const failed = await deliver(w.env, w.msg('dm:U3', 'ping'), w.o);
-  assert.deepEqual(failed, { conversation: cvOf('art', 'slack', 'dm:U3'), seq: 1, body: 'failed', reason: 'claude --bg didn\'t start: Error: not logged in' });
+  assert.deepEqual(failed, { conversation: cvOf('art', 'slack', 'dm:U3'), seq: 1, body: 'queued', reason: 'no body could start (claude --bg didn\'t start: Error: not logged in): trying again in 60 s' });
   assert.ok(w.core.turns.some((t) => t.place === 'dm:U3'));
   w.runner.failStart = null;
 
@@ -549,7 +549,7 @@ test('A+B. with no box placed for it, a delivery\'s body is failed (and says why
   const w = world();
   const { runner: _r, ...o } = w.o;
   const r = await deliver(w.env, w.msg('dm:P', 'hello'), o);
-  assert.equal(r.body, 'failed');
+  assert.equal(r.body, 'queued', 'the runtime tries again');
   assert.match(r.reason, /no box owned by art's owner reports claude logged in/);
   assert.equal(w.core.turns.length, 1);
 });
@@ -592,4 +592,68 @@ test('C. send as the piece API: only the conversation\'s own agent, with its bod
   assert.equal((await api(w.env, fx, { caller: { kind: 'owner' }, path: 'send', body: {} })).status, 403);
   assert.equal((await api(w.env, fx, { caller: { kind: 'piece', subject: 'one' }, path: 'body-sync', body: {} })).status, 403);
   delete process.env.FAKE_SEND;
+});
+
+test('a body that fails to start is the runtime\'s to retry, on its tick, with backoff; then it\'s started, and the source never asked again (t-1744)', async () => {
+  const w = world();
+  const venues = { ...w.o.venues(), wake: { kind: 'scheduled', piece: 'loom' } };
+  const o = { ...w.o, venues: () => venues };
+  const wake = { source: 'clock', id: 'w-aaa111', agent: 'art', venue: 'wake', place: 'lane:knowledge', label: 'knowledge', from: { kind: 'schedule' }, kind: 'wake', at: w.clock.now().toISOString(), text: 'Your lane is routines/knowledge.md.' };
+  w.runner.failStart = 'art\'s house h-9 didn\'t start its body host in 150 s';
+  const a = await deliver(w.env, wake, o);
+  assert.equal(a.body, 'queued');
+  const cv = cvOf('art', 'wake', 'lane:knowledge');
+  const starts = () => w.log.filter((l) => l[0] === 'start').length;
+  // Before its time: the tick doesn't try.
+  w.clock.advance(30_000);
+  await tick(w.env, o);
+  assert.equal(loadConv(w.env, cv).startFails, 1);
+  // At it: tried again, fails again, waits longer (4 min).
+  w.clock.advance(31_000);
+  await tick(w.env, o);
+  let c = loadConv(w.env, cv);
+  assert.equal(c.startFails, 2);
+  assert.equal(c.retryAt - w.clock.now().getTime(), 240_000);
+  assert.match(Object.values(c.outcomes)[0].reason, /trying again in 240 s/);
+  // The house comes back: the next try starts the body, with the wake as it came.
+  w.runner.failStart = null;
+  w.clock.advance(240_000);
+  await tick(w.env, o);
+  c = loadConv(w.env, cv);
+  assert.equal(starts(), 1);
+  assert.ok(w.log.find((l) => l[0] === 'start')[2].endsWith('Your lane is routines/knowledge.md.'));
+  assert.deepEqual([Object.values(c.outcomes)[0].body, c.startFails, c.retryAt, c.queue.length], ['started', undefined, undefined, 0]);
+  assert.equal(w.core.turns.filter((t) => t.conversation === cv).length, 1, 'one wake turn: retrying wrote nothing more');
+});
+
+test('a body that never starts: given up after its tries, with a failed note on the conversation and a notice for the owner (t-1744)', async () => {
+  const w = world({ LOOM_RUNTIME_RETRY_S: '[60, 120]' });
+  const venues = { ...w.o.venues(), wake: { kind: 'scheduled', piece: 'loom' } };
+  const o = { ...w.o, venues: () => venues };
+  const wake = { source: 'clock', id: 'w-bbb222', agent: 'art', venue: 'wake', place: 'lane:knowledge', label: 'knowledge', from: { kind: 'schedule' }, kind: 'wake', at: w.clock.now().toISOString(), text: 'the lane' };
+  w.runner.failStart = 'no box owned by art\'s owner reports claude logged in';
+  await deliver(w.env, wake, o);
+  const cv = cvOf('art', 'wake', 'lane:knowledge');
+  for (const ms of [60_000, 120_000]) { w.clock.advance(ms); await tick(w.env, o); }
+  const c = loadConv(w.env, cv);
+  assert.deepEqual([Object.values(c.outcomes)[0].body, c.queue.length, c.startFails, c.retryAt], ['failed', 0, undefined, undefined]);
+  assert.equal(w.log.filter((l) => l[0] === 'start').length, 0);
+  const note = w.core.turns.at(-1);
+  assert.deepEqual([note.conversation, note.kind, note.outcome, note.from], [cv, 'note', 'failed', { kind: 'agent', id: 'art' }]);
+  assert.match(note.run, /^run-[0-9a-f]{12}$/);
+  assert.deepEqual(w.core.audits.at(-1), { conversation: cv, seq: note.seq, text: 'couldn\'t start a body after 3 tries: no box owned by art\'s owner reports claude logged in' });
+  // The owner hears of it, on the runtime's page.
+  const { deliveryNotices } = await import('../src/delivery.mjs');
+  const [kept] = deliveryNotices(w.env, w.clock.now().getTime());
+  assert.equal(deliveryNotices(w.env, w.clock.now().getTime() + 86_400_000).length, 0, 'a day, then gone');
+  // The page reads them as of now: the same notice, written now, is in its manifest.
+  writeFileSync(join(deliveryDir(w.env), 'notices.json'), JSON.stringify([{ ...kept, at: new Date().toISOString() }]));
+  const { manifest } = await import('../src/ui.mjs');
+  const n = manifest(w.env).notices.find((x) => x.agent === 'art');
+  assert.equal(n.text, 'Art\'s wake lane:knowledge couldn\'t start a body: no box owned by art\'s owner reports claude logged in');
+  assert.equal(n.tone, 'warn');
+  // Nothing more is tried: the tick is quiet now.
+  w.clock.advance(3600_000);
+  await tick(w.env, o);
+  assert.equal(w.core.turns.length, 2);
 });
