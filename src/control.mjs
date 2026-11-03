@@ -594,13 +594,13 @@ const sameMade = (x, y) => !!x && !!y && ['repo', 'houseFile', 'branch', 'repoSe
  * A running body host's house on this box, of an agent this box may host, made the way the agent's house is made now:
  * the only house a box may check the repo of, or say the agent's current build from.
  */
-function checkableHouse(env, s, caller, id) {
+function checkableHouse(env, s, caller, id, { repo = true } = {}) {
   const h = s.houses[id];
   if (!h || h.box !== caller.subject || h.state !== 'running' || !isHostTask(h.task)) fail(`no running body host's house ${id} for this box`, 404);
   if (!mayHost(s.boxes[caller.subject], h.agent, membersOf(env))) fail(`this box may not host ${h.agent}`, 403);
   const a = s.agents[h.agent];
   if (!a) fail(`${h.agent} has no house config`, 409);
-  if (!sameMade(h.made, madeOf(a))) fail(`${id} was made from another repo, house file, branch or repo secret than ${h.agent}'s house is now: its next house says its build`, 409);
+  if (repo && !sameMade(h.made, madeOf(a))) fail(`${id} was made from another repo, house file, branch or repo secret than ${h.agent}'s house is now: its next house says its build`, 409);
   return { h, a };
 }
 
@@ -621,7 +621,10 @@ export function outdatedHouse(s, id) {
 export function buildCheck(env, effects, caller, { id }) {
   return update(env, (s) => {
     boxOf(s, caller);
-    const { h } = checkableHouse(env, s, caller, id);
+    // A house claimed before its claim kept how it was made: only its own image is asked for (no repo, no secret).
+    const pre = !s.houses[id]?.made;
+    const { h } = checkableHouse(env, s, caller, id, { repo: !pre });
+    if (pre) return { id, agent: h.agent, check: false, known: !!h.build };
     // The repo and secret its claim was made with (the same as the agent's now, or refused above).
     const m = h.made;
     const repoAuth = m.repoSecret ? effects.secret(m.repoSecret, { agent: h.agent, house: h.id }) : null;
@@ -634,7 +637,9 @@ export function buildReport(env, effects, caller, { id, house, current }) {
   return update(env, (s) => {
     boxOf(s, caller);
     // Only a running body host's house of an agent this box may host, made as the agent's house is now (checkableHouse).
-    const { h } = checkableHouse(env, s, caller, id);
+    // Its own image needs only the house (a body host's, on this box, of an agent it may host); the agent's current
+    // build, a house made as the agent's house is made now.
+    const { h } = checkableHouse(env, s, caller, id, { repo: current !== undefined });
     // Its own image, once: never overwritten by a later report.
     const own = buildTag(house, h.agent);
     if (own && !h.build) h.build = own;

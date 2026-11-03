@@ -280,6 +280,14 @@ test('the control plane: a house\'s build from its box\'s report, the current on
   assert.match(changed.body.error, /another repo, house file, branch or repo secret/);
   assert.equal(secrets.length, m);
   assert.equal(api(env, fx, { caller: box, path: 'build-report', body: { id, current: NEW } }).status, 409);
+  // A house claimed before houses kept how they were made (h-844, live): its own image only, no repo, no secret.
+  update(env, (s) => { delete s.houses[id].made; delete s.houses[id].build; });
+  const k = secrets.length;
+  assert.deepEqual(ok(api(env, fx, { caller: box, path: 'build-check', body: { id } })), { id, agent: 'art', check: false, known: false });
+  assert.equal(secrets.length, k);
+  ok(api(env, fx, { caller: box, path: 'build-report', body: { id, house: OLD } }));
+  assert.equal(load(env).houses[id].build, OLD);
+  assert.equal(api(env, fx, { caller: box, path: 'build-report', body: { id, current: NEW } }).status, 409, 'but no say in the current build');
   // The owner points art at another house file: the current build isn't known until a box says.
   ok(api(env, fx, { caller: owner, path: 'set-agent', body: { agent: 'art', repo: 'https://example.com/art.git', repoSecret: 'gh-art-2', houseFile: 'house2/house.json' } }));
   assert.equal(load(env).builds?.art, undefined);

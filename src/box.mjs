@@ -485,7 +485,8 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
       try {
         const c = await client.call('build-check', { id: x.id });
         const house = c.known ? null : houseImage(x.id);
-        let current = round.get(x.agent);
+        // A house from before its claim kept how it was made: only its own image (control.mjs, buildCheck).
+        let current = c.check === false ? null : round.get(x.agent);
         if (current === undefined) {
           current = null;
           try { current = buildOf(c); } catch (e) { log(`checking ${x.agent}'s image: ${e.message}`); }
