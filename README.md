@@ -317,6 +317,12 @@ loom-now kept). `loom runtime now talking` from a house reads its own. The runti
 bridges, who they're talking with, what waits, and the accounts' quota. Its manifest makes a bridge gone dark an alert
 on loom's Inbox and each live conversation its agent's `doing`. A board holds no message text.
 
+**An off-box status board** (`src/statusreport.mjs`, optional): with `LOOM_RUNTIME_STATUS_URL` set, the runtime's
+`run --local` posts each agent's v1 report (sleepunit-agents/status: its bridges as its board holds them, and free
+memory) there every 10 s, so a board on another machine shows the agent dark when this one stops. Each agent's bearer
+token is a secret the secrets piece issues to the runtime for that agent (`LOOM_RUNTIME_STATUS_TOKENS`, `agent:secret,…`;
+default `<agent>-status-token` for every agent with a board): kept in memory, never logged, never in argv.
+
 **Gates** (who a platform id is, and what each person may do with each agent) are the runtime's too: collection
 `gates`, one document per agent, each entry keyed by the person's card slug. Importing or allowing someone ensures
 their person card in core (`POST /api/loom/people/ensure`); merging two entries merges their cards and every agent's
