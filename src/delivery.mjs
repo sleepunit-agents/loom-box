@@ -177,6 +177,13 @@ export function depsOf(env, o = {}) {
 
 // ─── The deliver body ───────────────────────────────────────────────────────
 
+/**
+ * A scheduled venue with no send (core's own `wake`): there's nowhere to post, and the body's message is its run's
+ * reply all the same. It's recorded (the agent's `reply` turn, answered, and its text in the audit log) and posted
+ * nowhere, so a scheduled run has the agent turn its measures read (conversations.md, "What each kind is measured on").
+ */
+export const recordsOnly = (v) => !v?.send && !v?.orphaned && v?.kind === 'scheduled';
+
 /** A venue as core has it ({kind, piece, send?}), or undefined: none, or core couldn't say. */
 async function venueOf(d, name) {
   try { return (await d.venues())?.[name]; } catch (e) { d.warn(`core couldn't list the venues: ${e.message}`); return undefined; }
@@ -372,11 +379,14 @@ const render = (msgs) => msgs.map((x) => (x.kind === 'wake' ? x.text : `${who(x.
 
 /** The brief a new body starts with: where it is, its conversation and run (for identity), and the messages. */
 function startBrief(c, msgs, run, sends) {
+  const how = sends === 'record'
+    ? `When you're done, pipe a short account of what you did to \`loom runtime send --conversation ${c.conversation}\`: on ${c.venue} nothing is posted; it's recorded as this run's reply.`
+    : `To say something there, pipe it to \`loom runtime send --conversation ${c.conversation}\`; it answers {ok, id?} and, when it couldn't post, why.`;
   return [
     `You are ${c.agent}, in a conversation on ${c.venue}: ${c.label ?? c.place}.`,
     `Its conversation is ${c.conversation} and this run is ${run}: call identity with {conversation: "${c.conversation}", run: "${run}"} first.`,
     ...(c.runs > 0 ? [`It has history this session doesn't: read it with conversation({id: "${c.conversation}"}) (its digests) before you answer.`] : []),
-    ...(sends ? [`To say something there, pipe it to \`loom runtime send --conversation ${c.conversation}\`; it answers {ok, id?} and, when it couldn't post, why.`] : []),
+    ...(sends ? [how] : []),
     '',
     render(msgs),
   ].join('\n');
@@ -525,7 +535,8 @@ async function execute(env, op, d, mem) {
   try {
     const msgs = op.msgs.map((x) => ({ ...x, text: open(d, x, mem) })).filter((x) => x.text !== null);
     if (!msgs.length) throw new DeliveryError('its messages\' text is gone');
-    const sends = !!(await venueOf(d, c0.venue))?.send;
+    const v0 = await venueOf(d, c0.venue);
+    const sends = v0?.send ? 'post' : recordsOnly(v0) ? 'record' : null;
     const runKey = randomBytes(24).toString('hex');
     const bodyDeps = { runner: d.runner, accounts: d.accounts, now: d.now, fetchImpl: d.fetchImpl, bodyEnv: d.bodyEnv(runKey) };
     const base = { agent: c0.agent, venue: c0.venue, venueKind: c0.kind, cwd: d.cwd };
@@ -779,7 +790,7 @@ export async function send(env, { conversation, text, key }, o = {}) {
   }
   if (!str(text, MAX_TEXT)) return { ok: false, reason: `a message is 1-${MAX_TEXT} characters` };
   const v = await venueOf(d, c.venue);
-  if (!v?.send) return { ok: false, reason: `venue ${c.venue} declares no send: nothing posts there` };
+  if (!v?.send && !recordsOnly(v)) return { ok: false, reason: `venue ${c.venue} declares no send: nothing posts there` };
   const ref = `out-${randomBytes(6).toString('hex')}`;
   const out = { body: c.body, run: c.run };
   if (o.detach) (o.spawnSender ?? ((...a) => spawnSender(env, ...a)))(conversation, ref, text, out);
@@ -809,7 +820,8 @@ export async function post(env, conversation, ref, text, { body, run } = {}, o =
   const c = loadConv(env, conversation);
   if (!c) return { ok: false, reason: `no conversation ${conversation} here` };
   const v = await venueOf(d, c.venue);
-  let r = v?.send ? await sendOnce(d, v.send, c, text) : { ok: false, answered: true, reason: `venue ${c.venue} declares no send` };
+  // A scheduled venue with no send (a wake) posts nowhere: its message is only recorded.
+  let r = v?.send ? await sendOnce(d, v.send, c, text) : recordsOnly(v) ? { ok: true, recorded: true } : { ok: false, answered: true, reason: `venue ${c.venue} declares no send` };
   if (!r.ok && r.answered && v?.send) r = await sendOnce(d, v.send, c, text);
   let rec = null;
   try { rec = body ? readBody(env, body) : null; } catch { /* its body is gone: the turn says no model */ }

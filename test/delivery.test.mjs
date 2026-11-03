@@ -287,6 +287,30 @@ test('outbound: accepted at once; the venue\'s send (--place, --agent, the text 
   delete process.env.FAKE_SEND;
 });
 
+test('a wake (core\'s scheduled venue, no send): the body is told to record its reply, and it\'s recorded, posted nowhere', async () => {
+  const w = world();
+  const venues = { ...w.o.venues(), wake: { kind: 'scheduled', piece: 'loom' } };
+  const o = { ...w.o, venues: () => venues };
+  const a = await deliver(w.env, { source: 'clock', id: 'w-abc123', agent: 'art', venue: 'wake', place: 'lane:nightly', label: 'nightly', from: { kind: 'schedule' }, kind: 'wake', at: w.clock.now().toISOString(), text: 'Your lane is routines/nightly.md.' }, o);
+  const cv = cvOf('art', 'wake', 'lane:nightly');
+  assert.deepEqual(a, { conversation: cv, seq: 1, body: 'started' });
+  const brief = w.log.find((l) => l[0] === 'start')[2];
+  assert.ok(brief.includes(`loom runtime send --conversation ${cv}\`: on wake nothing is posted; it's recorded as this run's reply`), brief);
+  assert.ok(brief.endsWith('Your lane is routines/nightly.md.'), 'a wake\'s text is the brief\'s message, as it came');
+  const c = loadConv(w.env, cv);
+  let p;
+  const r = await send(w.env, { conversation: cv, text: 'Ran nightly: 3 pages verified.', key: w.runner.envs[c.body.split(':')[1]].LOOM_BODY_KEY }, { ...o, onSend: (x) => { p = x; } });
+  assert.equal(r.accepted, true);
+  const posted = await p;
+  assert.deepEqual([posted.ok, posted.recorded], [true, true]);
+  const reply = w.core.turns.at(-1);
+  assert.deepEqual([reply.kind, reply.venue, reply.place, reply.outcome, reply.run, reply.from], ['reply', 'wake', 'lane:nightly', 'answered', c.run, { kind: 'agent', id: 'art' }]);
+  assert.deepEqual(w.core.audits.at(-1), { conversation: cv, seq: reply.seq, text: 'Ran nightly: 3 pages verified.' });
+  // A live or agent venue with no send still posts and records nothing (relay, above); an orphaned scheduled one too.
+  venues.wake = { kind: 'scheduled', orphaned: true };
+  assert.match((await send(w.env, { conversation: cv, text: 'x', key: w.runner.envs[c.body.split(':')[1]].LOOM_BODY_KEY }, o)).reason, /declares no send/);
+});
+
 test('send answers only the body holding the conversation: another body, no key, or a past run\'s key is refused', async () => {
   const w = world();
   const S = scratch('rt-send-bind-');
