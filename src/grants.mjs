@@ -60,10 +60,21 @@ export function grantsProblem(doc) {
 
 const matches = (pattern, path) => pattern === '*' || pattern === path || (pattern.endsWith('/*') && (path === pattern.slice(0, -2) || path.startsWith(pattern.slice(0, -1))));
 
+/**
+ * A path core may ask about: '' or segments of core's own path characters ([A-Za-z0-9._~-], as loom's /api route takes
+ * them), never `.` or `..`, never empty, no backslash or percent-encoding. Core asks with exactly the path it forwards
+ * (loom src/transport/http-server.ts), so anything else is no path of a real call, and a prefix grant must never
+ * match it (tasks/../secrets).
+ */
+const SEGMENT = /^[A-Za-z0-9._~-]{1,200}$/;
+export const canonicalPath = (path) => path === '' || (path.length <= 1000 && path.split('/').every((x) => SEGMENT.test(x) && x !== '.' && x !== '..'));
+
 /** The answer to one ask, from the grants document (null: there are none yet). */
 export function decide(doc, ask) {
   const { agent, piece, path } = ask ?? {};
   if (typeof agent !== 'string' || typeof piece !== 'string' || typeof path !== 'string') return { allow: false, reason: 'the ask is {agent, piece, path}' };
+  if (!canonicalPath(path)) return { allow: false, reason: `${JSON.stringify(path.slice(0, 80))} isn't a path a call can have (no . or .. segments, no empty ones, no \\ or %)` };
+  if (!AGENT.test(agent) || !PIECE.test(piece)) return { allow: false, reason: 'the ask names an agent and a piece by their names' };
   if (doc == null) return { allow: true };
   const why = grantsProblem(doc);
   // A document the runtime can't read is no grant at all: refuse, saying so, rather than guess.

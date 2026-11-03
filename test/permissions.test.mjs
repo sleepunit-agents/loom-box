@@ -7,7 +7,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ask, decide, GRANTS, KEY, paired, seed, seedDoc, setPiece, currentLists } from '../src/grants.mjs';
-import { answer, asks, exportGates, followMerge, gatesOf, GATES, importGates, mergePeople, ownersRunOf, parseExport, propose, PROPOSALS, renamed, seen, status } from '../src/gates.mjs';
+import { answer, asks, annotate, exportGates, followMerge, gatesOf, GATES, importGates, mergePeople, ownersRunOf, parseExport, propose, PROPOSALS, renamed, seen, status } from '../src/gates.mjs';
 import { loomStore, memStore } from '../src/store.mjs';
 import { runFor } from '../src/gates-api.mjs';
 import { grantIn } from '../src/perms-cli.mjs';
@@ -135,11 +135,24 @@ const ART_DOC = {
 const MARK_DOC = { people: { jonathan: { name: 'Jonathan', tier: 3, discord: ['111'] } }, agents: {} };
 const EXPORT = JSON.stringify({ v: 1, from: 'shuttle', agents: { art: { doc: ART_DOC, rev: 2 }, mark: { doc: MARK_DOC, rev: 2 } } });
 
-function fakeCore({ fail = {} } = {}) {
+/** A core whose people are `cards` ({slug: {name, ids: ['slack U1', ...]}}); ensure answers as loom's does, dry or not. */
+function fakeCore({ fail = {}, cards = { jonathan: { name: 'Jonathan', ids: ['slack U1', 'discord 111'] } } } = {}) {
   const calls = [];
   return {
     calls,
-    async ensure(b) { calls.push(['ensure', b]); if (fail.ensure) throw new Error(fail.ensure); return { slug: b.slug, created: b.slug === 'grace' }; },
+    cards,
+    async ensure(b) {
+      calls.push([b.dry_run ? 'dry' : 'ensure', b]);
+      if (fail.ensure) throw new Error(fail.ensure);
+      const ids = Object.entries(b.where ?? {}).flatMap(([f, e]) => [].concat(e.value).map((v) => `${f} ${v}`));
+      const card = cards[b.slug];
+      if (!card) { if (!b.dry_run) cards[b.slug] = { name: b.name, ids }; return { slug: b.slug, created: true, added: {}, unchanged: false, card: { name: b.name } }; }
+      const missing = ids.filter((x) => !card.ids.includes(x));
+      if (!b.dry_run) card.ids.push(...missing);
+      const added = {};
+      for (const m of missing) { const [f, v] = m.split(' '); (added[f] ??= []).push(v); }
+      return { slug: b.slug, created: false, added, unchanged: !missing.length, card: { name: card.name } };
+    },
     async merge(b) { calls.push(['merge', b]); if (fail.merge) throw new Error(fail.merge); return { ok: true }; },
     async deliver(b) { calls.push(['deliver', b]); if (fail.deliver) throw new Error(fail.deliver); return { conversation: 'cv-0123456789ab', seq: 1, body: 'started' }; },
   };
@@ -161,7 +174,7 @@ describe('spec test 9: the gates migration', () => {
     assert.deepEqual(grace.where, { slack: { value: 'U8' } });
     assert.equal(grace.role, 'toxicologist');
     assert.equal('tier' in grace || 'grant' in grace, false);
-    assert.match(r.cards, /person cards: 1 made, 2 already there/);
+    assert.match(r.cards, /person cards: 1 made, 2 already there|person cards: 2 made, 1 already there/);
   });
 
   test('the import refuses anything but an owner\'s run: a house, a granted agent call, no grant, and core\'s own refusal', async () => {
@@ -248,8 +261,9 @@ describe('a body proposes; the owner allows or denies', () => {
     assert.equal(r.ok, true, r.message);
     assert.deepEqual(gatesOf(st, 'art').doc.people['pat-lee'], entry);
     assert.equal(st.get(PROPOSALS, 'art.p-abc123'), null);
-    assert.deepEqual(core.calls.map(([k, b]) => [k, b.slug]), [['ensure', 'pat-lee']]);
-    assert.match(r.message, /Person card: has a card already/);
+    // A new slug: checked dry, then its card made.
+    assert.deepEqual(core.calls.map(([k, b]) => [k, b.slug]), [['dry', 'pat-lee'], ['ensure', 'pat-lee']]);
+    assert.match(r.message, /Person card: card made/);
     assert.deepEqual(asks(st), []);
   });
 
@@ -285,9 +299,9 @@ describe('a body proposes; the owner allows or denies', () => {
 
   test('a body reaches its own agent\'s gates only, through the run path', async () => {
     const st = await setup();
-    const out = runFor({}, { kind: 'agent', agent: 'mark' }, ['gates', 'people'], st);
+    const out = await runFor({}, { kind: 'agent', agent: 'mark' }, ['gates', 'people'], st, fakeCore());
     assert.deepEqual(JSON.parse(out.stdout).doc, MARK_DOC);
-    const p = runFor({}, { kind: 'agent', agent: 'mark', service: 'discord' }, ['propose-person', '--slug', 'pat-lee', '--entry', JSON.stringify(entry)], st);
+    const p = await runFor({}, { kind: 'agent', agent: 'mark', service: 'discord' }, ['propose-person', '--slug', 'pat-lee', '--entry', JSON.stringify(entry)], st, fakeCore());
     assert.equal(p.exit, 0, p.stderr);
     assert.equal(asks(st)[0].page, 'gates/mark');
   });
@@ -327,5 +341,101 @@ describe('merges: a card merge is followed by the gates', () => {
   test('seen() is stable however the document\'s keys were ordered', () => {
     const p = { id: 'p-1', slug: 'grace', entry: { tier: 1, name: 'G' } };
     assert.equal(seen(p, { people: { grace: { a: 1, b: 2 } } }), seen({ ...p, entry: { name: 'G', tier: 1 } }, { people: { grace: { b: 2, a: 1 } } }));
+  });
+});
+
+describe('shuttle\'s hand-off: gates propose takes the proposal on stdin, never as flags', () => {
+  const entry = { name: 'Pat Lee', tier: 2, slack: { T1: ['U9'] } };
+  const run = async (args, input, st) => {
+    const { gatesCli } = await import('../src/perms-cli.mjs');
+    const writes = [];
+    const w = process.stdout.write;
+    process.stdout.write = (x) => { writes.push(String(x)); return true; };
+    try { await gatesCli(['propose', ...args], {}, { store: st, core: fakeCore(), stdin: async () => input }); return { ok: true, out: writes.join('') }; }
+    catch (e) { return { ok: false, code: e.code, message: e.message }; }
+    finally { process.stdout.write = w; }
+  };
+
+  test('exactly --agent A --from F --stdin; the proposal is the stdin JSON', async () => {
+    const st = memStore();
+    await importGates(st, fakeCore(), EXPORT, { owner: true });
+    const r = await run(['--agent', 'art', '--from', 'slack', '--stdin'], JSON.stringify({ slug: 'pat-lee', entry: JSON.stringify(entry) }), st);
+    assert.equal(r.ok, true, r.message);
+    assert.equal(asks(st)[0].page, 'gates/art');
+  });
+
+  test('a body\'s own --agent (or anything after) is refused: nothing written', async () => {
+    const st = memStore();
+    await importGates(st, fakeCore(), EXPORT, { owner: true });
+    for (const args of [['--agent', 'art', '--from', 'slack', '--stdin', '--agent', 'mark'], ['--agent', 'art', '--from', 'slack', '--slug', 'x'], ['--from', 'x', '--agent', 'art', '--stdin']]) {
+      const r = await run(args, JSON.stringify({ slug: 'pat-lee', entry: JSON.stringify(entry) }), st);
+      assert.equal(r.ok, false, args.join(' '));
+      assert.equal(r.code, 2);
+    }
+    // Flags smuggled in the JSON are no flags: an unknown key is refused by propose's allowlist.
+    const r = await run(['--agent', 'art', '--from', 'slack', '--stdin'], JSON.stringify({ slug: 'pat-lee', entry: JSON.stringify(entry), agent: 'mark' }), st);
+    assert.match(r.message, /doesn't take --agent/);
+    assert.deepEqual(asks(st), []);
+  });
+});
+
+describe('a proposal never puts a body\'s ids on someone else\'s card', () => {
+  const setup = async (core) => { const st = memStore(); await importGates(st, core, EXPORT, { owner: true }); return st; };
+
+  test('a new gate slug that is another person\'s card, with the body\'s own Slack id: shown, and Allow refused', async () => {
+    const core = fakeCore({ cards: { 'jonathan-barket': { name: 'Jonathan Barket', ids: ['slack U1'] } } });
+    const st = await setup(core);
+    const ok = runFor({}, { kind: 'agent', agent: 'mark', service: 'discord' },
+      ['propose-person', '--slug', 'jonathan-barket', '--entry', JSON.stringify({ name: 'Jonathan', tier: 2, slack: { T1: ['UEVIL'] } })], st, core);
+    assert.equal((await ok).exit, 0);
+    const [a] = asks(st);
+    assert.match(a.text, /\(jonathan-barket\): this slug is Jonathan Barket's card/);
+    assert.deepEqual(a.actions.map((x) => x.action), ['gates-deny']);
+    // Even an Allow sent by hand (the action's fields made up) is refused, and nothing is written anywhere.
+    const before = structuredClone(gatesOf(st, 'mark').doc);
+    const p = st.list(PROPOSALS)[0].doc;
+    const r = await answer(st, core, 'gates-allow', { agent: 'mark', id: p.id, seen: seen(p, gatesOf(st, 'mark').doc) });
+    assert.equal(r.ok, false);
+    assert.match(r.message, /this slug is Jonathan Barket's card, which doesn't have slack UEVIL/);
+    assert.deepEqual(core.cards['jonathan-barket'].ids, ['slack U1']);
+    assert.deepEqual(gatesOf(st, 'mark').doc, before);
+    assert.equal(core.calls.filter(([k, b]) => k === 'ensure' && b.slug === 'jonathan-barket').length, 0);
+  });
+
+  test('the slug\'s card already has the proposal\'s ids: Allow goes ahead, and the card isn\'t written', async () => {
+    const core = fakeCore({ cards: { 'jonathan-barket': { name: 'Jonathan Barket', ids: ['slack U1'] } } });
+    const st = await setup(core);
+    await runFor({}, { kind: 'agent', agent: 'mark' }, ['propose-person', '--slug', 'jonathan-barket', '--entry', JSON.stringify({ name: 'Jonathan', tier: 2, slack: { T1: ['U1'] } })], st, core);
+    const [a] = asks(st);
+    assert.match(a.text, /\(jonathan-barket\)/);
+    assert.deepEqual(a.actions.map((x) => x.action), ['gates-allow', 'gates-deny']);
+    const r = await answer(st, core, 'gates-allow', a.actions[0].fields);
+    assert.equal(r.ok, true, r.message);
+    assert.match(r.message, /Jonathan Barket's, which has these ids already/);
+    assert.equal(core.calls.filter(([k, b]) => k === 'ensure' && b.slug === 'jonathan-barket').length, 0);
+  });
+
+  test('a card check core can\'t answer refuses Allow (fail closed)', async () => {
+    const st = await setup(fakeCore());
+    propose(st, { agent: 'art' }, { slug: 'pat-lee', entry: JSON.stringify({ name: 'Pat', tier: 2, slack: { T1: ['U9'] } }) }, { rand: () => 'dddddd' });
+    const [a] = asks(st);
+    const r = await answer(st, fakeCore({ fail: { ensure: 'core didn\'t answer people/ensure' } }), 'gates-allow', a.actions[0].fields);
+    assert.equal(r.ok, false);
+    assert.match(r.message, /couldn't be checked/);
+    assert.equal(gatesOf(st, 'art').doc.people['pat-lee'], undefined);
+  });
+});
+
+describe('paths: only a call\'s canonical path is ever granted', () => {
+  const doc = { v: 1, pieces: { tasks: { art: ['*'] }, secrets: {}, clock: { art: ['wakes/*'] } } };
+  test('tasks/../secrets, empty segments, backslashes and percent-encoding are refused, whatever the grant', () => {
+    for (const path of ['tasks/../secrets', '../secrets', './run', 'run/', '/run', 'a//b', 'a\\b', '%2e%2e/secrets', 'wakes/%2e%2e', 'wakes/..']) {
+      assert.equal(decide(doc, { agent: 'art', piece: 'tasks', path }).allow, false, path);
+      assert.equal(decide(doc, { agent: 'art', piece: 'clock', path }).allow, false, path);
+      assert.equal(decide(null, { agent: 'art', piece: 'tasks', path }).allow, false, path);
+    }
+    assert.equal(decide(doc, { agent: 'art', piece: 'tasks', path: 'run' }).allow, true);
+    assert.equal(decide(doc, { agent: 'art', piece: 'tasks', path: '' }).allow, true);
+    assert.equal(decide(doc, { agent: 'art', piece: 'clock', path: 'wakes/w-1.json' }).allow, true);
   });
 });

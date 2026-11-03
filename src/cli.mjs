@@ -65,7 +65,7 @@
 //                                                                      output (stream-json, or a Codex rollout)
 // Permissions (agent-runtime.md, section 6; the runtime is the grants authority, and holds the gates):
 //   loom runtime grants ask | list [--json] | seed [--dry-run] [--force] | set <piece> <agents|*> [--paths p,p] | paired <a> <b>
-//   loom runtime gates people --agent a | status | propose --agent a --slug S --entry J … | export --json
+//   loom runtime gates people --agent a | status | propose --agent a --from w --stdin < proposal | export --json
 //   loom runtime gates import [--force]                  the owner's run: loom shuttle gates export --json | loom runtime gates import
 //   loom runtime gates follow-merge <from> <into>        the owner's: after a card merge, every agent's gates follow
 //   loom runtime secrets-map --json                      which secret each agent's houses get (for: | loom secrets policy houses-import)

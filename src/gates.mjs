@@ -263,7 +263,7 @@ export function propose(store, caller, flags, { now = Date.now() / 1000, rand = 
     ...(via ? { relay: { via, say } } : {}),
   });
   for (const k of same) store.del(PROPOSALS, k);
-  return { ok: true, message: `${pid}: asked the owner to ${isObj(before) ? 'change' : 'add'} ${entry.name} (${slug}) in ${agent}'s people; nothing changes until they allow it${via ? `, then ${agent} is told to send the message on ${via}` : ''}` };
+  return { ok: true, pid, message: `${pid}: asked the owner to ${isObj(before) ? 'change' : 'add'} ${entry.name} (${slug}) in ${agent}'s people; nothing changes until they allow it${via ? `, then ${agent} is told to send the message on ${via}` : ''}` };
 }
 
 /** propose-person's argv (`--slug S --entry J …`) as flags, or why not. */
@@ -295,22 +295,23 @@ function summaryOf(e) {
 export function view(agent, p, doc) {
   const e = p.entry, slug = p.slug, who = nameOf(agent);
   const cur = doc?.people?.[slug];
-  const problem = personProblem(slug, e, doc);
+  const problem = personProblem(slug, e, doc) ?? cardProblem(slug, p.card);
   const change = isObj(cur);
   let title, what;
   if (change && !problem) {
     const diff = changes(cur, after(doc, slug, e));
-    title = `${who} asks to change ${e.name || slug}: ${diff.join('; ')}`;
-    if (title.length > TITLE_MAX) title = `${who} asks to change ${e.name || slug}: ${diff.length} fields (${diff.map((d) => d.split(':')[0]).join(', ')})`;
+    title = `${who} asks to change ${e.name || slug} (${slug}): ${diff.join('; ')}`;
+    if (title.length > TITLE_MAX) title = `${who} asks to change ${e.name || slug} (${slug}): ${diff.length} fields (${diff.map((d) => d.split(':')[0]).join(', ')})`;
     what = ['Changes', diff.join('; ')];
   } else {
-    title = `${who} asks to ${change ? 'change' : 'add'} ${e.name || slug}: ${problem ? 'can\'t be allowed' : summaryOf(e)}`;
+    title = `${who} asks to ${change ? 'change' : 'add'} ${e.name || slug} (${slug}): ${p.card?.state === 'other' ? `this slug is ${p.card.name}'s card` : problem ? 'can\'t be allowed' : summaryOf(e)}`;
     what = ['Entry', JSON.stringify(e)];
   }
   if (title.length > TITLE_MAX) title = `${who} asks to ${change ? 'change' : 'add'} a person (${slug})`.slice(0, TITLE_MAX);
   const asker = `${who}, from ${p.from || 'a body'}`;
   const r = isObj(p.relay) && p.relay.say ? p.relay : null;
-  const kv = [['Asked by', asker], ['Why', p.why || '—'], ['Slug', String(slug)], what, ...(r ? [[`Then, on ${r.via}`, String(r.say)]] : [])];
+  const cardLine = p.card?.state === 'other' ? `this slug is ${p.card.name}'s card` : p.card?.state === 'same' ? `${p.card.name}'s card, which has these ids` : p.card?.state === 'new' ? 'no card yet: Allow makes one' : 'checked when you allow';
+  const kv = [['Asked by', asker], ['Why', p.why || '—'], ['Slug', String(slug)], ['Card', cardLine], what, ...(r ? [[`Then, on ${r.via}`, String(r.say)]] : [])];
   const bits = [`Asked by ${asker}`, ...(p.why ? [`why: ${p.why}`] : []), what[0] === 'Changes' ? `${slug}, before → after: ${what[1]}` : `new as ${slug}: ${what[1]}`,
     ...(r ? [`then on ${r.via}: “${r.say}”`] : [])];
   let detail = bits.join(' · ');
@@ -407,6 +408,44 @@ export async function ensureCards(core, agent, pairs, verb, now = new Date()) {
   return out;
 }
 
+/**
+ * What allowing a proposal would do to a person card, asked of core without writing (ensure's dry run):
+ *  - new: no card has the slug, so Allow makes one;
+ *  - same: the slug's card already has every id the proposal gives;
+ *  - other: the slug is someone's card that doesn't have these ids. Allow never adds a body's ids to an existing
+ *    card (that would make a stranger's Slack id Jonathan's, for every agent): it's refused;
+ *  - unknown: core couldn't say (an id already on another card, core down), and Allow is refused too.
+ */
+export async function cardCheck(core, agent, slug, entry) {
+  try {
+    const o = await core.ensure({ ...cardBody(agent, slug, entry, 'a proposal, checked'), dry_run: true });
+    if (o?.created === true && !o.redirected_from) return { state: 'new' };
+    const name = typeof o?.card?.name === 'string' ? o.card.name.slice(0, 80) : slug;
+    const missing = Object.entries(o?.added ?? {}).flatMap(([f, v]) => [].concat(v).map((x) => `${f} ${x}`));
+    if (!missing.length && !o?.created) return { state: 'same', name };
+    return { state: 'other', name, missing: missing.slice(0, 8) };
+  } catch (e) {
+    return { state: 'unknown', why: String(e.message ?? e).replace(/^core refused people\/ensure: /, '').slice(0, 200) };
+  }
+}
+
+/** The card check, kept on the proposal so the Inbox shows it (the manifest can't ask core). Never throws. */
+export async function annotate(store, core, agent, pid) {
+  try {
+    const got = store.get(PROPOSALS, `${agent}.${pid}`);
+    if (!got?.doc) return;
+    const card = await cardCheck(core, agent, got.doc.slug, got.doc.entry);
+    store.put(PROPOSALS, `${agent}.${pid}`, { ...got.doc, card }, got.rev);
+  } catch { /* the Allow checks again */ }
+}
+
+/** Why a card check stops Allow, or null. */
+export function cardProblem(slug, card) {
+  if (card?.state === 'other') return `this slug is ${card.name}'s card, which doesn't have ${card.missing?.join(', ') || 'these ids'}: a proposal never adds ids to someone's card. Deny it; the body can propose under its own slug`;
+  if (card?.state === 'unknown') return `the card for ${slug} couldn't be checked (${card.why})`;
+  return null;
+}
+
 const cardSentence = (r) => (!r.length ? '' : r[0].ok ? `Person card: ${r[0].what}.` : `No person card was made (${r[0].what}); they're in the gates all the same.`);
 export function cardSummary(results, limit = 6) {
   const ok = results.filter((r) => r.ok), bad = results.filter((r) => !r.ok);
@@ -436,7 +475,7 @@ export async function answer(store, core, action, fields, { now = new Date() } =
     store.del(PROPOSALS, key);
     return { ok: true, message: `Denied: ${name} isn't in ${who}'s people; nothing changed.`, page: `gates/${agent}` };
   }
-  let doc, merged, newRev;
+  let doc, merged, newRev, card;
   for (let i = 0; ; i++) {
     ({ doc } = gatesOf(store, agent));
     const { rev } = gatesOf(store, agent);
@@ -444,6 +483,10 @@ export async function answer(store, core, action, fields, { now = new Date() } =
     if (seen(p, doc) !== String(fields.seen ?? '')) return { ok: false, message: `${name}'s entry changed since you looked: open it again.`, page: `gates/${agent}` };
     const v = view(agent, p, doc);
     if (v.problem) return { ok: false, message: `Not added: ${v.problem}. Deny it, or ask the body again.`, page: `gates/${agent}` };
+    // The card, as it is now (never the check the Inbox showed): a body's ids never go onto someone's card.
+    card = await cardCheck(core, agent, p.slug, p.entry);
+    const cp = cardProblem(p.slug, card);
+    if (cp) return { ok: false, message: `Not added: ${cp}.`, page: `gates/${agent}` };
     if (!v.allow) return { ok: false, message: 'Not added: it doesn\'t show in full, so it can\'t be allowed. Deny it.', page: `gates/${agent}` };
     merged = mergeInto(doc, p.slug, p.entry);
     try { newRev = store.put(GATES, agent, merged, rev); break; } catch (e) {
@@ -455,7 +498,10 @@ export async function answer(store, core, action, fields, { now = new Date() } =
   store.del(PROPOSALS, key);
   const verb = isObj(doc.people?.[p.slug]) ? 'changed in' : 'added to';
   let msg = `${name} ${verb} ${who}'s people; its bridges read it within a minute.`;
-  const card = cardSentence(await ensureCards(core, agent, [[p.slug, merged.people[p.slug]]], 'allowed', now));
+  // Only a new card is made from a proposal; a card that has these ids already needs nothing.
+  const cardLine = card.state === 'new'
+    ? cardSentence(await ensureCards(core, agent, [[p.slug, merged.people[p.slug]]], 'allowed', now))
+    : `Person card: ${card.name}'s, which has these ids already.`;
   if (isObj(p.relay) && p.relay.say) {
     try {
       await core.deliver({
@@ -468,7 +514,7 @@ export async function answer(store, core, action, fields, { now = new Date() } =
       msg += ` The follow-up didn't reach ${who} (${String(e.message ?? e).slice(0, 160)}); relay it by hand.`;
     }
   }
-  return { ok: true, message: `${msg}${card ? ` ${card}` : ''}`, page: `gates/${agent}` };
+  return { ok: true, message: `${msg}${cardLine ? ` ${cardLine}` : ''}`, page: `gates/${agent}` };
 }
 
 /**

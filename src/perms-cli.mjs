@@ -8,13 +8,13 @@
 //   grants paired <from> <to>       may <from> relay to <to>? (exit 0 yes, 1 no)
 //   gates people --agent <a> [--json]     an agent's gates ({doc, rev}), as its bridges read them
 //   gates status [--json]                 {agent: rev} of the gates the runtime holds
-//   gates propose --agent <a> [--from <who>] --slug S --entry JSON [--why W] [--then-relay-say T --then-relay-via slack]
+//   gates propose --agent <a> --from <who> --stdin   shuttle's hand-off: {slug, entry, why?, then-relay-say?, then-relay-via?} on stdin
 //   gates export --json                   the runtime's gates, in the export's shape
 //   gates import [--force] < export       the owner's run: `loom shuttle gates export --json | loom runtime gates import`
 //   gates follow-merge <from> <into>      the owner's: after a card merge made elsewhere, every agent's gates follow
 import { loomStore } from './store.mjs';
 import { ask, GRANTS, KEY, paired, householdOf, seed, setPiece } from './grants.mjs';
-import { exportGates, followMerge, gatesOf, importGates, ownersRunOf, propose, proposeFlags, status } from './gates.mjs';
+import { AGENT as AGENT_NAME, annotate, exportGates, followMerge, gatesOf, importGates, ownersRunOf, propose, status } from './gates.mjs';
 import { coreFrom } from './core.mjs';
 
 class Fail extends Error { constructor(m, code = 1) { super(m); this.code = code; } }
@@ -81,13 +81,21 @@ export async function gatesCli(rest, env, { store = loomStore(env), core = coreF
     }
     case 'status': out(status(store)); return;
     case 'propose': {
-      const agent = flag(args, '--agent'), from = flag(args, '--from');
-      const rest2 = [];
-      for (let i = 0; i < args.length; i++) { if (args[i] === '--agent' || args[i] === '--from') { i++; continue; } rest2.push(args[i]); }
-      const flags = proposeFlags(rest2);
-      if (typeof flags === 'string') throw new Fail(flags, 2);
+      // From shuttle (a body's propose-person, handed on): exactly --agent A --from F --stdin, and the proposal as one
+      // JSON object on stdin. Nothing the body wrote is a flag here, so it can't name another agent or sender.
+      if (args.length !== 5 || args[0] !== '--agent' || args[2] !== '--from' || args[4] !== '--stdin') {
+        throw new Fail('usage: loom runtime gates propose --agent <a> --from <who> --stdin  < {slug, entry, why?, then-relay-say?, then-relay-via?}', 2);
+      }
+      const [, agent, , from] = args;
+      if (!AGENT_NAME.test(agent)) throw new Fail('that isn\'t an agent', 2);
+      let flags;
+      try { flags = JSON.parse(await stdin()); } catch { throw new Fail('propose-person: the proposal on stdin isn\'t JSON', 2); }
+      if (!flags || typeof flags !== 'object' || Array.isArray(flags) || !Object.values(flags).every((v) => typeof v === 'string')) {
+        throw new Fail('propose-person: the proposal is one JSON object of strings', 2);
+      }
       const r = propose(store, { agent, service: from }, flags);
       if (!r.ok) throw new Fail(`propose-person: ${r.message}`, 1);
+      await annotate(store, core, agent, r.pid);
       process.stdout.write(`${r.message}\n`);
       return;
     }
