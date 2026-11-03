@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { StateError, load, localBoxName, stateDir } from './state.mjs';
 import { sessionsBusy } from './busy.mjs';
 import { allowJoin, blockAllJoins, blockJoin, pendingJoins } from './enroll.mjs';
-import { addBox, assertBoxOwner, isBoxOwner, boxLabelOf, boxOfCall, boxUpdateNow, loginOver, factsOf, lendBox, list, loginCancel, loginCode, loginStart, loginView, primaryOf, remoteDown, remoteUp, revokeBox, shownTask, serviceDown, serviceMove, serviceRestart, serviceUp, setAgent, isHostTask, setBoxOwner, setMayHost, setPrimary, up, down, LIVE } from './control.mjs';
+import { addBox, assertBoxOwner, isBoxOwner, boxLabelOf, boxOfCall, boxUpdateNow, loginOver, factsOf, lendBox, list, loginCancel, loginCode, loginStart, loginView, primaryOf, remoteDown, remoteUp, revokeBox, shownTask, serviceDown, serviceMove, serviceRestart, serviceUp, setAgent, isHostHouse, setBoxOwner, setMayHost, setPrimary, up, down, LIVE } from './control.mjs';
 import { LOGIN_HARNESSES } from './logins.mjs';
 import { ownCommit, swapCommand } from './version.mjs';
 import { stateAccounts } from './accounts.mjs';
@@ -305,7 +305,6 @@ const LANE_PROMPT = /^\s*You are running the ([a-z][a-z0-9-]*) lane\b/;
 
 /** What a task house is doing, in a line: a wake's note (the clock puts it in the prompt), else the task's start. */
 export function taskLine(task) {
-  if (isHostTask(shownTask(task))) return 'Body host: where its conversations run';
   const w = wakeOf(shownTask(task));
   // A lane's own prompt ("You are running the landscape lane in a fresh house. …"): the lane, never the prompt's words.
   const ln = LANE_PROMPT.exec(w.t);
@@ -324,14 +323,16 @@ export function taskLine(task) {
 const laneLine = (text) => text.replace(/^([a-z][a-z0-9-]*)(?=:|$)/, (n) => laneWords(n));
 
 /** A house by what it is: "Art's Discord bridge", "Wake: cadence runner build (t-1689)", "Reflect lane: nightly retro". */
-export function houseName(h) {
+export function houseName(h, s) {
   const who = cap(String(h.agent ?? ''));
   if (h.service) {
     if (h.service === 'remote') return `${who}'s house session`;
     return BRIDGE.test(h.service) ? `${who}'s ${cap(h.service)} bridge` : `${who}'s ${h.service.replace(/-/g, ' ')}`;
   }
   // A body host's house (houserunner.mjs): where delivery's bodies run, never its command and boot key.
-  if (isHostTask(shownTask(h.task))) return `${who}'s body host`;
+  // By the runtime's own mark (control.mjs, isHostHouse), never by its task's text alone (an agent writes that). Given
+  // the state, one from before the mark counts too when no agent asked for it.
+  if (h.kind === 'body-host' || (s && isHostHouse(h, s))) return `${who}'s body host`;
   const w = wakeOf(h.task);
   if (w.kind === 'schedule') {
     const t = taskLine(h.task);
@@ -404,7 +405,7 @@ export function agentReports(s, nowMs = Date.now(), busy = {}) {
     const down = mine.filter((v) => !up(v) && late(v));
     const failing = down.filter((v) => (v.restarts ?? 0) >= BROKEN_RESTARTS);
     // A body host's house is where its conversations run, not something it's doing: its bodies are (the now board's).
-    const tasks = Object.values(s.houses).filter((h) => h.agent === a && !h.service && !isHostTask(shownTask(h.task)) && (h.state === 'running' || h.state === 'starting'))
+    const tasks = Object.values(s.houses).filter((h) => h.agent === a && !h.service && !isHostHouse(h, s) && (h.state === 'running' || h.state === 'starting'))
       // Running first (it's what the agent is doing), then the newest.
       .sort((x, y) => (y.state === 'running') - (x.state === 'running') || Date.parse(y.created) - Date.parse(x.created));
     const readings = [];
@@ -489,13 +490,13 @@ function houseSheet(s, h, nowMs) {
     ...(h.exit !== undefined ? [{ label: 'Exit', value: String(h.exit) }] : []),
   ];
   const task = typeof h.task === 'string' ? shownTask(h.task) : '';
-  return { title: houseName(h), blocks: [{ type: 'kv', items }, ...(!h.service && task ? [{ type: 'code', label: isHostTask(task) ? 'What it runs' : 'Its task', text: task.slice(0, 1900) }] : []),
+  return { title: houseName(h, s), blocks: [{ type: 'kv', items }, ...(!h.service && task ? [{ type: 'code', label: isHostHouse(h, s) ? 'What it runs' : 'Its task', text: task.slice(0, 1900) }] : []),
     { type: 'text', tone: 'muted', text: `House ${h.id}` }] };
 }
 
 /** A house as a panel row: what it is, its state in words, its agent's mark; the ids and the command a tap away. */
 function housePanelRow(s, h, nowMs, extra = {}) {
-  return { label: short(houseName(h), 90), value: houseWords(h), tone: houseTone(h), ...(AGENT_ID.test(h.agent ?? '') ? { agent: h.agent } : {}), ...extra, ...(extra.act ? {} : { sheet: houseSheet(s, h, nowMs) }) };
+  return { label: short(houseName(h, s), 90), value: houseWords(h), tone: houseTone(h), ...(AGENT_ID.test(h.agent ?? '') ? { agent: h.agent } : {}), ...extra, ...(extra.act ? {} : { sheet: houseSheet(s, h, nowMs) }) };
 }
 const AGENT_ID = /^[a-z][a-z0-9-]{0,39}$/;
 const who = (a) => cap(String(a ?? ''));
@@ -905,7 +906,7 @@ function agentTabPage(env, agent, caller, nowMs) {
         h.state === 'wanted' || h.state === 'running' || h.state === 'starting' ? { detail: `On ${nameOf(h.box)}`, act: { action: 'down', label: 'Stop', tone: 'danger', fields: { id: h.id }, confirm: 'This house stops.' } } : { detail: `On ${nameOf(h.box)}` })) }
       : { type: 'text', tone: 'muted', text: 'No houses up now.' },
     ...(houses.length > live.length ? [{ type: 'details', summary: 'Recent', meta: String(houses.length - live.length), blocks: [{ type: 'table', columns: ['House', 'Box', 'State', 'Updated'],
-      rows: houses.filter((h) => !LIVE.has(h.state)).slice(0, 20).map((h) => [short(houseName(h)), nameOf(h.box), houseWords(h) + (h.exit !== undefined ? ` (exit ${h.exit})` : ''), ago(h.updated, nowMs)]) }] }] : []),
+      rows: houses.filter((h) => !LIVE.has(h.state)).slice(0, 20).map((h) => [short(houseName(h, s)), nameOf(h.box), houseWords(h) + (h.exit !== undefined ? ` (exit ${h.exit})` : ''), ago(h.updated, nowMs)]) }] }] : []),
   ] }];
   if (svcs.length) {
     sections.push({ id: 'services', title: 'Services', blocks: [

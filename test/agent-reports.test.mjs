@@ -83,7 +83,7 @@ test('doing (loom\'s summary card): each running task house by its note, a lane 
     task: JSON.stringify({ prompt: 'You are Art, waking from a self-set alarm in a fresh house (loom-box) (wake id w-ab12cd, kind schedule, set 2026-10-27 08:00:00, note: schedule reflect: nightly retro). Go.' }) };
   s.remotes.art.name = 'art';
   // A body host's house isn't something Art is doing (before: "Loom-runtime body-host --piece runtime --host-key …", once per host).
-  s.houses['h-131'] = { id: 'h-131', agent: 'art', box: 'loom', state: 'running', created: ago(1), started: ago(1), task: `loom-runtime body-host --piece runtime --host-key ${'f'.repeat(32)}` };
+  s.houses['h-131'] = { id: 'h-131', agent: 'art', box: 'loom', state: 'running', created: ago(1), started: ago(1), kind: 'body-host', task: `loom-runtime body-host --piece runtime --host-key ${'f'.repeat(32)}` };
   const r = agentReports(s, now, { 'box:art': true });
   assert.deepEqual(r.art.doing, [
     { text: 'Reflect: nightly retro', kind: 'lane', where: 'a house on loom', since: ago(2) },   // newest first
