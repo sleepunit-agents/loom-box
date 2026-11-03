@@ -57,6 +57,11 @@
         "hint": "JSON by venue or venue kind, e.g. {\"slack\": 7, \"scheduled\": 1}; at most 14 (default live 14, scheduled 1, agent 3)"
       },
       {
+        "name": "LOOM_RUNTIME_RETRY_S",
+        "label": "How long a body that couldn't start waits before each new try",
+        "hint": "a JSON list of seconds, 1-5 of them (default [60, 240, 600]: about 15 minutes); after the last, it's given up and the owner is told"
+      },
+      {
         "name": "LOOM_RUNTIME_BODY_ENV",
         "label": "More of the runtime's environment a body may have",
         "hint": "variable names, comma-separated; never LOOM_*, a harness's settings or a provider's key (a body in a house runs in the house's own environment)"

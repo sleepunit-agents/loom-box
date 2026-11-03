@@ -66,6 +66,15 @@ export const SEND_MS = 15_000;
 /** A start or resume that's been "starting" this long, its process gone or not, is given up (a cold house is slow). */
 const STARTING_MS = 240_000;
 const OUTCOME_MS = 3_600_000;
+/**
+ * A body that fails to start is the runtime's to try again, on its tick: after each of these waits (about 15 minutes
+ * in all), then given up, with a `failed` note on the conversation and a notice for the owner. A source never polls.
+ * LOOM_RUNTIME_RETRY_S (a JSON list of seconds, 1-5 of them, each 1-3600) changes them.
+ */
+export const RETRY_DELAYS_MS = [60_000, 240_000, 600_000];
+/** Given-up deliveries, as the owner's notices: this many, for this long. */
+const NOTICE_MS = 86_400_000;
+const NOTICES_MAX = 20;
 
 const KINDS = ['message', 'wake'];
 const FROM_KINDS = ['person', 'agent', 'schedule', 'unknown'];
@@ -121,6 +130,46 @@ export function limitsOf(env) {
 }
 
 /** A venue's continuity window: LOOM_RUNTIME_CONTINUITY by venue, else by kind, else the kind's default; ≤ 14 days. */
+export function retryDelaysOf(env) {
+  try {
+    const v = JSON.parse(setting(env, 'RETRY_S') ?? 'null');
+    if (Array.isArray(v) && v.length >= 1 && v.length <= 5 && v.every((x) => Number.isFinite(x) && x >= 1 && x <= 3600)) return v.map((x) => x * 1000);
+  } catch { /* the defaults */ }
+  return RETRY_DELAYS_MS;
+}
+
+// ─── Given up: the owner hears of it ────────────────────────────────────────
+
+const noticesFile = (env) => join(deliveryDir(env), 'notices.json');
+
+/** The deliveries the runtime gave up on in the last day, newest first: what the runtime's page shows the owner. */
+export function deliveryNotices(env, nowMs = Date.now()) {
+  const l = readJson(noticesFile(env));
+  return (Array.isArray(l) ? l : []).filter((n) => n && typeof n.text === 'string' && nowMs - Date.parse(n.at) < NOTICE_MS).slice(0, NOTICES_MAX);
+}
+
+const cap = (x) => String(x).charAt(0).toUpperCase() + String(x).slice(1);
+
+/**
+ * A delivery given up on: a `failed` note on its conversation in core (the agent's turn, its outcome failed; the reason
+ * as its audit text) and a notice for the owner. Neither failing stops the other.
+ */
+async function giveUp(env, c, reason, tries, d) {
+  const at = d.now().toISOString();
+  const said = `couldn't start a body after ${tries} tries: ${reason}`;
+  try {
+    const { seq } = await d.core.turn({ agent: c.agent, venue: c.venue, place: c.place, at, from: { kind: 'agent', id: c.agent }, kind: 'note', run: newRun(), outcome: 'failed', ...(c.label !== undefined ? { label: c.label } : {}) });
+    try { await d.core.audit({ conversation: c.conversation, seq, text: said }); } catch (e) { d.warn(`the failed note on ${c.conversation} stands without its reason: ${e.message}`); }
+  } catch (e) { d.warn(`couldn't record the failed note on ${c.conversation}: ${e.message}`); }
+  const notice = {
+    text: `${cap(c.agent)}'s ${c.venue} ${c.place} couldn't start a body: ${reason}`.slice(0, 300),
+    meta: `${tries} tries over ${Math.round(retryDelaysOf(env).reduce((a, b) => a + b, 0) / 60_000)} min · ${c.conversation}`,
+    at, agent: c.agent, tone: 'warn', page: '',
+  };
+  locked(env, () => writeJson(noticesFile(env), [notice, ...deliveryNotices(env, d.now().getTime())].slice(0, NOTICES_MAX)));
+  d.warn(`gave up on ${c.conversation}: ${said}`);
+}
+
 export function windowMs(env, venue, kind) {
   const c = limitsOf(env).continuity;
   const days = num(c[venue], num(c[kind], CONTINUITY_DAYS[kind] ?? MAX_CONTINUITY_DAYS));
@@ -470,6 +519,8 @@ function plan(env, cv, d, mem) {
     // Gone on its own: what it leaves is saved, then this conversation is planned again.
     return begin({ type: 'retire', body: c.body });
   }
+  // A start that failed is tried again at its time, on the tick: until then it waits (what it was told stands).
+  if (c.retryAt && now < c.retryAt) return null;
   if (busy.length >= limits.busy) return wait(`every body is busy (${busy.length} of ${limits.busy} mid-turn)`);
   if (busy.length + idle.length >= limits.busy) {
     // Over the limit with a warm idle body: it makes room (the least recently active), its conversation saved.
@@ -566,6 +617,7 @@ async function execute(env, op, d, mem) {
       }
       c.body = r.body;
       c.run = run;
+      delete c.retryAt; delete c.startFails; delete c.retryReason;
       c.sendKey = keyHash(runKey).toString('hex');
       c.runs = (c.runs ?? 0) + 1;
       if (op.type === 'resume') delete c.slot;
@@ -580,6 +632,7 @@ async function execute(env, op, d, mem) {
     if (!keep) endAndForget(env, r.body, d);
   } catch (e) {
     for (const p of restored) rmSync(p, { recursive: true, force: true });
+    let gaveUp = null;
     locked(env, () => {
       const c = loadConv(env, op.cv);
       if (!c) return;
@@ -590,11 +643,29 @@ async function execute(env, op, d, mem) {
         delete c.slot;
         requeue(c, op.msgs);
       } else {
-        // A body that fails to start is `failed`: the turn stands, and nothing is retried here.
-        outcome(c, keys, { body: 'failed', reason: String(e.message).split('\n')[0].slice(0, 300) }, now());
+        // A body that fails to start: the turn stands, and the runtime tries again on its tick, after a wait that
+        // grows. Only a message it keeps sealed can wait; one it can't (no age) is failed now.
+        const reason = String(e.message).split('\n')[0].slice(0, 300);
+        const delays = retryDelaysOf(env);
+        const tries = (c.startFails ?? 0) + 1;
+        const keep = op.msgs.filter((x) => x.sealed);
+        const lost = op.msgs.filter((x) => !x.sealed).map((x) => x.key);
+        if (lost.length) outcome(c, lost, { body: 'failed', reason: `${reason}, and the runtime can't keep its text to try again (no age)` }, now());
+        if (keep.length && tries <= delays.length) {
+          c.startFails = tries;
+          c.retryAt = now() + delays[tries - 1];
+          c.retryReason = reason;
+          requeue(c, keep);
+          outcome(c, keep.map((x) => x.key), { body: 'queued', reason: `no body could start (${reason}): trying again in ${Math.round(delays[tries - 1] / 1000)} s` }, now());
+        } else if (keep.length) {
+          outcome(c, keep.map((x) => x.key), { body: 'failed', reason }, now());
+          delete c.retryAt; delete c.startFails; delete c.retryReason;
+          gaveUp = { c: { ...c }, reason, tries };
+        }
       }
       saveConv(env, c);
     });
+    if (gaveUp) await giveUp(env, gaveUp.c, gaveUp.reason, gaveUp.tries, d);
   }
 }
 
