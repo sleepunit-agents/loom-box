@@ -13,6 +13,22 @@ import { LOGIN_HARNESSES } from './logins.mjs';
 import { ownCommit, swapCommand } from './version.mjs';
 import { stateAccounts } from './accounts.mjs';
 import { deliveryNotices } from './delivery.mjs';
+import { loomStore } from './store.mjs';
+import { asks as gateAsks, answer as gateAnswer, gatesPage, mergePeople, status as gatesStatus, proposals as gateProposals } from './gates.mjs';
+import { GRANTS, KEY as GRANTS_KEY, grantsProblem, setPiece } from './grants.mjs';
+import { coreFrom } from './core.mjs';
+
+/**
+ * The runtime's own store (the grants, the gates), when it runs as loom's piece: loom names it (LOOM_PIECE_NAME).
+ * Outside loom (a dev checkout, the tests) there's none unless a test hands one in, so the page never reads a real
+ * household's store by accident.
+ */
+export function permsStore(env) {
+  // A test hands in a store object; a real environment's string never is one.
+  if (env?.LOOM_RUNTIME_TEST_STORE && typeof env.LOOM_RUNTIME_TEST_STORE === 'object') return env.LOOM_RUNTIME_TEST_STORE;
+  return env?.LOOM_PIECE_NAME ? loomStore(env) : null;
+}
+const permsCore = (env) => (env?.LOOM_RUNTIME_TEST_CORE && typeof env.LOOM_RUNTIME_TEST_CORE === 'object' ? env.LOOM_RUNTIME_TEST_CORE : coreFrom(env, { timeoutMs: 8_000 }));
 
 const OWNER = { kind: 'owner' };
 const ago = (iso, nowMs = Date.now()) => {
@@ -92,7 +108,16 @@ export function manifest(env) {
       page: '',
     },
     // A box asking to join is the owner's call: the code is the one on the box's own terminal.
-    asks: pendingJoins(s).slice(0, 5).map((j) => ({
+    // ...and a person a body proposes for an agent's gates (gates.mjs): the household owner's to allow or deny.
+    asks: [...pendingJoins(s).slice(0, 5).map((j) => joinAsk(j)), ...permsAsks(env)],
+    agents: agentReports(s, Date.now(), { ...reportedBusy(s), ...sessionsBusy(join(stateDir(env), 'session-cpu.json')) }),
+    // A delivery the runtime gave up on (its body never started, after its retries): the owner hears of it.
+    notices: [...deliveryNotices(env), ...boxNotices(s)].sort((x, y) => Date.parse(y.at) - Date.parse(x.at)).slice(0, 20),
+  };
+}
+
+function joinAsk(j) {
+  return {
       text: `A box asks to join: ${j.name}`,
       meta: `from ${j.address}, code ${j.code}${j.facts.length ? ` · ${j.facts.filter((f) => !f.startsWith('runtime:')).slice(0, 4).map(factWords).join(' · ')}` : ''}`,
       // Something to allow: loom's Inbox files it under Permissions (it was Decisions, by default).
@@ -101,11 +126,42 @@ export function manifest(env) {
         { action: 'allow-join', label: 'Let it in', tone: 'primary', fields: { id: j.id }, confirm: `Let ${j.name} in only if its terminal shows code ${j.code}.` },
         { action: 'block-join', label: 'Block', tone: 'danger', fields: { id: j.id } },
       ],
-    })),
-    agents: agentReports(s, Date.now(), { ...reportedBusy(s), ...sessionsBusy(join(stateDir(env), 'session-cpu.json')) }),
-    // A delivery the runtime gave up on (its body never started, after its retries): the owner hears of it.
-    notices: [...deliveryNotices(env), ...boxNotices(s)].sort((x, y) => Date.parse(y.at) - Date.parse(x.at)).slice(0, 20),
   };
+}
+
+/** Proposals waiting in the gates; never one that breaks the manifest. */
+function permsAsks(env) {
+  const st = permsStore(env);
+  if (!st) return [];
+  try { return gateAsks(st).slice(0, 10); } catch { return []; }
+}
+
+/** The household's permissions: each piece's grant, who may relay to whom, and each agent's gates. */
+function permissionsPage(env) {
+  const st = permsStore(env);
+  if (!st) return { title: 'Permissions', sections: [{ id: 'none', blocks: [{ type: 'text', tone: 'muted', text: 'The runtime reads its permissions from loom\'s store when loom runs it.' }] }] };
+  const g = st.get(GRANTS, GRANTS_KEY);
+  const sections = [];
+  if (!g) {
+    sections.push({ id: 'grants', title: 'Grants', blocks: [{ type: 'callout', tone: 'warn', title: 'Not seeded', text: 'No grants yet, so each piece decides by its own agent list, as before. `loom runtime grants seed` imports those lists; from then on the runtime decides first.' }] });
+  } else {
+    const bad = grantsProblem(g.doc);
+    const rows = Object.entries(g.doc.pieces ?? {}).map(([p, by]) => [p, Object.entries(by).map(([a, ps]) => `${a === '*' ? 'every agent' : a}: ${ps.join(', ')}`).join('; '), g.doc.seeded?.from?.[p] ?? '']);
+    sections.push({ id: 'grants', title: 'Grants', blocks: [
+      ...(bad ? [{ type: 'callout', tone: 'bad', title: 'Can\'t be read', text: `${bad}: every agent's piece call is refused until it's fixed.` }] : []),
+      { type: 'table', columns: ['Piece', 'Who may use it', 'Seeded from'], rows },
+      { type: 'form', action: 'grants-set', submit: 'Save', note: 'One piece\'s grant: agents comma-separated, or * for every agent; paths * (all), a path, or a prefix ending in /*. Empty agents removes the piece\'s grant.',
+        fields: [{ name: 'piece', label: 'Piece', kind: 'text', required: true }, { name: 'agents', label: 'Agents', kind: 'text' }, { name: 'paths', label: 'Paths', kind: 'text', value: '*' }],
+        hidden: { rev: String(g.rev) } }] });
+    const relay = Object.entries(g.doc.relay ?? {});
+    sections.push({ id: 'relay', title: 'Who may relay to whom', blocks: [relay.length ? { type: 'kv', items: relay.map(([a, to]) => ({ label: a, value: to.join(', ') || 'no one' })) } : { type: 'text', tone: 'muted', text: 'No pairs.' }] });
+  }
+  let held = {};
+  try { held = gatesStatus(st); } catch { held = {}; }
+  sections.push({ id: 'gates', title: 'Gates', blocks: [Object.keys(held).length
+    ? { type: 'list', items: Object.keys(held).sort().map((a) => { const n = gateProposals(st, a).length; return { text: `${a}'s people`, meta: n ? `${n} waiting for you` : `revision ${held[a]}`, ...(n ? { tone: 'warn' } : {}), page: `gates/${a}` }; }) }
+    : { type: 'text', tone: 'muted', text: 'The runtime holds no gates yet: `loom shuttle gates export --json | loom runtime gates import`.' }] });
+  return { title: 'Permissions', intro: 'Which agent may use which piece (core asks the runtime before each call), who may relay to whom, and who each person is to each agent.', sections };
 }
 
 const NOTICE_WINDOW_MS = 24 * 3600_000;
@@ -425,7 +481,9 @@ function boxesPage(env, nowMs, caller = OWNER) {
   ] });
 
   sections.push({ id: 'new-agent', side: true, title: '', blocks: [
-    { type: 'details', summary: 'Give an agent a house', blocks: [agentForm('', null)] }] });
+    { type: 'details', summary: 'Give an agent a house', blocks: [agentForm('', null)] },
+    // Which agent may use which piece, who may relay to whom, and each agent's gates (agent-runtime.md, section 6).
+    { type: 'list', items: [{ text: 'Permissions', meta: 'grants, relay pairs, gates', page: 'permissions' }] }] });
   return { title: 'Boxes', intro: `${live_boxes.length} box${live_boxes.length === 1 ? '' : 'es'}, ${live.length} house${live.length === 1 ? '' : 's'} up${waiting ? ' or waiting' : ''}. A house is an agent's container, started for a task.`, sections };
 }
 
@@ -762,6 +820,11 @@ export function page(env, { path, caller: c }, nowMs = Date.now()) {
   if (Array.isArray(caller.agents)) return path === '' || path === undefined ? agentOwnerPage(env, caller, nowMs) : { title: 'Not found', sections: [] };
   if (path === '' || path === undefined) return boxesPage(env, nowMs, caller);
   if (path === 'agents') return agentsPage(env);
+  if (path === 'permissions') return permissionsPage(env);
+  if (typeof path === 'string' && /^gates\/[a-z][a-z0-9-]{0,39}$/.test(path)) {
+    const st = permsStore(env);
+    return st ? gatesPage(st, path.slice(6)) : { title: 'Not found', sections: [] };
+  }
   if (typeof path === 'string' && /^login\/l-[0-9a-f]{12}$/.test(path)) {
     const l = load(env).logins?.[path.slice(6)];
     if (l) { try { assertBoxOwner(env, caller, l.box); } catch (e) { return { status: 403, title: 'Not allowed', sections: [{ id: 'no', blocks: [{ type: 'text', tone: 'muted', text: e.message }] }] }; } }
@@ -854,6 +917,20 @@ export function act(env, effects, { action, fields: raw = {}, caller: c }, publi
       case 'service-move': {
         const r = serviceMove(env, effects, OWNER, fields);
         return { ok: true, message: r.moving ? `${r.service}: stopping on ${label(r.box)}; it starts on ${label(r.moveTo)} once that's confirmed.` : `${r.service} is on ${label(r.box)}.`, page: '' };
+      }
+      case 'gates-allow': case 'gates-deny': case 'gates-merge': case 'grants-set': {
+        const st = permsStore(env);
+        if (!st) return { ok: false, message: 'The runtime reads its permissions from loom\'s store when loom runs it.' };
+        if (action === 'grants-set') {
+          const g = st.get(GRANTS, GRANTS_KEY);
+          if (String(g?.rev ?? 0) !== String(fields.rev ?? '0')) return { ok: false, message: 'The grants changed since you opened this: open it again.', page: 'permissions' };
+          const who = String(fields.agents ?? '').trim();
+          const rev = setPiece(st, { piece: String(fields.piece ?? '').trim(), agents: who === '*' ? '*' : who.split(',').map((x) => x.trim()).filter(Boolean),
+            paths: String(fields.paths || '*').split(',').map((x) => x.trim()).filter(Boolean) });
+          return { ok: true, message: `Saved ${fields.piece}'s grant (revision ${rev}); core asks it from the next call.`, page: 'permissions' };
+        }
+        return (action === 'gates-merge' ? mergePeople(st, permsCore(env), fields) : gateAnswer(st, permsCore(env), action, fields))
+          .catch((err) => ({ ok: false, message: `The runtime failed (${String(err.message || err).slice(0, 160)}).` }));
       }
       default: return { ok: false, message: `No action ${action}.` };
     }
