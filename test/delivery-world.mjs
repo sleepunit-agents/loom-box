@@ -120,9 +120,16 @@ export const testSealer = {
   open: (b) => Buffer.from(b.toString().slice(3).split('').reverse().join(''), 'base64'),
 };
 
+/** The stand-in loom (fake-loom.mjs) as a bin a runtime can run with any PATH: this node, by its own path. */
+export function fakeLoomBin(dir) {
+  const bin = join(dir, 'fake-loom');
+  writeFileSync(bin, `#!/bin/sh\nexec '${process.execPath}' '${join(here, 'fake-loom.mjs')}' "$@"\n`, { mode: 0o755 });
+  return bin;
+}
+
 export function world(extra = {}, { inboxDir } = {}) {
   const HOME = scratch('rt-deliver-');
-  const env = { HOME, PATH: '/usr/bin:/bin', LANG: 'C.UTF-8', LOOM_RUNTIME_TOKEN_FILE: join(HOME, 'runtime-token'), LOOM_RUNTIME_LOOM_URL: 'http://127.0.0.1:1/mcp', ANTHROPIC_BASE_URL: 'http://proxy', SOMETHING_ELSE: 'x', LOOM_BOX_LOCAL_NAME: 'one', LOOM_BOX_HOME: join(HOME, 'state'), LOOM_BOX_DATA: join(HOME, 'data'), LOOM_RUNTIME_SCORECARDS: 'off', LOOM_BIN: join(here, 'fake-loom.mjs'), ...extra };
+  const env = { HOME, PATH: '/usr/bin:/bin', LANG: 'C.UTF-8', LOOM_RUNTIME_TOKEN_FILE: join(HOME, 'runtime-token'), LOOM_RUNTIME_LOOM_URL: 'http://127.0.0.1:1/mcp', ANTHROPIC_BASE_URL: 'http://proxy', SOMETHING_ELSE: 'x', LOOM_BOX_LOCAL_NAME: 'one', LOOM_BOX_HOME: join(HOME, 'state'), LOOM_BOX_DATA: join(HOME, 'data'), LOOM_RUNTIME_SCORECARDS: 'off', LOOM_BIN: fakeLoomBin(HOME), ...extra };
   setModels(env, { list: [{ id: 'opus', harness: 'claude', family: 'anthropic' }], agent: 'art', prefer: ['opus'] });
   setModels(env, { agent: 'mark', prefer: ['opus'] });
   const log = [];
