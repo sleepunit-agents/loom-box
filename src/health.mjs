@@ -195,7 +195,10 @@ export function problems(s, label = 'this box') {
   }
   const m = s.mem;
   if (m?.total && m.available < 0.08 * m.total) out.mem = { for: 10, reading: 'mem', severity: 'warn', title: `${label} is short of memory`, detail: `${gb(m.available)} GB of ${gb(m.total)} GB left` };
-  if (m?.swap_total && m.swap_free < 0.15 * m.swap_total) out.swap = { for: 10, reading: 'mem', severity: 'warn', title: `${label}'s swap is nearly full`, detail: `swap ${Math.round(100 - (100 * m.swap_free) / m.swap_total)}% full` };
+  // Full swap alone is idle pages parked out of RAM, not trouble (loom: 2 GB swap 89% full with 9.5 GB free and
+  // memory PSI 0, three alerts in a day). It counts only when memory is tight too: little left, or tasks stalling on it.
+  const memTight = m?.total && (m.available < 0.25 * m.total || (s.psi?.memory?.some ?? 0) >= 10);
+  if (m?.swap_total && m.swap_free < 0.15 * m.swap_total && memTight) out.swap = { for: 10, reading: 'mem', severity: 'warn', title: `${label}'s swap is nearly full`, detail: `swap ${Math.round(100 - (100 * m.swap_free) / m.swap_total)}% full, ${gb(m.available)} GB of memory left` };
   for (const [name, h] of Object.entries(s.smart ?? {})) {
     const hot = name.startsWith('nvme') ? 70 : 55;
     const bad = [[h.passed === false, 'SMART says it\'s failing'], [(h.reallocated ?? 0) > 0, `${h.reallocated} reallocated sectors`], [(h.pending ?? 0) > 0, `${h.pending} sectors pending`],

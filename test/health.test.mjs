@@ -197,10 +197,15 @@ const RULES = [
   ['pool-full-rpool', 0, () => ({ pools: [{ name: 'rpool', health: 'ONLINE', cap: 86 }] })],
   ['fs-/', 10, () => ({ fs: [{ mount: '/', used_pct: 91 }] })],
   ['mem', 10, () => ({ mem: { total: 100, available: 7, swap_total: 0, swap_free: 0 } })],
-  ['swap', 10, () => ({ mem: { total: 100, available: 50, swap_total: 100, swap_free: 10 } })],
+  ['swap', 10, () => ({ mem: { total: 100, available: 20, swap_total: 100, swap_free: 10 } })],
+  ['swap', 10, () => ({ mem: { total: 100, available: 50, swap_total: 100, swap_free: 10 }, psi: { io: { some: 1, full: 0 }, memory: { some: 12, full: 1 } } }), 'memory stalling'],
   ...[['passed', false], ['reallocated', 1], ['pending', 1], ['media_errors', 1], ['wear_pct', 80], ['temp_c', 56]].map(([k, v]) => [`smart-sda`, 0, () => ({ smart: { sda: { [k]: v } } }), k]),
   ['smart-nvme0n1', 0, () => ({ smart: { nvme0n1: { temp_c: 70 } } }), 'nvme hot'],
 ];
+test('rule swap: full swap with memory free and no stall never fires', () => {
+  for (let m = 0; m <= 15; m++) poll(m * 60, { health: { ...sampleWith(), mem: { total: 100, available: 60, swap_total: 100, swap_free: 5 }, psi: { io: { some: 0, full: 0 }, memory: { some: 0.3, full: 0 } }, t: Math.round((T0 + m * 60_000) / 1000) } });
+  assert.equal(healthAlerts().length, 0);
+});
 for (const [key, mins, extra, why] of RULES) {
   test(`rule ${key}${why ? ` (${why})` : ''}: not before ${mins} min, once at it`, () => {
     const s = (m) => ({ ...sampleWith(), ...extra(), t: Math.round((T0 + m * 60_000) / 1000) });
