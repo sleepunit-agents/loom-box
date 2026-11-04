@@ -15,6 +15,7 @@ import { cpSync, readFileSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { api } from '../src/control.mjs';
+import { runner } from '../src/box.mjs';
 import { manifest } from '../src/ui.mjs';
 import { problems, sampleHealth } from '../src/health.mjs';
 import { watchOf } from '../src/watch.mjs';
@@ -280,4 +281,43 @@ test('loom runtime health escapes what it prints, whatever the watch holds', () 
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /bad\\x1b\[31mred: d\\x07/);
   assert.doesNotMatch(r.stdout, /\u001b/);
+});
+
+test('each threshold at equality alerts (≥, not >)', () => {
+  const at = [['io', { psi: { io: { some: 50, full: 50 } } }], ['arc-prune', { arc: { prune_per_s: 100 } }], ['pool-full-rpool', { pools: [{ name: 'rpool', health: 'ONLINE', cap: 85 }] }],
+    ['fs-/', { fs: [{ mount: '/', used_pct: 90 }] }], ['disk-sda', { disks: { sda: { rotational: true, util: 80, r_await: 300 } } }], ['disk-nvme0n1', { disks: { nvme0n1: { rotational: false, util: 80, w_await: 30 } } }],
+    ['ct-io-1', { containers: { 1: { io: { some: 40 } } } }], ['ct-mem-1', { containers: { 1: { memory: { some: 20 } } } }], ['smart-sda', { smart: { sda: { temp_c: 55 } } }], ['smart-sda', { smart: { sda: { wear_pct: 80 } } }]];
+  for (const [key, x] of at) assert.ok(problems({ ...sampleWith(), ...x }, 'x')[key], `${key} at ${JSON.stringify(x)}`);
+});
+
+test('an episode keeps its first title (the Inbox pushes once); its detail follows the samples', () => {
+  poll(0, { health: sampleWith({ pools: [{ name: 'rpool', health: 'DEGRADED', cap: 50 }] }) });
+  poll(60, { health: sampleWith({ pools: [{ name: 'rpool', health: 'FAULTED', cap: 50 }] }) });
+  const c = watchOf(env).boxes.one.conditions['pool-rpool'];
+  assert.equal(c.title, 'one: ZFS pool rpool is DEGRADED');
+  assert.match(c.detail, /FAULTED/);
+});
+
+test('loom\'s own box quiet: it is the dark one, and no other is judged', () => {
+  ok(call(owner, 'add-box', { name: 'thor', mayHost: '*' }));
+  const thor = { kind: 'piece', subject: boxId('thor') };
+  ok(call(owner, 'box-watch', { name: 'thor', alwaysOn: 'on' }));
+  for (let m = 0; m <= 12; m++) { poll(m * 60, {}); if (m === 0) ok(call(thor, 'poll', {})); }
+  const n = healthAlerts().length;
+  // loom's own runner stops at 12 min; at 30 the manifest (loom's listeners still answering) reads.
+  at(30 * 60); manifest(env, clock, fx);
+  assert.deepEqual(healthAlerts().slice(n).map((a) => a.summary), ['one is dark']);
+});
+
+test('a report-only box never upgrades itself from what loom says', async () => {
+  let upgrades = 0, now = T0;
+  const client = { async call() { return { version: 'f'.repeat(40) }; } };
+  const r = runner({ ...env, LOOM_BOX_PODMAN: '/bin/false' }, client, { loomUrl: 'http://x/mcp', log: () => {}, clock: () => now, status: () => ({}), sweep: () => [], runtime: () => ({}), codexUsage: () => null,
+    upgrade: () => { upgrades++; return null; }, reportOnly: true, sampleUnits: async () => ({ at: '', units: [] }), sampleHealth: async () => null, bootInfo: () => null });
+  await r.tick(); await r.settled();
+  assert.equal(upgrades, 0);
+  const r2 = runner({ ...env, LOOM_BOX_PODMAN: '/bin/false' }, client, { loomUrl: 'http://x/mcp', log: () => {}, clock: () => now, status: () => ({}), sweep: () => [], runtime: () => ({}), codexUsage: () => null,
+    upgrade: () => { upgrades++; return null; }, reportOnly: false, sampleUnits: async () => ({ at: '', units: [] }), sampleHealth: async () => null, bootInfo: () => null });
+  await r2.tick();
+  assert.equal(upgrades, 1);
 });

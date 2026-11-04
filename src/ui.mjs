@@ -133,6 +133,11 @@ export function manifest(env, nowMs = Date.now(), o = {}) {
   };
 }
 
+function watchControlRows(b) {
+  return b.local ? [] : [{ label: 'Watch', value: `${b.reportOnly ? 'Report-only' : 'Hosts what it may'} · ${b.reportOnly || b.alwaysOn ? 'always on' : 'not always on'}`,
+          detail: 'An always-on box quiet for 10 minutes is an alert', act: b.reportOnly ? { action: 'box-watch', label: 'Let it host', fields: { name: b.id, report_only: 'off' }, confirm: `${b.label} may take houses again.` }
+            : { action: 'box-watch', label: b.alwaysOn ? 'Not always on' : 'Always on', fields: { name: b.id, always_on: b.alwaysOn ? 'off' : 'on' } } }];
+}
 function watchAsksOf(env, s) { try { return watchAsks(env, (b) => boxLabelOf(s, b), (b) => !!s.boxes[b]?.revoked); } catch { return []; } }
 function watchNoticesOf(env, nowMs) { try { return watchNotices(env, nowMs); } catch { return []; } }
 function watchRowsOf(env, box, nowMs) { try { return watchRows(env, box, nowMs); } catch { return []; } }
@@ -625,7 +630,7 @@ function boxesPage(env, nowMs, caller = OWNER) {
       return { label: b.label, value: `${seen} · ${plural(n, 'house')}`, tone: b.local || b.lastSeen ? 'ok' : 'warn',
         sheet: { title: b.label, blocks: [
           { type: 'panel', rows: [...(b.lastSeen || b.local ? runtimePanelRows(env, b, nowMs, mayAct(b)) : []), ...harnessPanelRows(s, b, nowMs, mayAct(b))].map(({ sheet: _s, ...r }) => r) },
-          ...(watchRowsOf(env, b.id, nowMs).length ? [{ type: 'panel', title: 'Watch', rows: watchRowsOf(env, b.id, nowMs).map(({ sheet: _s, ...r }) => r) }] : []),
+          { type: 'panel', title: 'Watch', rows: [...watchRowsOf(env, b.id, nowMs).map(({ sheet: _s, ...r }) => r), ...watchControlRows(b)] },
           ...(b.local ? [] : [boxSettingsPanel(b)]),
         ] } };
     }) }] });
@@ -645,9 +650,7 @@ function boxesPage(env, nowMs, caller = OWNER) {
         // When it last came back, and its units failing (watch.mjs).
         ...watchRowsOf(env, b.id, nowMs),
         // Whether silence is an alert, and whether it hosts anything: the owner's (control.mjs, setBoxWatch).
-        ...(b.local ? [] : [{ label: 'Watch', value: `${b.reportOnly ? 'Report-only' : 'Hosts what it may'} · ${b.reportOnly || b.alwaysOn ? 'always on' : 'not always on'}`,
-          detail: 'An always-on box quiet for 10 minutes is an alert', act: b.reportOnly ? { action: 'box-watch', label: 'Let it host', fields: { name: b.id, report_only: 'off' }, confirm: `${b.label} may take houses again.` }
-            : { action: 'box-watch', label: b.alwaysOn ? 'Not always on' : 'Always on', fields: { name: b.id, always_on: b.alwaysOn ? 'off' : 'on' } } }]),
+        ...watchControlRows(b),
       ] },
       // Its disk is the headline's tile (only loom's own box measures one).
       here.length

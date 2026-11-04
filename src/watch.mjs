@@ -339,7 +339,8 @@ function noteHealth(env, w, b, box, label, sample, nowMs, calls) {
     const was = conds[key];
     // A sample may open only so many conditions, and a box hold only so many (each is an alert to come).
     if (!was && (++opened > NEW_CONDITIONS_MAX || Object.keys(conds).length >= CONDITIONS_MAX)) continue;
-    const cur = { since: was?.since ?? iso, title: f.title, detail: f.detail, severity: f.severity, reading: f.reading, ...(was?.alerted ? { alerted: was.alerted, said: was.said } : {}) };
+    // Its title is the episode's, from its first sample (the Inbox pushes once by it); what changes is the detail.
+    const cur = { since: was?.since ?? iso, title: was?.title ?? f.title, detail: f.detail, severity: f.severity, reading: f.reading, ...(was?.alerted ? { alerted: was.alerted, said: was.said } : {}) };
     const lasted = nowMs - Date.parse(cur.since);
     if (!cur.alerted && lasted >= f.for * 60_000) {
       cur.alerted = cur.said = iso;
@@ -371,7 +372,7 @@ export const SAMPLE_LIST_MAX = 32;
 export const NEW_CONDITIONS_MAX = 16;
 const CONDITIONS_MAX = 64;
 /** One sample per box per this long; the rest are dropped quietly (a box's data, not anyone's work). */
-export const HEALTH_MIN_GAP_MS = 50_000;
+export const HEALTH_MIN_GAP_MS = 40_000;
 const HISTORY_FILE_MAX = 32 * 1024 * 1024;
 
 const POOL = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$/;
@@ -439,8 +440,12 @@ export function checkDark(env, s, nowMs = Date.now(), o = {}) {
       // The runtime itself up 10 minutes: its own box polling now (within 2 minutes) and since 10 minutes ago. After the
       // runtime was down, the first poll from anyone finds its own box stale, so nobody is dark until it's been back 10.
       const own = local && w.boxes[local];
-      if (!own?.upSince || !own.seen || nowMs - Date.parse(own.seen) > 2 * 60_000 || nowMs - Date.parse(own.upSince) < DARK_MS) return;
+      // The runtime's own box quiet: it's the one that's dark (its runner died, or the whole machine was down); the
+      // others can't be judged until it's been back 10 minutes.
+      const ownStale = !own?.seen || nowMs - Date.parse(own.seen) > 2 * 60_000;
+      if (!ownStale && (!own.upSince || nowMs - Date.parse(own.upSince) < DARK_MS)) return;
       for (const [id, b] of Object.entries(s.boxes)) {
+        if (ownStale && id !== local) continue;
         if (b.revoked || !(b.local || b.reportOnly || b.alwaysOn)) continue;
         const wb = (w.boxes[id] ??= {});
         const seen = wb.seen ?? b.lastSeen;
