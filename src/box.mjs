@@ -729,6 +729,8 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
     try { busy = sessionsBusy(pathJoin(stateDir(env), 'session-cpu.json')); } catch { busy = undefined; }
     // A runner before this one may have left a login's container behind (it died mid-sign-in): those go, once.
     // Tried again each tick until podman answers once (null: it didn't).
+    // A report-only box runs no sign-ins, so there's nothing of a runner before it to sweep (and no podman to ask).
+    if (reportOnlyHere) swept = true;
     if (!swept) {
       let gone = null;
       try { gone = sweep(); } catch (e) { log(`sweep: ${e.message}`); }
