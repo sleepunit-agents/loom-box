@@ -51,14 +51,30 @@ export function bootInfo(root = '') {
 }
 
 /** What looks like a secret in a unit's journal, redacted (as Art's art-unit-alert did), and its lines cut to size. */
+/**
+ * A webhook URL with its secret part gone: any token on the line that parses as a URL whose host or path says
+ * "webhook" (Discord, Teams, most), or whose host is hooks.slack.com, keeps only its scheme and host. No regex: a
+ * box's long line can't make it backtrack.
+ */
+function maskWebhooks(line) {
+  return line.split(/(\s+)/).map((tok) => {
+    if (!tok.includes('://') || tok.length < 10) return tok;
+    // A URL in quotes or brackets: what's around it stays.
+    const lead = tok.length - tok.replace(/^['"(<\[]+/, '').length;
+    const core = tok.slice(lead);
+    let u;
+    try { u = new URL(core); } catch { return tok; }
+    if (!/^https?:$/.test(u.protocol)) return tok;
+    const host = u.host.toLowerCase();
+    if (!(host === 'hooks.slack.com' || host.includes('webhook') || u.pathname.toLowerCase().includes('webhook'))) return tok;
+    return `${tok.slice(0, lead)}${u.protocol}//${u.host}/[REDACTED]`;
+  }).join('');
+}
+
 export function redact(text) {
-  // Every quantifier is bounded and each scheme anchored, and a line is cut to 2000 characters first: a box's long
-  // line can't make a regex backtrack for long (ReDoS) on the control plane.
-  return String(text ?? '').slice(0, LINE_MAX)
-    .replace(/[\0-\x08\x0b-\x1f]/g, '')
-    .replace(/(https:\/\/(?:[a-z]{1,20}\.)?discord(?:app)?\.com\/api(?:\/v\d{1,3})?\/webhooks\/\d{1,30}\/)[^\s]{1,300}/gi, '$1[REDACTED]')
-    .replace(/(https:\/\/hooks\.slack\.com\/(?:services|workflows|triggers)\/)[^\s]{1,300}/gi, '$1[REDACTED]')
-    .replace(/(\/[A-Za-z0-9._-]{0,40}webhooks?\/)[A-Za-z0-9_-]{16,200}/gi, '$1[REDACTED]')
+  // A line is cut to 2000 characters first, and every regex left is bounded with its scheme anchored, so a box's long
+  // line can't make one backtrack for long (ReDoS) on the control plane.
+  return maskWebhooks(String(text ?? '').slice(0, LINE_MAX).replace(/[\0-\x08\x0b-\x1f]/g, ''))
     .replace(/\b([A-Za-z][A-Za-z0-9+.-]{0,30}:\/\/)[^\s\/]{0,200}@/g, '$1[REDACTED]@')
     .replace(/(\bbearer {1,5})[A-Za-z0-9._~+\/=-]{8,500}/gi, '$1[REDACTED]')
     .replace(/((?:password|passwd|secret|api[_-]?key|token)[=:] {0,5})[^\s]{1,500}/gi, '$1[REDACTED]')
