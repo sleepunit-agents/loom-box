@@ -363,3 +363,14 @@ test('the box sends health once a minute, taken beside the polls', async () => {
   assert.equal(samples, 3);
   assert.equal(bodies.filter((b) => b.health).length, 3);
 });
+
+test('a report-only box never sweeps for sign-in containers (it runs none, and has no podman)', async () => {
+  let sweeps = 0;
+  const logs = [];
+  const client = { async call() { return {}; } };
+  const r = runner({ ...env, LOOM_BOX_PODMAN: '/bin/false' }, client, { loomUrl: 'http://x/mcp', log: (m) => logs.push(m), clock: () => T0, status: () => ({}), sweep: () => { sweeps++; return null; },
+    upgrade: () => null, runtime: () => ({}), codexUsage: () => null, reportOnly: true, sampleUnits: async () => ({ at: '', units: [] }), sampleHealth: async () => null, bootInfo: () => null });
+  for (let i = 0; i < 3; i++) { await r.tick(); await r.settled(); }
+  assert.equal(sweeps, 0);
+  assert.equal(logs.filter((l) => /sweep/.test(l)).length, 0);
+});
