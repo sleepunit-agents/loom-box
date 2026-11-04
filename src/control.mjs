@@ -705,6 +705,11 @@ export function report(env, effects, caller, { id, state, exit, log, build }) {
 const SERVICE_NAME = /^[a-z][a-z0-9-]{0,39}$/;
 const RESTART_BASE_MS = 5_000;
 const RESTART_MAX_MS = 300_000;
+/** A service's unasked ends kept on it (`crashes`), for the now board's crash-loop alert: the last hour's, ten at most. */
+const CRASHES_KEPT_MS = 3_600_000;
+const CRASHES_MAX = 10;
+/** What a box reports of a house it no longer has because it restarted (box.mjs): the runtime's restart, not a crash. */
+const RUNTIME_LOST = /the box no longer has this house \(it restarted/;
 /** One part of a saved state, as base64: inside loom's 1 MB body cap (src/blobs.mjs). */
 export const MAX_STATE_BYTES = Math.ceil(PART_RAW / 3) * 4;
 
@@ -782,7 +787,8 @@ export function serviceUp(env, effects, caller, body) {
     const svc = s.services[key];
     if (svc?.want === 'up') return { service: key, box: svc.box, house: svc.house, state: s.houses[svc.house]?.state };
     const box = placeHouse(s, a, { box: body.box || svc?.box || undefined }, env);
-    const next = { agent: a, name: body.name, box, want: 'up', restarts: 0, created: svc?.created ?? now(effects) };
+    // Its recent crashes stay: brought back up, a loop still shows as one.
+    const next = { agent: a, name: body.name, box, want: 'up', restarts: 0, created: svc?.created ?? now(effects), ...(svc?.crashes?.length ? { crashes: svc.crashes } : {}) };
     s.services[key] = next;
     const id = startService(s, next, effects);
     return { service: key, box, house: id, state: 'wanted' };
@@ -868,6 +874,14 @@ function serviceHouseEnded(s, h, effects) {
     return;
   }
   // A clean stop the owner didn't ask for, or a crash: up again, more slowly each time.
+  // Kept as a crash for the now board's loop alert (nowboard.mjs, looping): when, and its log's last line. Not a house
+  // the runtime itself lost track of (it restarted under it, or a house written off): that's the runtime's own doing.
+  if (h.state !== 'lost' && !RUNTIME_LOST.test(String(h.log ?? ''))) {
+    const at = Date.parse(h.updated);
+    const last = String(h.log ?? '').trim().split('\n').filter(Boolean).pop() ?? '';
+    svc.crashes = [...(svc.crashes ?? []).filter((c) => at - Date.parse(c.at) < CRASHES_KEPT_MS),
+      { at: h.updated, house: h.id, state: h.state, ...(Number.isInteger(h.exit) ? { exit: h.exit } : {}), ...(last ? { error: last.slice(0, 200) } : {}) }].slice(-CRASHES_MAX);
+  }
   const ranMs = Date.parse(h.updated) - Date.parse(h.started ?? h.created);
   svc.restarts = ranMs > 10 * 60_000 ? 1 : (svc.restarts ?? 0) + 1;
   startService(s, svc, effects, Math.min(RESTART_BASE_MS * 2 ** (svc.restarts - 1), RESTART_MAX_MS));

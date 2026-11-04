@@ -14,13 +14,29 @@
 // A board holds no message text: nowlog never writes any (its own tests pin it).
 //
 // What the runtime shows of it: on its page, the Now board (each agent's bridges, who they're talking with, what
-// waits and why, and the model accounts' quota, the old status board's tiles); in its manifest, a bridge gone dark
-// (an alert on loom's Inbox) and each agent's `doing` (its card on Home).
+// waits and why, and the model accounts' quota, the old status board's tiles); in its manifest, a bridge that's
+// actually down (an alert on loom's Inbox), one back after an outage (an FYI) and each agent's `doing` (its card on Home).
+//
+// A bridge's state (bridgeStatus; Jonathan, 2026-11-03: notify when it's actually down, not on every blip):
+//
+//   live        its snapshot is fresh (three of its intervals, 30 s at least)
+//   late        silent for less than LOOM_RUNTIME_BRIDGE_DARK_S (default 300) and nothing explains it: shown, never said
+//   restarting  silent, and the runtime knows why: its service's house is wanted, starting or stopping, being moved
+//               or restarted, or just started and not heard from yet. Never an alert (so never a push). Not forever:
+//               a house stuck that way for three dark thresholds is dark.
+//   down        silent, and the owner took its service down: nothing is meant to be running
+//   dark        silent for longer than the threshold while its house is supposed to be running: an alert
+//   looping     its service's house ended unasked LOOP_RESTARTS times or more within LOOP_WINDOW_S (control.mjs keeps
+//               them, `crashes`): an alert at once, whatever the timer says
+//
+// What was dark or looping is remembered (<data>/now-watch.json): back live, it leaves one FYI ("was down 7 min, back
+// at 14:02"); a blip under the threshold leaves nothing. The alert's text is fixed for its outage (when it began), so
+// loom pushes it once (loom src/ui/push.ts: an ask's key is its text); the FYI is a notice, which never pushes.
 import { existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, writeFileSync, appendFileSync, closeSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { setting } from './piece.mjs';
-import { AGENT_NAME } from './state.mjs';
+import { AGENT_NAME, load, withLock } from './state.mjs';
 
 const BRIDGE = /^[a-z][a-z0-9-]{0,30}$/;
 export const SNAP_MAX = 64 * 1024;
@@ -80,7 +96,7 @@ function writePrivate(path, text) {
 /** Each bridge on a board: how many it's talking with, how many wait, and whether its snapshot is fresh. */
 export function talking(dir, nowS = Date.now() / 1000) {
   const out = {};
-  for (const b of bridgesOf(dir, nowS)) out[b.name] = { talking: b.talking.length, waiting: b.waiting.length, age_s: Math.round(nowS - b.at), fresh: !b.dark };
+  for (const b of bridgesOf(dir, nowS)) out[b.name] = { talking: b.talking.length, waiting: b.waiting.length, age_s: Math.round(nowS - b.at), fresh: !b.stale };
   return out;
 }
 
@@ -125,7 +141,7 @@ export function runNow(env, caller, argv) {
 
 const readJson = (p) => { try { return JSON.parse(readFileSync(p, 'utf-8')); } catch { return null; } };
 
-/** A board's bridges: each snapshot with its freshness (dark: older than three of its intervals, 30 s at least). */
+/** A board's bridges: each snapshot with its freshness (stale: older than three of its intervals, 30 s at least). */
 export function bridgesOf(dir, nowS = Date.now() / 1000) {
   let names = [];
   try { names = readdirSync(dir).filter((n) => n.endsWith('.json') && !n.startsWith('.')).sort(); } catch { return []; }
@@ -138,7 +154,7 @@ export function bridgesOf(dir, nowS = Date.now() / 1000) {
     const at = Number(snap.at) || 0;
     const every = Math.max(10, Number(snap.interval_s) || 10);
     out.push({
-      name, at, dark: nowS - at > Math.max(30, 3 * every),
+      name, at, stale: nowS - at > Math.max(30, 3 * every),
       talking: Array.isArray(snap.talking) ? snap.talking : [], waiting: Array.isArray(snap.waiting) ? snap.waiting : [],
       slots: snap.slots && typeof snap.slots === 'object' ? snap.slots : null, socket: snap.socket && typeof snap.socket === 'object' ? snap.socket : null,
     });
@@ -160,7 +176,120 @@ export function boards(env, nowS = Date.now() / 1000) {
   return out;
 }
 
+// ─── What each bridge is: live, restarting, dark… ───────────────────────────
+
+/** Silence this long, with nothing to explain it, is a bridge down. */
+export const DARK_DEFAULT_S = 300;
+/** A crash loop: this many unasked ends of a bridge's service house within the window. */
+export const LOOP_RESTARTS = 3;
+export const LOOP_WINDOW_S = 15 * 60;
+/** A service house on its way up or down: the runtime is (re)starting it. */
+const TRANSIT = new Set(['wanted', 'starting', 'stopping']);
+const FYI_MAX = 10;
+const FYI_S = 86_400;
+
+/** LOOM_RUNTIME_BRIDGE_DARK_S: 30 s to a day, else the default. */
+export function darkAfterS(env) {
+  const n = Number.parseInt(setting(env, 'BRIDGE_DARK_S') ?? '', 10);
+  return Number.isInteger(n) && n >= 30 && n <= 86_400 ? n : DARK_DEFAULT_S;
+}
+
+const sec = (iso) => { const t = Date.parse(iso); return Number.isNaN(t) ? 0 : t / 1000; };
+
+/** The unasked ends of a service's house within the loop window (control.mjs, serviceHouseEnded), oldest first. */
+export function recentCrashes(svc, nowS) {
+  if (!svc || svc.want !== 'up' || !Array.isArray(svc.crashes)) return [];
+  return svc.crashes.filter((c) => c && nowS - sec(c.at) < LOOP_WINDOW_S && sec(c.at) > 0).sort((x, y) => sec(x.at) - sec(y.at));
+}
+
+/**
+ * What a bridge is now (the states above): {state, …}. `b` from bridgesOf; `svc` its service's record (agent/<bridge>,
+ * control.mjs) and `house` that service's current house, when the runtime runs it; a bridge it doesn't run has only
+ * its silence to go by.
+ */
+export function bridgeStatus(b, svc, house, nowS, darkS = DARK_DEFAULT_S) {
+  const crashes = recentCrashes(svc, nowS);
+  if (crashes.length >= LOOP_RESTARTS) return { state: 'looping', crashes };
+  if (!b.stale) return { state: 'live' };
+  if (svc && svc.want !== 'up') return { state: 'down' };
+  if (svc) {
+    // Its house is on its way (wanted, perhaps waiting out a back-off; claimed and starting; stopping for a move or a
+    // restart), or there's none yet: the runtime is replacing it.
+    if (!house || TRANSIT.has(house.state) || svc.moveTo) {
+      const since = house ? Math.max(sec(house.updated ?? house.created), sec(house.notBefore)) : nowS;
+      if (nowS - since <= 3 * darkS) return { state: 'restarting', house: house?.state ?? 'none', since };
+      return { state: 'dark', stuck: house?.state ?? 'none', stuckS: nowS - since };
+    }
+    // A fresh house, up but not heard from yet: its bridge is still connecting.
+    const started = sec(house.started ?? house.updated);
+    if (house.state === 'running' && started > b.at && nowS - started <= darkS) return { state: 'restarting', house: 'running', since: started };
+  }
+  return nowS - b.at > darkS ? { state: 'dark' } : { state: 'late' };
+}
+
+const watchFile = (env) => join(dataDir(env), 'now-watch.json');
+
+/**
+ * Every board's bridges with their state, and the outages remembered: a bridge dark or looping is noted (when it
+ * began), and back live it leaves one FYI. `s` is the runtime's state (load), read here if not given. Remembering is
+ * best-effort: a watch file that can't be had leaves the states as they are, with no FYI.
+ */
+export function watchBridges(env, nowS = Date.now() / 1000, s = undefined) {
+  const all = boards(env, nowS);
+  let st = s;
+  if (st === undefined) { try { st = load(env); } catch { st = null; } }
+  const darkS = darkAfterS(env);
+  const out = {};
+  for (const [agent, bs] of Object.entries(all)) {
+    out[agent] = bs.map((b) => {
+      const svc = st?.services?.[`${agent}/${b.name}`];
+      return { ...b, ...bridgeStatus(b, svc, svc ? st?.houses?.[svc.house] : undefined, nowS, darkS) };
+    });
+  }
+  let w = { v: 1, bridges: {}, notices: [] };
+  try {
+    withLock(dataDir(env), 'now-watch.lock', () => {
+      const had = readJson(watchFile(env));
+      if (had && typeof had === 'object' && had.bridges && typeof had.bridges === 'object') w = { v: 1, bridges: had.bridges, notices: Array.isArray(had.notices) ? had.notices : [] };
+      const before = JSON.stringify(w);
+      const seen = new Set();
+      for (const [agent, bs] of Object.entries(out)) {
+        for (const b of bs) {
+          const k = `${agent}/${b.name}`;
+          seen.add(k);
+          const r = w.bridges[k];
+          if (b.state === 'dark' || b.state === 'looping') {
+            // An outage's start: its last word (dark), or its first restart in the window (looping). Kept while it lasts.
+            if (!r || r.kind !== b.state) w.bridges[k] = { kind: b.state, since: b.state === 'dark' ? b.at : sec(b.crashes[0].at), outage: r?.outage ?? b.at, restarts: b.crashes?.length ?? 0 };
+            else if (b.state === 'looping') r.restarts = Math.max(r.restarts ?? 0, b.crashes.length);
+          } else if (b.state === 'live' && r) {
+            w.notices.unshift(backNotice(agent, b, r));
+            delete w.bridges[k];
+          } else if (b.state === 'down' && r) delete w.bridges[k]; // the owner took it down: nothing to report
+          // Restarting or late: an outage still going (if one was noted), never a new one.
+        }
+      }
+      for (const k of Object.keys(w.bridges)) if (!seen.has(k)) delete w.bridges[k];
+      w.notices = w.notices.filter((n) => n && typeof n.text === 'string' && nowS - sec(n.at) < FYI_S).slice(0, FYI_MAX);
+      if (JSON.stringify(w) !== before) { ensureDir(dataDir(env)); writePrivate(watchFile(env), JSON.stringify(w)); }
+    }, 'the now board\'s watch', 2000);
+  } catch { /* remembered next time */ }
+  for (const [agent, bs] of Object.entries(out)) for (const b of bs) { const r = w.bridges[`${agent}/${b.name}`]; if (r) b.outage = r; }
+  return { all: out, notices: w.notices };
+}
+
+/** The FYI a bridge back from an outage leaves: how long it was down (or that it settled), and when it came back. */
+function backNotice(agent, b, r) {
+  const who = `${cap(agent)}'s ${b.name} bridge`;
+  const text = r.kind === 'looping'
+    ? `${who} is steady again after ${r.restarts} restarts, back at ${clock(b.at)}`
+    : `${who} was down ${minutes(b.at - (r.outage ?? r.since))}, back at ${clock(b.at)}`;
+  return { text, at: new Date(b.at * 1000).toISOString(), agent, page: 'now' };
+}
+
 const cap = (s) => String(s).charAt(0).toUpperCase() + String(s).slice(1);
+const minutes = (s) => { const m = Math.max(1, Math.round(s / 60)); return m < 120 ? `${m} min` : `${Math.round(m / 60)} h`; };
+const lastError = (crashes) => { const e = [...crashes].reverse().find((c) => c.error)?.error; return e ? String(e).replace(/\s+/g, ' ').trim().slice(0, 140) : ''; };
 const clock = (s) => new Date(s * 1000).toISOString().slice(11, 16) + ' UTC';
 function ago(sec) {
   const s = Math.max(0, Math.round(sec));
@@ -176,19 +305,30 @@ const withWhom = (t) => {
 };
 const why = (w) => String(w?.why ?? w?.reason ?? w?.hold ?? '').slice(0, 80);
 
-/** The manifest's part: a dark bridge's alert, and each agent's doing (its card on Home). */
-export function nowManifest(env, nowS = Date.now() / 1000) {
-  const all = boards(env, nowS);
+/** The manifest's part: an alert for each bridge actually down (dark or looping), the FYIs, and each agent's doing. */
+export function nowManifest(env, nowS = Date.now() / 1000, s = undefined) {
+  const { all, notices } = watchBridges(env, nowS, s);
   const asks = [];
   const agents = {};
   for (const [agent, bs] of Object.entries(all)) {
-    for (const b of bs.filter((x) => x.dark)) {
-      asks.push({ text: `${cap(agent)}'s ${b.name} bridge is dark since ${clock(b.at)}`, meta: `no word from it for ${ago(nowS - b.at)}`,
-        // Something wrong to look at, not a choice (loom's Inbox files it under Alerts, not Decisions).
-        page: 'now', label: 'Look', kind: 'alert', agent });
+    for (const b of bs) {
+      const who = `${cap(agent)}'s ${b.name} bridge`;
+      // Something wrong to look at, not a choice (loom's Inbox files it under Alerts, not Decisions). Its text is fixed
+      // for the outage (when it began), so it's pushed once; what changes goes in its meta.
+      if (b.state === 'dark') {
+        asks.push({ text: `${who} is down: no word since ${clock(b.at)}`,
+          meta: b.stuck ? `its house has been ${b.stuck === 'none' ? 'missing' : b.stuck} for ${minutes(b.stuckS)}` : `nothing from it for ${ago(nowS - b.at)}, while its house is up`,
+          at: new Date(b.at * 1000).toISOString(), page: 'now', label: 'Look', kind: 'alert', agent });
+      } else if (b.state === 'looping') {
+        const since = b.outage?.kind === 'looping' ? b.outage.since : sec(b.crashes[0].at);
+        const err = lastError(b.crashes);
+        asks.push({ text: `${who} keeps restarting, since ${clock(since)}`,
+          meta: `${b.crashes.length} restarts in ${minutes(nowS - sec(b.crashes[0].at))}${err ? `, last error: ${err}` : ''}`,
+          at: new Date(since * 1000).toISOString(), page: 'now', label: 'Look', kind: 'alert', agent });
+      }
     }
     // Each conversation one of its bodies is in, simply (as shuttle's card said it): who or where, and how lately.
-    const doing = bs.filter((b) => !b.dark).flatMap((b) => b.talking.map((t) => {
+    const doing = bs.filter((b) => !b.stale).flatMap((b) => b.talking.map((t) => {
       const who = Array.isArray(t.who) ? t.who.filter((x) => typeof x === 'string') : [];
       const venue = typeof t.venue === 'string' ? t.venue.slice(0, 40) : '';
       const dm = /\bdm\b/i.test(venue);
@@ -201,33 +341,40 @@ export function nowManifest(env, nowS = Date.now() / 1000) {
     }));
     if (doing.length) agents[agent] = doing.slice(0, DOING_MAX);
   }
-  return { asks: asks.slice(0, ASKS_MAX), agents };
+  return { asks: asks.slice(0, ASKS_MAX), agents, notices };
 }
 
 /** The Now page: the old status board's tiles (bridges, talking, waiting, quota), then each agent's board. */
 /** A usage window in words: "7d" -> "week", "5h" -> "5 hours". */
 const windowName = (k) => (k === '7d' ? 'week' : /^\d+h$/.test(k) ? `${k.slice(0, -1)} hours` : /^\d+d$/.test(k) ? `${k.slice(0, -1)} days` : k);
 
-export function nowPage(env, { usage = [], nowS = Date.now() / 1000 } = {}) {
-  const all = boards(env, nowS);
+export function nowPage(env, { usage = [], nowS = Date.now() / 1000, state = undefined } = {}) {
+  const { all } = watchBridges(env, nowS, state);
   const flat = Object.values(all).flat();
-  const live = flat.filter((b) => !b.dark);
+  const isLive = (x) => x.state === 'live' || x.state === 'late';
+  const live = flat.filter(isLive);
   const sections = [];
-  const dark = flat.length - live.length;
-  const talking = live.reduce((n, b) => n + b.talking.length, 0);
-  const waiting = live.reduce((n, b) => n + b.waiting.length, 0);
+  const dark = flat.filter((x) => x.state === 'dark' || x.state === 'looping').length;
+  const restarting = flat.filter((x) => x.state === 'restarting').length;
+  const off = flat.filter((x) => x.state === 'down').length;
+  // Who's talking and waiting: from snapshots still current, whatever the bridge's state.
+  const current = flat.filter((x) => !x.stale);
+  const talking = current.reduce((n, x) => n + x.talking.length, 0);
+  const waiting = current.reduce((n, x) => n + x.waiting.length, 0);
   // The quota, as the boxes report it (accounts.mjs): each window a meter; the fullest one a tile.
   const windows = usage.filter((u) => Object.keys(u.windows ?? {}).length).flatMap((u) => Object.entries(u.windows).filter(([, v]) => typeof v === 'number').map(([w, v]) => ({ u, w, v: Math.max(0, Math.min(1, v)) })));
   const fullest = windows.reduce((m, x) => (!m || x.v > m.v ? x : m), null);
   const toneOfUse = (v) => (v >= 0.95 ? { tone: 'bad' } : v >= 0.8 ? { tone: 'warn' } : {});
   // The headline: the bridges in a word, then the quota if it's running out.
+  const detail = [`${live.length} live`, ...(restarting ? [`${restarting} restarting`] : []), ...(off ? [`${off} down`] : []), `${talking} talking`, `${waiting} waiting`].join(' · ');
   const health = dark
-    ? { tone: 'bad', text: `${dark === 1 ? 'A bridge has' : `${dark} bridges have`} gone quiet`, detail: `${live.length} live · ${talking} talking · ${waiting} waiting` }
+    ? { tone: 'bad', text: `${dark === 1 ? 'A bridge is' : `${dark} bridges are`} down`, detail }
+    : restarting ? { tone: 'warn', text: `${restarting === 1 ? 'A bridge is' : `${restarting} bridges are`} restarting`, detail }
     : fullest && fullest.v >= 0.95 ? { tone: 'bad', text: `${fullest.u.label} is nearly out`, detail: `${Math.round(fullest.v * 100)}% of its ${windowName(fullest.w)} used` }
       : !flat.length ? { tone: 'muted', text: 'No bridge reports yet', detail: 'A bridge writes here once it\'s up.' }
         : { tone: fullest && fullest.v >= 0.8 ? 'warn' : 'ok', text: `${flat.length === 1 ? 'The bridge is' : `All ${flat.length} bridges are`} live`, detail: `${talking} talking · ${waiting} waiting${fullest && fullest.v >= 0.8 ? ` · ${fullest.u.label} at ${Math.round(fullest.v * 100)}%` : ''}` };
   const stats = [
-    { label: 'Bridges', value: `${live.length} live`, ...(dark ? { detail: `${dark} dark`, tone: 'bad' } : { tone: live.length ? 'ok' : 'muted' }) },
+    { label: 'Bridges', value: `${live.length} live`, ...(dark ? { detail: `${dark} down`, tone: 'bad' } : restarting ? { detail: `${restarting} restarting`, tone: 'warn' } : { tone: live.length ? 'ok' : 'muted' }) },
     { label: 'Talking', value: String(talking), detail: 'conversations' },
     { label: 'Waiting', value: String(waiting), ...(waiting ? { tone: 'warn', detail: 'for a body' } : { detail: 'nothing' }) },
     ...(fullest ? [{ label: 'Quota', value: `${Math.round(fullest.v * 100)}%`, detail: `${fullest.u.label}, ${windowName(fullest.w)}`, meter: fullest.v, ...toneOfUse(fullest.v) }] : []),
@@ -236,13 +383,9 @@ export function nowPage(env, { usage = [], nowS = Date.now() / 1000 } = {}) {
   const meters = windows.map(({ u, w, v }) => ({ label: `${u.label} · ${windowName(w)}`, value: v, detail: `${Math.round(v * 100)}%${u.resets?.[w] ? `, resets ${clock(u.resets[w])}` : ''}`, ...toneOfUse(v) }));
   sections.push({ id: 'quota', title: 'Quota', side: true, blocks: [meters.length ? { type: 'meter', items: meters.slice(0, 12) } : { type: 'text', tone: 'muted', text: 'No account has reported its usage yet.' }] });
   for (const [agent, bs] of Object.entries(all)) {
-    const rows = bs.map((b) => ({
-      text: `${cap(b.name)} bridge`, agent,
-      meta: b.dark ? `dark: no word for ${ago(nowS - b.at)}` : [`${b.talking.length} talking`, `${b.waiting.length} waiting`, ...(b.slots ? [`${b.slots.used ?? 0} of ${b.slots.cap ?? '?'} slots`] : []), ...(b.socket?.state ? [`socket ${b.socket.state}`] : [])].join(' · '),
-      badge: b.dark ? 'quiet' : 'live', tone: b.dark ? 'bad' : 'ok',
-    }));
-    const talk = bs.filter((b) => !b.dark).flatMap((b) => b.talking.map((t) => ({ text: withWhom(t), meta: b.name })));
-    const wait = bs.filter((b) => !b.dark).flatMap((b) => b.waiting.map((w) => ({ text: withWhom(w), meta: [b.name, why(w)].filter(Boolean).join(' · '), tone: 'warn' })));
+    const rows = bs.map((b) => ({ text: `${cap(b.name)} bridge`, agent, ...bridgeRow(b, nowS) }));
+    const talk = bs.filter((b) => !b.stale).flatMap((b) => b.talking.map((t) => ({ text: withWhom(t), meta: b.name })));
+    const wait = bs.filter((b) => !b.stale).flatMap((b) => b.waiting.map((w) => ({ text: withWhom(w), meta: [b.name, why(w)].filter(Boolean).join(' · '), tone: 'warn' })));
     sections.push({ id: `board-${agent}`, title: `${cap(agent)}'s bridges`, blocks: [
       { type: 'list', items: rows },
       ...(talk.length ? [{ type: 'text', tone: 'muted', text: 'Talking now' }, { type: 'list', items: talk.slice(0, 20) }] : []),
@@ -250,6 +393,19 @@ export function nowPage(env, { usage = [], nowS = Date.now() / 1000 } = {}) {
     ] });
   }
   return { title: 'Now', intro: 'Live state: each agent\'s bridges, who they\'re talking with and what waits. Nothing anyone said is kept here.', sections };
+}
+
+/** A bridge's row on the Now page: its badge and tone by its state, and a line saying why. */
+function bridgeRow(b, nowS) {
+  const busy = [`${b.talking.length} talking`, `${b.waiting.length} waiting`, ...(b.slots ? [`${b.slots.used ?? 0} of ${b.slots.cap ?? '?'} slots`] : []), ...(b.socket?.state ? [`socket ${b.socket.state}`] : [])].join(' · ');
+  switch (b.state) {
+    case 'looping': { const err = lastError(b.crashes); return { badge: 'restarting', tone: 'bad', meta: `keeps restarting: ${b.crashes.length} restarts in ${minutes(nowS - sec(b.crashes[0].at))}${err ? `, last error: ${err}` : ''}` }; }
+    case 'dark': return { badge: 'down', tone: 'bad', meta: b.stuck ? `down: its house has been ${b.stuck === 'none' ? 'missing' : b.stuck} for ${minutes(b.stuckS)}` : `down: no word for ${ago(nowS - b.at)}, while its house is up` };
+    case 'restarting': return { badge: 'restarting', tone: 'warn', meta: `the runtime is ${b.house === 'running' ? 'bringing it back: its house is up, the bridge is connecting' : b.house === 'stopping' ? 'restarting its house' : 'starting its house'}` };
+    case 'down': return { badge: 'off', tone: 'muted', meta: 'taken down: its service is down' };
+    case 'late': return { badge: 'live', tone: 'warn', meta: `no word for ${ago(nowS - b.at)}` };
+    default: return { badge: 'live', tone: 'ok', meta: busy };
+  }
 }
 
 export const boardExists = (env, agent) => existsSync(boardDir(env, agent));

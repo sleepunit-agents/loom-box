@@ -106,6 +106,7 @@ import { readModels, resolveFor, setModels } from './models.mjs';
 import { endBody, feedBody, listBodies, resumeBody, startBody } from './bodies.mjs';
 import { PART_RAW, joinParts, partsOf } from './blobs.mjs';
 import { answerLoop, deliver, listConvs, post, send, tick } from './delivery.mjs';
+import { watchBridges } from './nowboard.mjs';
 import { reviewStatus, reviewTick, runReview } from './review.mjs';
 import { bodyKeyFor, runBodyHost } from './bodyhost.mjs';
 import { runnerFor, usageDirOf } from './runners.mjs';
@@ -128,6 +129,8 @@ export function keepsHousesOnExit(env, read = {}) {
   return show(unit).trim() === 'process';
 }
 
+/** How often the delivery service notes the bridges' outages (nowboard.mjs, watchBridges). */
+const WATCH_EVERY_MS = 30_000;
 const USAGE = readFileSync(fileURLToPath(import.meta.url), 'utf-8').split('\n').slice(1).filter((l) => l.startsWith('//')).map((l) => l.slice(3)).join('\n') + '\n';
 
 class Fail extends Error { constructor(m, code = 1) { super(m); this.code = code; } }
@@ -563,8 +566,11 @@ async function delivery(rest, env, json) {
   }
   if (sub === 'run') {
     const every = Number(flag(rest, '--every')) || 5000;
+    let watched = 0;
     for (;;) {
       try { await tick(env); } catch (err) { process.stderr.write(`loom-runtime deliver: tick: ${err.message}\n`); }
+      // The bridges' outages, noted even while nothing reads the manifest (loom down for a deploy): each half minute.
+      if (Date.now() - watched >= WATCH_EVERY_MS) { watched = Date.now(); try { watchBridges(env); } catch (err) { process.stderr.write(`loom-runtime deliver: bridge watch: ${err.message}\n`); } }
       // The day's review, once it's due (review.mjs): started detached, so the tick never waits on it.
       try { const r = await reviewTick(env); if (r?.started) process.stderr.write(`loom-runtime deliver: started the review for ${r.started}\n`); } catch (err) { process.stderr.write(`loom-runtime deliver: review tick: ${err.message}\n`); }
       if (rest.includes('--once')) return;

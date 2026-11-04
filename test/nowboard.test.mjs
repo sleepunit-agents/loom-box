@@ -94,28 +94,28 @@ describe('the inbox: a bridge in a house writes its board through the runtime', 
 });
 
 describe('the board on the runtime\'s page and in its manifest', () => {
-  test('a dark bridge is an alert, a live one\'s conversations are its agent\'s doing; nothing anyone said', async () => {
+  test('a bridge silent past the threshold (and not the runtime\'s restart) is an alert, a live one\'s conversations are its agent\'s doing; nothing anyone said', async () => {
     const env = world();
     const now = Date.now() / 1000;
     await api(env, fx, { caller: art, path: 'now/snapshot', body: { bridge: 'discord', snap: snap(now, { talking: [{ chan: 'D1', venue: 'discord-dm', who: ['Grace Aquino'], active_s: 120, body_since: now - 300 }] }) } });
     await api(env, fx, { caller: mark, path: 'now/snapshot', body: { bridge: 'discord', snap: snap(now - 3600) } });
     const m = nowManifest(env, now);
     assert.equal(m.asks.length, 1);
-    assert.match(m.asks[0].text, /^Mark's discord bridge is dark since /);
+    assert.match(m.asks[0].text, /^Mark's discord bridge is down: no word since /);
     assert.deepEqual([m.asks[0].kind, m.asks[0].agent, m.asks[0].page], ['alert', 'mark', 'now']);
     assert.deepEqual(m.agents.art[0], { text: 'Talking with Grace Aquino', kind: 'talk', where: 'Discord discord-dm · active 2m ago', since: new Date((now - 300) * 1000).toISOString() });
     assert.equal(m.agents.mark, undefined);
     // The whole manifest carries them, beside the runtime's own.
     const full = manifest(env);
-    assert.ok(full.asks.some((a) => a.text.startsWith('Mark\'s discord bridge is dark')));
+    assert.ok(full.asks.some((a) => a.text.startsWith('Mark\'s discord bridge is down')));
     assert.equal(full.agents.art.doing[0].text, 'Talking with Grace Aquino');
     assert.deepEqual(full.tile.label, 'Boxes', 'the runtime\'s tile is still its boxes');
     const p = nowPage(env, { usage: [{ account: 'max', provider: 'anthropic', label: 'Claude Max', windows: { '5h': 0.4, '7d': 0.97 }, resets: { '5h': now + 3600 } }], nowS: now });
     // A status screen: the headline in words (a dark bridge first), then tiles, the fullest quota window a meter.
-    assert.deepEqual(p.sections[0].blocks[0], { type: 'health', tone: 'bad', text: 'A bridge has gone quiet', detail: '1 live · 1 talking · 0 waiting' });
+    assert.deepEqual(p.sections[0].blocks[0], { type: 'health', tone: 'bad', text: 'A bridge is down', detail: '1 live · 1 talking · 0 waiting' });
     const stats = p.sections[0].blocks[1].items;
     assert.deepEqual(stats.map((x) => [x.label, x.value]), [['Bridges', '1 live'], ['Talking', '1'], ['Waiting', '0'], ['Quota', '97%']]);
-    assert.equal(stats[0].detail, '1 dark');
+    assert.equal(stats[0].detail, '1 down');
     assert.deepEqual([stats[3].meter, stats[3].tone, stats[3].detail], [0.97, 'bad', 'Claude Max, week']);
     assert.deepEqual(p.sections[1].blocks[0].items.map((x) => x.label), ['Claude Max · 5 hours', 'Claude Max · week']);
     assert.equal(p.sections[1].blocks[0].items[1].tone, 'bad');
@@ -141,7 +141,7 @@ describe('the board on the runtime\'s page and in its manifest', () => {
     writeFileSync(join(env.LOOM_RUNTIME_NOW_DIR, 'art-now', 'convs.json'), '{"at": 1}');
     assert.deepEqual(bridgesOf(join(env.LOOM_RUNTIME_NOW_DIR, 'art-now')), []);
     assert.deepEqual(talking(join(env.LOOM_RUNTIME_NOW_DIR, 'art-now')), {});
-    assert.deepEqual(nowManifest(env), { asks: [], agents: {} });
+    assert.deepEqual(nowManifest(env), { asks: [], agents: {}, notices: [] });
     assert.equal(manifest(env).tile.label, 'Boxes');
   });
 });
