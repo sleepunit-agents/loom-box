@@ -170,7 +170,7 @@ test('redact: webhook URLs (Discord, Teams, Slack, any webhook), bearer tokens, 
   const discord = redact('posting to https://discord.com/api/webhooks/123456789/abcDEFtokenTOKENtoken failed: 404');
   assert.equal(discord, 'posting to https://discord.com/[REDACTED] failed: 404');
   const teams = redact("sent 'https://contoso.webhook.office.com/webhookb2/aaaa-bbbb@cccc/IncomingWebhook/dddd1234/eeee-ffff' ok");
-  assert.equal(teams, "sent 'https://contoso.webhook.office.com/[REDACTED] ok");
+  assert.equal(teams, "sent 'https://contoso.webhook.office.com/[REDACTED]' ok");
   assert.equal(redact('to https://hooks.slack.com/services/T0/B0/slackSECRET1 now'), 'to https://hooks.slack.com/[REDACTED] now');
   const long = redact('https://ex.com/api/webhook/' + 'a'.repeat(900));
   assert.equal(long, 'https://ex.com/[REDACTED]');
@@ -178,6 +178,11 @@ test('redact: webhook URLs (Discord, Teams, Slack, any webhook), bearer tokens, 
   assert.doesNotMatch(r, /eyJhbGci|hunter2|u:pw|abcdefghijklmnopqrstu|loom_abcdefghij/);
   for (const kept of ['Using Bearer', 'password=', 'done', 'https://[REDACTED]@host/x']) assert.ok(r.includes(kept), `${kept} in ${r}`);
   assert.equal(redact('Error: EADDRINUSE: address already in use :::8080 at https://example.com/api/x'), 'Error: EADDRINUSE: address already in use :::8080 at https://example.com/api/x');
+  assert.equal(redact('KEY=https://discord.com/api/webhooks/1/xSECRETxxxxxxxxxxxxxxxx'), 'KEY=https://discord.com/[REDACTED]');
+  assert.equal(redact('{"url":"https://discord.com/api/webhooks/1/jsonSECRETxxxxxxxx","ok":true}'), '{"url":"https://discord.com/[REDACTED]","ok":true}');
+  assert.equal(redact('POST /api/webhooks/1/SECRETTOKEN HTTP/1.1'), 'POST /api/webhooks/[REDACTED] HTTP/1.1');
+  assert.equal(redact('see a=https://example.com/x,b=https://x.webhook.office.com/webhookb2/S3CRET'), 'see a=https://example.com/x,b=https://x.webhook.office.com/[REDACTED]');
+  assert.equal(redact('GET /api/users/1 HTTP/1.1'), 'GET /api/users/1 HTTP/1.1');
 });
 
 test('a scope the box couldn\'t read keeps its episodes: unknown, never OK again', () => {
@@ -240,7 +245,7 @@ test('the box sends its boot on every poll and its units once a minute, sampled 
 
 
 test('redact is quick on a pathological 100 KB line, and still masks a password with an @ in it', () => {
-  const lines = ['https://' + 'a'.repeat(100_000), 'https://x.webhook.com/' + 'a/'.repeat(50_000), ('https://hooks.slack.com/s ').repeat(5000), 'x://' + 'a@'.repeat(50_000), 'bearer ' + 'a'.repeat(100_000), '/webhook/' + 'a'.repeat(100_000),
+  const lines = ['a://'.repeat(25_000), 'x=' + 'https://'.repeat(12_000), '/webhook'.repeat(12_000), 'https://' + 'a'.repeat(100_000), 'https://x.webhook.com/' + 'a/'.repeat(50_000), ('https://hooks.slack.com/s ').repeat(5000), 'x://' + 'a@'.repeat(50_000), 'bearer ' + 'a'.repeat(100_000), '/webhook/' + 'a'.repeat(100_000),
     'token=' + 'a'.repeat(100_000), 'https://hooks.slack.com/services/' + 'a/'.repeat(50_000), 'A'.repeat(30) + '://' + '@'.repeat(100_000)];
   for (const l of lines) {
     const t = process.hrtime.bigint();
