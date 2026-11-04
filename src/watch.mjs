@@ -49,24 +49,43 @@ export function bootInfo(root = '') {
 }
 
 /** What looks like a secret in a unit's journal, redacted (as Art's art-unit-alert did), and its lines cut to size. */
+/** Whether a parsed URL is a webhook's: "webhook" in its host or path, or Slack's hooks host. */
+const isHook = (u) => /^https?:$/.test(u.protocol) && (u.host.toLowerCase() === 'hooks.slack.com' || u.host.toLowerCase().includes('webhook') || u.pathname.toLowerCase().includes('webhook'));
+/** Where a URL embedded in a token ends: a quote, a bracket, a comma or a backslash closes it. */
+const URL_END = new Set(['"', "'", '<', '>', '(', ')', '[', ']', '{', '}', ',', '\\', '`']);
+
 /**
- * A webhook URL with its secret part gone: any token on the line that parses as a URL whose host or path says
- * "webhook" (Discord, Teams, most), or whose host is hooks.slack.com, keeps only its scheme and host. No regex: a
- * box's long line can't make it backtrack.
+ * One whitespace-free token with its webhooks' secret parts gone. Each `://` in it is backed up to its scheme's start
+ * (letters only, 30 at most), the URL runs to the first closing character, and a webhook's URL keeps only its scheme
+ * and host; what's around it stays. A token with no `://` that's a path with a segment saying "webhook"
+ * (`/api/webhooks/1/SECRET`) keeps the path through that segment. No regex: nothing here can backtrack.
  */
+function maskToken(tok) {
+  if (!tok.includes('://')) {
+    if (!tok.includes('/')) return tok;
+    const segs = tok.split('/');
+    const at = segs.findIndex((g) => g.toLowerCase().includes('webhook'));
+    return at >= 0 && at < segs.length - 1 && segs.slice(at + 1).join('') ? `${segs.slice(0, at + 1).join('/')}/[REDACTED]` : tok;
+  }
+  let out = '', pos = 0;
+  for (let idx = tok.indexOf('://', pos); idx >= 0; idx = tok.indexOf('://', pos)) {
+    let start = idx;
+    while (start > pos && idx - start < 30 && /[A-Za-z]/.test(tok[start - 1])) start--;
+    let end = idx + 3;
+    while (end < tok.length && !URL_END.has(tok[end])) end++;
+    out += tok.slice(pos, start);
+    const url = tok.slice(start, end);
+    let u = null;
+    try { u = start < idx ? new URL(url) : null; } catch { u = null; }
+    out += u && isHook(u) ? `${u.protocol}//${u.host}/[REDACTED]` : url;
+    pos = end;
+  }
+  return out + tok.slice(pos);
+}
+
+/** Every token on the line, masked (the line is already cut to LINE_MAX). */
 function maskWebhooks(line) {
-  return line.split(/(\s+)/).map((tok) => {
-    if (!tok.includes('://') || tok.length < 10) return tok;
-    // A URL in quotes or brackets: what's around it stays.
-    const lead = tok.length - tok.replace(/^['"(<\[]+/, '').length;
-    const core = tok.slice(lead);
-    let u;
-    try { u = new URL(core); } catch { return tok; }
-    if (!/^https?:$/.test(u.protocol)) return tok;
-    const host = u.host.toLowerCase();
-    if (!(host === 'hooks.slack.com' || host.includes('webhook') || u.pathname.toLowerCase().includes('webhook'))) return tok;
-    return `${tok.slice(0, lead)}${u.protocol}//${u.host}/[REDACTED]`;
-  }).join('');
+  return line.split(/(\s+)/).map((tok) => (tok.length < 10 || /^\s/.test(tok) ? tok : maskToken(tok))).join('');
 }
 
 export function redact(text) {
