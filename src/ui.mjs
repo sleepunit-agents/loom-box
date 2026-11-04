@@ -129,12 +129,12 @@ export function manifest(env, nowMs = Date.now()) {
     agents: reports,
     // A delivery the runtime gave up on (its body never started, after its retries): the owner hears of it.
     // ...and a relay thread between agents that's run long today: a heads-up, never a stop (relay.mjs).
-    notices: [...deliveryNotices(env), ...relayNotices(env), ...boxNotices(s), ...(board.notices ?? []), ...watchNoticesOf(env)].sort((x, y) => Date.parse(y.at) - Date.parse(x.at)).slice(0, 20),
+    notices: [...deliveryNotices(env), ...relayNotices(env), ...boxNotices(s), ...(board.notices ?? []), ...watchNoticesOf(env, nowMs)].sort((x, y) => Date.parse(y.at) - Date.parse(x.at)).slice(0, 20),
   };
 }
 
 function watchAsksOf(env, s) { try { return watchAsks(env, (b) => boxLabelOf(s, b), (b) => !!s.boxes[b]?.revoked); } catch { return []; } }
-function watchNoticesOf(env) { try { return watchNotices(env); } catch { return []; } }
+function watchNoticesOf(env, nowMs) { try { return watchNotices(env, nowMs); } catch { return []; } }
 function watchRowsOf(env, box, nowMs) { try { return watchRows(env, box, nowMs); } catch { return []; } }
 
 function joinAsk(j) {

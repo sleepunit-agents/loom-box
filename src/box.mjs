@@ -696,9 +696,9 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
   // Keeping watch (watch.mjs): this boot on every poll; the units, sampled once a minute and sent with the next poll.
   const sampleUnits = unitsImpl ?? unitSampler(env);
   const readBoot = bootImpl ?? (() => bootInfo());
-  // Health (health.mjs): its 5 s window runs beside the polls, and the sample goes with the first poll after it's done.
+  // The units' sample and health's (its 5 s window) run beside the polls, each sent with the first poll after it's done.
   const takeHealth = healthImpl ?? (() => sampleHealth());
-  let unitsAt = 0, healthAt = 0, healthDone = null, healthBusy = false;
+  let unitsAt = 0, unitsDone = null, unitsBusy = false, healthAt = 0, healthDone = null, healthBusy = false;
   // Report-only (joined with --report-only): it says so on every poll, and takes nothing.
   let reportOnlyHere = reportOnly;
   if (reportOnlyHere === undefined) { try { reportOnlyHere = !!JSON.parse(readFileSync(configPath(env), 'utf-8')).reportOnly; } catch { reportOnlyHere = false; } }
@@ -706,9 +706,11 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
     const out = {};
     if (reportOnlyHere) out.reportOnly = true;
     try { const b = readBoot(); if (b) out.boot = b; } catch { /* left out */ }
-    if (clock() - unitsAt >= SAMPLE_MS) {
+    if (unitsDone) { out.units = unitsDone; unitsDone = null; }
+    if (!unitsBusy && clock() - unitsAt >= SAMPLE_MS) {
       unitsAt = clock();
-      try { out.units = sampleUnits(clock()); } catch (e) { log(`units: ${e.message}`); }
+      unitsBusy = true;
+      Promise.resolve().then(() => sampleUnits(clock())).then((u) => { unitsDone = u; }, (e) => log(`units: ${e.message}`)).finally(() => { unitsBusy = false; });
     }
     if (healthDone) { out.health = healthDone; healthDone = null; }
     if (!healthBusy && clock() - healthAt >= SAMPLE_MS) {
@@ -718,6 +720,8 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
     }
     return out;
   }
+  /** For a test: the units' sample under way, done. */
+  async function settled() { while (unitsBusy || healthBusy) await new Promise((r) => setTimeout(r, 5)); }
 
   async function tick() {
     // Which remote sessions here are mid-turn (busy.mjs): loom shows it on the agents' cards (t-1624).
@@ -789,7 +793,7 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
     return want;
   }
 
-  return { tick, stop, houses, shutdown, endLogins, run };
+  return { tick, stop, houses, shutdown, endLogins, run, settled };
 }
 
 export { dataDir };
