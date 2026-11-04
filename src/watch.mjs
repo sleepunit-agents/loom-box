@@ -224,7 +224,9 @@ function notice(w, n) {
 
 /** Text a box sent, as it may be shown or said: no control characters (C0, DEL, C1), capped. */
 export function printable(v, n = 120) {
-  return String(v ?? '').replace(/[\x00-\x1f\x7f-\x9f]/g, '').slice(0, n);
+  // Control characters, and the invisible and direction-changing ones (zero-width, bidi overrides) a line could hide
+  // text behind.
+  return String(v ?? '').replace(/[\x00-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/g, '').slice(0, n);
 }
 const ISO_OK = (v, nowMs) => typeof v === 'string' && v.length <= 30 && Number.isFinite(Date.parse(v)) && Date.parse(v) <= nowMs + 60_000 && Date.parse(v) > nowMs - 400 * 86_400_000;
 

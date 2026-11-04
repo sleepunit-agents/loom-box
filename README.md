@@ -490,7 +490,9 @@ each with its journal's last lines, redacted). The control plane keeps what it h
 `<LOOM_BOX_DATA>/box-watch.json` (never `state.json`), and turns it into the owner's Inbox (an alert while a unit is
 failing; an FYI when a box came back from a boot or a unit is OK again) and the owner's alert command
 (`LOOM_RUNTIME_ALERT_COMMAND`: sources `box-boot` and `unit-<name>`), once when it starts, "(still)" every 6 hours, once
-when it's over.
+when it's over. A box's boots alert at most once an hour (each still leaves its FYI, five a box at most), so one that
+boot-loops is one alert. What a box sends is data, never trusted: redacted, stripped of control and invisible
+characters, capped, and dropped when it isn't in the shape the box would send.
 
 | Setting (on a box) | What |
 |---|---|
