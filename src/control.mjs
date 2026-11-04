@@ -13,6 +13,7 @@ import { chmodSync, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } 
 import { join } from 'node:path';
 import { AGENT_NAME, BOX_NAME, SECRET_NAME, StateError, load, localBoxName, nextHouseId, update } from './state.mjs';
 import { joinPoll, joinRequest } from './enroll.mjs';
+import { noteReport } from './watch.mjs';
 import { MAX_PARTS, PART_RAW, drop, partsOf, putPart, putWhole, readPart } from './blobs.mjs';
 import { parsePortGrant, parseTailnetGrant } from './house.mjs';
 import { CODE, LOGIN_NAMES, scrubCliOutput } from './logins.mjs';
@@ -426,7 +427,21 @@ export function hello(env, effects, caller, { facts, harnesses }) {
 /** What this box should be running: houses to start, and houses to stop. */
 const SESSION_KEY = /^(box:[^\0]{1,120}|house:h-\d{1,9})$/;
 
-export function poll(env, effects, caller, { facts, sessions, harnesses, usage, loginsRunning, runtime } = {}) {
+export function poll(env, effects, caller, body = {}) {
+  const out = pollState(env, effects, caller, body);
+  // What the box says of itself (keeping-watch.md): its boot, and its units' sample when it has a new one. Kept apart
+  // from the state file, and never fails the poll.
+  const { boot, units } = body ?? {};
+  if (boot || units) {
+    let label = caller.subject;
+    try { label = boxNameOf(load(env), caller.subject); } catch { /* its id, then */ }
+    noteReport(env, caller.subject, { boot: boot && typeof boot === 'object' ? boot : undefined, units: units && typeof units === 'object' ? units : undefined },
+      Date.parse(now(effects)), { label, ...(effects.alert ? { alert: effects.alert } : {}) });
+  }
+  return out;
+}
+
+function pollState(env, effects, caller, { facts, sessions, harnesses, usage, loginsRunning, runtime } = {}) {
   const f = facts === undefined ? null : listOf(facts, 'facts', FACT, 32);
   const running = runningReport(loginsRunning);
   const rt = runtimeReport(runtime);

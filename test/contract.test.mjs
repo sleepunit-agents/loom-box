@@ -33,6 +33,12 @@ test('the manifest, both pages and every action result are valid page vocabulary
   ]) check('act', vocab.parseActResult(r));
   api(env, fx, { caller: { kind: 'piece', subject: 'one' }, path: 'claim', body: { id: 'h-2' } });
   api(env, fx, { caller: { kind: 'piece', subject: 'one' }, path: 'report', body: { id: 'h-2', state: 'failed', exit: 2, log: 'boom' } });
+  // What a box says of itself (watch.mjs): a boot back, a unit failing with its journal lines, another OK again.
+  env.LOOM_BOX_DATA = join(env.HOME, 'data');
+  const K = '11111111-1111-1111-1111-111111111111';
+  const one = { kind: 'piece', subject: 'one' };
+  api(env, fx, { caller: one, path: 'poll', body: { boot: { id: `${K}:1`, kernel: K, up: 9 }, units: { at: '', units: [{ unit: 'a.service', scope: 'user', state: 'failed', log: ['l1', 'l2'] }, { unit: 'b.service', scope: 'system', state: 'looping', restarts: 4, log: [] }] } } });
+  api(env, fx, { caller: one, path: 'poll', body: { boot: { id: `${K}:2`, kernel: K, up: 9 }, units: { at: '', units: [{ unit: 'a.service', scope: 'user', state: 'failed', log: ['l1'] }] } } });
   check('full manifest', vocab.parseManifest(manifest(env)));
   check('full page', vocab.parsePage(page(env, { path: '' })));
   check('full agents page', vocab.parsePage(page(env, { path: 'agents' })));

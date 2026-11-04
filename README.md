@@ -481,3 +481,19 @@ npm test
 ```
 
 They pin runtime.md's list: a box refuses an agent it may not host; a need nobody has fails and names itself; nothing else picks a box; a box credential gets only box calls; a revoked box gets nothing and its houses' tokens go with it; secrets go once, to the house's box; with nothing enrolled, everything goes to loom's own machine. There's also a house run end to end against a real git repo. And agent-runtime.md's: model choice (test 4, `test/models.test.mjs`), the runner interface against stand-in harnesses (`test/runners.test.mjs`), model logins and the accounts view, and that the package holds no credential (`test/accounts.test.mjs`), and the rename (`test/rename.test.mjs`).
+
+## Keeping watch (loom docs/specs/keeping-watch.md)
+
+Every box says, on each poll, which boot it's in (`boot`: the kernel's boot id, PID 1's start, its uptime) and, once a
+minute, which of its systemd units (the runner's user's and the system's) have failed or keep restarting (`units`:
+each with its journal's last lines, redacted). The control plane keeps what it heard in
+`<LOOM_BOX_DATA>/box-watch.json` (never `state.json`), and turns it into the owner's Inbox (an alert while a unit is
+failing; an FYI when a box came back from a boot or a unit is OK again) and the owner's alert command
+(`LOOM_RUNTIME_ALERT_COMMAND`: sources `box-boot` and `unit-<name>`), once when it starts, "(still)" every 6 hours, once
+when it's over. A box's boots alert at most once an hour (each still leaves its FYI, five a box at most), so one that
+boot-loops is one alert. What a box sends is data, never trusted: redacted, stripped of control and invisible
+characters, capped, and dropped when it isn't in the shape the box would send.
+
+| Setting (on a box) | What |
+|---|---|
+| `LOOM_RUNTIME_UNITS_IGNORE` | a JavaScript regex searched in a unit's name: those units are never reported |
