@@ -143,26 +143,78 @@ test('a sample without its reading neither holds nor ends a condition; unread fo
   assert.deepEqual(healthAlerts().slice(2).map((a) => [a.facts.key, a.facts.cleared]).sort(), [['pool-rpool', 1], ['unread-pools', 1]]);
 });
 
+const boxId = (name) => Object.entries(JSON.parse(readFileSync(join(env.LOOM_BOX_HOME, 'state.json'), 'utf-8')).boxes).find(([, b]) => b.name === name)?.[0] ?? name;
+
 test('dark: an always-on box silent 10 minutes, from a manifest read alone; its next poll clears it; others never', () => {
   ok(call(owner, 'add-box', { name: 'thor', mayHost: '*' }));
   ok(call(owner, 'add-box', { name: 'laptop', mayHost: '*' }));
-  const thor = { kind: 'piece', subject: Object.entries(JSON.parse(readFileSync(join(env.LOOM_BOX_HOME, 'state.json'), 'utf-8')).boxes).find(([, b]) => b.name === 'thor' || false)?.[0] ?? 'thor' };
-  const laptop = { kind: 'piece', subject: Object.entries(JSON.parse(readFileSync(join(env.LOOM_BOX_HOME, 'state.json'), 'utf-8')).boxes).find(([, b]) => b.name === 'laptop')?.[0] ?? 'laptop' };
+  const thor = { kind: 'piece', subject: boxId('thor') }, laptop = { kind: 'piece', subject: boxId('laptop') };
   ok(call(owner, 'box-watch', { name: 'thor', alwaysOn: 'on' }));
-  poll(0, {});
-  ok(call(thor, 'poll', {}));
-  ok(call(laptop, 'poll', {}));
-  // The runtime's own box has been up under 10 minutes: nobody's dark yet, whatever the clock says.
-  at(9 * 60); manifest(env, clock);
+  // loom's own box polls to 10.5 min; thor and the laptop last spoke at 1 min, so on those polls nothing is dark yet...
+  for (let m = 0; m <= 10; m++) { poll(m * 60, {}); if (m === 1) { ok(call(thor, 'poll', {})); ok(call(laptop, 'poll', {})); } }
+  poll(630, {});
   assert.equal(healthAlerts().length, 0);
-  for (let m = 1; m <= 12; m++) poll(m * 60, {});
-  at(12 * 60); manifest(env, clock);
-  assert.deepEqual(healthAlerts().map((a) => [a.summary, a.severity]), [['thor is dark', 'bad']]);
+  const before = healthAlerts().length;
+  // ...and the manifest alone, at 11 min with no poll in between, finds thor dark (laptop isn't always on).
+  at(11 * 60 + 30); manifest(env, clock, fx);
+  assert.deepEqual(healthAlerts().slice(before).map((a) => [a.summary, a.severity]), [['thor is dark', 'bad']]);
   assert.ok(manifest(env, clock).asks.find((a) => a.text === 'thor is dark'));
   at(13 * 60); ok(call(thor, 'poll', {}));
-  assert.deepEqual([healthAlerts()[1].summary, healthAlerts()[1].facts.cleared], ['thor is back', 1]);
+  assert.deepEqual([healthAlerts().at(-1).summary, healthAlerts().at(-1).facts.cleared], ['thor is back', 1]);
   assert.equal(manifest(env, clock).asks.filter((a) => /thor/.test(a.text)).length, 0);
   assert.equal(healthAlerts().filter((a) => /laptop/.test(a.summary)).length, 0);
+});
+
+test('nobody is dark until the runtime\'s own box has been up 10 minutes, and polling now', () => {
+  ok(call(owner, 'add-box', { name: 'thor', mayHost: '*' }));
+  const thor = { kind: 'piece', subject: boxId('thor') };
+  ok(call(owner, 'box-watch', { name: 'thor', alwaysOn: 'on' }));
+  ok(call(thor, 'poll', {}));
+  // The runtime comes up at 30 min (thor quiet 30 min): not for its first 10.
+  for (let m = 30; m <= 39; m++) poll(m * 60, {});
+  at(39 * 60 + 30); manifest(env, clock, fx);
+  assert.equal(healthAlerts().length, 0);
+  poll(40 * 60, {}); poll(41 * 60, {});
+  assert.deepEqual(healthAlerts().map((a) => a.summary), ['thor is dark']);
+  // The runtime down from 41 min to 3 h: thor's first poll back can't make anyone else dark.
+  ok(call(owner, 'add-box', { name: 'odin', mayHost: '*' }));
+  ok(call(owner, 'box-watch', { name: 'odin', alwaysOn: 'on' }));
+  at(3 * 3600); ok(call(thor, 'poll', {}));
+  at(3 * 3600 + 30); manifest(env, clock, fx);
+  assert.equal(healthAlerts().filter((a) => /odin/.test(a.summary)).length, 0);
+});
+
+/** Each rule, from samples that hold it: not before its `for`, once at it. */
+const RULES = [
+  ['io', 10, () => ({ psi: { io: { some: 60, full: 60 } } })],
+  ['ct-io-103', 15, () => ({ containers: { 103: { io: { some: 45 } } } })],
+  ['ct-mem-104', 10, () => ({ containers: { 104: { memory: { some: 25 } } } })],
+  ['disk-sda', 10, () => ({ disks: { sda: { rotational: true, util: 90, r_await: 400 } } })],
+  ['disk-nvme0n1', 10, () => ({ disks: { nvme0n1: { rotational: false, util: 90, w_await: 35 } } })],
+  ['arc-prune', 5, () => ({ arc: { prune_per_s: 150 } })],
+  ['pool-rpool', 0, () => ({ pools: [{ name: 'rpool', health: 'DEGRADED', cap: 50 }] })],
+  ['pool-full-rpool', 0, () => ({ pools: [{ name: 'rpool', health: 'ONLINE', cap: 86 }] })],
+  ['fs-/', 10, () => ({ fs: [{ mount: '/', used_pct: 91 }] })],
+  ['mem', 10, () => ({ mem: { total: 100, available: 7, swap_total: 0, swap_free: 0 } })],
+  ['swap', 10, () => ({ mem: { total: 100, available: 50, swap_total: 100, swap_free: 10 } })],
+  ...[['passed', false], ['reallocated', 1], ['pending', 1], ['media_errors', 1], ['wear_pct', 80], ['temp_c', 56]].map(([k, v]) => [`smart-sda`, 0, () => ({ smart: { sda: { [k]: v } } }), k]),
+  ['smart-nvme0n1', 0, () => ({ smart: { nvme0n1: { temp_c: 70 } } }), 'nvme hot'],
+];
+for (const [key, mins, extra, why] of RULES) {
+  test(`rule ${key}${why ? ` (${why})` : ''}: not before ${mins} min, once at it`, () => {
+    const s = (m) => ({ ...sampleWith(), ...extra(), t: Math.round((T0 + m * 60_000) / 1000) });
+    for (let m = 0; m < mins; m++) { poll(m * 60, { health: s(m) }); assert.equal(healthAlerts().length, 0, `minute ${m}`); }
+    poll(mins * 60, { health: s(mins) });
+    assert.deepEqual(healthAlerts().map((a) => a.facts.key), [key]);
+    poll(mins * 60 + 60, { health: s(mins + 1) });
+    assert.equal(healthAlerts().length, 1);
+  });
+}
+// The thresholds' other side: just under each is nothing.
+test('just under each threshold, nothing', () => {
+  const under = [{ psi: { io: { some: 49, full: 49 } } }, { arc: { prune_per_s: 99 } }, { pools: [{ name: 'rpool', health: 'ONLINE', cap: 84 }] }, { fs: [{ mount: '/', used_pct: 89.9 }] },
+    { disks: { nvme0n1: { rotational: false, util: 90, w_await: 29 } } }, { disks: { sda: { rotational: true, util: 79, r_await: 900 } } }, { smart: { sda: { temp_c: 54, wear_pct: 79 } } }];
+  for (const u of under) assert.deepEqual(Object.keys(problems({ ...sampleWith(), ...u }, 'x')), [], JSON.stringify(u));
 });
 
 test('a report-only box: no houses, sessions, sign-ins or version from poll, and claim refuses it', () => {
@@ -176,11 +228,12 @@ test('a report-only box: no houses, sessions, sign-ins or version from poll, and
   const p = ok(call(wunder, 'poll', { reportOnly: true }));
   assert.deepEqual([p.start, p.bodyHosts, p.remotes, p.logins, p.version, p.reportOnly], [[], [], [], [], undefined, true]);
   assert.equal(call(wunder, 'claim', { id: before.start[0].id }).status, 403);
-  // A box can't take it back itself; the owner can.
+  // A box can't take it back itself; the owner can, and the box saying report-only on every poll doesn't undo that.
   ok(call(wunder, 'poll', { reportOnly: false }));
   assert.equal(ok(call(wunder, 'poll', {})).reportOnly, true);
   ok(call(owner, 'box-watch', { name: 'wunder', reportOnly: 'off' }));
-  assert.equal(ok(call(wunder, 'poll', {})).start.length, 1);
+  assert.equal(ok(call(wunder, 'poll', { reportOnly: true })).start.length, 1);
+  assert.equal(ok(call(wunder, 'poll', { reportOnly: true })).reportOnly, undefined);
   assert.ok(watchOf(env).boxes[id]);
 });
 

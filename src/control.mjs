@@ -242,7 +242,7 @@ export function setBoxWatch(env, effects, { name, alwaysOn, reportOnly }) {
     const id = resolveBox(s, name);
     const b = s.boxes[id];
     if (alwaysOn !== undefined) { if (alwaysOn === true || alwaysOn === 'on') b.alwaysOn = true; else delete b.alwaysOn; }
-    if (reportOnly !== undefined && !b.local) { if (reportOnly === true || reportOnly === 'on') b.reportOnly = true; else delete b.reportOnly; }
+    if (reportOnly !== undefined && !b.local) { b.reportOnlyAsked = true; if (reportOnly === true || reportOnly === 'on') b.reportOnly = true; else delete b.reportOnly; }
     return { box: id, name: boxNameOf(s, id), alwaysOn: !!(b.local || b.reportOnly || b.alwaysOn), reportOnly: !!b.reportOnly };
   });
 }
@@ -402,7 +402,7 @@ export function list(env, caller) {
   const boxes = Object.entries(s.boxes)
     .filter(([, b]) => householdOwner(caller) || (!b.revoked && mine?.some((a) => mayHost(b, a, members))))
     .map(([id, b]) => ({ id, name: b.name ?? id, local: !!b.local, facts: factsOf(b), lastSeen: b.lastSeen, harnesses: harnessesOf(b, householdOwner(caller)),
-      ...(householdOwner(caller) ? { runtime: b.runtime ?? null, mayHost: b.mayHost, owner: boxOwner(b, members), lentTo: b.lentTo ?? [], revoked: b.revoked ?? null, created: b.created } : {}) }));
+      ...(householdOwner(caller) ? { runtime: b.runtime ?? null, mayHost: b.mayHost, owner: boxOwner(b, members), lentTo: b.lentTo ?? [], revoked: b.revoked ?? null, created: b.created, reportOnly: !!b.reportOnly, alwaysOn: !!b.alwaysOn } : {}) }));
   const primary = caller.kind === 'agent' ? primaryOf(s, caller.agent, env) : undefined;
   const services = Object.entries(s.services ?? {})
     .filter(([, v]) => sees(caller, v.agent))
@@ -475,7 +475,9 @@ function pollState(env, effects, caller, { facts, sessions, harnesses, usage, lo
     const b = boxOf(s, caller);
     if (f) b.facts = f;
     // A box may make itself report-only (joined with --report-only); only the owner may undo it.
-    if (reportOnly === true && !b.local) b.reportOnly = true;
+    // Once: the box asks (joined with --report-only), and the owner's word after that stands, off included.
+    if (reportOnly === true && !b.local && !b.reportOnlyAsked) { b.reportOnly = true; b.reportOnlyAsked = true; }
+    const ro = !!b.reportOnly;
     if (hs) b.harnesses = stamp(hs, now(effects));
     // The household's own salt for account keys (accounts.mjs): made once, never shown.
     s.accountSalt ??= randomBytes(16).toString('hex');
@@ -502,7 +504,8 @@ function pollState(env, effects, caller, { facts, sessions, harnesses, usage, lo
     return {
       // Logins the owner started from the box's page: the CLI's own login, run here (logins.mjs). A pasted code goes
       // to the box once and is gone from loom's state.
-      logins: Object.values(s.logins ?? {}).filter((l) => l.box === caller.subject && (l.state === 'wanted' || l.codeWaiting || l.state === 'cancel'))
+      // A report-only box: no sign-in is ever handed to it, so none is taken (or its code spent) here.
+      logins: ro ? [] : Object.values(s.logins ?? {}).filter((l) => l.box === caller.subject && (l.state === 'wanted' || l.codeWaiting || l.state === 'cancel'))
         .map((l) => {
           // The code, if one waits, goes to the box once and is gone (takeCode removes it; an old one has expired).
           const code = l.codeWaiting ? takeCode(env, l.id, Date.parse(now(effects))) : null;
@@ -515,7 +518,7 @@ function pollState(env, effects, caller, { facts, sessions, harnesses, usage, lo
         }),
       // Which agents may use each of this box's logins: the box runs its CLI in one of their images (logins.mjs).
       loginAgents: Object.fromEntries(LOGIN_NAMES.map((k) => [k, Object.keys(s.agents).filter((ag) => mayHaveLogin(b, s.agents[ag], ag, k, members))])),
-      start: mine.filter((h) => h.state === 'wanted' && mayHost(b, h.agent, members) && !(h.notBefore && Date.parse(h.notBefore) > Date.parse(now(effects)))).map((h) => {
+      start: ro ? [] : mine.filter((h) => h.state === 'wanted' && mayHost(b, h.agent, members) && !(h.notBefore && Date.parse(h.notBefore) > Date.parse(now(effects)))).map((h) => {
         const a = s.agents[h.agent] || {};
         return { id: h.id, agent: h.agent, task: h.task, service: h.service ?? null, slot: h.slot ?? null, session: !!h.session, repo: a.repo, houseFile: a.houseFile || 'house/house.json', branch: a.branch ?? null,
           // A house asked for with a GPU need gets the box's GPU (t-1616).

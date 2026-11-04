@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { StateError, load, localBoxName, stateDir } from './state.mjs';
 import { sessionsBusy } from './busy.mjs';
 import { allowJoin, blockAllJoins, blockJoin, pendingJoins } from './enroll.mjs';
-import { addBox, assertBoxOwner, isBoxOwner, boxLabelOf, boxOfCall, boxUpdateNow, loginOver, factsOf, lendBox, list, loginCancel, loginCode, loginStart, loginView, primaryOf, remoteDown, remoteUp, revokeBox, shownTask, serviceDown, serviceMove, serviceRestart, serviceUp, setAgent, isHostHouse, setBoxOwner, setMayHost, setPrimary, up, down, LIVE } from './control.mjs';
+import { addBox, assertBoxOwner, isBoxOwner, boxLabelOf, boxOfCall, boxUpdateNow, loginOver, factsOf, lendBox, list, loginCancel, loginCode, loginStart, loginView, primaryOf, remoteDown, remoteUp, revokeBox, shownTask, serviceDown, serviceMove, serviceRestart, serviceUp, setAgent, isHostHouse, setBoxOwner, setMayHost, setBoxWatch, setPrimary, up, down, LIVE } from './control.mjs';
 import { LOGIN_HARNESSES } from './logins.mjs';
 import { ownCommit, swapCommand } from './version.mjs';
 import { stateAccounts } from './accounts.mjs';
@@ -96,14 +96,14 @@ function sessionsSection(env, s, view, only) {
   return blocks.length > 1 ? { id: 'sessions', title: 'Sessions', blocks } : null;
 }
 
-export function manifest(env, nowMs = Date.now()) {
+export function manifest(env, nowMs = Date.now(), o = {}) {
   const s = load(env);
   // The now board (nowboard.mjs): a bridge actually down is an alert (one restarting, by the runtime's own doing, is
   // not), one back from an outage an FYI, and what each agent's bodies are in is its doing.
   let board = { asks: [], agents: {}, notices: [] };
   try { board = nowManifest(env, Date.now() / 1000, s); } catch { /* a board that can't be read leaves the rest of the manifest */ }
   // An always-on box gone silent is dark (watch.mjs): loom reads this manifest each minute, so it's checked here too.
-  try { checkDark(env, s, nowMs); } catch { /* next time */ }
+  try { checkDark(env, s, nowMs, o.alert ? { alert: o.alert } : {}); } catch { /* next time */ }
   const reports = agentReports(s, Date.now(), { ...reportedBusy(s), ...sessionsBusy(join(stateDir(env), 'session-cpu.json')) });
   for (const [a, doing] of Object.entries(board.agents)) reports[a] = { readings: [], ...reports[a], doing: [...(reports[a]?.doing ?? []), ...doing].slice(0, 8) };
   const boxes = Object.values(s.boxes).filter((b) => !b.revoked);
@@ -644,6 +644,10 @@ function boxesPage(env, nowMs, caller = OWNER) {
         ...harnessPanelRows(s, b, nowMs, mayAct(b)),
         // When it last came back, and its units failing (watch.mjs).
         ...watchRowsOf(env, b.id, nowMs),
+        // Whether silence is an alert, and whether it hosts anything: the owner's (control.mjs, setBoxWatch).
+        ...(b.local ? [] : [{ label: 'Watch', value: `${b.reportOnly ? 'Report-only' : 'Hosts what it may'} · ${b.reportOnly || b.alwaysOn ? 'always on' : 'not always on'}`,
+          detail: 'An always-on box quiet for 10 minutes is an alert', act: b.reportOnly ? { action: 'box-watch', label: 'Let it host', fields: { name: b.id, reportOnly: 'off' }, confirm: `${b.label} may take houses again.` }
+            : { action: 'box-watch', label: b.alwaysOn ? 'Not always on' : 'Always on', fields: { name: b.id, alwaysOn: b.alwaysOn ? 'off' : 'on' } } }]),
       ] },
       // Its disk is the headline's tile (only loom's own box measures one).
       here.length
@@ -1128,6 +1132,7 @@ export function act(env, effects, { action, fields: raw = {}, caller: c }, publi
       case 'block-join': { const r = blockJoin(env, effects, fields); return { ok: true, message: `Blocked ${r.name}'s request.`, page: '' }; }
       case 'block-all-joins': { const r = blockAllJoins(env, effects); return { ok: true, message: `Blocked ${r.blocked} waiting request${r.blocked === 1 ? '' : 's'}.`, page: '' }; }
       case 'revoke-box': { const r = revokeBox(env, effects, fields); return { ok: true, message: `Revoked ${r.name}. Its houses lost their tokens.`, page: '' }; }
+      case 'box-watch': { const r = setBoxWatch(env, effects, fields); return { ok: true, message: `${r.name}: ${r.reportOnly ? 'report-only' : 'hosts what it may'}, ${r.alwaysOn ? 'always on' : 'not always on'}.`, page: '' }; }
       case 'may-host': { const r = setMayHost(env, effects, fields); return { ok: true, message: `Saved who ${r.name} may host.`, page: '' }; }
       case 'box-owner': { const r = setBoxOwner(env, effects, fields); return { ok: true, message: `${r.name} is ${r.owner}'s.`, page: '' }; }
       case 'box-lend': { const r = lendBox(env, effects, fields); return { ok: true, message: r.lentTo.length ? `${r.name} is lent to ${r.lentTo.join(', ')}.` : `${r.name} is lent to no one.`, page: '' }; }

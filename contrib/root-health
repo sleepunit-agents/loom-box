@@ -1,0 +1,78 @@
+#!/usr/bin/env python3
+"""root-health — what a report-only box can't read without root, written where it can (loom docs/specs/keeping-watch.md,
+"The hypervisor"). Run by root on a timer, every 10 minutes:
+
+    /run/loom-box/root-health.json  (0644)  {"t": <unix s>, "smart": {"<disk>": {...}}, "containers": {"<id>": "<name>"}}
+
+It reads only: smartctl -H -A -j for each sd*/nvme*n* disk, and `pct list` (Proxmox) for the containers' names. It
+writes only that file, by rename. Nothing on the box asks it for anything: the box just reads the file (and ignores
+it once it's 30 minutes old). Stdlib only.
+
+Install (as root, on the host):
+    install -m 0755 root-health /usr/local/sbin/loom-root-health
+    printf '[Unit]\\nDescription=loom root health\\n[Service]\\nType=oneshot\\nExecStart=/usr/local/sbin/loom-root-health\\n' > /etc/systemd/system/loom-root-health.service
+    printf '[Timer]\\nOnBootSec=1min\\nOnUnitActiveSec=10min\\n[Install]\\nWantedBy=timers.target\\n' > /etc/systemd/system/loom-root-health.timer
+    systemctl daemon-reload && systemctl enable --now loom-root-health.timer
+"""
+import json
+import os
+import re
+import shutil
+import subprocess
+import time
+
+OUT = os.environ.get("LOOM_ROOT_HEALTH") or "/run/loom-box/root-health.json"
+
+
+def sh(*argv, timeout=30):
+    try:
+        return subprocess.run(argv, capture_output=True, text=True, timeout=timeout).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def disks():
+    try:
+        return sorted(n for n in os.listdir("/sys/block") if re.fullmatch(r"sd[a-z]+|nvme\d+n\d+", n))
+    except OSError:
+        return []
+
+
+def smart():
+    out = {}
+    if not shutil.which("smartctl"):
+        return out
+    for name in disks():
+        try:
+            j = json.loads(sh("smartctl", "-H", "-A", "-j", f"/dev/{name}") or "{}")
+        except ValueError:
+            continue
+        attrs = {a.get("name"): a.get("raw", {}).get("value") for a in j.get("ata_smart_attributes", {}).get("table", [])}
+        nv = j.get("nvme_smart_health_information_log") or {}
+        out[name] = {"passed": j.get("smart_status", {}).get("passed"), "temp_c": (j.get("temperature") or {}).get("current"),
+                     "reallocated": attrs.get("Reallocated_Sector_Ct"), "pending": attrs.get("Current_Pending_Sector"),
+                     "wear_pct": nv.get("percentage_used"), "media_errors": nv.get("media_errors")}
+    return out
+
+
+def containers():
+    out = {}
+    for line in sh("pct", "list").splitlines()[1:]:
+        p = line.split()
+        if len(p) >= 3 and re.fullmatch(r"\d{1,9}", p[0]) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", p[-1]):
+            out[p[0]] = p[-1]
+    return out
+
+
+def main():
+    os.makedirs(os.path.dirname(OUT), mode=0o755, exist_ok=True)
+    body = json.dumps({"t": int(time.time()), "smart": smart(), "containers": containers()})
+    tmp = f"{OUT}.{os.getpid()}.tmp"
+    with open(tmp, "w") as f:
+        f.write(body)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, OUT)
+
+
+if __name__ == "__main__":
+    main()

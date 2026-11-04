@@ -400,8 +400,10 @@ export function checkDark(env, s, nowMs = Date.now(), o = {}) {
   try {
     updateWatch(env, (w) => {
       const local = Object.entries(s.boxes).find(([, b]) => b.local)?.[0];
-      const up = local && w.boxes[local]?.upSince;
-      if (!up || nowMs - Date.parse(up) < DARK_MS) return;
+      // The runtime itself up 10 minutes: its own box polling now (within 2 minutes) and since 10 minutes ago. After the
+      // runtime was down, the first poll from anyone finds its own box stale, so nobody is dark until it's been back 10.
+      const own = local && w.boxes[local];
+      if (!own?.upSince || !own.seen || nowMs - Date.parse(own.seen) > 2 * 60_000 || nowMs - Date.parse(own.upSince) < DARK_MS) return;
       for (const [id, b] of Object.entries(s.boxes)) {
         if (b.revoked || !(b.local || b.reportOnly || b.alwaysOn)) continue;
         const wb = (w.boxes[id] ??= {});
