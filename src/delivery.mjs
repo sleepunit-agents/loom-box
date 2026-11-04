@@ -72,6 +72,7 @@ import { AGENT_NAME, StateError, alive, withLock } from './state.mjs';
 import { RUNS_KEPT, causeOf, detectLoop, textHash } from './loops.mjs';
 import { runnerFor } from './runners.mjs';
 import { raiseAlert } from './alerthook.mjs';
+import { keepKey } from './bodyhost.mjs';
 import { readRelays } from './relay.mjs';
 
 const DAY_MS = 86_400_000;
@@ -1081,6 +1082,9 @@ async function execute(env, op, d, mem) {
       }
       c.body = r.body;
       c.run = run;
+      // A local body speaks with its run's key as a house's body does: from the keys dir (bodyhost.mjs, keyFile), as
+      // `claude --bg` gives every session its daemon's environment, not this launch's (t-1830).
+      if (local) keepKey(env, op.cv, runKey);
       c.bodyRules = { guest: rules.guest, key: rules.key };
       ack(c, op.msgs);
       delete c.retryAt; delete c.startFails; delete c.retryReason;

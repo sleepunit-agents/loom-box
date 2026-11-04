@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 import { deliver, loadConv, localBodiesOf, tick } from '../src/delivery.mjs';
 import { alertCall, raiseAlert } from '../src/alerthook.mjs';
 import { readBody } from '../src/bodies.mjs';
+import { bodyKeyFor } from '../src/bodyhost.mjs';
 import { cvOf, fakeRunner, world } from './delivery-world.mjs';
 import { scratch } from './scratch.mjs';
 import { writeFileSync } from 'node:fs';
@@ -47,6 +48,8 @@ describe('local bodies', () => {
     assert.equal(localLog.filter((l) => l[0] === 'start').length, 1);
     const id = c.body.split(':')[1];
     assert.equal(localRunner.envs[id].PATH, '/home/art/Art/bin:/usr/bin');
+    // Its run's key, where `loom runtime send` finds it (a --bg session has its daemon's environment, not this one).
+    assert.equal(bodyKeyFor({ HOME: w.env.HOME }, c.conversation), localRunner.envs[id].LOOM_BODY_KEY);
     // The same source again while it works: fed to the same body (or waiting for it), never a second body.
     const b = await deliver(w.env, lwake('alert:test', 'test: scratch dir over 1 GB (again)'), w.o);
     assert.equal(b.conversation, a.conversation);
