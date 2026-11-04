@@ -226,7 +226,7 @@ export function bridgeStatus(b, svc, house, nowS, darkS = DARK_DEFAULT_S) {
     const started = sec(house.started ?? house.updated);
     if (house.state === 'running' && started > b.at && nowS - started <= darkS) return { state: 'restarting', house: 'running', since: started };
   }
-  return nowS - b.at > darkS ? { state: 'dark' } : { state: 'late' };
+  return nowS - b.at > darkS ? { state: 'dark', ...(svc ? { running: true } : {}) } : { state: 'late' };
 }
 
 const watchFile = (env) => join(dataDir(env), 'now-watch.json');
@@ -325,7 +325,7 @@ export function nowManifest(env, nowS = Date.now() / 1000, s = undefined) {
       // for the outage (when it began), so it's pushed once; what changes goes in its meta.
       if (b.state === 'dark') {
         asks.push({ text: `${who} is down: no word since ${clock(b.at)}`,
-          meta: b.stuck ? `its house has been ${b.stuck === 'none' ? 'missing' : b.stuck} for ${minutes(b.stuckS)}` : `nothing from it for ${ago(nowS - b.at)}, while its house is up`,
+          meta: b.stuck ? `its house has been ${b.stuck === 'none' ? 'missing' : b.stuck} for ${minutes(b.stuckS)}` : `nothing from it for ${ago(nowS - b.at)}${b.running ? ', while its house is up' : ''}`,
           at: new Date(b.at * 1000).toISOString(), page: 'now', label: 'Look', kind: 'alert', agent });
       } else if (b.state === 'looping') {
         const since = b.outage?.kind === 'looping' ? b.outage.since : sec(b.crashes[0].at);
@@ -408,7 +408,7 @@ function bridgeRow(b, nowS) {
   const busy = [`${b.talking.length} talking`, `${b.waiting.length} waiting`, ...(b.slots ? [`${b.slots.used ?? 0} of ${b.slots.cap ?? '?'} slots`] : []), ...(b.socket?.state ? [`socket ${b.socket.state}`] : [])].join(' · ');
   switch (b.state) {
     case 'looping': { const err = lastError(b.crashes); return { badge: 'restarting', tone: 'bad', meta: `keeps restarting: ${b.crashes.length} restarts in ${minutes(nowS - sec(b.crashes[0].at))}${err ? `, last error: ${err}` : ''}` }; }
-    case 'dark': return { badge: 'down', tone: 'bad', meta: b.stuck ? `down: its house has been ${b.stuck === 'none' ? 'missing' : b.stuck} for ${minutes(b.stuckS)}` : `down: no word for ${ago(nowS - b.at)}, while its house is up` };
+    case 'dark': return { badge: 'down', tone: 'bad', meta: b.stuck ? `down: its house has been ${b.stuck === 'none' ? 'missing' : b.stuck} for ${minutes(b.stuckS)}` : `down: no word for ${ago(nowS - b.at)}${b.running ? ', while its house is up' : ''}` };
     case 'restarting': return { badge: 'restarting', tone: 'warn', meta: `the runtime is ${b.house === 'running' ? 'bringing it back: its house is up, the bridge is connecting' : b.house === 'stopping' ? 'restarting its house' : 'starting its house'}` };
     case 'down': return { badge: 'off', tone: 'muted', meta: 'taken down: its service is down' };
     case 'late': return { badge: 'live', tone: 'warn', meta: `no word for ${ago(nowS - b.at)}` };
