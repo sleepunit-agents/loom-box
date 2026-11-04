@@ -41,7 +41,7 @@ export function bodyKeyFor(env, conversation) {
   return env.LOOM_BODY_KEY;
 }
 
-function keepKey(env, conversation, key) {
+export function keepKey(env, conversation, key) {
   const f = keyFile(env, conversation);
   if (!f || typeof key !== 'string' || !key) return;
   mkdirSync(keysDir(env), { recursive: true, mode: 0o700 });
