@@ -250,8 +250,9 @@ export function noteReport(env, box, { boot, units } = {}, nowMs = Date.now(), o
           const host = prev.kernel && boot.kernel && prev.kernel !== boot.kernel;
           notice(w, { box, text: `${label} came back at ${clock(bootAt)}, up ${seconds(boot.up)}${dark !== null ? ` after being dark ${seconds(dark)}` : ''}${host ? '. Its host restarted too' : ''}`,
             at: new Date(nowMs).toISOString(), page: '' });
-          calls.push({ source: 'box-boot', severity: 'warn', summary: `${label} came back from a restart${dark !== null ? ` after being dark ${seconds(dark)}` : ''}`,
-            facts: { box, up_s: boot.up, ...(dark !== null ? { dark_s: dark } : {}), kernel_restarted: host ? 1 : 0, at: new Date(bootAt).toISOString() } });
+          // One boot alert a box per hour: a box that boot-loops (or says it does) is one alert, with the FYIs.
+          if (!b.bootSaid || nowMs - Date.parse(b.bootSaid) >= 3600_000) { b.bootSaid = new Date(nowMs).toISOString(); calls.push({ source: 'box-boot', severity: 'warn', summary: `${label} came back from a restart${dark !== null ? ` after being dark ${seconds(dark)}` : ''}`,
+            facts: { box, up_s: boot.up, ...(dark !== null ? { dark_s: dark } : {}), kernel_restarted: host ? 1 : 0, at: new Date(bootAt).toISOString() } }); }
         }
         b.boot = { id: boot.id, kernel: boot.kernel, up: boot.up, at: new Date(nowMs - boot.up * 1000).toISOString() };
       }

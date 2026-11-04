@@ -56,7 +56,7 @@ test('a box back from a boot: one FYI with its up and dark times and one alert; 
   const fyi = manifest(env, clock).notices.find((n) => /came back/.test(n.text));
   assert.match(fyi.text, /^one came back at 14:07 UTC, up 40 s after being dark 6 min$/);
   // The host too: the kernel's id changed.
-  at(1000);
+  at(4000);
   ok(call(box, 'poll', { boot: { id: `${K2}:50`, kernel: K2, up: 30 } }));
   assert.equal(alerts[1].facts.kernel_restarted, 1);
   assert.match(manifest(env, clock).notices[0].text, /Its host restarted too/);
@@ -264,4 +264,39 @@ test('a units sample with too much log text is dropped whole: nothing stored, no
   at(60); ok(call(box, 'poll', { units: big }));
   assert.deepEqual(Object.keys(watchOf(env).boxes.one.units), ['user:art-slack.service']);
   assert.equal(alerts.length, 1);
+});
+
+test('looping ends only 15 minutes after its last rise, not when the window holds fewer than 3', async () => {
+  // Rises of 1 at minutes 1, 2, 3 (looping), one more at 10; at 17 the window (2, 17] holds 3 and 10: still looping.
+  const counts = { 0: 0, 1: 1, 2: 2, 3: 3, 10: 4, 17: 4, 26: 4 };
+  let n = 0;
+  const run = async (argv) => (argv[0] === 'journalctl' ? '' : argv.includes('--user') ? `Id=art-x.service\nActiveState=activating\nNRestarts=${n}\n` : '');
+  const sample = unitSampler({}, { run });
+  const looping = async (m) => { n = counts[m]; return (await sample(T0 + m * 60_000)).units.some((u) => u.unit === 'art-x.service'); };
+  for (const m of [0, 1, 2]) assert.equal(await looping(m), false, `minute ${m}`);
+  assert.equal(await looping(3), true);
+  assert.equal(await looping(10), true);
+  assert.equal(await looping(17), true);
+  assert.equal(await looping(26), false);
+});
+
+test('the control plane redacts what a box sends in its journal lines, and drops units in any other shape', () => {
+  const units = { at: '', units: [
+    { unit: 'art-slack.service', scope: 'user', state: 'failed', log: ['2026-11-04 loom x[1]: token=sekrit123 https://u:pw@h/x Bearer abcdefghijkl https://discord.com/api/webhooks/1/hooksecretxxxxxxxx'] },
+    { unit: 'x'.repeat(5000) + '.service', scope: 'user', state: 'failed' }, { unit: 'evil\u001b[2J.service', scope: 'user', state: 'failed' },
+    { unit: 'ok.service', scope: 'root', state: 'failed' }, { unit: 'ok2.service', scope: 'user', state: 'exploded' },
+  ] };
+  ok(call(box, 'poll', { units }));
+  const w = watchOf(env).boxes.one.units;
+  assert.deepEqual(Object.keys(w), ['user:art-slack.service']);
+  const said = JSON.stringify({ w, alerts, m: manifest(env, clock) });
+  for (const leak of ['sekrit123', 'u:pw', 'abcdefghijkl', 'hooksecret', '\u001b']) assert.ok(!said.includes(leak), leak);
+});
+
+test('a box boot-looping is one boot alert an hour, its FYIs five', () => {
+  for (let i = 0; i < 20; i++) { at(i * 30); ok(call(box, 'poll', { boot: { id: `${K1}:${100 + i}`, kernel: K1, up: 5 } })); }
+  assert.equal(alerts.filter((a) => a.source === 'box-boot').length, 1);
+  assert.ok(manifest(env, clock).notices.filter((n) => /came back/.test(n.text)).length <= 5);
+  at(3700); ok(call(box, 'poll', { boot: { id: `${K1}:999`, kernel: K1, up: 5 } }));
+  assert.equal(alerts.filter((a) => a.source === 'box-boot').length, 2);
 });
