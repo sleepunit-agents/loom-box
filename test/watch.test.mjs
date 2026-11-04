@@ -51,13 +51,13 @@ test('a box back from a boot: one FYI with its up and dark times and one alert; 
   assert.deepEqual([alerts[0].source, alerts[0].severity], ['box-boot', 'warn']);
   assert.equal(alerts[0].facts.dark_s, 360);
   assert.equal(alerts[0].facts.kernel_restarted, 0);
-  const fyi = manifest(env).notices.find((n) => /came back/.test(n.text));
+  const fyi = manifest(env, clock).notices.find((n) => /came back/.test(n.text));
   assert.match(fyi.text, /^one came back at 14:07 UTC, up 40 s after being dark 6 min$/);
   // The host too: the kernel's id changed.
   at(1000);
   ok(call(box, 'poll', { boot: { id: `${K2}:50`, kernel: K2, up: 30 } }));
   assert.equal(alerts[1].facts.kernel_restarted, 1);
-  assert.match(manifest(env).notices[0].text, /Its host restarted too/);
+  assert.match(manifest(env, clock).notices[0].text, /Its host restarted too/);
 });
 
 test('a failed unit: an Inbox alert and one call; still failed, none until 6 hours on; gone, an FYI and cleared=1', () => {
@@ -67,7 +67,7 @@ test('a failed unit: an Inbox alert and one call; still failed, none until 6 hou
   assert.equal(alerts[0].severity, 'bad');
   assert.equal(alerts[0].summary, 'art-slack.service failed on one');
   assert.match(alerts[0].facts.log, /EADDRINUSE/);
-  const ask = manifest(env).asks.find((a) => /art-slack/.test(a.text));
+  const ask = manifest(env, clock).asks.find((a) => /art-slack/.test(a.text));
   assert.equal(ask.text, 'art-slack.service failed on one');
   assert.equal(ask.kind, 'alert');
   assert.match(ask.meta, /EADDRINUSE/);
@@ -84,8 +84,8 @@ test('a failed unit: an Inbox alert and one call; still failed, none until 6 hou
   at(6 * 3600 + 60); ok(call(box, 'poll', { units: none() }));
   assert.equal(alerts.length, 3);
   assert.deepEqual([alerts[2].source, alerts[2].facts.cleared], ['unit-art-slack', 1]);
-  assert.equal(manifest(env).asks.filter((a) => /art-slack/.test(a.text)).length, 0);
-  assert.match(manifest(env).notices[0].text, /^art-slack\.service on one is OK again \(failed for 6 h\)$/);
+  assert.equal(manifest(env, clock).asks.filter((a) => /art-slack/.test(a.text)).length, 0);
+  assert.match(manifest(env, clock).notices[0].text, /^art-slack\.service on one is OK again \(failed for 6 h\)$/);
 });
 
 test('unit sources: as art-unit-alert named them', () => {
@@ -139,10 +139,10 @@ test('the control plane takes a looping unit as one alert, and its end as one cl
   at(60); ok(call(box, 'poll', { units: looping(14) }));
   assert.deepEqual(alerts.map((a) => a.summary), ['art-shuttle.service keeps restarting on one']);
   assert.equal(alerts[0].facts.restarts, 12);
-  assert.match(manifest(env).asks.find((a) => /shuttle/.test(a.text)).text, /keeps restarting on one/);
+  assert.match(manifest(env, clock).asks.find((a) => /shuttle/.test(a.text)).text, /keeps restarting on one/);
   at(1000); ok(call(box, 'poll', { units: none() }));
   assert.equal(alerts[1].facts.cleared, 1);
-  assert.match(manifest(env).notices[0].text, /kept restarting for/);
+  assert.match(manifest(env, clock).notices[0].text, /kept restarting for/);
 });
 
 test('a box that isn\'t enrolled says nothing to the watch', () => {

@@ -18,7 +18,7 @@ import { asks as gateAsks, answer as gateAnswer, gatesPage, mergePeople, status 
 import { GRANTS, KEY as GRANTS_KEY, GrantsError, grantsProblem, householdOf, setPiece, setRelay } from './grants.mjs';
 import { relayNotices } from './relay.mjs';
 import { nowManifest, nowPage } from './nowboard.mjs';
-import { watchAsks, watchNotices, watchRows } from './watch.mjs';
+import { checkDark, watchAsks, watchNotices, watchRows } from './watch.mjs';
 import { coreFrom } from './core.mjs';
 
 /**
@@ -96,12 +96,14 @@ function sessionsSection(env, s, view, only) {
   return blocks.length > 1 ? { id: 'sessions', title: 'Sessions', blocks } : null;
 }
 
-export function manifest(env) {
+export function manifest(env, nowMs = Date.now()) {
   const s = load(env);
   // The now board (nowboard.mjs): a bridge actually down is an alert (one restarting, by the runtime's own doing, is
   // not), one back from an outage an FYI, and what each agent's bodies are in is its doing.
   let board = { asks: [], agents: {}, notices: [] };
   try { board = nowManifest(env, Date.now() / 1000, s); } catch { /* a board that can't be read leaves the rest of the manifest */ }
+  // An always-on box gone silent is dark (watch.mjs): loom reads this manifest each minute, so it's checked here too.
+  try { checkDark(env, s, nowMs); } catch { /* next time */ }
   const reports = agentReports(s, Date.now(), { ...reportedBusy(s), ...sessionsBusy(join(stateDir(env), 'session-cpu.json')) });
   for (const [a, doing] of Object.entries(board.agents)) reports[a] = { readings: [], ...reports[a], doing: [...(reports[a]?.doing ?? []), ...doing].slice(0, 8) };
   const boxes = Object.values(s.boxes).filter((b) => !b.revoked);
