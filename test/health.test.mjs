@@ -12,6 +12,7 @@
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { cpSync, readFileSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { api } from '../src/control.mjs';
 import { manifest } from '../src/ui.mjs';
@@ -181,4 +182,49 @@ test('a report-only box: no houses, sessions, sign-ins or version from poll, and
   ok(call(owner, 'box-watch', { name: 'wunder', reportOnly: 'off' }));
   assert.equal(ok(call(wunder, 'poll', {})).start.length, 1);
   assert.ok(watchOf(env).boxes[id]);
+});
+
+test('what a box can send is bounded: one sample per 50 s, capped lists, strict names, printable text, few new conditions', async () => {
+  const bad = {
+    ...sampleWith(),
+    pools: [...Array.from({ length: 40 }, (_, i) => ({ name: `p${i}`, health: 'FAULTED', cap: 99 })), { name: 'evil\u001b[2J', health: 'FAULTED', cap: 99 }],
+    fs: [{ mount: '/ok', used_pct: 99 }, { mount: '/x\u001b]0;pwned\u0007', used_pct: 99 }, { mount: 'relative', used_pct: 99 }],
+    disks: { sda: { util: 1 }, 'sd$(rm)': { util: 99, r_await: 999 } },
+    containers: { 103: { name: 'loom\u009b', io: { some: 0 } }, abc: { io: { some: 99 } } },
+    container: 'lxc\u0000x', extra: 'x'.repeat(100000),
+  };
+  poll(0, { health: bad });
+  const w = watchOf(env).boxes.one;
+  assert.equal(w.health.pools.length, 32);
+  assert.ok(!JSON.stringify(w.health).match(/[\u0000-\u001f\u007f-\u009f]/));
+  assert.deepEqual(w.health.fs.map((f) => f.mount), ['/ok']);
+  assert.deepEqual(Object.keys(w.health.disks), ['sda']);
+  assert.deepEqual(Object.keys(w.health.containers), ['103']);
+  assert.equal(w.health.containers['103'].name, undefined);
+  assert.equal(w.health.extra, undefined);
+  // 32 pools faulted at once: only so many conditions open from one sample.
+  assert.ok(Object.keys(w.conditions).length <= 16, String(Object.keys(w.conditions).length));
+  assert.ok(healthAlerts().length <= 16);
+  // A second sample 10 s later is dropped, history and all.
+  const n = healthAlerts().length;
+  poll(10, { health: sampleWith({ io: 99 }) });
+  assert.equal(watchOf(env).boxes.one.healthAt, new Date(T0).toISOString());
+  assert.equal(healthAlerts().length, n);
+  const hist = readFileSync(join(env.LOOM_BOX_DATA, 'health', `one-${new Date(T0).toISOString().slice(0, 7)}.jsonl`), 'utf-8').trim().split('\n');
+  assert.equal(hist.length, 1);
+  // The alert command and the page get the same clean text.
+  assert.ok(!JSON.stringify(alerts).match(/[\u0000-\u001f\u007f-\u009f]/));
+  assert.ok(!JSON.stringify(manifest(env, clock)).match(/[\u0000-\u001f\u007f-\u009f]/));
+});
+
+test('loom runtime health escapes what it prints, whatever the watch holds', () => {
+  poll(0, { health: sampleWith() });
+  const f = join(env.LOOM_BOX_DATA, 'box-watch.json');
+  const w = JSON.parse(readFileSync(f, 'utf-8'));
+  w.boxes.one.conditions = { x: { title: 'bad\u001b[31mred', detail: 'd\u0007', since: 'now' } };
+  writeFileSync(f, JSON.stringify(w));
+  const r = spawnSync(process.execPath, [new URL('../src/cli.mjs', import.meta.url).pathname, 'health'], { env: { ...process.env, ...env }, encoding: 'utf-8' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /bad\\x1b\[31mred: d\\x07/);
+  assert.doesNotMatch(r.stdout, /\u001b/);
 });

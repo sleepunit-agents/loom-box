@@ -14,7 +14,7 @@ import { setting } from './piece.mjs';
 import { withLock } from './state.mjs';
 import { raiseAlert } from './alerthook.mjs';
 import { healthWords, problems } from './health.mjs';
-import { appendFileSync, readdirSync, rmSync } from 'node:fs';
+import { appendFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 
 /** A condition still going is said again this often. */
 export const REMIND_MS = 6 * 3600_000;
@@ -192,7 +192,7 @@ export function noteReport(env, box, { boot, units, health } = {}, nowMs = Date.
         }
       }
       if (health && typeof health === 'object') noteHealth(env, w, b, box, label, health, nowMs, calls);
-      if (boot && typeof boot.id === 'string' && boot.id.length <= 120 && Number.isFinite(boot.up)) {
+      if (boot && typeof boot.id === 'string' && /^[0-9a-f-]{36}:\d{1,20}$/.test(boot.id) && /^[0-9a-f-]{36}$/.test(boot.kernel ?? '') && Number.isFinite(boot.up) && boot.up >= 0) {
         const prev = b.boot;
         if (prev && prev.id !== boot.id) {
           const bootAt = nowMs - boot.up * 1000;
@@ -211,7 +211,7 @@ export function noteReport(env, box, { boot, units, health } = {}, nowMs = Date.
         for (const u of units.units.slice(0, UNITS_MAX)) {
           if (!UNIT.test(u?.unit ?? '') || !['user', 'system'].includes(u.scope) || !['failed', 'looping'].includes(u.state)) continue;
           const key = `${u.scope}:${u.unit}`;
-          const log = (Array.isArray(u.log) ? u.log : []).map((l) => redact(l).slice(0, 300)).slice(-LOG_LINES);
+          const log = (Array.isArray(u.log) ? u.log : []).slice(-LOG_LINES).map((l) => printable(redact(l), 300));
           const was = had[key];
           const ep = { unit: u.unit, scope: u.scope, state: u.state, since: was?.since ?? new Date(nowMs).toISOString(), said: was?.said, log,
             ...(u.restarts ? { restarts: Number(u.restarts) || 0 } : {}), ...(u.result ? { result: String(u.result).slice(0, 40) } : {}) };
@@ -249,8 +249,11 @@ const READINGS = ['mem', 'psi', 'fs', 'disks', 'arc', 'pools', 'containers', 'sm
  * reading leaves it as it was. A reading the box had and hasn't sent for 30 minutes is its own condition (unread-…).
  */
 function noteHealth(env, w, b, box, label, sample, nowMs, calls) {
+  // One sample a box per HEALTH_MIN_GAP_MS: more are dropped, history and all.
+  if (b.healthAt && nowMs - Date.parse(b.healthAt) < HEALTH_MIN_GAP_MS) return;
   const s = sanitizeSample(sample);
   if (!s) return;
+  label = printable(label, 64);
   const found = problems(s, label);
   const missing = new Set(READINGS.filter((r) => s[r] === null || s[r] === undefined || (Array.isArray(s.unread) && s.unread.includes(r))));
   const had = (b.readings ??= {});
@@ -260,8 +263,11 @@ function noteHealth(env, w, b, box, label, sample, nowMs, calls) {
   }
   const conds = (b.conditions ??= {});
   const iso = new Date(nowMs).toISOString();
+  let opened = 0;
   for (const [key, f] of Object.entries(found)) {
     const was = conds[key];
+    // A sample may open only so many conditions, and a box hold only so many (each is an alert to come).
+    if (!was && (++opened > NEW_CONDITIONS_MAX || Object.keys(conds).length >= CONDITIONS_MAX)) continue;
     const cur = { since: was?.since ?? iso, title: f.title, detail: f.detail, severity: f.severity, reading: f.reading, ...(was?.alerted ? { alerted: was.alerted, said: was.said } : {}) };
     const lasted = nowMs - Date.parse(cur.since);
     if (!cur.alerted && lasted >= f.for * 60_000) {
@@ -288,11 +294,55 @@ function noteHealth(env, w, b, box, label, sample, nowMs, calls) {
   try { keepSample(env, box, s, nowMs); } catch { /* the history is best-effort */ }
 }
 
-/** A sample as the control plane keeps it: plain numbers and short strings only, nothing a box could stuff in. */
+/** Text a box sent, as it may be shown or said: no control characters (C0, DEL, C1), 120 characters at most. */
+export function printable(v, n = 120) {
+  return String(v ?? '').replace(/[\x00-\x1f\x7f-\x9f]/g, '').slice(0, n);
+}
+
+/** At most this many of each list or map a sample carries, and new conditions one sample may open. */
+export const SAMPLE_LIST_MAX = 32;
+export const NEW_CONDITIONS_MAX = 16;
+const CONDITIONS_MAX = 64;
+/** One sample per box per this long; the rest are dropped quietly (a box's data, not anyone's work). */
+export const HEALTH_MIN_GAP_MS = 50_000;
+const HISTORY_FILE_MAX = 32 * 1024 * 1024;
+
+const POOL = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$/;
+const MOUNT = /^\/[A-Za-z0-9_.\/+ -]{0,119}$/;
+const DISK = /^(sd[a-z]{1,4}|nvme\d{1,3}n\d{1,3}|vd[a-z]{1,4})$/;
+const CT_ID = /^\d{1,9}$/;
+const CT_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
+const READING = /^[a-z]{1,16}$/;
+const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+const psiIn = (p) => (p && typeof p === 'object' ? { some: num(p.some) ?? 0, full: num(p.full) ?? 0 } : null);
+const entries = (o) => (o && typeof o === 'object' && !Array.isArray(o) ? Object.entries(o).slice(0, 4 * SAMPLE_LIST_MAX) : []);
+
+/**
+ * A sample as the control plane keeps it: only the fields the rules read, each a finite number or a short printable
+ * string; a pool, mount, disk or container name that doesn't match its pattern is dropped, and each list or map is
+ * cut to SAMPLE_LIST_MAX. A box is only partly trusted, and these names go into titles, the page and the alert command.
+ */
 export function sanitizeSample(x) {
-  const j = JSON.stringify(x ?? null);
-  if (!x || typeof x !== 'object' || j.length > 64 * 1024) return null;
-  try { return JSON.parse(j, (k, v) => (typeof v === 'string' ? v.slice(0, 120) : v)); } catch { return null; }
+  if (!x || typeof x !== 'object' || Array.isArray(x)) return null;
+  const out = { t: num(x.t), container: x.container === null || x.container === undefined ? null : printable(x.container, 20), cpus: num(x.cpus) };
+  out.load = Array.isArray(x.load) ? x.load.slice(0, 3).map((v) => num(v) ?? 0) : null;
+  out.mem = x.mem && typeof x.mem === 'object' && num(x.mem.total) ? { total: num(x.mem.total), available: num(x.mem.available) ?? 0, swap_total: num(x.mem.swap_total) ?? 0, swap_free: num(x.mem.swap_free) ?? 0 } : null;
+  out.psi = x.psi && typeof x.psi === 'object' ? { cpu: psiIn(x.psi.cpu), io: psiIn(x.psi.io), memory: psiIn(x.psi.memory) } : null;
+  out.fs = Array.isArray(x.fs) ? x.fs.filter((f) => f && typeof f.mount === 'string' && MOUNT.test(f.mount) && num(f.used_pct) !== null).slice(0, SAMPLE_LIST_MAX).map((f) => ({ mount: f.mount, used_pct: num(f.used_pct) })) : null;
+  if (x.disks === null || x.disks === undefined) out.disks = null;
+  else out.disks = Object.fromEntries(entries(x.disks).filter(([k, d]) => DISK.test(k) && d && typeof d === 'object').slice(0, SAMPLE_LIST_MAX)
+    .map(([k, d]) => [k, { rotational: typeof d.rotational === 'boolean' ? d.rotational : null, util: num(d.util) ?? 0, r_mb_s: num(d.r_mb_s) ?? 0, w_mb_s: num(d.w_mb_s) ?? 0, r_await: num(d.r_await), w_await: num(d.w_await) }]));
+  out.arc = x.arc && typeof x.arc === 'object' ? { size: num(x.arc.size), c_max: num(x.arc.c_max), dnode_size: num(x.arc.dnode_size) ?? 0, dnode_limit: num(x.arc.dnode_limit) ?? 0, prune_per_s: num(x.arc.prune_per_s) ?? 0 } : null;
+  out.pools = Array.isArray(x.pools) ? x.pools.filter((p) => p && typeof p.name === 'string' && POOL.test(p.name)).slice(0, SAMPLE_LIST_MAX)
+    .map((p) => ({ name: p.name, health: /^[A-Z]{1,16}$/.test(p.health ?? '') ? p.health : 'UNKNOWN', cap: num(p.cap) ?? 0 })) : null;
+  if (x.containers === null || x.containers === undefined) out.containers = null;
+  else out.containers = Object.fromEntries(entries(x.containers).filter(([k, c]) => CT_ID.test(k) && c && typeof c === 'object').slice(0, SAMPLE_LIST_MAX)
+    .map(([k, c]) => [k, { io: psiIn(c.io), memory: psiIn(c.memory), ...(typeof c.name === 'string' && CT_NAME.test(c.name) ? { name: c.name } : {}) }]));
+  if (x.smart === null || x.smart === undefined) out.smart = null;
+  else out.smart = Object.fromEntries(entries(x.smart).filter(([k, h]) => DISK.test(k) && h && typeof h === 'object').slice(0, SAMPLE_LIST_MAX)
+    .map(([k, h]) => [k, { passed: typeof h.passed === 'boolean' ? h.passed : null, temp_c: num(h.temp_c), reallocated: num(h.reallocated), pending: num(h.pending), wear_pct: num(h.wear_pct), media_errors: num(h.media_errors) }]));
+  out.unread = Array.isArray(x.unread) ? x.unread.filter((r) => typeof r === 'string' && READING.test(r)).slice(0, 16) : [];
+  return out;
 }
 
 const healthDir = (env) => join(dataDir(env), 'health');
@@ -302,7 +352,11 @@ function keepSample(env, box, s, nowMs) {
   if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(box)) return;
   mkdirSync(healthDir(env), { recursive: true, mode: 0o700 });
   const month = new Date(nowMs).toISOString().slice(0, 7);
-  appendFileSync(join(healthDir(env), `${box}-${month}.jsonl`), JSON.stringify(s) + '\n', { mode: 0o600 });
+  const file = join(healthDir(env), `${box}-${month}.jsonl`);
+  // A month's file stops growing past HISTORY_FILE_MAX (a sample a minute is ~2-5 MB a month); three months kept.
+  let size = 0;
+  try { size = statSync(file).size; } catch { /* new */ }
+  if (size < HISTORY_FILE_MAX) appendFileSync(file, JSON.stringify(s) + '\n', { mode: 0o600 });
   const mine = readdirSync(healthDir(env)).filter((n) => n.startsWith(`${box}-`) && /-\d{4}-\d{2}\.jsonl$/.test(n)).sort();
   for (const old of mine.slice(0, -3)) rmSync(join(healthDir(env), old), { force: true });
 }

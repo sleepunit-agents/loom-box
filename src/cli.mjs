@@ -264,11 +264,13 @@ async function main(argv, env) {
       const ids = box ? [Object.keys(s.boxes).find((id) => id === box || s.boxes[id].name === box)].filter(Boolean) : Object.keys(w.boxes).filter((id) => s.boxes[id] && !s.boxes[id].revoked);
       if (box && !ids.length) throw new Fail(`no box ${box}`, 1);
       if (json) return out(Object.fromEntries(ids.map((id) => [id, { health: w.boxes[id]?.health ?? null, conditions: w.boxes[id]?.conditions ?? {}, units: w.boxes[id]?.units ?? {} }])));
+      // Whatever a box sent is escaped again here: nothing it says reaches the owner's terminal as a control sequence.
+      const esc = (v) => String(v ?? '').replace(/[\x00-\x1f\x7f-\x9f]/g, (c) => `\\x${c.charCodeAt(0).toString(16).padStart(2, '0')}`);
       for (const id of ids) {
         const b = w.boxes[id] ?? {};
-        process.stdout.write(`${s.boxes[id].name ?? id}: ${healthWords(b.health)}${b.healthAt ? ` (${b.healthAt})` : ''}\n`);
-        for (const c of Object.values(b.conditions ?? {})) process.stdout.write(`  now: ${c.title}: ${c.detail} (since ${c.since}${c.alerted ? ', alerted' : ''})\n`);
-        for (const u of Object.values(b.units ?? {})) process.stdout.write(`  unit: ${u.unit} ${u.state} since ${u.since}\n`);
+        process.stdout.write(`${esc(s.boxes[id].name ?? id)}: ${esc(healthWords(b.health))}${b.healthAt ? ` (${esc(b.healthAt)})` : ''}\n`);
+        for (const c of Object.values(b.conditions ?? {})) process.stdout.write(`  now: ${esc(c.title)}: ${esc(c.detail)} (since ${esc(c.since)}${c.alerted ? ', alerted' : ''})\n`);
+        for (const u of Object.values(b.units ?? {})) process.stdout.write(`  unit: ${esc(u.unit)} ${esc(u.state)} since ${esc(u.since)}\n`);
       }
       return;
     }
