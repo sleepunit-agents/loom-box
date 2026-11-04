@@ -6,7 +6,7 @@
 //
 // The box's half (bootInfo, unitSampler) only reads: /proc, `systemctl show`, `journalctl`. The control plane's half
 // (noteReport, watchAsks, watchNotices) keeps what it has heard in <data>/box-watch.json, never in the state file.
-import { spawnSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -50,15 +50,20 @@ export function redact(text) {
   return String(text ?? '')
     .replace(/[\0-\x08\x0b-\x1f]/g, '')
     .replace(/(https:\/\/([a-z]+\.)?discord(app)?\.com\/api(\/v\d+)?\/webhooks\/\d+\/)\S+/gi, '$1[REDACTED]')
-    .replace(/(authorization: *bearer +)\S+/gi, '$1[REDACTED]')
+    .replace(/(https:\/\/hooks\.slack\.com\/(services|workflows|triggers)\/)\S+/gi, '$1[REDACTED]')
+    .replace(/(https?:\/\/[^\s/]*\/[^\s]*webhook[^\s]*?\/)[A-Za-z0-9_-]{16,}\S*/gi, '$1[REDACTED]')
+    .replace(/([A-Za-z][A-Za-z0-9+.-]*:\/\/)[^\s/]*@/g, '$1[REDACTED]@')
+    .replace(/(\bbearer +)[A-Za-z0-9._~+\/=-]{8,}/gi, '$1[REDACTED]')
     .replace(/((password|passwd|secret|api[_-]?key|token)[=:] *)\S+/gi, '$1[REDACTED]')
     .replace(/sk-[A-Za-z0-9_-]{16,}/g, 'sk-[REDACTED]')
     .replace(/\b(loom_|ghp_|gho_|github_pat_|xox[abposr]-)[A-Za-z0-9_-]{10,}/g, '$1[REDACTED]');
 }
 
+/** A command's stdout, or null when it couldn't run or failed. Async, so a wedged journal never stalls the polls. */
 function sh(argv, env) {
-  const r = spawnSync(argv[0], argv.slice(1), { encoding: 'utf-8', timeout: 15_000, env, maxBuffer: 16 * 1024 * 1024 });
-  return r.status === 0 ? r.stdout : '';
+  return new Promise((resolve) => {
+    execFile(argv[0], argv.slice(1), { encoding: 'utf-8', timeout: 10_000, env, maxBuffer: 16 * 1024 * 1024 }, (err, out) => resolve(err ? null : out));
+  });
 }
 
 /** `systemctl show` output, as one object per unit. */
@@ -84,10 +89,16 @@ export function unitSampler(env = process.env, o = {}) {
   let ignore = null;
   try { const r = setting(env, 'UNITS_IGNORE'); if (r) ignore = new RegExp(r); } catch { ignore = null; }
   const scopes = [['user', ['--user']], ['system', []]];
-  return function sample(nowMs = Date.now()) {
-    const failed = [], looping = [];
+  return async function sample(nowMs = Date.now()) {
+    const failed = [], looping = [], unread = [];
     for (const [scope, flag] of scopes) {
-      const units = parseShow(run(['systemctl', ...flag, 'show', '--no-pager', '-p', 'Id,ActiveState,SubState,Result,NRestarts', '*']));
+      // Since when, as systemd says (--timestamp=unix, systemd 251+); an older one, without it.
+      const props = 'Id,ActiveState,SubState,Result,NRestarts,StateChangeTimestamp';
+      let text = await run(['systemctl', ...flag, 'show', '--no-pager', '--timestamp=unix', '-p', props, '*']);
+      if (text === null) text = await run(['systemctl', ...flag, 'show', '--no-pager', '-p', props.replace(',StateChangeTimestamp', ''), '*']);
+      // Couldn't read this scope (no user bus, a timeout): unknown, never "nothing's failing".
+      if (text === null) { unread.push(scope); continue; }
+      const units = parseShow(text);
       for (const u of units) {
         if (!UNIT.test(u.Id) || (ignore && ignore.test(u.Id))) continue;
         const key = `${scope}:${u.Id}`;
@@ -104,19 +115,20 @@ export function unitSampler(env = process.env, o = {}) {
           }
         }
         const r = restarts.get(key);
-        if (u.ActiveState === 'failed') failed.push({ unit: u.Id, scope, result: u.Result || 'failed' });
+        const at = /^@(\d{9,11})$/.exec(u.StateChangeTimestamp ?? '');
+        if (u.ActiveState === 'failed') failed.push({ unit: u.Id, scope, result: u.Result || 'failed', ...(at ? { since: new Date(Number(at[1]) * 1000).toISOString() } : {}) });
         else if (r?.looping) looping.push({ unit: u.Id, scope, restarts: r.bumps.length });
       }
     }
     const all = [...failed.map((x) => ({ ...x, state: 'failed' })), ...looping.map((x) => ({ ...x, state: 'looping' }))].slice(0, UNITS_MAX);
-    for (const u of all) u.log = journal(run, u.scope, u.unit);
-    return { at: new Date(nowMs).toISOString(), units: all };
+    for (const u of all) u.log = await journal(run, u.scope, u.unit);
+    return { at: new Date(nowMs).toISOString(), units: all, ...(unread.length ? { unread } : {}) };
   };
 }
 
 /** A unit's own last words: its journal's last lines, systemd's own status lines dropped, redacted, capped. */
-function journal(run, scope, unit) {
-  const out = run(['journalctl', ...(scope === 'user' ? ['--user'] : []), '-u', unit, '-n', '50', '--no-pager', '-q', '-o', 'short-iso']);
+async function journal(run, scope, unit) {
+  const out = (await run(['journalctl', ...(scope === 'user' ? ['--user'] : []), '-u', unit, '-n', '50', '--no-pager', '-q', '-o', 'short-iso'])) ?? '';
   const lines = out.split('\n').filter((l) => l.trim() && !/ systemd\[\d+\]: /.test(l)).slice(-LOG_LINES).map((l) => redact(l).slice(0, 300));
   let n = 0;
   return lines.reverse().filter((l) => (n += l.length + 1) <= LOG_CHARS).reverse();
@@ -160,10 +172,19 @@ const seconds = (s) => (s < 120 ? `${s} s` : minutes(s * 1000));
 const clock = (ms) => new Date(ms).toISOString().slice(11, 16) + ' UTC';
 const lastLine = (log) => (Array.isArray(log) && log.length ? String(log[log.length - 1]).replace(/^\S+\s+\S+\s+/, '').slice(0, 200) : '');
 
+/** At most this many FYIs one box keeps in the Inbox at a time: a box with flapping units can't crowd out the rest. */
+const FYI_PER_BOX = 5;
 function notice(w, n) {
   w.notices.unshift(n);
-  w.notices = w.notices.filter((x) => Date.parse(n.at) - Date.parse(x.at) < FYI_KEEP_MS).slice(0, FYI_MAX);
+  const per = {};
+  w.notices = w.notices.filter((x) => Date.parse(n.at) - Date.parse(x.at) < FYI_KEEP_MS && (!x.box || (per[x.box] = (per[x.box] ?? 0) + 1) <= FYI_PER_BOX)).slice(0, FYI_MAX);
 }
+
+/** Text a box sent, as it may be shown or said: no control characters (C0, DEL, C1), capped. */
+export function printable(v, n = 120) {
+  return String(v ?? '').replace(/[\x00-\x1f\x7f-\x9f]/g, '').slice(0, n);
+}
+const ISO_OK = (v, nowMs) => typeof v === 'string' && v.length <= 30 && Number.isFinite(Date.parse(v)) && Date.parse(v) <= nowMs + 60_000 && Date.parse(v) > nowMs - 400 * 86_400_000;
 
 /**
  * What a box said in one poll: its `boot` (each poll) and its `units` sample (once a minute, when it has a new one).
@@ -179,13 +200,15 @@ export function noteReport(env, box, { boot, units } = {}, nowMs = Date.now(), o
       const b = (w.boxes[box] ??= {});
       const seen = b.seen;
       b.seen = new Date(nowMs).toISOString();
-      if (boot && typeof boot.id === 'string' && boot.id.length <= 120 && Number.isFinite(boot.up)) {
+      // Only a boot in the shape bootInfo makes: a kernel's boot id, PID 1's start, an uptime under ten years.
+      if (boot && typeof boot.id === 'string' && /^[0-9a-f-]{36}:\d{1,20}$/.test(boot.id) && /^[0-9a-f-]{36}$/.test(boot.kernel ?? '')
+        && typeof boot.up === 'number' && Number.isFinite(boot.up) && boot.up >= 0 && boot.up < 10 * 365 * 86_400) {
         const prev = b.boot;
         if (prev && prev.id !== boot.id) {
           const bootAt = nowMs - boot.up * 1000;
           const dark = seen ? Math.max(0, Math.round((bootAt - Date.parse(seen)) / 1000)) : null;
           const host = prev.kernel && boot.kernel && prev.kernel !== boot.kernel;
-          notice(w, { text: `${label} came back at ${clock(bootAt)}, up ${seconds(boot.up)}${dark !== null ? ` after being dark ${seconds(dark)}` : ''}${host ? '. Its host restarted too' : ''}`,
+          notice(w, { box, text: `${label} came back at ${clock(bootAt)}, up ${seconds(boot.up)}${dark !== null ? ` after being dark ${seconds(dark)}` : ''}${host ? '. Its host restarted too' : ''}`,
             at: new Date(nowMs).toISOString(), page: '' });
           calls.push({ source: 'box-boot', severity: 'warn', summary: `${label} came back from a restart${dark !== null ? ` after being dark ${seconds(dark)}` : ''}`,
             facts: { box, up_s: boot.up, ...(dark !== null ? { dark_s: dark } : {}), kernel_restarted: host ? 1 : 0, at: new Date(bootAt).toISOString() } });
@@ -198,10 +221,13 @@ export function noteReport(env, box, { boot, units } = {}, nowMs = Date.now(), o
         for (const u of units.units.slice(0, UNITS_MAX)) {
           if (!UNIT.test(u?.unit ?? '') || !['user', 'system'].includes(u.scope) || !['failed', 'looping'].includes(u.state)) continue;
           const key = `${u.scope}:${u.unit}`;
-          const log = (Array.isArray(u.log) ? u.log : []).map((l) => redact(l).slice(0, 300)).slice(-LOG_LINES);
+          const log = (Array.isArray(u.log) ? u.log : []).slice(-LOG_LINES).map((l) => printable(redact(l), 300));
           const was = had[key];
-          const ep = { unit: u.unit, scope: u.scope, state: u.state, since: was?.since ?? new Date(nowMs).toISOString(), said: was?.said, log,
-            ...(u.restarts ? { restarts: Number(u.restarts) || 0 } : {}), ...(u.result ? { result: String(u.result).slice(0, 40) } : {}) };
+          // Since when: systemd's word if the box had it (and it's a sane time), else when loom first heard.
+          const since = was?.since ?? (ISO_OK(u.since, nowMs) ? new Date(Date.parse(u.since)).toISOString() : new Date(nowMs).toISOString());
+          const ep = { unit: u.unit, scope: u.scope, state: u.state, since, said: was?.said, log,
+            ...(Number.isFinite(Number(u.restarts)) && Number(u.restarts) > 0 ? { restarts: Math.min(1e6, Number(u.restarts)) } : {}),
+            ...(u.result ? { result: printable(u.result, 40) } : {}) };
           const fresh = !was;
           const due = was && (!was.said || nowMs - Date.parse(was.said) >= REMIND_MS);
           if (fresh || due) {
@@ -213,14 +239,16 @@ export function noteReport(env, box, { boot, units } = {}, nowMs = Date.now(), o
           }
           next[key] = ep;
         }
+        const unread = new Set(Array.isArray(units.unread) ? units.unread.filter((x) => x === 'user' || x === 'system') : []);
         for (const [key, ep] of Object.entries(had)) {
           if (next[key]) continue;
+          // Its scope couldn't be read this time: unknown, never "OK again".
+          if (unread.has(ep.scope)) { next[key] = ep; continue; }
           const lasted = minutes(nowMs - Date.parse(ep.since));
-          notice(w, { text: `${ep.unit} on ${label} is OK again (${ep.state === 'looping' ? 'kept restarting' : 'failed'} for ${lasted})`, at: new Date(nowMs).toISOString(), page: '' });
+          notice(w, { box, text: `${ep.unit} on ${label} is OK again (${ep.state === 'looping' ? 'kept restarting' : 'failed'} for ${lasted})`, at: new Date(nowMs).toISOString(), page: '' });
           calls.push({ source: unitSource(ep.unit), severity: 'warn', summary: `${ep.unit} on ${label} is OK again`, facts: { box, unit: ep.unit, cleared: 1, minutes: Math.round((nowMs - Date.parse(ep.since)) / 60_000) } });
         }
         b.units = next;
-        b.unitsAt = units.at;
       }
     });
   } catch { return []; }
@@ -244,7 +272,7 @@ export function watchAsks(env, labelOf = (b) => b, revoked = () => false) {
 
 /** The FYIs: a box back from a boot, a unit OK again. */
 export function watchNotices(env, nowMs = Date.now()) {
-  return readWatch(env).notices.filter((n) => n && typeof n.text === 'string' && nowMs - Date.parse(n.at) < FYI_KEEP_MS);
+  return readWatch(env).notices.filter((n) => n && typeof n.text === 'string' && nowMs - Date.parse(n.at) < FYI_KEEP_MS).map(({ box: _b, ...n }) => n);
 }
 
 /** A box's page rows: when it last came back, and each unit failing with its journal's last lines (its own output). */

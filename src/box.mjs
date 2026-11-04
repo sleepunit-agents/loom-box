@@ -695,16 +695,21 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
   // Keeping watch (watch.mjs): this boot on every poll; the units, sampled once a minute and sent with the next poll.
   const sampleUnits = unitsImpl ?? unitSampler(env);
   const readBoot = bootImpl ?? (() => bootInfo());
-  let unitsAt = 0;
+  // The units' sample runs beside the polls (a wedged journal never holds one up) and goes with the first poll after.
+  let unitsAt = 0, unitsDone = null, unitsBusy = false;
   function watchReport() {
     const out = {};
     try { const b = readBoot(); if (b) out.boot = b; } catch { /* left out */ }
-    if (clock() - unitsAt >= SAMPLE_MS) {
+    if (unitsDone) { out.units = unitsDone; unitsDone = null; }
+    if (!unitsBusy && clock() - unitsAt >= SAMPLE_MS) {
       unitsAt = clock();
-      try { out.units = sampleUnits(clock()); } catch (e) { log(`units: ${e.message}`); }
+      unitsBusy = true;
+      Promise.resolve().then(() => sampleUnits(clock())).then((u) => { unitsDone = u; }, (e) => log(`units: ${e.message}`)).finally(() => { unitsBusy = false; });
     }
     return out;
   }
+  /** For a test: the units' sample under way, done. */
+  async function settled() { while (unitsBusy) await new Promise((r) => setTimeout(r, 5)); }
 
   async function tick() {
     // Which remote sessions here are mid-turn (busy.mjs): loom shows it on the agents' cards (t-1624).
@@ -775,7 +780,7 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
     return want;
   }
 
-  return { tick, stop, houses, shutdown, endLogins, run };
+  return { tick, stop, houses, shutdown, endLogins, run, settled };
 }
 
 export { dataDir };

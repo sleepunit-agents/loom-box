@@ -96,7 +96,7 @@ function sessionsSection(env, s, view, only) {
   return blocks.length > 1 ? { id: 'sessions', title: 'Sessions', blocks } : null;
 }
 
-export function manifest(env) {
+export function manifest(env, nowMs = Date.now()) {
   const s = load(env);
   // The now board (nowboard.mjs): a bridge actually down is an alert (one restarting, by the runtime's own doing, is
   // not), one back from an outage an FYI, and what each agent's bodies are in is its doing.
@@ -127,12 +127,12 @@ export function manifest(env) {
     agents: reports,
     // A delivery the runtime gave up on (its body never started, after its retries): the owner hears of it.
     // ...and a relay thread between agents that's run long today: a heads-up, never a stop (relay.mjs).
-    notices: [...deliveryNotices(env), ...relayNotices(env), ...boxNotices(s), ...(board.notices ?? []), ...watchNoticesOf(env)].sort((x, y) => Date.parse(y.at) - Date.parse(x.at)).slice(0, 20),
+    notices: [...deliveryNotices(env), ...relayNotices(env), ...boxNotices(s), ...(board.notices ?? []), ...watchNoticesOf(env, nowMs)].sort((x, y) => Date.parse(y.at) - Date.parse(x.at)).slice(0, 20),
   };
 }
 
 function watchAsksOf(env, s) { try { return watchAsks(env, (b) => boxLabelOf(s, b), (b) => !!s.boxes[b]?.revoked); } catch { return []; } }
-function watchNoticesOf(env) { try { return watchNotices(env); } catch { return []; } }
+function watchNoticesOf(env, nowMs) { try { return watchNotices(env, nowMs); } catch { return []; } }
 function watchRowsOf(env, box, nowMs) { try { return watchRows(env, box, nowMs); } catch { return []; } }
 
 function joinAsk(j) {
