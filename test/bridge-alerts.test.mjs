@@ -182,3 +182,19 @@ test('a short blip leaves nothing; a long outage that recovers leaves one FYI, n
   at(130 + 8 * 60); snap();
   assert.equal(view().notices.length, 1, 'one FYI, not one per read');
 });
+
+test('a snapshot whose time is no time (NaN, Infinity, far future, negative) is unreadable; the good bridge beside it still updates', () => {
+  bridgeUp();
+  const d = join(env.LOOM_RUNTIME_NOW_DIR, 'art-now');
+  // JSON can't carry NaN or Infinity, but a huge number parses to Infinity, and a string isn't a number.
+  writeFileSync(join(d, 'discord.json'), '{"v": 1, "bridge": "discord", "at": 1e400, "interval_s": 5}');
+  writeFileSync(join(d, 'teams.json'), JSON.stringify({ v: 1, at: 'NaN', interval_s: 5 }));
+  writeFileSync(join(d, 'matrix.json'), JSON.stringify({ v: 1, at: nowS() + 86_400 * 365 * 1e6, interval_s: 5 }));
+  writeFileSync(join(d, 'signal.json'), JSON.stringify({ v: 1, at: -5, interval_s: 5 }));
+  at(500);
+  const m = view();
+  assert.deepEqual(m.asks.map((a) => a.text), ['Art\'s slack bridge is down: no word since 14:00 UTC'], 'only the readable bridge, and it is noted');
+  assert.deepEqual(nowPage(env, { nowS: nowS() }).sections.find((s) => s.id === 'board-art').blocks[0].items.map((x) => x.text), ['Slack bridge']);
+  at(520); snap();
+  assert.equal(view().notices.length, 1, 'the good bridge\'s outage ended, with its FYI');
+});

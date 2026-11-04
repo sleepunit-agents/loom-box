@@ -151,7 +151,9 @@ export function bridgesOf(dir, nowS = Date.now() / 1000) {
     if (!snap || typeof snap !== 'object' || Array.isArray(snap)) continue;
     const name = n.slice(0, -5);
     if (!BRIDGE.test(name) || name === 'convs') continue;
-    const at = Number(snap.at) || 0;
+    // `at` is the house's word: a finite time, not after now (a minute's skew aside), or the snapshot is unreadable.
+    const at = typeof snap.at === 'number' ? snap.at : Number.NaN;
+    if (!Number.isFinite(at) || at <= 0 || at > nowS + 60) continue;
     const every = Math.max(10, Number(snap.interval_s) || 10);
     out.push({
       name, at, stale: nowS - at > Math.max(30, 3 * every),
@@ -257,16 +259,8 @@ export function watchBridges(env, nowS = Date.now() / 1000, s = undefined) {
         for (const b of bs) {
           const k = `${agent}/${b.name}`;
           seen.add(k);
-          const r = w.bridges[k];
-          if (b.state === 'dark' || b.state === 'looping') {
-            // An outage's start: its last word (dark), or its first restart in the window (looping). Kept while it lasts.
-            if (!r || r.kind !== b.state) w.bridges[k] = { kind: b.state, since: b.state === 'dark' ? b.at : sec(b.crashes[0].at), outage: r?.outage ?? b.at, restarts: b.crashes?.length ?? 0 };
-            else if (b.state === 'looping') r.restarts = Math.max(r.restarts ?? 0, b.crashes.length);
-          } else if (b.state === 'live' && r) {
-            w.notices.unshift(backNotice(agent, b, r));
-            delete w.bridges[k];
-          } else if (b.state === 'down' && r) delete w.bridges[k]; // the owner took it down: nothing to report
-          // Restarting or late: an outage still going (if one was noted), never a new one.
+          // Each bridge on its own: one that can't be noted never holds up the others.
+          try { noteBridge(w, k, agent, b); } catch { /* noted next time */ }
         }
       }
       for (const k of Object.keys(w.bridges)) if (!seen.has(k)) delete w.bridges[k];
@@ -276,6 +270,20 @@ export function watchBridges(env, nowS = Date.now() / 1000, s = undefined) {
   } catch { /* remembered next time */ }
   for (const [agent, bs] of Object.entries(out)) for (const b of bs) { const r = w.bridges[`${agent}/${b.name}`]; if (r) b.outage = r; }
   return { all: out, notices: w.notices };
+}
+
+/** One bridge's part of the watch: an outage noted (dark, looping), or ended (back live: its FYI; taken down: none). */
+function noteBridge(w, k, agent, b) {
+  const r = w.bridges[k];
+  if (b.state === 'dark' || b.state === 'looping') {
+    // An outage's start: its last word (dark), or its first restart in the window (looping). Kept while it lasts.
+    if (!r || r.kind !== b.state) w.bridges[k] = { kind: b.state, since: b.state === 'dark' ? b.at : sec(b.crashes[0].at), outage: r?.outage ?? b.at, restarts: b.crashes?.length ?? 0 };
+    else if (b.state === 'looping') r.restarts = Math.max(r.restarts ?? 0, b.crashes.length);
+  } else if (b.state === 'live' && r) {
+    w.notices.unshift(backNotice(agent, b, r));
+    delete w.bridges[k];
+  } else if (b.state === 'down' && r) delete w.bridges[k]; // the owner took it down: nothing to report
+  // Restarting or late: an outage still going (if one was noted), never a new one.
 }
 
 /** The FYI a bridge back from an outage leaves: how long it was down (or that it settled), and when it came back. */
