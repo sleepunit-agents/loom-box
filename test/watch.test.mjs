@@ -300,3 +300,30 @@ test('a box boot-looping is one boot alert an hour, its FYIs five', () => {
   at(3700); ok(call(box, 'poll', { boot: { id: `${K1}:999`, kernel: K1, up: 5 } }));
   assert.equal(alerts.filter((a) => a.source === 'box-boot').length, 2);
 });
+
+test('boot FYIs: none for a box\'s first boot or the same boot again; one for a new one, with the facts', () => {
+  const fyis = () => manifest(env, clock).notices.filter((n) => /came back/.test(n.text)).length;
+  ok(call(box, 'poll', { boot: { id: `${K1}:100`, kernel: K1, up: 5000 } }));
+  at(60); ok(call(box, 'poll', { boot: { id: `${K1}:100`, kernel: K1, up: 5060 } }));
+  assert.equal(fyis(), 0);
+  at(400); ok(call(box, 'poll', { boot: { id: `${K1}:200`, kernel: K1, up: 30 } }));
+  assert.equal(fyis(), 1);
+  assert.deepEqual(Object.keys(alerts[0].facts).sort(), ['at', 'box', 'dark_s', 'kernel_restarted', 'up_s']);
+  assert.deepEqual([alerts[0].facts.box, alerts[0].facts.up_s], ['one', 30]);
+});
+
+test('a unit\'s facts, and the 6-hour reminder re-stamped (not every poll after)', () => {
+  ok(call(box, 'poll', { units: failed('art-slack.service') }));
+  assert.deepEqual(Object.fromEntries(['box', 'unit', 'scope', 'state'].map((k) => [k, alerts[0].facts[k]])), { box: 'one', unit: 'art-slack.service', scope: 'user', state: 'failed' });
+  at(6 * 3600); ok(call(box, 'poll', { units: failed('art-slack.service') }));
+  at(6 * 3600 + 60); ok(call(box, 'poll', { units: failed('art-slack.service') }));
+  at(6 * 3600 + 120); ok(call(box, 'poll', { units: failed('art-slack.service') }));
+  assert.deepEqual(alerts.map((a) => a.summary), ['art-slack.service failed on one', 'art-slack.service failed on one (still)']);
+  at(12 * 3600); ok(call(box, 'poll', { units: failed('art-slack.service') }));
+  assert.equal(alerts.length, 3);
+});
+
+test('printable drops bidi overrides and zero-width characters', async () => {
+  const { printable } = await import('../src/watch.mjs');
+  assert.equal(printable('a‮b​c﻿d'), 'abcd');
+});
