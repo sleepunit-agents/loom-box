@@ -315,8 +315,15 @@ day is a heads-up on loom's Inbox (`LOOM_RUNTIME_RELAY_HEADS_UP`). From a house,
 house writes its board through loom's piece API as its agent (shuttle's nowlog with `SHUTTLE_NOW_REMOTE=runtime/now`):
 `now/snapshot` `{bridge, snap}` and `now/event` `{record}`, into `<LOOM_RUNTIME_NOW_DIR>/<agent>-now` (the layout
 loom-now kept). `loom runtime now talking` from a house reads its own. The runtime's page **Now** shows each agent's
-bridges, who they're talking with, what waits, and the accounts' quota. Its manifest makes a bridge gone dark an alert
-on loom's Inbox and each live conversation its agent's `doing`. A board holds no message text.
+bridges, who they're talking with, what waits, and the accounts' quota. Its manifest makes a bridge actually down an
+alert on loom's Inbox (pushed once) and each live conversation its agent's `doing`. A board holds no message text.
+
+A bridge the runtime is restarting (its service's house wanted, starting, stopping, being moved or just up) shows as
+**restarting**, never an alert. It's **down** after `LOOM_RUNTIME_BRIDGE_DARK_S` (default 300) of silence while its
+house is meant to be running, or a house stuck on its way up for three times that. A crash loop (its service's house
+ending unasked 3 times within 15 minutes; `crashes` on the service) is an alert at once: "keeps restarting: 4 restarts
+in 12 min, last error …". Back from an outage, a bridge leaves one FYI ("was down 7 min, back at 14:02"); a blip
+leaves nothing. What was down is remembered in `<data>/now-watch.json`, noted by the manifest and the delivery tick.
 
 
 **Gates** (who a platform id is, and what each person may do with each agent) are the runtime's too: collection

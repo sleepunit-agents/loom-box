@@ -97,9 +97,10 @@ function sessionsSection(env, s, view, only) {
 
 export function manifest(env) {
   const s = load(env);
-  // The now board (nowboard.mjs): a bridge gone dark is an alert, and what each agent's bodies are in is its doing.
-  let board = { asks: [], agents: {} };
-  try { board = nowManifest(env); } catch { /* a board that can't be read leaves the rest of the manifest */ }
+  // The now board (nowboard.mjs): a bridge actually down is an alert (one restarting, by the runtime's own doing, is
+  // not), one back from an outage an FYI, and what each agent's bodies are in is its doing.
+  let board = { asks: [], agents: {}, notices: [] };
+  try { board = nowManifest(env, Date.now() / 1000, s); } catch { /* a board that can't be read leaves the rest of the manifest */ }
   const reports = agentReports(s, Date.now(), { ...reportedBusy(s), ...sessionsBusy(join(stateDir(env), 'session-cpu.json')) });
   for (const [a, doing] of Object.entries(board.agents)) reports[a] = { readings: [], ...reports[a], doing: [...(reports[a]?.doing ?? []), ...doing].slice(0, 8) };
   const boxes = Object.values(s.boxes).filter((b) => !b.revoked);
@@ -124,7 +125,7 @@ export function manifest(env) {
     agents: reports,
     // A delivery the runtime gave up on (its body never started, after its retries): the owner hears of it.
     // ...and a relay thread between agents that's run long today: a heads-up, never a stop (relay.mjs).
-    notices: [...deliveryNotices(env), ...relayNotices(env), ...boxNotices(s)].sort((x, y) => Date.parse(y.at) - Date.parse(x.at)).slice(0, 20),
+    notices: [...deliveryNotices(env), ...relayNotices(env), ...boxNotices(s), ...(board.notices ?? [])].sort((x, y) => Date.parse(y.at) - Date.parse(x.at)).slice(0, 20),
   };
 }
 
@@ -412,7 +413,10 @@ export function agentReports(s, nowMs = Date.now(), busy = {}) {
     const bridges = mine.filter((v) => BRIDGE.test(v.name));
     if (bridges.length) {
       const bad = bridges.some((v) => !up(v) && late(v));
-      readings.push({ label: 'Bridges', value: bridges.map((v) => `${v.name} ${up(v) ? '✓' : '✗'}`).join('  '), tone: bad ? 'bad' : 'ok' });
+      // One on its way back up (the runtime restarting it, within the grace) is restarting, not down.
+      const word = (v) => (up(v) ? '✓' : late(v) ? '✗' : 'restarting');
+      const restarting = bridges.some((v) => !up(v) && !late(v));
+      readings.push({ label: 'Bridges', value: bridges.map((v) => `${v.name} ${word(v)}`).join('  '), tone: bad ? 'bad' : restarting ? 'warn' : 'ok' });
     }
     // Each remote session, and whether it's mid-turn (busy.mjs: only sessions on this machine are seen).
     const remote = [];
