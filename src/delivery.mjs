@@ -158,13 +158,14 @@ const locked = (env, f) => withLock(deliveryDir(env), 'lock', f, 'delivery', num
 const num = (v, d) => { const n = Number(v); return v !== undefined && v !== '' && Number.isFinite(n) && n >= 0 ? n : d; };
 
 /**
- * Local bodies (t-1830): a wake that needs loom's machine (`<!-- house: local -->` in its text, which the clock sends
- * only for a wake set on loom's machine, or one the owner approved) has its body here, not in a house, when the owner
- * says so for its agent. LOOM_RUNTIME_LOCAL_BODIES, JSON: {"agents": ["art"], "cwd": "/home/art/Art", "claude":
+ * Local bodies (t-1830): a wake that needs loom's machine has its body here, not in a house, when the owner says so
+ * for its agent. Never read from a wake's text: only the deliver contract's structured `local: true`, on venue wake,
+ * from a schedule, and only from the piece the owner names (`from`, default the clock), which sends it only for a wake
+ * set on loom's machine (a house can't name a wake's place, so no house's wake is ever delivered local).
+ * LOOM_RUNTIME_LOCAL_BODIES, JSON: {"agents": ["art"], "cwd": "/home/art/Art", "from": "clock", "claude":
  * "/home/art/.local/bin/claude", "args": ["--dangerously-skip-permissions"], "path": "…"}. agents and cwd are
  * required; unset or unreadable, there are none and such a wake is refused (403): the clock then runs it its old way.
  */
-export const LOCAL_MARK = '<!-- house: local -->';
 export function localBodiesOf(env) {
   let v;
   try { v = JSON.parse(setting(env, 'LOCAL_BODIES') || 'null'); } catch { return null; }
@@ -172,8 +173,11 @@ export function localBodiesOf(env) {
   const agents = Array.isArray(v.agents) ? v.agents.filter((a) => typeof a === 'string' && AGENT_NAME.test(a)) : [];
   if (!agents.length || typeof v.cwd !== 'string' || !v.cwd.startsWith('/')) return null;
   const args = Array.isArray(v.args) && v.args.every((a) => typeof a === 'string') ? v.args : [];
-  return { agents, cwd: v.cwd, ...(typeof v.claude === 'string' && v.claude ? { claude: v.claude } : {}), args, ...(typeof v.path === 'string' && v.path ? { path: v.path } : {}) };
+  const from = typeof v.from === 'string' && PIECE.test(v.from) ? v.from : 'clock';
+  return { agents, cwd: v.cwd, from, ...(typeof v.claude === 'string' && v.claude ? { claude: v.claude } : {}), args, ...(typeof v.path === 'string' && v.path ? { path: v.path } : {}) };
 }
+const mismatch = (place, local) => `forbidden: ${place}'s bodies run ${local ? "on loom's machine" : 'in a house'}, and this wake's would not`;
+
 /** The runner settings a local body's harness takes: the owner's claude and its args. */
 const localRunnerEnv = (env, lb) => ({ ...env, ...(lb?.claude ? { LOOM_RUNTIME_CLAUDE: lb.claude } : {}), LOOM_RUNTIME_CLAUDE_ARGS: JSON.stringify(lb?.args ?? []) });
 
@@ -382,7 +386,7 @@ const str = (v, max, min = 1) => typeof v === 'string' && v.length >= min && v.l
 /** The deliver body (agent-runtime.md, "The deliver contract"), checked whole: `source` (the calling piece) is core's, added as it forwards. */
 export function parseDelivery(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) fail('a delivery is a JSON object');
-  const bad = Object.keys(raw).find((k) => !['id', 'agent', 'venue', 'place', 'label', 'from', 'kind', 'at', 'text', 'source'].includes(k));
+  const bad = Object.keys(raw).find((k) => !['id', 'agent', 'venue', 'place', 'label', 'from', 'kind', 'at', 'text', 'source', 'local'].includes(k));
   if (bad !== undefined) fail(`a delivery has no key ${JSON.stringify(bad)}`);
   if (!str(raw.id, MAX_ID)) fail(`id is the source's own id for the message, 1-${MAX_ID} characters`);
   if (!AGENT_NAME.test(raw.agent ?? '')) fail('agent is an agent id');
@@ -397,6 +401,8 @@ export function parseDelivery(raw) {
   if (typeof raw.at !== 'string' || Number.isNaN(Date.parse(raw.at))) fail('at is an ISO-8601 time');
   if (!str(raw.text, MAX_TEXT)) fail(`text is 1-${MAX_TEXT} characters`);
   if (!PIECE.test(raw.source ?? '')) fail('source is the calling piece, as core forwards it');
+  if (raw.local !== undefined && raw.local !== true) fail('local is true, or left out');
+  if (raw.local === true && (raw.venue !== 'wake' || raw.kind !== 'wake' || raw.from.kind !== 'schedule')) fail('local is only for a wake from a schedule, on venue wake');
   return { ...raw };
 }
 
@@ -429,15 +435,16 @@ async function deliverOnce(env, raw, o) {
   // Where its bodies run (t-1830): a wake that needs loom's machine has them here, for an agent the owner lets; its
   // conversation keeps that for good. A wake that's the other kind is refused (403), before anything's written: a
   // house's wake never joins a conversation whose body runs here. A person's message (the owner's Reply) joins either.
-  const local = m.venue === 'wake' && m.kind === 'wake' && m.text.includes(LOCAL_MARK);
-  if (local && !localBodiesOf(env)?.agents.includes(m.agent)) {
-    return { status: 403, error: `forbidden: the runtime runs no local bodies for ${m.agent} (LOOM_RUNTIME_LOCAL_BODIES): this wake needs loom's machine` };
+  const local = m.local === true;
+  if (local) {
+    const lb = localBodiesOf(env);
+    if (!lb?.agents.includes(m.agent)) return { status: 403, error: `forbidden: the runtime runs no local bodies for ${m.agent} (LOOM_RUNTIME_LOCAL_BODIES): this wake needs loom's machine` };
+    if (m.source !== lb.from) return { status: 403, error: `forbidden: only ${lb.from} delivers a wake whose body runs on loom's machine, not ${m.source}` };
   }
+  // A quick look first, so a mismatch writes nothing; the same check again under the lock, below, is what holds.
   if (m.kind === 'wake') {
     const prior = listConvs(env).find((c) => c.agent === m.agent && c.venue === m.venue && c.place === m.place);
-    if (prior && !!prior.local !== local) {
-      return { status: 403, error: `forbidden: ${m.place}'s bodies run ${prior.local ? "on loom's machine" : 'in a house'}, and this wake's would not` };
-    }
+    if (prior && !!prior.local !== local) return { status: 403, error: mismatch(m.place, prior.local) };
   }
   const key = deliveryKey(m);
   const now = () => d.now().getTime();
@@ -504,14 +511,19 @@ async function deliverOnce(env, raw, o) {
     const venueInfo = await venueOf(d, m.venue);
     let kind;
     try { kind = kindOf(m.venue, venueInfo?.kind); } catch { kind = 'live'; }
-    locked(env, () => {
+    const clash = locked(env, () => {
       const c = loadConv(env, turn.conversation) ?? { conversation: turn.conversation, agent: m.agent, venue: m.venue, place: m.place, kind, queue: [], outcomes: {}, runs: 0, started: d.now().toISOString(), ...(local ? { local: true } : {}) };
+      // Where its bodies run is the conversation's for good: a wake of the other kind, raced past the look above,
+      // stops here (its turn stands, no body hears it).
+      if (m.kind === 'wake' && !!c.local !== local) return mismatch(m.place, c.local);
       if (m.label !== undefined) c.label = m.label;
       // A retry after a crash may find its message already queued (or already answered): never twice.
-      if (!c.queue.some((x) => x.key === key) && !c.outcomes?.[key]) c.queue.push({ key, id: m.id, at: m.at, from: m.from, kind: m.kind, ...(tier ? { tier } : {}), ...(tierUnread ? { tierUnread: true } : {}), ...(sealed ? { sealed } : { mem: true }) });
+      if (!c.queue.some((x) => x.key === key) && !c.outcomes?.[key]) c.queue.push({ key, id: m.id, at: m.at, from: m.from, kind: m.kind, ...(local ? { local: true } : {}), ...(tier ? { tier } : {}), ...(tierUnread ? { tierUnread: true } : {}), ...(sealed ? { sealed } : { mem: true }) });
       c.last = d.now().toISOString();
       saveConv(env, c);
+      return null;
     });
+    if (clash) return settle({ status: 403, error: clash });
     const mem = new Map(sealed ? [] : [[key, m.text]]);
     // The source's 2 s are real time, whatever clock the records are kept by.
     const reachEnd = Date.now() + REACH_MS;
@@ -661,6 +673,15 @@ function plan(env, cv, d, mem) {
   const now = d.now().getTime();
   const c = loadConv(env, cv);
   if (!c?.queue?.length) return null;
+  // A wake whose kind (here, or in a house) isn't its conversation's never reaches its body (t-1830): failed, whatever
+  // let it onto the queue. A person's message (the owner's Reply) has no kind and joins either.
+  const stray = c.queue.filter((x) => x.kind === 'wake' && !isNote(x) && !!x.local !== !!c.local);
+  if (stray.length) {
+    outcome(c, stray.map((x) => x.key), { body: 'failed', reason: mismatch(c.place, c.local) }, now);
+    c.queue = c.queue.filter((x) => !stray.includes(x));
+    saveConv(env, c);
+    if (!c.queue.length) return null;
+  }
   // A post-failure note is never a delivery of its own (t-1760): alone on the queue (what it rode with went another
   // way), it goes back to waiting for the conversation's next real message, and nothing starts for it.
   if (c.queue.every(isNote)) {
@@ -1029,6 +1050,8 @@ async function execute(env, op, d, mem) {
     // A conversation whose bodies run on loom's machine (a local wake's, t-1830): the local runner, in the agent's own
     // folder there, with the PATH the owner set for it. Every other: in the agent's house.
     const local = !!c0.local;
+    // Plan dropped any wake of the other kind; never one reaches a body (t-1830).
+    if (op.msgs.some((x) => x.kind === 'wake' && !isNote(x) && !!x.local !== local)) throw new DeliveryError(mismatch(c0.place, local), 403);
     const lb = local ? localBodiesOf(env) : null;
     if (local && !lb?.agents.includes(c0.agent)) throw new DeliveryError(`the runtime runs no local bodies for ${c0.agent} now (LOOM_RUNTIME_LOCAL_BODIES)`, 403);
     const bodyEnv = d.bodyEnv(runKey, op.cv);
