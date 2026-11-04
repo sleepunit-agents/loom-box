@@ -646,8 +646,8 @@ function boxesPage(env, nowMs, caller = OWNER) {
         ...watchRowsOf(env, b.id, nowMs),
         // Whether silence is an alert, and whether it hosts anything: the owner's (control.mjs, setBoxWatch).
         ...(b.local ? [] : [{ label: 'Watch', value: `${b.reportOnly ? 'Report-only' : 'Hosts what it may'} · ${b.reportOnly || b.alwaysOn ? 'always on' : 'not always on'}`,
-          detail: 'An always-on box quiet for 10 minutes is an alert', act: b.reportOnly ? { action: 'box-watch', label: 'Let it host', fields: { name: b.id, reportOnly: 'off' }, confirm: `${b.label} may take houses again.` }
-            : { action: 'box-watch', label: b.alwaysOn ? 'Not always on' : 'Always on', fields: { name: b.id, alwaysOn: b.alwaysOn ? 'off' : 'on' } } }]),
+          detail: 'An always-on box quiet for 10 minutes is an alert', act: b.reportOnly ? { action: 'box-watch', label: 'Let it host', fields: { name: b.id, report_only: 'off' }, confirm: `${b.label} may take houses again.` }
+            : { action: 'box-watch', label: b.alwaysOn ? 'Not always on' : 'Always on', fields: { name: b.id, always_on: b.alwaysOn ? 'off' : 'on' } } }]),
       ] },
       // Its disk is the headline's tile (only loom's own box measures one).
       here.length
@@ -1132,7 +1132,7 @@ export function act(env, effects, { action, fields: raw = {}, caller: c }, publi
       case 'block-join': { const r = blockJoin(env, effects, fields); return { ok: true, message: `Blocked ${r.name}'s request.`, page: '' }; }
       case 'block-all-joins': { const r = blockAllJoins(env, effects); return { ok: true, message: `Blocked ${r.blocked} waiting request${r.blocked === 1 ? '' : 's'}.`, page: '' }; }
       case 'revoke-box': { const r = revokeBox(env, effects, fields); return { ok: true, message: `Revoked ${r.name}. Its houses lost their tokens.`, page: '' }; }
-      case 'box-watch': { const r = setBoxWatch(env, effects, fields); return { ok: true, message: `${r.name}: ${r.reportOnly ? 'report-only' : 'hosts what it may'}, ${r.alwaysOn ? 'always on' : 'not always on'}.`, page: '' }; }
+      case 'box-watch': { const r = setBoxWatch(env, effects, { name: fields.name, alwaysOn: fields.always_on, reportOnly: fields.report_only }); return { ok: true, message: `${r.name}: ${r.reportOnly ? 'report-only' : 'hosts what it may'}, ${r.alwaysOn ? 'always on' : 'not always on'}.`, page: '' }; }
       case 'may-host': { const r = setMayHost(env, effects, fields); return { ok: true, message: `Saved who ${r.name} may host.`, page: '' }; }
       case 'box-owner': { const r = setBoxOwner(env, effects, fields); return { ok: true, message: `${r.name} is ${r.owner}'s.`, page: '' }; }
       case 'box-lend': { const r = lendBox(env, effects, fields); return { ok: true, message: r.lentTo.length ? `${r.name} is lent to ${r.lentTo.join(', ')}.` : `${r.name} is lent to no one.`, page: '' }; }
