@@ -70,6 +70,8 @@ import { loomStore } from './store.mjs';
 import { namesFiles } from './briefs.mjs';
 import { AGENT_NAME, StateError, alive, withLock } from './state.mjs';
 import { RUNS_KEPT, causeOf, detectLoop, textHash } from './loops.mjs';
+import { runnerFor } from './runners.mjs';
+import { raiseAlert } from './alerthook.mjs';
 import { readRelays } from './relay.mjs';
 
 const DAY_MS = 86_400_000;
@@ -155,6 +157,26 @@ const locked = (env, f) => withLock(deliveryDir(env), 'lock', f, 'delivery', num
 
 const num = (v, d) => { const n = Number(v); return v !== undefined && v !== '' && Number.isFinite(n) && n >= 0 ? n : d; };
 
+/**
+ * Local bodies (t-1830): a wake that needs loom's machine (`<!-- house: local -->` in its text, which the clock sends
+ * only for a wake set on loom's machine, or one the owner approved) has its body here, not in a house, when the owner
+ * says so for its agent. LOOM_RUNTIME_LOCAL_BODIES, JSON: {"agents": ["art"], "cwd": "/home/art/Art", "claude":
+ * "/home/art/.local/bin/claude", "args": ["--dangerously-skip-permissions"], "path": "…"}. agents and cwd are
+ * required; unset or unreadable, there are none and such a wake is refused (403): the clock then runs it its old way.
+ */
+export const LOCAL_MARK = '<!-- house: local -->';
+export function localBodiesOf(env) {
+  let v;
+  try { v = JSON.parse(setting(env, 'LOCAL_BODIES') || 'null'); } catch { return null; }
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
+  const agents = Array.isArray(v.agents) ? v.agents.filter((a) => typeof a === 'string' && AGENT_NAME.test(a)) : [];
+  if (!agents.length || typeof v.cwd !== 'string' || !v.cwd.startsWith('/')) return null;
+  const args = Array.isArray(v.args) && v.args.every((a) => typeof a === 'string') ? v.args : [];
+  return { agents, cwd: v.cwd, ...(typeof v.claude === 'string' && v.claude ? { claude: v.claude } : {}), args, ...(typeof v.path === 'string' && v.path ? { path: v.path } : {}) };
+}
+/** The runner settings a local body's harness takes: the owner's claude and its args. */
+const localRunnerEnv = (env, lb) => ({ ...env, ...(lb?.claude ? { LOOM_RUNTIME_CLAUDE: lb.claude } : {}), LOOM_RUNTIME_CLAUDE_ARGS: JSON.stringify(lb?.args ?? []) });
+
 export function limitsOf(env) {
   let continuity = {};
   try { const c = JSON.parse(setting(env, 'CONTINUITY') || '{}'); if (c && typeof c === 'object' && !Array.isArray(c)) continuity = c; } catch { /* the defaults */ }
@@ -209,6 +231,8 @@ async function giveUp(env, c, reason, tries, d) {
   };
   locked(env, () => addNotice(env, notice, d.now().getTime()));
   d.warn(`gave up on ${c.conversation}: ${said}`);
+  d.alert(env, { source: 'runtime-start', severity: 'warn', place: c.place, summary: `${c.agent}'s ${c.venue} ${c.place} couldn't start a body after ${tries} tries`,
+    facts: { agent: c.agent, conversation: c.conversation, venue: c.venue, place: c.place, reason } });
 }
 
 export function windowMs(env, venue, kind) {
@@ -252,10 +276,14 @@ export function depsOf(env, o = {}) {
   const core = o.core ?? coreFrom(env, { fetchImpl: o.fetchImpl });
   const seal = o.sealer ?? (sealer ??= ageSealer(env, deliveryDir(env)));
   const houses = {};
+  const locals = {};
   return {
     core,
-    // Bodies run in their agent's house; a test hands in a local (fake) runner.
-    runner: o.runner ?? ((h) => (houses[h] ??= new HouseRunner(env, h, { sealer: seal, now: o.now }))),
+    // Bodies run in their agent's house; a local wake's (t-1830), on this machine, when the owner lets that agent's
+    // (LOOM_RUNTIME_LOCAL_BODIES). A test hands in a local (fake) runner.
+    runner: o.runner ?? ((h, local) => (local
+      ? (locals[h] ??= runnerFor(h, localRunnerEnv(env, localBodiesOf(env))))
+      : (houses[h] ??= new HouseRunner(env, h, { sealer: seal, now: o.now })))),
     sealer: seal,
     now: o.now ?? (() => new Date()),
     accounts: o.accounts ?? accountsFrom(env),
@@ -265,6 +293,8 @@ export function depsOf(env, o = {}) {
     bodyEnv: (key, conversation) => bodyEnvOf(env, { key, conversation }),
     cwd: o.cwd ?? setting(env, 'BODY_CWD'),
     warn: o.warn ?? ((m) => process.stderr.write(`loom-runtime deliver: ${m}\n`)),
+    // What the runtime noticed, to the owner's alert command (alerthook.mjs, t-1830); a test hands in its own.
+    alert: o.alert ?? raiseAlert,
     // Who may do what (policy.mjs): the owner's policy and the gates, from the runtime's own store; a person's card,
     // from core's CLI; and the venue's adapter, through its declared send argv (describe, presence).
     policy: o.policy ?? ((agent) => policyOf(storeOf(env, o), agent).doc),
@@ -396,6 +426,19 @@ async function deliverOnce(env, raw, o) {
   const d = depsOf(env, o);
   let m;
   try { m = parseDelivery(raw); } catch (e) { return { status: e.status ?? 400, error: e.message }; }
+  // Where its bodies run (t-1830): a wake that needs loom's machine has them here, for an agent the owner lets; its
+  // conversation keeps that for good. A wake that's the other kind is refused (403), before anything's written: a
+  // house's wake never joins a conversation whose body runs here. A person's message (the owner's Reply) joins either.
+  const local = m.venue === 'wake' && m.kind === 'wake' && m.text.includes(LOCAL_MARK);
+  if (local && !localBodiesOf(env)?.agents.includes(m.agent)) {
+    return { status: 403, error: `forbidden: the runtime runs no local bodies for ${m.agent} (LOOM_RUNTIME_LOCAL_BODIES): this wake needs loom's machine` };
+  }
+  if (m.kind === 'wake') {
+    const prior = listConvs(env).find((c) => c.agent === m.agent && c.venue === m.venue && c.place === m.place);
+    if (prior && !!prior.local !== local) {
+      return { status: 403, error: `forbidden: ${m.place}'s bodies run ${prior.local ? "on loom's machine" : 'in a house'}, and this wake's would not` };
+    }
+  }
   const key = deliveryKey(m);
   const now = () => d.now().getTime();
 
@@ -462,7 +505,7 @@ async function deliverOnce(env, raw, o) {
     let kind;
     try { kind = kindOf(m.venue, venueInfo?.kind); } catch { kind = 'live'; }
     locked(env, () => {
-      const c = loadConv(env, turn.conversation) ?? { conversation: turn.conversation, agent: m.agent, venue: m.venue, place: m.place, kind, queue: [], outcomes: {}, runs: 0, started: d.now().toISOString() };
+      const c = loadConv(env, turn.conversation) ?? { conversation: turn.conversation, agent: m.agent, venue: m.venue, place: m.place, kind, queue: [], outcomes: {}, runs: 0, started: d.now().toISOString(), ...(local ? { local: true } : {}) };
       if (m.label !== undefined) c.label = m.label;
       // A retry after a crash may find its message already queued (or already answered): never twice.
       if (!c.queue.some((x) => x.key === key) && !c.outcomes?.[key]) c.queue.push({ key, id: m.id, at: m.at, from: m.from, kind: m.kind, ...(tier ? { tier } : {}), ...(tierUnread ? { tierUnread: true } : {}), ...(sealed ? { sealed } : { mem: true }) });
@@ -515,7 +558,7 @@ function statusOf(env, c, d) {
   let rec;
   try { rec = readBody(env, c.body); } catch { return 'unknown'; }
   if (rec.ended) return 'ended';
-  try { return d.runner(rec.harness).status(bodyOf(c.body, rec)); } catch { return 'unknown'; }
+  try { return d.runner(rec.harness, rec.local).status(bodyOf(c.body, rec)); } catch { return 'unknown'; }
 }
 
 const isStarting = (c, now) => !!c.starting && alive(c.starting.pid) && now - c.starting.since < STARTING_MS;
@@ -652,7 +695,7 @@ function plan(env, cv, d, mem) {
     if (!c.bodyRules?.guest && c.queue.some((x) => x.tier === 1)) return begin({ type: 'reseat', body: c.body });
     // Mid-turn: into its inbox, where its harness hears it (shuttle's hand_over).
     const rec = readBody(env, c.body);
-    const runner = d.runner(rec.harness);
+    const runner = d.runner(rec.harness, rec.local);
     const left = [];
     for (const x of c.queue) {
       if (x.tierUnread && !c.bodyRules?.guest) { left.push({ x, reason: 'its sender\'s tier couldn\'t be read' }); continue; }
@@ -822,7 +865,7 @@ function closeRun(env, c, d, now) {
   r.end = now;
   try {
     const rec = readBody(env, c.body);
-    const t = cleanTurn(d.runner(rec.harness).turn?.(bodyOf(c.body, rec)));
+    const t = cleanTurn(d.runner(rec.harness, rec.local).turn?.(bodyOf(c.body, rec)));
     if (t) r.turn = t;
   } catch { /* its harness can't say: never a failure for that */ }
   return true;
@@ -851,6 +894,8 @@ async function loopNote(env, op, d) {
     const { seq } = await d.core.turn({ agent: c.agent, venue: c.venue, place: c.place, at, from: { kind: 'agent', id: c.agent }, kind: 'note', run: newRun(), outcome: 'deferred', ...(c.label !== undefined ? { label: c.label } : {}) });
     try { await d.core.audit({ conversation: c.conversation, seq, text: `Paused: it looks like a loop (${op.reason}). Nothing starts here until the owner resumes it.` }); } catch (e) { d.warn(`the pause note on ${c.conversation} stands without its reason: ${e.message}`); }
   } catch (e) { d.warn(`couldn't record the pause note on ${c.conversation}: ${e.message}`); }
+  d.alert(env, { source: 'runtime-loop', severity: 'warn', place: c.place, summary: `${c.agent}'s ${c.venue} ${c.label ?? c.place} is paused: it looks like a loop`,
+    facts: { agent: c.agent, conversation: c.conversation, venue: c.venue, place: c.place, reason: op.reason } });
 }
 
 /** The owner's asks: each paused conversation, once, with Resume and Dismiss (ui.mjs). */
@@ -981,14 +1026,21 @@ async function execute(env, op, d, mem) {
       return;
     }
     const runKey = randomBytes(24).toString('hex');
-    const bodyDeps = { runner: d.runner, accounts: d.accounts, now: d.now, fetchImpl: d.fetchImpl, bodyEnv: d.bodyEnv(runKey, op.cv) };
-    const base = { agent: c0.agent, venue: c0.venue, venueKind: c0.kind, cwd: d.cwd, deny: rules.deny, guest: rules.guest };
+    // A conversation whose bodies run on loom's machine (a local wake's, t-1830): the local runner, in the agent's own
+    // folder there, with the PATH the owner set for it. Every other: in the agent's house.
+    const local = !!c0.local;
+    const lb = local ? localBodiesOf(env) : null;
+    if (local && !lb?.agents.includes(c0.agent)) throw new DeliveryError(`the runtime runs no local bodies for ${c0.agent} now (LOOM_RUNTIME_LOCAL_BODIES)`, 403);
+    const bodyEnv = d.bodyEnv(runKey, op.cv);
+    if (lb?.path) bodyEnv.PATH = lb.path;
+    const bodyDeps = { runner: (h) => d.runner(h, local), accounts: d.accounts, now: d.now, fetchImpl: d.fetchImpl, bodyEnv };
+    const base = { agent: c0.agent, venue: c0.venue, venueKind: c0.kind, cwd: local ? lb.cwd : d.cwd, deny: rules.deny, guest: rules.guest, ...(local ? { local: true } : {}) };
     if (op.type === 'start') {
       r = await startBody(env, { ...base, place: c0.place, brief: startBrief(c0, msgs, run, sends, rules) }, bodyDeps);
     } else {
       const pack = JSON.parse(d.sealer.open(readFileSync(slotFile(env, op.cv))).toString('utf-8'));
       if (pack?.v !== 1 || !Array.isArray(pack.files)) throw new DeliveryError('its slot isn\'t one this runtime wrote');
-      const runner = d.runner(pack.harness);
+      const runner = d.runner(pack.harness, local);
       const slot = { harness: pack.harness, session: pack.session };
       // A house's body gets its files with the resume (its host puts them back); a local one, here.
       if (!runner.remote) restored = restoreFiles(runner, pack.files);
@@ -1074,7 +1126,7 @@ async function execute(env, op, d, mem) {
 function endAndForget(env, ref, d) {
   try {
     const rec = readBody(env, ref);
-    const runner = d.runner(rec.harness);
+    const runner = d.runner(rec.harness, rec.local);
     const body = bodyOf(ref, rec);
     const slot = (() => { try { return runner.slotOf(body) ?? rec.slot; } catch { return rec.slot; } })();
     endBody(env, ref, { runner: d.runner, now: d.now, bodyEnv: d.bodyEnv() });
@@ -1123,7 +1175,7 @@ async function retire(env, cv, ref, d, stop) {
   const c = loadConv(env, cv);
   let rec;
   try { rec = readBody(env, ref); } catch { return { slot: null, pending: [] }; }
-  const runner = d.runner(rec.harness);
+  const runner = d.runner(rec.harness, rec.local);
   const body = bodyOf(ref, rec);
   const pending = takeInbox(runner, ref, c, rec);
   const slot = (() => { try { return runner.slotOf(body) ?? rec.slot; } catch { return rec.slot; } })();
@@ -1158,7 +1210,7 @@ async function retire(env, cv, ref, d, stop) {
 function expireSlot(env, c, d) {
   rmSync(slotFile(env, c.conversation), { force: true });
   try {
-    const runner = d.runner(c.slot.harness);
+    const runner = d.runner(c.slot.harness, c.local);
     if (!runner.remote) dropSession(runner, c.slot);
   } catch { /* a harness this machine no longer runs */ }
 }
@@ -1188,7 +1240,7 @@ export async function tick(env, o = {}, only, mem = new Map()) {
         if (st === 'working') {
           // Its harness gone (its process dead, its house down) while it says it's mid-turn: it ended.
           let gone = false;
-          try { const rec = readBody(env, c.body); const r = d.runner(rec.harness); gone = typeof r.alive === 'function' && r.alive(bodyOf(c.body, rec)) === false; } catch { gone = false; }
+          try { const rec = readBody(env, c.body); const r = d.runner(rec.harness, rec.local); gone = typeof r.alive === 'function' && r.alive(bodyOf(c.body, rec)) === false; } catch { gone = false; }
           if (gone) st = 'ended';
         }
         if (st === 'working' && c.idleSince) { c.idleSince = undefined; dirty = true; }
@@ -1267,7 +1319,7 @@ const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{3,127}$/;
 function sessionOf(d, ref) {
   try {
     const rec = readBody(d.env, ref);
-    const s = d.runner(rec.harness).slotOf(bodyOf(ref, rec))?.session ?? rec.slot?.session;
+    const s = d.runner(rec.harness, rec.local).slotOf(bodyOf(ref, rec))?.session ?? rec.slot?.session;
     return typeof s === 'string' && SESSION_ID.test(s) ? s : null;
   } catch { return null; }
 }
@@ -1437,7 +1489,7 @@ export async function post(env, conversation, ref, text, { body, run, to } = {},
 function feedLive(env, ref, id, text, d) {
   try {
     const rec = ref ? readBody(env, ref) : null;
-    return !!(rec && !rec.ended && d.runner(rec.harness).feed(bodyOf(ref, rec), { id, text }).fed);
+    return !!(rec && !rec.ended && d.runner(rec.harness, rec.local).feed(bodyOf(ref, rec), { id, text }).fed);
   } catch { return false; }
 }
 

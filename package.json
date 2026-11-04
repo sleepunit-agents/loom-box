@@ -98,6 +98,16 @@
         "name": "LOOM_RUNTIME_RELAY_HEADS_UP",
         "label": "A relay thread this long is a heads-up",
         "hint": "messages in one thread within a day, on loom's Inbox (default 8); never a stop"
+      },
+      {
+        "name": "LOOM_RUNTIME_LOCAL_BODIES",
+        "label": "Agents whose local wakes have their bodies on this machine",
+        "hint": "JSON {\"agents\": [\"art\"], \"cwd\": \"/home/art/Art\", \"claude\": \"\u2026/claude\", \"args\": [...], \"path\": \"\u2026\"}: a wake marked <!-- house: local --> (set on loom's machine, or approved) runs here, in its conversation; unset, such a wake is refused and the clock runs it its old way"
+      },
+      {
+        "name": "LOOM_RUNTIME_ALERT_COMMAND",
+        "label": "The owner's alert command",
+        "hint": "a JSON argv; the runtime adds <source> --severity --summary --fact k=v\u2026 for what it notices (a bridge down, a loop pause, a body that couldn't start) and runs it detached, besides the Inbox"
       }
     ],
     "services": [
@@ -150,7 +160,7 @@
             },
             "reply_to": {
               "type": "string",
-              "description": "The relay id (r-…) this answers"
+              "description": "The relay id (r-\u2026) this answers"
             },
             "from": {
               "type": "string",
@@ -158,7 +168,7 @@
             },
             "approval": {
               "type": "string",
-              "description": "An approval id (a-…) the owner allowed, for a relay the household doesn't pair"
+              "description": "An approval id (a-\u2026) the owner allowed, for a relay the household doesn't pair"
             }
           },
           "required": [

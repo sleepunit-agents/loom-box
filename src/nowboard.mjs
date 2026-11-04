@@ -37,6 +37,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { setting } from './piece.mjs';
 import { AGENT_NAME, load, withLock } from './state.mjs';
+import { raiseAlert } from './alerthook.mjs';
 
 const BRIDGE = /^[a-z][a-z0-9-]{0,30}$/;
 export const SNAP_MAX = 64 * 1024;
@@ -236,7 +237,7 @@ const watchFile = (env) => join(dataDir(env), 'now-watch.json');
  * began), and back live it leaves one FYI. `s` is the runtime's state (load), read here if not given. Remembering is
  * best-effort: a watch file that can't be had leaves the states as they are, with no FYI.
  */
-export function watchBridges(env, nowS = Date.now() / 1000, s = undefined) {
+export function watchBridges(env, nowS = Date.now() / 1000, s = undefined, o = {}) {
   const all = boards(env, nowS);
   let st = s;
   if (st === undefined) { try { st = load(env); } catch { st = null; } }
@@ -249,6 +250,7 @@ export function watchBridges(env, nowS = Date.now() / 1000, s = undefined) {
     });
   }
   let w = { v: 1, bridges: {}, notices: [] };
+  const began = [];
   try {
     withLock(dataDir(env), 'now-watch.lock', () => {
       const had = readJson(watchFile(env));
@@ -260,7 +262,7 @@ export function watchBridges(env, nowS = Date.now() / 1000, s = undefined) {
           const k = `${agent}/${b.name}`;
           seen.add(k);
           // Each bridge on its own: one that can't be noted never holds up the others.
-          try { noteBridge(w, k, agent, b); } catch { /* noted next time */ }
+          try { if (noteBridge(w, k, agent, b)) began.push({ agent, b }); } catch { /* noted next time */ }
         }
       }
       for (const k of Object.keys(w.bridges)) if (!seen.has(k)) delete w.bridges[k];
@@ -269,6 +271,13 @@ export function watchBridges(env, nowS = Date.now() / 1000, s = undefined) {
     }, 'the now board\'s watch', 2000);
   } catch { /* remembered next time */ }
   for (const [agent, bs] of Object.entries(out)) for (const b of bs) { const r = w.bridges[`${agent}/${b.name}`]; if (r) b.outage = r; }
+  // An outage that began just now: the owner's alert command hears of it once (t-1830), as the Inbox's alert does.
+  for (const { agent, b } of began) {
+    const looping = b.state === 'looping';
+    (o.alert ?? raiseAlert)(env, { source: 'runtime-bridge', severity: 'bad',
+      summary: `${cap(agent)}'s ${b.name} bridge ${looping ? 'keeps restarting' : 'is down'}`,
+      facts: { agent, bridge: b.name, state: b.state, since: clock(looping ? sec(b.crashes[0].at) : b.at), ...(looping ? { restarts: b.crashes.length, error: lastError(b.crashes) } : {}) } });
+  }
   return { all: out, notices: w.notices };
 }
 
@@ -277,8 +286,8 @@ function noteBridge(w, k, agent, b) {
   const r = w.bridges[k];
   if (b.state === 'dark' || b.state === 'looping') {
     // An outage's start: its last word (dark), or its first restart in the window (looping). Kept while it lasts.
-    if (!r || r.kind !== b.state) w.bridges[k] = { kind: b.state, since: b.state === 'dark' ? b.at : sec(b.crashes[0].at), outage: r?.outage ?? b.at, restarts: b.crashes?.length ?? 0 };
-    else if (b.state === 'looping') r.restarts = Math.max(r.restarts ?? 0, b.crashes.length);
+    if (!r || r.kind !== b.state) { w.bridges[k] = { kind: b.state, since: b.state === 'dark' ? b.at : sec(b.crashes[0].at), outage: r?.outage ?? b.at, restarts: b.crashes?.length ?? 0 }; return !r; }
+    if (b.state === 'looping') r.restarts = Math.max(r.restarts ?? 0, b.crashes.length);
   } else if (b.state === 'live' && r) {
     w.notices.unshift(backNotice(agent, b, r));
     delete w.bridges[k];
