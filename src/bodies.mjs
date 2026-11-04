@@ -61,17 +61,17 @@ function forRunner(runner, b, cwd) {
   try { return composeBrief(b, cwd); } catch (e) { fail(e.message, 422); }
 }
 
-export async function startBody(env, { agent, brief: b, venue, venueKind, prefer = [], cwd, deny = [], place, guest }, o = {}) {
+export async function startBody(env, { agent, brief: b, venue, venueKind, prefer = [], cwd, deny = [], place, guest, local }, o = {}) {
   const d = deps(env, o);
   const text = brief(b);
   if (typeof venue !== 'string' || !/^[a-z][a-z0-9-]{0,39}$/.test(venue)) fail('which venue (wake, relay, session, discord, slack, …)');
   const pick = await resolveFor(env, { agent, venue, venueKind, prefer, accounts: d.accounts, now: d.now(), fetchImpl: d.fetchImpl });
-  const runner = d.runner(pick.harness);
+  const runner = d.runner(pick.harness, !!local);
   const body = await runner.start({ agent, brief: forRunner(runner, text, cwd), model: pick.model, cwd, env: o.bodyEnv, deny });
   const rec = {
     body: `${body.harness}:${body.id}`, agent, venue, kind: pick.kind, ...(place ? { place: String(place).slice(0, 200) } : {}),
     // What it was started with of its rules (tool names, never the brief): for the owner's `loom runtime bodies`.
-    ...(deny.length ? { deny: [...deny] } : {}), ...(guest ? { guest: true } : {}),
+    ...(deny.length ? { deny: [...deny] } : {}), ...(guest ? { guest: true } : {}), ...(local ? { local: true } : {}),
     harness: body.harness, model: pick.model, family: pick.family, ...(pick.account ? { account: pick.account } : {}),
     started: d.now().toISOString(), ...(body.slot ? { slot: body.slot } : {}), ...(body.house ? { house: body.house } : {}),
   };
@@ -82,16 +82,16 @@ export async function startBody(env, { agent, brief: b, venue, venueKind, prefer
 export function feedBody(env, ref, message, o = {}) {
   const rec = readBody(env, ref);
   if (typeof message?.text !== 'string' || !message.text) fail('a message has text');
-  return deps(env, o).runner(rec.harness).feed({ id: ref.split(':')[1], ...rec }, message);
+  return deps(env, o).runner(rec.harness, rec.local).feed({ id: ref.split(':')[1], ...rec }, message);
 }
 
 /** A body continued: by its id (its slot, from the harness), or by a slot ({harness, session}) another machine kept. */
-export async function resumeBody(env, { body: ref, slot, agent, venue, venueKind, brief: b, prefer = [], cwd, deny = [], files, guest }, o = {}) {
+export async function resumeBody(env, { body: ref, slot, agent, venue, venueKind, brief: b, prefer = [], cwd, deny = [], files, guest, local }, o = {}) {
   const d = deps(env, o);
   let rec = null;
   if (ref) {
     rec = readBody(env, ref);
-    slot = d.runner(rec.harness).slotOf({ id: ref.split(':')[1], ...rec }) ?? rec.slot;
+    slot = d.runner(rec.harness, rec.local).slotOf({ id: ref.split(':')[1], ...rec }) ?? rec.slot;
     if (!slot) fail(`${ref} has no slot yet: its harness hasn't said which session it is`, 409);
   }
   if (!slot || !['claude', 'codex'].includes(slot.harness) || typeof slot.session !== 'string' || !slot.session) fail('resume takes a body, or a slot {harness, session}');
@@ -99,11 +99,12 @@ export async function resumeBody(env, { body: ref, slot, agent, venue, venueKind
   const where = rec?.venue ?? venue;
   // A resume keeps the slot's harness; its model is chosen again, among that harness's (quota may have moved).
   const pick = await resolveFor(env, { agent: who, venue: where, venueKind: rec?.kind ?? venueKind, prefer: [...prefer, ...(rec ? [rec.model] : [])], harness: slot.harness, accounts: d.accounts, now: d.now(), fetchImpl: d.fetchImpl });
-  const runner = d.runner(slot.harness);
+  const here = !!(local ?? rec?.local);
+  const runner = d.runner(slot.harness, here);
   const body = await runner.resume(slot, { agent: who, brief: forRunner(runner, brief(b), cwd), model: pick.model, cwd, env: o.bodyEnv, deny, ...(files ? { files } : {}) });
   const next = {
     body: `${body.harness}:${body.id}`, agent: who, venue: where, kind: pick.kind, ...(rec?.place ? { place: rec.place } : {}),
-    ...(deny.length ? { deny: [...deny] } : {}), ...(guest ? { guest: true } : {}),
+    ...(deny.length ? { deny: [...deny] } : {}), ...(guest ? { guest: true } : {}), ...(here ? { local: true } : {}),
     harness: body.harness, model: pick.model, family: pick.family, ...(pick.account ? { account: pick.account } : {}),
     started: d.now().toISOString(), slot: body.slot ?? slot, ...(ref ? { resumed: ref } : {}), ...(body.house ? { house: body.house } : {}),
   };
@@ -113,7 +114,7 @@ export async function resumeBody(env, { body: ref, slot, agent, venue, venueKind
 
 export function endBody(env, ref, o = {}) {
   const rec = readBody(env, ref);
-  deps(env, o).runner(rec.harness).end({ id: ref.split(':')[1], ...rec }, o.bodyEnv);
+  deps(env, o).runner(rec.harness, rec.local).end({ id: ref.split(':')[1], ...rec }, o.bodyEnv);
   save(env, { ...rec, ended: (o.now ?? (() => new Date()))().toISOString() });
   return { body: ref, ended: true };
 }
@@ -127,7 +128,7 @@ export function listBodies(env, o = {}) {
     try { rec = JSON.parse(readFileSync(join(dir(env), f), 'utf-8')); } catch { continue; }
     if (!REF.test(rec?.body ?? '')) continue;
     let status = 'unknown';
-    try { status = rec.ended ? 'ended' : d.runner(rec.harness).status({ id: rec.body.split(':')[1], ...rec }); } catch { /* a runner that can't say */ }
+    try { status = rec.ended ? 'ended' : d.runner(rec.harness, rec.local).status({ id: rec.body.split(':')[1], ...rec }); } catch { /* a runner that can't say */ }
     out.push({ ...rec, status });
   }
   return out;
