@@ -18,6 +18,7 @@ import { asks as gateAsks, answer as gateAnswer, gatesPage, mergePeople, status 
 import { GRANTS, KEY as GRANTS_KEY, GrantsError, grantsProblem, householdOf, setPiece, setRelay } from './grants.mjs';
 import { relayNotices } from './relay.mjs';
 import { nowManifest, nowPage } from './nowboard.mjs';
+import { watchAsks, watchNotices, watchRows } from './watch.mjs';
 import { coreFrom } from './core.mjs';
 
 /**
@@ -121,13 +122,18 @@ export function manifest(env) {
     // A box asking to join is the owner's call: the code is the one on the box's own terminal.
     // ...and a person a body proposes for an agent's gates (gates.mjs): the household owner's to allow or deny.
     // ...and a conversation paused as a loop (delivery.mjs, loops.mjs): Resume or Dismiss.
-    asks: [...pendingJoins(s).slice(0, 5).map((j) => joinAsk(j)), ...permsAsks(env), ...board.asks, ...loopAsksOf(env)],
+    // ...and a unit failing or crash-looping on a box (watch.mjs, keeping-watch.md).
+    asks: [...pendingJoins(s).slice(0, 5).map((j) => joinAsk(j)), ...permsAsks(env), ...board.asks, ...loopAsksOf(env), ...watchAsksOf(env, s)],
     agents: reports,
     // A delivery the runtime gave up on (its body never started, after its retries): the owner hears of it.
     // ...and a relay thread between agents that's run long today: a heads-up, never a stop (relay.mjs).
-    notices: [...deliveryNotices(env), ...relayNotices(env), ...boxNotices(s), ...(board.notices ?? [])].sort((x, y) => Date.parse(y.at) - Date.parse(x.at)).slice(0, 20),
+    notices: [...deliveryNotices(env), ...relayNotices(env), ...boxNotices(s), ...(board.notices ?? []), ...watchNoticesOf(env)].sort((x, y) => Date.parse(y.at) - Date.parse(x.at)).slice(0, 20),
   };
 }
+
+function watchAsksOf(env, s) { try { return watchAsks(env, (b) => boxLabelOf(s, b), (b) => !!s.boxes[b]?.revoked); } catch { return []; } }
+function watchNoticesOf(env) { try { return watchNotices(env); } catch { return []; } }
+function watchRowsOf(env, box, nowMs) { try { return watchRows(env, box, nowMs); } catch { return []; } }
 
 function joinAsk(j) {
   return {
@@ -617,6 +623,7 @@ function boxesPage(env, nowMs, caller = OWNER) {
       return { label: b.label, value: `${seen} · ${plural(n, 'house')}`, tone: b.local || b.lastSeen ? 'ok' : 'warn',
         sheet: { title: b.label, blocks: [
           { type: 'panel', rows: [...(b.lastSeen || b.local ? runtimePanelRows(env, b, nowMs, mayAct(b)) : []), ...harnessPanelRows(s, b, nowMs, mayAct(b))].map(({ sheet: _s, ...r }) => r) },
+          ...(watchRowsOf(env, b.id, nowMs).length ? [{ type: 'panel', title: 'Watch', rows: watchRowsOf(env, b.id, nowMs).map(({ sheet: _s, ...r }) => r) }] : []),
           ...(b.local ? [] : [boxSettingsPanel(b)]),
         ] } };
     }) }] });
@@ -633,6 +640,8 @@ function boxesPage(env, nowMs, caller = OWNER) {
         machineRow(b),
         ...(b.lastSeen || b.local ? runtimePanelRows(env, b, nowMs, mayAct(b)) : []),
         ...harnessPanelRows(s, b, nowMs, mayAct(b)),
+        // When it last came back, and its units failing (watch.mjs).
+        ...watchRowsOf(env, b.id, nowMs),
       ] },
       // Its disk is the headline's tile (only loom's own box measures one).
       here.length

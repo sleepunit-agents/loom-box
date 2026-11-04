@@ -24,6 +24,7 @@ import { containerName, missingSecrets, parseHouseFile, podmanSecret, runArgs, s
 import { PART_RAW, joinParts, partsOf } from './blobs.mjs';
 import { boxSessions } from './remote.mjs';
 import { sessionsBusy } from './busy.mjs';
+import { bootInfo, SAMPLE_MS, unitSampler } from './watch.mjs';
 import { harnessStatus, LOGIN_HARNESSES, loginDir, pruneLoginDir, startLogin, sweepCliContainers } from './logins.mjs';
 
 /** How often a box asks its harness CLIs whether they're logged in (and at once after a login). */
@@ -420,7 +421,7 @@ function rootless(env) {
 export function runner(env, client, { loomUrl, labels = [], log = (m) => process.stderr.write(`loom-box: ${m}\n`), hasSocket = (p) => existsSync(p), hasCdi = () => CDI_SPECS.some((p) => existsSync(p)), upgrade = maybeUpgrade,
   status = (agents) => harnessStatus(env, { agents }), login = (h, o) => startLogin(env, h, o), codexUsage = () => null, clock = () => Date.now(), secureChannel = true,
   sweep = () => sweepCliContainers(env), runtime = () => ({ commit: ownCommit(), piece: ownPiece() }),
-  buildOf = (c) => buildNow(env, c), houseImage = (id) => imageOf(env, id) }) {
+  buildOf = (c) => buildNow(env, c), houseImage = (id) => imageOf(env, id), sampleUnits: unitsImpl = undefined, bootInfo: bootImpl = undefined }) {
   const houses = new Map(); // id -> { child, dir, stopAt? }
   // This runner, as the control plane tells it from one before it: a login handed to another run is one a restart
   // dropped (control.mjs, settleLogins).
@@ -691,6 +692,20 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
     while (houses.size && Date.now() < until) await new Promise((res) => setTimeout(res, 200));
   }
 
+  // Keeping watch (watch.mjs): this boot on every poll; the units, sampled once a minute and sent with the next poll.
+  const sampleUnits = unitsImpl ?? unitSampler(env);
+  const readBoot = bootImpl ?? (() => bootInfo());
+  let unitsAt = 0;
+  function watchReport() {
+    const out = {};
+    try { const b = readBoot(); if (b) out.boot = b; } catch { /* left out */ }
+    if (clock() - unitsAt >= SAMPLE_MS) {
+      unitsAt = clock();
+      try { out.units = sampleUnits(clock()); } catch (e) { log(`units: ${e.message}`); }
+    }
+    return out;
+  }
+
   async function tick() {
     // Which remote sessions here are mid-turn (busy.mjs): loom shows it on the agents' cards (t-1624).
     let busy;
@@ -709,7 +724,7 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
     // Which runtime this box runs, and how its last upgrade went (version.mjs): the box's page shows both.
     let rt = null;
     try { const r = runtime(); rt = { ...(r.commit ? { commit: r.commit } : {}), ...(r.piece ? { piece: r.piece } : {}) }; const u = lastUpgrade(stateDir(env), clock()); if (u) rt.upgrade = u; } catch { rt = null; }
-    const want = await client.call('poll', { facts: detectFacts(env, labels), ...(busy ? { sessions: busy } : {}), ...(hs ? { harnesses: hs } : {}), ...(cx ? { usage: { codex: cx } } : {}),
+    const want = await client.call('poll', { ...watchReport(), facts: detectFacts(env, labels), ...(busy ? { sessions: busy } : {}), ...(hs ? { harnesses: hs } : {}), ...(cx ? { usage: { codex: cx } } : {}),
       // The logins this runner has going: one loom handed out that isn't here was lost (control.mjs, settleLogins).
       loginsRunning: { run, ids: [...logins.keys()] }, ...(rt ? { runtime: rt } : {}) });
     if (want.loginAgents) {
