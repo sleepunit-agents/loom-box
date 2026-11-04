@@ -710,6 +710,10 @@ const CRASHES_KEPT_MS = 3_600_000;
 const CRASHES_MAX = 10;
 /** What a box reports of a house it no longer has because it restarted (box.mjs): the runtime's restart, not a crash. */
 const RUNTIME_LOST = /the box no longer has this house \(it restarted/;
+/** What a bridge logs when it stops itself, idle, to start again on its agent's newer code (shuttle/upgrade.py): with
+ *  exit 0, an upgrade, not a crash. A merge burst does it every few minutes (t-1833). */
+const SELF_UPGRADE = /^(?:body host: )?upgrading: .* is behind \(.*stopping so a fresh house starts on it/m;
+const selfUpgrade = (h) => h.exit === 0 && SELF_UPGRADE.test(String(h.log ?? ''));
 /** One part of a saved state, as base64: inside loom's 1 MB body cap (src/blobs.mjs). */
 export const MAX_STATE_BYTES = Math.ceil(PART_RAW / 3) * 4;
 
@@ -876,7 +880,8 @@ function serviceHouseEnded(s, h, effects) {
   // A clean stop the owner didn't ask for, or a crash: up again, more slowly each time.
   // Kept as a crash for the now board's loop alert (nowboard.mjs, looping): when, and its log's last line. Not a house
   // the runtime itself lost track of (it restarted under it, or a house written off): that's the runtime's own doing.
-  if (h.state !== 'lost' && !RUNTIME_LOST.test(String(h.log ?? ''))) {
+  // Nor a bridge that stopped cleanly to upgrade (selfUpgrade).
+  if (h.state !== 'lost' && !RUNTIME_LOST.test(String(h.log ?? '')) && !selfUpgrade(h)) {
     const at = Date.parse(h.updated);
     const last = String(h.log ?? '').trim().split('\n').filter(Boolean).pop() ?? '';
     svc.crashes = [...(svc.crashes ?? []).filter((c) => at - Date.parse(c.at) < CRASHES_KEPT_MS),

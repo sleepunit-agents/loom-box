@@ -164,6 +164,31 @@ test('a crash loop alerts at once, saying what\'s happening; the runtime\'s own 
   assert.match(m.notices[0].text, /^Art's slack bridge is steady again after 4 restarts, back at 14:20 UTC$/);
 });
 
+test('a bridge stopping itself to upgrade onto new code isn\'t a crash; a failing exit that says the same still is', () => {
+  // Shuttle's upgrade (shuttle/upgrade.py): idle and behind, it stops cleanly so a fresh house starts on the new
+  // commit. A merge burst does this every few minutes (2026-11-04: three alerts in an hour, all exit 0; t-1833).
+  bridgeUp();
+  const upgrading = (i) => `starting\nupgrading: Art is behind (aaaaaa${i} → bbbbbb${i}) and nobody's talking; stopping so a fresh house starts on it\nstopping: drained 0 queued event(s) into pending`;
+  for (let i = 1; i <= 4; i++) {
+    at(i * 60 - 40);
+    ok(call(one(), 'report', { id: houseOf(), state: 'done', exit: 0, log: upgrading(i) }));
+    at(i * 60);
+    startWanted();
+    snap();
+    if (i < 4) assert.deepEqual(view().asks, [], `${i} upgrade(s)`);
+  }
+  assert.equal(load(env).services['art/slack'].crashes, undefined);
+  assert.deepEqual(view().asks, []);
+  // The body host's own wording counts too.
+  at(400);
+  ok(call(one(), 'report', { id: houseOf(), state: 'done', exit: 0, log: 'body host: upgrading: Art is behind (a → b) and nobody\'s talking; stopping so a fresh house starts on it' }));
+  assert.equal(load(env).services['art/slack'].crashes, undefined);
+  // Not exit 0: a crash, whatever its log says.
+  at(700); startWanted(); snap(); at(720);
+  ok(call(one(), 'report', { id: houseOf(), state: 'failed', exit: 1, log: upgrading(9) }));
+  assert.equal(load(env).services['art/slack'].crashes.length, 1);
+});
+
 test('a short blip leaves nothing; a long outage that recovers leaves one FYI, not an alert', () => {
   bridgeUp();
   at(120);
