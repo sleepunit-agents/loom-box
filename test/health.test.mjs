@@ -321,3 +321,45 @@ test('a report-only box never upgrades itself from what loom says', async () => 
   await r2.tick();
   assert.equal(upgrades, 1);
 });
+
+test('an install that already ran section 2 (its own box polled 15 s ago, no upSince): dark still fires after 10 minutes', () => {
+  ok(call(owner, 'add-box', { name: 'thor', mayHost: '*' }));
+  ok(call(owner, 'box-watch', { name: 'thor', alwaysOn: 'on' }));
+  const f = join(env.LOOM_BOX_DATA, 'box-watch.json');
+  poll(0, {}); ok(call({ kind: 'piece', subject: boxId('thor') }, 'poll', {}));
+  const w = JSON.parse(readFileSync(f, 'utf-8')); delete w.boxes.one.upSince; writeFileSync(f, JSON.stringify(w));
+  for (let m = 1; m <= 13; m++) poll(m * 60, {});
+  assert.deepEqual(healthAlerts().map((a) => a.summary), ['thor is dark']);
+});
+
+test('severities: a pool full or unhealthy, SMART and dark are bad; the rest warn', () => {
+  const sev = (x) => Object.values(problems({ ...sampleWith(), ...x }, 'x'))[0]?.severity;
+  assert.equal(sev({ pools: [{ name: 'rpool', health: 'ONLINE', cap: 90 }] }), 'bad');
+  assert.equal(sev({ pools: [{ name: 'rpool', health: 'DEGRADED', cap: 50 }] }), 'bad');
+  assert.equal(sev({ smart: { sda: { pending: 1 } } }), 'bad');
+  assert.equal(sev({ fs: [{ mount: '/', used_pct: 95 }] }), 'warn');
+  assert.equal(sev({ psi: { io: { some: 60, full: 60 } } }), 'warn');
+});
+
+test('a sample with an odd load is no load, and words never throw; one box shows five alerts at most', () => {
+  poll(0, { health: { ...sampleWith(), load: [] } });
+  assert.equal(watchOf(env).boxes.one.health.load, null);
+  assert.doesNotThrow(() => manifest(env, clock));
+  const many = { ...sampleWith(), fs: Array.from({ length: 12 }, (_, i) => ({ mount: `/m${i}`, used_pct: 99 })), pools: Array.from({ length: 4 }, (_, i) => ({ name: `p${i}`, health: 'FAULTED', cap: 10 })) };
+  for (let m = 1; m <= 12; m++) poll(m * 60, { health: many });
+  const asks = manifest(env, clock).asks.filter((a) => a.text.startsWith('one'));
+  assert.equal(asks.length, 5);
+  // The four bad ones (the pools) are among them; the warn ones fill the rest.
+  assert.equal(asks.filter((a) => /ZFS pool/.test(a.text)).length, 4);
+});
+
+test('the box sends health once a minute, taken beside the polls', async () => {
+  let now = T0, samples = 0;
+  const bodies = [];
+  const client = { async call(path, body) { if (path === 'poll') bodies.push(body); return {}; } };
+  const r = runner({ ...env, LOOM_BOX_PODMAN: '/bin/false' }, client, { loomUrl: 'http://x/mcp', log: () => {}, clock: () => now, status: () => ({}), sweep: () => [], upgrade: () => null, runtime: () => ({}), codexUsage: () => null,
+    sampleUnits: async () => ({ at: '', units: [] }), sampleHealth: async () => { samples++; return sampleWith(); }, bootInfo: () => null });
+  for (let i = 0; i < 10; i++) { await r.tick(); await r.settled(); now += 15_000; }
+  assert.equal(samples, 3);
+  assert.equal(bodies.filter((b) => b.health).length, 3);
+});

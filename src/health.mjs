@@ -188,7 +188,7 @@ export function problems(s, label = 'this box') {
   if (s.arc && (s.arc.prune_per_s ?? 0) >= 100) out['arc-prune'] = { for: 5, reading: 'arc', severity: 'warn', title: `${label}: ZFS's cache is thrashing`, detail: `arc_prune ${Math.round(s.arc.prune_per_s)} calls/s (dnodes ${(s.arc.dnode_size ?? 0) >> 20} MB of a ${(s.arc.dnode_limit ?? 0) >> 20} MB limit)` };
   for (const p of s.pools ?? []) {
     if (p.health !== 'ONLINE') out[`pool-${p.name}`] = { for: 0, reading: 'pools', severity: 'bad', title: `${label}: ZFS pool ${p.name} is ${p.health}`, detail: `zpool says ${p.name} is ${p.health}` };
-    if (p.cap >= 85) out[`pool-full-${p.name}`] = { for: 0, reading: 'pools', severity: 'warn', title: `${label}: ZFS pool ${p.name} is filling up`, detail: `${p.name} is ${p.cap}% full` };
+    if (p.cap >= 85) out[`pool-full-${p.name}`] = { for: 0, reading: 'pools', severity: 'bad', title: `${label}: ZFS pool ${p.name} is filling up`, detail: `${p.name} is ${p.cap}% full` };
   }
   for (const f of s.fs ?? []) {
     if (f.used_pct >= 90) out[`fs-${f.mount}`] = { for: 10, reading: 'fs', severity: 'warn', title: `${label}: ${f.mount} is nearly full`, detail: `${f.mount} is ${f.used_pct}% full` };
@@ -209,7 +209,7 @@ export function problems(s, label = 'this box') {
 export function healthWords(s) {
   if (!s) return 'No health sample yet.';
   const parts = [];
-  if (s.load) parts.push(`load ${s.load[0].toFixed(1)} on ${s.cpus} CPUs`);
+  if (Array.isArray(s.load) && Number.isFinite(s.load[0])) parts.push(`load ${s.load[0].toFixed(1)} on ${s.cpus} CPUs`);
   if (s.mem) parts.push(`${gb(s.mem.available)} of ${gb(s.mem.total)} GB memory free${s.mem.swap_total ? `, swap ${Math.round(100 - (100 * s.mem.swap_free) / s.mem.swap_total)}% used` : ''}`);
   if (s.psi?.io) parts.push(`io stalled ${Math.round(s.psi.io.full ?? 0)}% (all) / ${Math.round(s.psi.io.some ?? 0)}% (some)`);
   const fullest = [...(s.fs ?? [])].sort((a, b) => b.used_pct - a.used_pct)[0];

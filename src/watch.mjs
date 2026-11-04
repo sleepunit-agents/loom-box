@@ -245,7 +245,7 @@ export function noteReport(env, box, { boot, units, health } = {}, nowMs = Date.
       const seen = b.seen;
       b.seen = new Date(nowMs).toISOString();
       // Heard from again: a box that was dark isn't (and the runtime's own box marks how long it's been up).
-      if (!seen || nowMs - Date.parse(seen) > 2 * 60_000) b.upSince = b.seen;
+      if (!seen || nowMs - Date.parse(seen) > 2 * 60_000 || !b.upSince) b.upSince = b.seen;
       const dark = b.conditions?.dark;
       if (dark) {
         delete b.conditions.dark;
@@ -395,7 +395,7 @@ const entries = (o) => (o && typeof o === 'object' && !Array.isArray(o) ? Object
 export function sanitizeSample(x) {
   if (!x || typeof x !== 'object' || Array.isArray(x)) return null;
   const out = { t: num(x.t), container: x.container === null || x.container === undefined ? null : printable(x.container, 20), cpus: num(x.cpus) };
-  out.load = Array.isArray(x.load) ? x.load.slice(0, 3).map((v) => num(v) ?? 0) : null;
+  out.load = Array.isArray(x.load) && x.load.length === 3 && x.load.every((v) => num(v) !== null) ? x.load.map(Number) : null;
   out.mem = x.mem && typeof x.mem === 'object' && num(x.mem.total) ? { total: num(x.mem.total), available: num(x.mem.available) ?? 0, swap_total: num(x.mem.swap_total) ?? 0, swap_free: num(x.mem.swap_free) ?? 0 } : null;
   out.psi = x.psi && typeof x.psi === 'object' ? { cpu: psiIn(x.psi.cpu), io: psiIn(x.psi.io), memory: psiIn(x.psi.memory) } : null;
   out.fs = Array.isArray(x.fs) ? x.fs.filter((f) => f && typeof f.mount === 'string' && MOUNT.test(f.mount) && num(f.used_pct) !== null).slice(0, SAMPLE_LIST_MAX).map((f) => ({ mount: f.mount, used_pct: num(f.used_pct) })) : null;
@@ -476,8 +476,8 @@ export function watchAsks(env, labelOf = (b) => b, revoked = () => false) {
   const asks = [];
   for (const [box, b] of Object.entries(w.boxes)) {
     if (revoked(box)) continue;
-    for (const c of Object.values(b.conditions ?? {})) {
-      if (!c.alerted) continue;
+    // Five a box: one box's many conditions can't crowd out the others' (as FYIs are five a box).
+    for (const c of Object.values(b.conditions ?? {}).filter((x) => x.alerted).sort((x, y) => (x.severity === 'bad' ? -1 : 0) - (y.severity === 'bad' ? -1 : 0)).slice(0, 5)) {
       asks.push({ text: c.title, meta: c.detail, at: c.since, page: '', label: 'Look', kind: 'alert' });
     }
     for (const ep of Object.values(b.units ?? {})) {
