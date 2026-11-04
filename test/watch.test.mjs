@@ -56,7 +56,7 @@ test('a box back from a boot: one FYI with its up and dark times and one alert; 
   const fyi = manifest(env, clock).notices.find((n) => /came back/.test(n.text));
   assert.match(fyi.text, /^one came back at 14:07 UTC, up 40 s after being dark 6 min$/);
   // The host too: the kernel's id changed.
-  at(4000);
+  at(4200);
   ok(call(box, 'poll', { boot: { id: `${K2}:50`, kernel: K2, up: 30 } }));
   assert.equal(alerts[1].facts.kernel_restarted, 1);
   assert.match(manifest(env, clock).notices[0].text, /Its host restarted too/);
