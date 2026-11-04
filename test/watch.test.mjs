@@ -231,3 +231,25 @@ test('the box sends its boot on every poll and its units once a minute, sampled 
   assert.equal(bodies.filter((b) => b.units).length, 3);
 });
 
+
+test('redact is quick on a pathological 100 KB line, and still masks a password with an @ in it', () => {
+  const lines = ['https://' + 'a'.repeat(100_000), 'x://' + 'a@'.repeat(50_000), 'bearer ' + 'a'.repeat(100_000), '/webhook/' + 'a'.repeat(100_000),
+    'token=' + 'a'.repeat(100_000), 'https://hooks.slack.com/services/' + 'a/'.repeat(50_000), 'A'.repeat(30) + '://' + '@'.repeat(100_000)];
+  for (const l of lines) {
+    const t = process.hrtime.bigint();
+    redact(l);
+    const ms = Number(process.hrtime.bigint() - t) / 1e6;
+    assert.ok(ms < 50, `${l.slice(0, 20)}… took ${ms} ms`);
+  }
+  const r = redact("fatal: unable to access 'https://u:p@ss@host/org/repo.git/'");
+  assert.doesNotMatch(r, /p@ss|u:p/);
+  assert.match(r, /https:\/\/\[REDACTED\]@host\/org/);
+});
+
+test('a units sample with too much log text is dropped whole: nothing stored, nothing cleared', () => {
+  ok(call(box, 'poll', { units: failed('art-slack.service') }));
+  const big = { at: '', units: [{ unit: 'b.service', scope: 'user', state: 'failed', log: Array.from({ length: 40 }, () => 'x'.repeat(2000)) }] };
+  at(60); ok(call(box, 'poll', { units: big }));
+  assert.deepEqual(Object.keys(watchOf(env).boxes.one.units), ['user:art-slack.service']);
+  assert.equal(alerts.length, 1);
+});
