@@ -96,6 +96,24 @@ test('a crash restarts it on the same box, slower each time; down stays down', (
   assert.equal(svc().want, 'down');
 });
 
+test('a bridge that stops itself to upgrade starts again at once, and its backoff starts over', () => {
+  // 2026-11-04: three state commits in 15 min, each an upgrade exit; the third waited 160s in backoff, Slack dark (t-1833).
+  ok(call(art, 'service-up', { name: 'discord' }));
+  const a = run('one').h;
+  ok(call(box('one'), 'report', { id: a.id, state: 'failed', exit: 1 }));
+  clock += 6_000;
+  const b = run('one').h;
+  assert.equal(svc().restarts, 1);
+  const upgrading = "upgrading: Art is behind (aaaaaaa → bbbbbbb) and nobody's talking; stopping so a fresh house starts on it\nstopping: drained 0 queued event(s) into pending";
+  ok(call(box('one'), 'report', { id: b.id, state: 'done', exit: 0, log: upgrading }));
+  assert.equal(svc().restarts, 0);
+  const c = run('one').h;
+  assert.notEqual(c.id, b.id, 'offered again with no wait');
+  ok(call(box('one'), 'report', { id: c.id, state: 'done', exit: 0, log: `body host: ${upgrading}` }));
+  run('one');
+  assert.equal(svc().restarts, 0);
+});
+
 test('one live house per service, whatever is asked', () => {
   ok(call(art, 'service-up', { name: 'discord' }));
   ok(call(art, 'service-up', { name: 'discord' }));

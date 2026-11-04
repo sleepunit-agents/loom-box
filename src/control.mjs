@@ -887,6 +887,13 @@ function serviceHouseEnded(s, h, effects) {
     svc.crashes = [...(svc.crashes ?? []).filter((c) => at - Date.parse(c.at) < CRASHES_KEPT_MS),
       { at: h.updated, house: h.id, state: h.state, ...(Number.isInteger(h.exit) ? { exit: h.exit } : {}), ...(last ? { error: last.slice(0, 200) } : {}) }].slice(-CRASHES_MAX);
   }
+  // A bridge that stopped to upgrade ran idle and healthy: up again at once, its backoff starting over. Counting it
+  // put a bridge's third upgrade in a merge burst minutes behind (t-1833).
+  if (selfUpgrade(h)) {
+    svc.restarts = 0;
+    startService(s, svc, effects);
+    return;
+  }
   const ranMs = Date.parse(h.updated) - Date.parse(h.started ?? h.created);
   svc.restarts = ranMs > 10 * 60_000 ? 1 : (svc.restarts ?? 0) + 1;
   startService(s, svc, effects, Math.min(RESTART_BASE_MS * 2 ** (svc.restarts - 1), RESTART_MAX_MS));
