@@ -25,6 +25,7 @@ import { PART_RAW, joinParts, partsOf } from './blobs.mjs';
 import { boxSessions } from './remote.mjs';
 import { sessionsBusy } from './busy.mjs';
 import { bootInfo, SAMPLE_MS, unitSampler } from './watch.mjs';
+import { sampleHealth } from './health.mjs';
 import { harnessStatus, LOGIN_HARNESSES, loginDir, pruneLoginDir, startLogin, sweepCliContainers } from './logins.mjs';
 
 /** How often a box asks its harness CLIs whether they're logged in (and at once after a login). */
@@ -421,7 +422,7 @@ function rootless(env) {
 export function runner(env, client, { loomUrl, labels = [], log = (m) => process.stderr.write(`loom-box: ${m}\n`), hasSocket = (p) => existsSync(p), hasCdi = () => CDI_SPECS.some((p) => existsSync(p)), upgrade = maybeUpgrade,
   status = (agents) => harnessStatus(env, { agents }), login = (h, o) => startLogin(env, h, o), codexUsage = () => null, clock = () => Date.now(), secureChannel = true,
   sweep = () => sweepCliContainers(env), runtime = () => ({ commit: ownCommit(), piece: ownPiece() }),
-  buildOf = (c) => buildNow(env, c), houseImage = (id) => imageOf(env, id), sampleUnits: unitsImpl = undefined, bootInfo: bootImpl = undefined }) {
+  buildOf = (c) => buildNow(env, c), houseImage = (id) => imageOf(env, id), sampleUnits: unitsImpl = undefined, bootInfo: bootImpl = undefined, sampleHealth: healthImpl = undefined, reportOnly = undefined }) {
   const houses = new Map(); // id -> { child, dir, stopAt? }
   // This runner, as the control plane tells it from one before it: a login handed to another run is one a restart
   // dropped (control.mjs, settleLogins).
@@ -695,10 +696,15 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
   // Keeping watch (watch.mjs): this boot on every poll; the units, sampled once a minute and sent with the next poll.
   const sampleUnits = unitsImpl ?? unitSampler(env);
   const readBoot = bootImpl ?? (() => bootInfo());
-  // The units' sample runs beside the polls (a wedged journal never holds one up) and goes with the first poll after.
-  let unitsAt = 0, unitsDone = null, unitsBusy = false;
+  // The units' sample and health's (its 5 s window) run beside the polls, each sent with the first poll after it's done.
+  const takeHealth = healthImpl ?? (() => sampleHealth());
+  let unitsAt = 0, unitsDone = null, unitsBusy = false, healthAt = 0, healthDone = null, healthBusy = false;
+  // Report-only (joined with --report-only): it says so on every poll, and takes nothing.
+  let reportOnlyHere = reportOnly;
+  if (reportOnlyHere === undefined) { try { reportOnlyHere = !!JSON.parse(readFileSync(configPath(env), 'utf-8')).reportOnly; } catch { reportOnlyHere = false; } }
   function watchReport() {
     const out = {};
+    if (reportOnlyHere) out.reportOnly = true;
     try { const b = readBoot(); if (b) out.boot = b; } catch { /* left out */ }
     if (unitsDone) { out.units = unitsDone; unitsDone = null; }
     if (!unitsBusy && clock() - unitsAt >= SAMPLE_MS) {
@@ -706,10 +712,16 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
       unitsBusy = true;
       Promise.resolve().then(() => sampleUnits(clock())).then((u) => { unitsDone = u; }, (e) => log(`units: ${e.message}`)).finally(() => { unitsBusy = false; });
     }
+    if (healthDone) { out.health = healthDone; healthDone = null; }
+    if (!healthBusy && clock() - healthAt >= SAMPLE_MS) {
+      healthAt = clock();
+      healthBusy = true;
+      Promise.resolve().then(() => takeHealth()).then((h) => { healthDone = h; }, (e) => log(`health: ${e.message}`)).finally(() => { healthBusy = false; });
+    }
     return out;
   }
   /** For a test: the units' sample under way, done. */
-  async function settled() { while (unitsBusy) await new Promise((r) => setTimeout(r, 5)); }
+  async function settled() { while (unitsBusy || healthBusy) await new Promise((r) => setTimeout(r, 5)); }
 
   async function tick() {
     // Which remote sessions here are mid-turn (busy.mjs): loom shows it on the agents' cards (t-1624).
@@ -774,7 +786,8 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
     // On another loom-box than loom's: install that one, between house starts (version.mjs).
     try {
       // Update now: the owner's token, carried into the attempt's record so loom knows it started (and stops asking).
-      const did = upgrade({ want: want.version, starting: (want.start || []).length > 0, env, stateDir: stateDir(env), now: typeof want.upgradeNow === 'string' ? want.upgradeNow : false });
+      // A report-only box never upgrades itself from what loom says: it's updated by hand on its machine.
+      const did = reportOnlyHere ? null : upgrade({ want: want.version, starting: (want.start || []).length > 0, env, stateDir: stateDir(env), now: typeof want.upgradeNow === 'string' ? want.upgradeNow : false });
       if (did) log(did);
     } catch (e) { log(`upgrade: ${e.message}`); }
     return want;

@@ -13,6 +13,8 @@ import { join } from 'node:path';
 import { setting } from './piece.mjs';
 import { withLock } from './state.mjs';
 import { raiseAlert } from './alerthook.mjs';
+import { healthWords, problems } from './health.mjs';
+import { appendFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 
 /** A condition still going is said again this often. */
 export const REMIND_MS = 6 * 3600_000;
@@ -233,7 +235,7 @@ const ISO_OK = (v, nowMs) => typeof v === 'string' && v.length <= 30 && Number.i
  * Keeps what's needed in the watch, leaves FYIs, and tells the alert command (o.alert, or raiseAlert) what started,
  * what lasted 6 hours more, and what's over. `label` is the box's name for people. Never throws.
  */
-export function noteReport(env, box, { boot, units } = {}, nowMs = Date.now(), o = {}) {
+export function noteReport(env, box, { boot, units, health } = {}, nowMs = Date.now(), o = {}) {
   const alert = o.alert ?? raiseAlert;
   const label = o.label ?? box;
   const calls = [];
@@ -242,6 +244,17 @@ export function noteReport(env, box, { boot, units } = {}, nowMs = Date.now(), o
       const b = (w.boxes[box] ??= {});
       const seen = b.seen;
       b.seen = new Date(nowMs).toISOString();
+      // Heard from again: a box that was dark isn't (and the runtime's own box marks how long it's been up).
+      if (!seen || nowMs - Date.parse(seen) > 2 * 60_000 || !b.upSince) b.upSince = b.seen;
+      const dark = b.conditions?.dark;
+      if (dark) {
+        delete b.conditions.dark;
+        if (dark.alerted) {
+          notice(w, { box, text: `${label} is back after ${minutes(nowMs - Date.parse(dark.since))} dark`, at: b.seen, page: '' });
+          calls.push({ source: 'box-health', severity: 'warn', summary: `${label} is back`, facts: { box, key: 'dark', cleared: 1, minutes: Math.round((nowMs - Date.parse(dark.since)) / 60_000) } });
+        }
+      }
+      if (health && typeof health === 'object') noteHealth(env, w, b, box, label, health, nowMs, calls);
       // Only a boot in the shape bootInfo makes: a kernel's boot id, PID 1's start, an uptime under ten years.
       if (boot && typeof boot.id === 'string' && /^[0-9a-f-]{36}:\d{1,20}$/.test(boot.id) && /^[0-9a-f-]{36}$/.test(boot.kernel ?? '')
         && typeof boot.up === 'number' && Number.isFinite(boot.up) && boot.up >= 0 && boot.up < 10 * 365 * 86_400) {
@@ -301,12 +314,172 @@ export function noteReport(env, box, { boot, units } = {}, nowMs = Date.now(), o
   return calls;
 }
 
+const READINGS = ['mem', 'psi', 'fs', 'disks', 'arc', 'pools', 'containers', 'smart'];
+
+/**
+ * One health sample against the rules: a condition holds from the first sample that shows it, alerts once it has held
+ * for its `for`, says "(still)" every REMIND_MS, and ends on a sample that reads it fine. A sample without its
+ * reading leaves it as it was. A reading the box had and hasn't sent for 30 minutes is its own condition (unread-…).
+ */
+function noteHealth(env, w, b, box, label, sample, nowMs, calls) {
+  // One sample a box per HEALTH_MIN_GAP_MS: more are dropped, history and all.
+  if (b.healthAt && nowMs - Date.parse(b.healthAt) < HEALTH_MIN_GAP_MS) return;
+  const s = sanitizeSample(sample);
+  if (!s) return;
+  label = printable(label, 64);
+  const found = problems(s, label);
+  const missing = new Set(READINGS.filter((r) => s[r] === null || s[r] === undefined || (Array.isArray(s.unread) && s.unread.includes(r))));
+  const had = (b.readings ??= {});
+  for (const r of READINGS) if (!missing.has(r)) had[r] = new Date(nowMs).toISOString();
+  for (const r of missing) {
+    if (had[r] && nowMs - Date.parse(had[r]) >= 30 * 60_000) found[`unread-${r}`] = { for: 0, reading: null, severity: 'warn', title: `${label} has stopped reading its ${r}`, detail: `no ${r} reading since ${clock(Date.parse(had[r]))}` };
+  }
+  const conds = (b.conditions ??= {});
+  const iso = new Date(nowMs).toISOString();
+  let opened = 0;
+  for (const [key, f] of Object.entries(found)) {
+    const was = conds[key];
+    // A sample may open only so many conditions, and a box hold only so many (each is an alert to come).
+    if (!was && (++opened > NEW_CONDITIONS_MAX || Object.keys(conds).length >= CONDITIONS_MAX)) continue;
+    // Its title is the episode's, from its first sample (the Inbox pushes once by it); what changes is the detail.
+    const cur = { since: was?.since ?? iso, title: was?.title ?? f.title, detail: f.detail, severity: f.severity, reading: f.reading, ...(was?.alerted ? { alerted: was.alerted, said: was.said } : {}) };
+    const lasted = nowMs - Date.parse(cur.since);
+    if (!cur.alerted && lasted >= f.for * 60_000) {
+      cur.alerted = cur.said = iso;
+      calls.push({ source: 'box-health', severity: f.severity, summary: f.title, facts: { box, key, minutes: Math.round(lasted / 60_000), detail: f.detail } });
+    } else if (cur.alerted && nowMs - Date.parse(cur.said) >= REMIND_MS) {
+      cur.said = iso;
+      calls.push({ source: 'box-health', severity: f.severity, summary: `${f.title} (still)`, facts: { box, key, minutes: Math.round(lasted / 60_000), detail: f.detail } });
+    }
+    conds[key] = cur;
+  }
+  for (const [key, c] of Object.entries(conds)) {
+    if (found[key] || key === 'dark') continue;
+    // Unknown, not fine: a sample without its reading can't end it.
+    if (c.reading && missing.has(c.reading)) continue;
+    delete conds[key];
+    if (c.alerted) {
+      notice(w, { box, text: `${c.title}: OK again after ${minutes(nowMs - Date.parse(c.since))}`, at: iso, page: '' });
+      calls.push({ source: 'box-health', severity: 'warn', summary: `${c.title}: OK again`, facts: { box, key, cleared: 1, minutes: Math.round((nowMs - Date.parse(c.since)) / 60_000) } });
+    }
+  }
+  b.health = s;
+  b.healthAt = iso;
+  try { keepSample(env, box, s, nowMs); } catch { /* the history is best-effort */ }
+}
+
+
+/** At most this many of each list or map a sample carries, and new conditions one sample may open. */
+export const SAMPLE_LIST_MAX = 32;
+export const NEW_CONDITIONS_MAX = 16;
+const CONDITIONS_MAX = 64;
+/** One sample per box per this long; the rest are dropped quietly (a box's data, not anyone's work). */
+export const HEALTH_MIN_GAP_MS = 40_000;
+const HISTORY_FILE_MAX = 32 * 1024 * 1024;
+
+const POOL = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$/;
+const MOUNT = /^\/[A-Za-z0-9_.\/+ -]{0,119}$/;
+const DISK = /^(sd[a-z]{1,4}|nvme\d{1,3}n\d{1,3}|vd[a-z]{1,4})$/;
+const CT_ID = /^\d{1,9}$/;
+const CT_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
+const READING = /^[a-z]{1,16}$/;
+const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+const psiIn = (p) => (p && typeof p === 'object' ? { some: num(p.some) ?? 0, full: num(p.full) ?? 0 } : null);
+const entries = (o) => (o && typeof o === 'object' && !Array.isArray(o) ? Object.entries(o).slice(0, 4 * SAMPLE_LIST_MAX) : []);
+
+/**
+ * A sample as the control plane keeps it: only the fields the rules read, each a finite number or a short printable
+ * string; a pool, mount, disk or container name that doesn't match its pattern is dropped, and each list or map is
+ * cut to SAMPLE_LIST_MAX. A box is only partly trusted, and these names go into titles, the page and the alert command.
+ */
+export function sanitizeSample(x) {
+  if (!x || typeof x !== 'object' || Array.isArray(x)) return null;
+  const out = { t: num(x.t), container: x.container === null || x.container === undefined ? null : printable(x.container, 20), cpus: num(x.cpus) };
+  out.load = Array.isArray(x.load) && x.load.length === 3 && x.load.every((v) => num(v) !== null) ? x.load.map(Number) : null;
+  out.mem = x.mem && typeof x.mem === 'object' && num(x.mem.total) ? { total: num(x.mem.total), available: num(x.mem.available) ?? 0, swap_total: num(x.mem.swap_total) ?? 0, swap_free: num(x.mem.swap_free) ?? 0 } : null;
+  out.psi = x.psi && typeof x.psi === 'object' ? { cpu: psiIn(x.psi.cpu), io: psiIn(x.psi.io), memory: psiIn(x.psi.memory) } : null;
+  out.fs = Array.isArray(x.fs) ? x.fs.filter((f) => f && typeof f.mount === 'string' && MOUNT.test(f.mount) && num(f.used_pct) !== null).slice(0, SAMPLE_LIST_MAX).map((f) => ({ mount: f.mount, used_pct: num(f.used_pct) })) : null;
+  if (x.disks === null || x.disks === undefined) out.disks = null;
+  else out.disks = Object.fromEntries(entries(x.disks).filter(([k, d]) => DISK.test(k) && d && typeof d === 'object').slice(0, SAMPLE_LIST_MAX)
+    .map(([k, d]) => [k, { rotational: typeof d.rotational === 'boolean' ? d.rotational : null, util: num(d.util) ?? 0, r_mb_s: num(d.r_mb_s) ?? 0, w_mb_s: num(d.w_mb_s) ?? 0, r_await: num(d.r_await), w_await: num(d.w_await) }]));
+  out.arc = x.arc && typeof x.arc === 'object' ? { size: num(x.arc.size), c_max: num(x.arc.c_max), dnode_size: num(x.arc.dnode_size) ?? 0, dnode_limit: num(x.arc.dnode_limit) ?? 0, prune_per_s: num(x.arc.prune_per_s) ?? 0 } : null;
+  out.pools = Array.isArray(x.pools) ? x.pools.filter((p) => p && typeof p.name === 'string' && POOL.test(p.name)).slice(0, SAMPLE_LIST_MAX)
+    .map((p) => ({ name: p.name, health: /^[A-Z]{1,16}$/.test(p.health ?? '') ? p.health : 'UNKNOWN', cap: num(p.cap) ?? 0 })) : null;
+  if (x.containers === null || x.containers === undefined) out.containers = null;
+  else out.containers = Object.fromEntries(entries(x.containers).filter(([k, c]) => CT_ID.test(k) && c && typeof c === 'object').slice(0, SAMPLE_LIST_MAX)
+    .map(([k, c]) => [k, { io: psiIn(c.io), memory: psiIn(c.memory), ...(typeof c.name === 'string' && CT_NAME.test(c.name) ? { name: c.name } : {}) }]));
+  if (x.smart === null || x.smart === undefined) out.smart = null;
+  else out.smart = Object.fromEntries(entries(x.smart).filter(([k, h]) => DISK.test(k) && h && typeof h === 'object').slice(0, SAMPLE_LIST_MAX)
+    .map(([k, h]) => [k, { passed: typeof h.passed === 'boolean' ? h.passed : null, temp_c: num(h.temp_c), reallocated: num(h.reallocated), pending: num(h.pending), wear_pct: num(h.wear_pct), media_errors: num(h.media_errors) }]));
+  out.unread = Array.isArray(x.unread) ? x.unread.filter((r) => typeof r === 'string' && READING.test(r)).slice(0, 16) : [];
+  return out;
+}
+
+const healthDir = (env) => join(dataDir(env), 'health');
+
+/** Every sample, a file a month per box, three months kept (as host-watch kept wunder's). */
+function keepSample(env, box, s, nowMs) {
+  if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(box)) return;
+  mkdirSync(healthDir(env), { recursive: true, mode: 0o700 });
+  const month = new Date(nowMs).toISOString().slice(0, 7);
+  const file = join(healthDir(env), `${box}-${month}.jsonl`);
+  // A month's file stops growing past HISTORY_FILE_MAX (a sample a minute is ~2-5 MB a month); three months kept.
+  let size = 0;
+  try { size = statSync(file).size; } catch { /* new */ }
+  if (size < HISTORY_FILE_MAX) appendFileSync(file, JSON.stringify(s) + '\n', { mode: 0o600 });
+  const mine = readdirSync(healthDir(env)).filter((n) => n.startsWith(`${box}-`) && /-\d{4}-\d{2}\.jsonl$/.test(n)).sort();
+  for (const old of mine.slice(0, -3)) rmSync(join(healthDir(env), old), { force: true });
+}
+
+/** Dark: an always-on box not heard from for 10 minutes, once the runtime's own box has been up 10 minutes. */
+export const DARK_MS = 10 * 60_000;
+export function checkDark(env, s, nowMs = Date.now(), o = {}) {
+  const alert = o.alert ?? raiseAlert;
+  const calls = [];
+  try {
+    updateWatch(env, (w) => {
+      const local = Object.entries(s.boxes).find(([, b]) => b.local)?.[0];
+      // The runtime itself up 10 minutes: its own box polling now (within 2 minutes) and since 10 minutes ago. After the
+      // runtime was down, the first poll from anyone finds its own box stale, so nobody is dark until it's been back 10.
+      const own = local && w.boxes[local];
+      // The runtime's own box quiet: it's the one that's dark (its runner died, or the whole machine was down); the
+      // others can't be judged until it's been back 10 minutes.
+      const ownStale = !own?.seen || nowMs - Date.parse(own.seen) > 2 * 60_000;
+      if (!ownStale && (!own.upSince || nowMs - Date.parse(own.upSince) < DARK_MS)) return;
+      for (const [id, b] of Object.entries(s.boxes)) {
+        if (ownStale && id !== local) continue;
+        if (b.revoked || !(b.local || b.reportOnly || b.alwaysOn)) continue;
+        const wb = (w.boxes[id] ??= {});
+        const seen = wb.seen ?? b.lastSeen;
+        if (!seen || nowMs - Date.parse(seen) < DARK_MS) continue;
+        const label = b.name ?? id;
+        const conds = (wb.conditions ??= {});
+        const d = conds.dark;
+        const iso = new Date(nowMs).toISOString();
+        if (!d) {
+          conds.dark = { since: seen, title: `${label} is dark`, detail: `no word from it since ${clock(Date.parse(seen))}`, severity: 'bad', reading: null, alerted: iso, said: iso };
+          calls.push({ source: 'box-health', severity: 'bad', summary: `${label} is dark`, facts: { box: id, key: 'dark', since: seen } });
+        } else if (nowMs - Date.parse(d.said) >= REMIND_MS) {
+          d.said = iso;
+          calls.push({ source: 'box-health', severity: 'bad', summary: `${label} is dark (still)`, facts: { box: id, key: 'dark', since: d.since, minutes: Math.round((nowMs - Date.parse(d.since)) / 60_000) } });
+        }
+      }
+    });
+  } catch { return []; }
+  for (const c of calls) { try { alert(env, c); } catch { /* never holds anything up */ } }
+  return calls;
+}
+
 /** The Inbox's alerts: each unit failing or looping on a box. Its text holds while it lasts (pushed once). */
 export function watchAsks(env, labelOf = (b) => b, revoked = () => false) {
   const w = readWatch(env);
   const asks = [];
   for (const [box, b] of Object.entries(w.boxes)) {
     if (revoked(box)) continue;
+    // Five a box: one box's many conditions can't crowd out the others' (as FYIs are five a box).
+    for (const c of Object.values(b.conditions ?? {}).filter((x) => x.alerted).sort((x, y) => (x.severity === 'bad' ? -1 : 0) - (y.severity === 'bad' ? -1 : 0)).slice(0, 5)) {
+      asks.push({ text: c.title, meta: c.detail, at: c.since, page: '', label: 'Look', kind: 'alert' });
+    }
     for (const ep of Object.values(b.units ?? {})) {
       asks.push({ text: `${ep.unit} ${ep.state === 'looping' ? 'keeps restarting' : 'failed'} on ${labelOf(box)}`, meta: lastLine(ep.log) || `${ep.scope} unit, since ${clock(Date.parse(ep.since))}`,
         at: ep.since, page: '', label: 'Look', kind: 'alert' });
@@ -325,6 +498,14 @@ export function watchRows(env, box, nowMs = Date.now()) {
   const b = readWatch(env).boxes[box];
   if (!b) return [];
   const rows = [];
+  if (b.health) {
+    const unread = (b.health.unread ?? []).filter((r) => r !== 'smart' || !b.health.container);
+    rows.push({ label: 'Health', value: healthWords(b.health), detail: `sampled ${minutes(nowMs - Date.parse(b.healthAt))} ago${unread.length ? ` · not read: ${unread.join(', ')}` : ''}`,
+      tone: Object.values(b.conditions ?? {}).some((c) => c.alerted) ? 'bad' : 'ok' });
+  }
+  for (const c of Object.values(b.conditions ?? {})) {
+    rows.push({ label: c.title, value: c.detail, detail: `since ${clock(Date.parse(c.since))}${c.alerted ? '' : ' (not long enough to alert yet)'}`, tone: c.alerted ? (c.severity === 'bad' ? 'bad' : 'warn') : 'muted' });
+  }
   if (b.boot?.at) rows.push({ label: 'Booted', value: `${minutes(nowMs - Date.parse(b.boot.at))} ago`, detail: clock(Date.parse(b.boot.at)) });
   for (const ep of Object.values(b.units ?? {})) {
     rows.push({ label: ep.unit, value: ep.state === 'looping' ? `Keeps restarting (${ep.restarts ?? '?'} in 15 min)` : `Failed (${ep.result ?? 'failed'})`, tone: 'bad',

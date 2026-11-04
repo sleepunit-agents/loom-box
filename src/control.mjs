@@ -13,7 +13,7 @@ import { chmodSync, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } 
 import { join } from 'node:path';
 import { AGENT_NAME, BOX_NAME, SECRET_NAME, StateError, load, localBoxName, nextHouseId, update } from './state.mjs';
 import { joinPoll, joinRequest } from './enroll.mjs';
-import { noteReport } from './watch.mjs';
+import { checkDark, noteReport } from './watch.mjs';
 import { MAX_PARTS, PART_RAW, drop, partsOf, putPart, putWhole, readPart } from './blobs.mjs';
 import { parsePortGrant, parseTailnetGrant } from './house.mjs';
 import { CODE, LOGIN_NAMES, scrubCliOutput } from './logins.mjs';
@@ -236,6 +236,17 @@ export function setMayHost(env, effects, { name, mayHost: mh }) {
   });
 }
 
+/** The owner's: whether a box is always on (dark after 10 minutes' silence is an alert), and whether it's report-only. */
+export function setBoxWatch(env, effects, { name, alwaysOn, reportOnly }) {
+  return update(env, (s) => {
+    const id = resolveBox(s, name);
+    const b = s.boxes[id];
+    if (alwaysOn !== undefined) { if (alwaysOn === true || alwaysOn === 'on') b.alwaysOn = true; else delete b.alwaysOn; }
+    if (reportOnly !== undefined && !b.local) { b.reportOnlyAsked = true; if (reportOnly === true || reportOnly === 'on') b.reportOnly = true; else delete b.reportOnly; }
+    return { box: id, name: boxNameOf(s, id), alwaysOn: !!(b.local || b.reportOnly || b.alwaysOn), reportOnly: !!b.reportOnly };
+  });
+}
+
 export function setPrimary(env, effects, { agent, box }) {
   const a = str(agent, 'an agent', 40);
   if (!AGENT_NAME.test(a)) fail('an agent name is lowercase letters, digits and dashes');
@@ -391,7 +402,7 @@ export function list(env, caller) {
   const boxes = Object.entries(s.boxes)
     .filter(([, b]) => householdOwner(caller) || (!b.revoked && mine?.some((a) => mayHost(b, a, members))))
     .map(([id, b]) => ({ id, name: b.name ?? id, local: !!b.local, facts: factsOf(b), lastSeen: b.lastSeen, harnesses: harnessesOf(b, householdOwner(caller)),
-      ...(householdOwner(caller) ? { runtime: b.runtime ?? null, mayHost: b.mayHost, owner: boxOwner(b, members), lentTo: b.lentTo ?? [], revoked: b.revoked ?? null, created: b.created } : {}) }));
+      ...(householdOwner(caller) ? { runtime: b.runtime ?? null, mayHost: b.mayHost, owner: boxOwner(b, members), lentTo: b.lentTo ?? [], revoked: b.revoked ?? null, created: b.created, reportOnly: !!b.reportOnly, alwaysOn: !!b.alwaysOn } : {}) }));
   const primary = caller.kind === 'agent' ? primaryOf(s, caller.agent, env) : undefined;
   const services = Object.entries(s.services ?? {})
     .filter(([, v]) => sees(caller, v.agent))
@@ -431,17 +442,27 @@ export function poll(env, effects, caller, body = {}) {
   const out = pollState(env, effects, caller, body);
   // What the box says of itself (keeping-watch.md): its boot, and its units' sample when it has a new one. Kept apart
   // from the state file, and never fails the poll.
-  const { boot, units } = body ?? {};
-  if (boot || units) {
+  const { boot, units, health } = body ?? {};
+  {
     let label = caller.subject;
     try { label = boxNameOf(load(env), caller.subject); } catch { /* its id, then */ }
-    noteReport(env, caller.subject, { boot: boot && typeof boot === 'object' ? boot : undefined, units: units && typeof units === 'object' ? units : undefined },
+    noteReport(env, caller.subject, { boot: boot && typeof boot === 'object' ? boot : undefined, units: units && typeof units === 'object' ? units : undefined,
+      health: health && typeof health === 'object' ? health : undefined },
       Date.parse(now(effects)), { label, ...(effects.alert ? { alert: effects.alert } : {}) });
+    // Any box's poll is a moment to see which of the others has gone dark (the manifest read is the other).
+    try { checkDark(env, load(env), Date.parse(now(effects)), effects.alert ? { alert: effects.alert } : {}); } catch { /* next time */ }
   }
+  // A report-only box (keeping-watch.md, "The hypervisor"): it reads its numbers and nothing else. No houses, body
+  // hosts, sessions, sign-ins, and no version to upgrade itself to, whatever its mayHost says.
+  try {
+    if (load(env).boxes[caller.subject]?.reportOnly) {
+      return { ...out, logins: [], start: [], stop: out.stop ?? [], bodyHosts: [], active: out.active ?? [], remotes: [], loginAgents: {}, version: undefined, upgradeNow: undefined, reportOnly: true };
+    }
+  } catch { /* as it was */ }
   return out;
 }
 
-function pollState(env, effects, caller, { facts, sessions, harnesses, usage, loginsRunning, runtime } = {}) {
+function pollState(env, effects, caller, { facts, sessions, harnesses, usage, loginsRunning, runtime, reportOnly } = {}) {
   const f = facts === undefined ? null : listOf(facts, 'facts', FACT, 32);
   const running = runningReport(loginsRunning);
   const rt = runtimeReport(runtime);
@@ -453,6 +474,10 @@ function pollState(env, effects, caller, { facts, sessions, harnesses, usage, lo
   return update(env, (s) => {
     const b = boxOf(s, caller);
     if (f) b.facts = f;
+    // A box may make itself report-only (joined with --report-only); only the owner may undo it.
+    // Once: the box asks (joined with --report-only), and the owner's word after that stands, off included.
+    if (reportOnly === true && !b.local && !b.reportOnlyAsked) { b.reportOnly = true; b.reportOnlyAsked = true; }
+    const ro = !!b.reportOnly;
     if (hs) b.harnesses = stamp(hs, now(effects));
     // The household's own salt for account keys (accounts.mjs): made once, never shown.
     s.accountSalt ??= randomBytes(16).toString('hex');
@@ -479,7 +504,8 @@ function pollState(env, effects, caller, { facts, sessions, harnesses, usage, lo
     return {
       // Logins the owner started from the box's page: the CLI's own login, run here (logins.mjs). A pasted code goes
       // to the box once and is gone from loom's state.
-      logins: Object.values(s.logins ?? {}).filter((l) => l.box === caller.subject && (l.state === 'wanted' || l.codeWaiting || l.state === 'cancel'))
+      // A report-only box: no sign-in is ever handed to it, so none is taken (or its code spent) here.
+      logins: ro ? [] : Object.values(s.logins ?? {}).filter((l) => l.box === caller.subject && (l.state === 'wanted' || l.codeWaiting || l.state === 'cancel'))
         .map((l) => {
           // The code, if one waits, goes to the box once and is gone (takeCode removes it; an old one has expired).
           const code = l.codeWaiting ? takeCode(env, l.id, Date.parse(now(effects))) : null;
@@ -492,7 +518,7 @@ function pollState(env, effects, caller, { facts, sessions, harnesses, usage, lo
         }),
       // Which agents may use each of this box's logins: the box runs its CLI in one of their images (logins.mjs).
       loginAgents: Object.fromEntries(LOGIN_NAMES.map((k) => [k, Object.keys(s.agents).filter((ag) => mayHaveLogin(b, s.agents[ag], ag, k, members))])),
-      start: mine.filter((h) => h.state === 'wanted' && mayHost(b, h.agent, members) && !(h.notBefore && Date.parse(h.notBefore) > Date.parse(now(effects)))).map((h) => {
+      start: ro ? [] : mine.filter((h) => h.state === 'wanted' && mayHost(b, h.agent, members) && !(h.notBefore && Date.parse(h.notBefore) > Date.parse(now(effects)))).map((h) => {
         const a = s.agents[h.agent] || {};
         return { id: h.id, agent: h.agent, task: h.task, service: h.service ?? null, slot: h.slot ?? null, session: !!h.session, repo: a.repo, houseFile: a.houseFile || 'house/house.json', branch: a.branch ?? null,
           // A house asked for with a GPU need gets the box's GPU (t-1616).
@@ -527,6 +553,7 @@ export function claim(env, effects, caller, { id }) {
     if (!h || h.box !== caller.subject) fail(`no house ${id} for this box`, 404);
     if (h.state !== 'wanted') fail(`house ${id} is ${h.state}, not waiting to start`, 409);
     if (!mayHost(s.boxes[caller.subject], h.agent, membersOf(env))) fail(`this box may not host ${h.agent}`, 403);
+    if (s.boxes[caller.subject].reportOnly) fail('this box is report-only: it hosts nothing', 403);
     const a = s.agents[h.agent];
     if (!a) fail(`${h.agent} has no house config`, 409);
     const label = houseTokenLabel(h, boxNameOf(s, h.box));
@@ -1370,7 +1397,7 @@ const OWNER_ONLY = {
   'add-box': addBox, 'revoke-box': revokeBox, 'may-host': setMayHost, 'set-primary': setPrimary, 'set-agent': setAgent,
   'seed-state': seedState, 'saved-state': (env, _fx, b) => savedState(env, b),
   'remote-up': remoteUp, 'remote-down': remoteDown,
-  'box-lend': lendBox, 'box-owner': setBoxOwner,
+  'box-lend': lendBox, 'box-owner': setBoxOwner, 'box-watch': setBoxWatch,
 };
 /** The box's own owner's (assertBoxOwner): its logins and Update now. */
 export const BOX_OWNER_ONLY = { 'login-start': loginStart, 'login-code': loginCode, 'login-cancel': loginCancel, 'box-update-now': boxUpdateNow };

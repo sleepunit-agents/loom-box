@@ -497,3 +497,14 @@ characters, capped, and dropped when it isn't in the shape the box would send.
 | Setting (on a box) | What |
 |---|---|
 | `LOOM_RUNTIME_UNITS_IGNORE` | a JavaScript regex searched in a unit's name: those units are never reported |
+
+### Health (section 3)
+
+Each box samples itself once a minute, without root (load, memory and swap, pressure, filesystems, disks and ZFS over a
+5 s window, pools, containers' pressure; SMART and container names from `/run/loom-box/root-health.json` if a root
+timer writes it: `contrib/root-health`), and sends it with its next poll as `health`. The control plane checks it
+against host-watch's rules (`src/health.mjs`, `problems`), keeps the last sample and each condition in `box-watch.json`
+and every sample in `<LOOM_BOX_DATA>/health/<box>-<YYYY-MM>.jsonl` (three months), and alerts (source `box-health`)
+once a condition has held its time. An always-on box (loom's own, a report-only one, or `loom runtime always-on <box>
+on`) quiet for 10 minutes is dark. `loom runtime health [<box>]` says how each is. `loom runtime join … --report-only`
+makes a box that only reports: it hosts nothing and never upgrades itself from what loom says.

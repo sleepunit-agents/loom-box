@@ -18,6 +18,9 @@
 //                                                         --tailnet: a box tailscaled.sock it may use, by name)
 //   loom runtime primary <agent> [<box>]                       an agent's primary (default: this machine)
 //   loom runtime rename-local                                  after renaming this machine: its box takes the new name
+//   loom runtime health [<box>] [--json]                       each box's last health sample and what's wrong now
+//   loom runtime always-on <box> on|off                        silent 10 minutes is an alert (loom's own and report-only boxes always are)
+//   loom runtime report-only <box> on|off                      it reports its numbers and hosts nothing
 //   loom runtime remote up <agent> [--box b] [--dir /path]     a box session: Claude's remote-control on the box itself,
 //                                                         in the agent's folder there (the box's whole reach; take it down after)
 //   loom runtime remote down <agent>
@@ -35,7 +38,7 @@
 //   loom runtime service seed <name> --from <dir>             its starting state (a bridge moving in)
 //   loom runtime service state <name> --to <dir>              its saved state, unpacked (a bridge moving out)
 // On a box:
-//   loom runtime join <loom-url> --name <name> [--labels x,y]  asks loom; the owner lets it in on the page
+//   loom runtime join <loom-url> --name <name> [--labels x,y] [--report-only]  asks loom; the owner lets it in on the page
 //                                       [--credential]     or: a credential from Add a box, on stdin or prompted
 //   loom runtime run                                           poll and run houses (a user service)
 // For loom (the piece contract):
@@ -88,11 +91,13 @@
 // For loom (the piece contract):
 //   loom runtime ui --json | ui page --json | ui act --json | api --json
 //   loom runtime bundle export | bundle import [--force]       its part of loom's bundle
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
-import { addBox, api, down, list, remoteDown, remoteUp, revokeBox, setAgent, setPrimary, up } from './control.mjs';
+import { addBox, api, down, list, remoteDown, remoteUp, revokeBox, setAgent, setBoxWatch, setPrimary, up } from './control.mjs';
+import { watchOf } from './watch.mjs';
+import { healthWords } from './health.mjs';
 import { realEffects } from './effects.mjs';
 import { act, houseBadge, manifest, page } from './ui.mjs';
 import { askToJoin, BoxError, joinLoom, loadConfig, packState, POLL_MS, remoteClient, restoreState, runner, runMode } from './box.mjs';
@@ -246,6 +251,29 @@ async function main(argv, env) {
       throw new Fail('usage: loom box remote up|down <agent> [--box b] [--dir /path]', 2);
     }
     case 'rename-local': { out(renameLocal(env)); return; }
+    case 'always-on': case 'report-only': {
+      const [box, v] = positional(rest);
+      if (!box || !['on', 'off'].includes(v)) throw new Fail(`usage: loom runtime ${cmd} <box> on|off`, 2);
+      out(setBoxWatch(env, realEffects(env), { name: box, [cmd === 'always-on' ? 'alwaysOn' : 'reportOnly']: v }));
+      return;
+    }
+    case 'health': {
+      const [box] = positional(rest);
+      const w = watchOf(env);
+      const s = loadState(env);
+      const ids = box ? [Object.keys(s.boxes).find((id) => id === box || s.boxes[id].name === box)].filter(Boolean) : Object.keys(w.boxes).filter((id) => s.boxes[id] && !s.boxes[id].revoked);
+      if (box && !ids.length) throw new Fail(`no box ${box}`, 1);
+      if (json) return out(Object.fromEntries(ids.map((id) => [id, { health: w.boxes[id]?.health ?? null, conditions: w.boxes[id]?.conditions ?? {}, units: w.boxes[id]?.units ?? {} }])));
+      // Whatever a box sent is escaped again here: nothing it says reaches the owner's terminal as a control sequence.
+      const esc = (v) => String(v ?? '').replace(/[\x00-\x1f\x7f-\x9f]/g, (c) => `\\x${c.charCodeAt(0).toString(16).padStart(2, '0')}`);
+      for (const id of ids) {
+        const b = w.boxes[id] ?? {};
+        process.stdout.write(`${esc(s.boxes[id].name ?? id)}: ${esc(healthWords(b.health))}${b.healthAt ? ` (${esc(b.healthAt)})` : ''}\n`);
+        for (const c of Object.values(b.conditions ?? {})) process.stdout.write(`  now: ${esc(c.title)}: ${esc(c.detail)} (since ${esc(c.since)}${c.alerted ? ', alerted' : ''})\n`);
+        for (const u of Object.values(b.units ?? {})) process.stdout.write(`  unit: ${esc(u.unit)} ${esc(u.state)} since ${esc(u.since)}\n`);
+      }
+      return;
+    }
     case 'primary': { const [agent, box] = positional(rest); out(setPrimary(env, realEffects(env), { agent, box })); return; }
     case 'up': {
       let task = flag(rest, '--task');
@@ -317,6 +345,14 @@ async function main(argv, env) {
       const hi = !rest.includes('--credential')
         ? await askToJoin(env, { url, name: flag(rest, '--name'), labels })
         : await joinLoom(env, { url, name: flag(rest, '--name'), labels, credential: await prompt('Box credential (from the Boxes page): ') });
+      // A report-only box (keeping-watch.md, "The hypervisor"): it reports its numbers and takes nothing, and never
+      // upgrades itself from what loom says. Kept in box.json, and said on every poll.
+      if (rest.includes('--report-only')) {
+        const p = `${stateDir(env)}/box.json`;
+        writeFileSync(p, JSON.stringify({ ...JSON.parse(readFileSync(p, 'utf-8')), reportOnly: true }, null, 2) + '\n', { mode: 0o600 });
+        process.stdout.write(`Joined as ${hi.name ?? hi.box} (${hi.box}), report-only. Run \`loom box run\` (or its user service) to start reporting.\n`);
+        return;
+      }
       process.stdout.write(`Joined as ${hi.name ?? hi.box} (${hi.box}). Run \`loom box run\` (or its user service) to start taking houses.\n`);
       return;
     }
