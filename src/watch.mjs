@@ -26,6 +26,9 @@ const FYI_MAX = 30;
 const UNITS_MAX = 20;
 const LOG_LINES = 10;
 const LOG_CHARS = 1200;
+/** A journal line is cut to this before anything reads it; a units sample's log text, all told, to UNITS_LOG_MAX. */
+const LINE_MAX = 2000;
+export const UNITS_LOG_MAX = 32 * 1024;
 const UNIT = /^[A-Za-z0-9@._:\\-]{1,120}\.(service|socket|timer|mount|path|target|scope|slice|swap|device|automount)$/;
 
 const dataDir = (env) => env.LOOM_BOX_DATA || join(env.HOME || homedir(), '.local', 'share', 'loom-box');
@@ -47,16 +50,18 @@ export function bootInfo(root = '') {
 
 /** What looks like a secret in a unit's journal, redacted (as Art's art-unit-alert did), and its lines cut to size. */
 export function redact(text) {
-  return String(text ?? '')
+  // Every quantifier is bounded and each scheme anchored, and a line is cut to 2000 characters first: a box's long
+  // line can't make a regex backtrack for long (ReDoS) on the control plane.
+  return String(text ?? '').slice(0, LINE_MAX)
     .replace(/[\0-\x08\x0b-\x1f]/g, '')
-    .replace(/(https:\/\/([a-z]+\.)?discord(app)?\.com\/api(\/v\d+)?\/webhooks\/\d+\/)\S+/gi, '$1[REDACTED]')
-    .replace(/(https:\/\/hooks\.slack\.com\/(services|workflows|triggers)\/)\S+/gi, '$1[REDACTED]')
-    .replace(/(https?:\/\/[^\s/]*\/[^\s]*webhook[^\s]*?\/)[A-Za-z0-9_-]{16,}\S*/gi, '$1[REDACTED]')
-    .replace(/([A-Za-z][A-Za-z0-9+.-]*:\/\/)[^\s/]*@/g, '$1[REDACTED]@')
-    .replace(/(\bbearer +)[A-Za-z0-9._~+\/=-]{8,}/gi, '$1[REDACTED]')
-    .replace(/((password|passwd|secret|api[_-]?key|token)[=:] *)\S+/gi, '$1[REDACTED]')
-    .replace(/sk-[A-Za-z0-9_-]{16,}/g, 'sk-[REDACTED]')
-    .replace(/\b(loom_|ghp_|gho_|github_pat_|xox[abposr]-)[A-Za-z0-9_-]{10,}/g, '$1[REDACTED]');
+    .replace(/(https:\/\/(?:[a-z]{1,20}\.)?discord(?:app)?\.com\/api(?:\/v\d{1,3})?\/webhooks\/\d{1,30}\/)[^\s]{1,300}/gi, '$1[REDACTED]')
+    .replace(/(https:\/\/hooks\.slack\.com\/(?:services|workflows|triggers)\/)[^\s]{1,300}/gi, '$1[REDACTED]')
+    .replace(/(\/[A-Za-z0-9._-]{0,40}webhooks?\/)[A-Za-z0-9_-]{16,200}/gi, '$1[REDACTED]')
+    .replace(/\b([A-Za-z][A-Za-z0-9+.-]{0,30}:\/\/)[^\s\/]{0,200}@/g, '$1[REDACTED]@')
+    .replace(/(\bbearer {1,5})[A-Za-z0-9._~+\/=-]{8,500}/gi, '$1[REDACTED]')
+    .replace(/((?:password|passwd|secret|api[_-]?key|token)[=:] {0,5})[^\s]{1,500}/gi, '$1[REDACTED]')
+    .replace(/sk-[A-Za-z0-9_-]{16,200}/g, 'sk-[REDACTED]')
+    .replace(/\b(loom_|ghp_|gho_|github_pat_|xox[abposr]-)[A-Za-z0-9_-]{10,200}/g, '$1[REDACTED]');
 }
 
 /** A command's stdout, or null when it couldn't run or failed. Async, so a wedged journal never stalls the polls. */
@@ -129,7 +134,7 @@ export function unitSampler(env = process.env, o = {}) {
 /** A unit's own last words: its journal's last lines, systemd's own status lines dropped, redacted, capped. */
 async function journal(run, scope, unit) {
   const out = (await run(['journalctl', ...(scope === 'user' ? ['--user'] : []), '-u', unit, '-n', '50', '--no-pager', '-q', '-o', 'short-iso'])) ?? '';
-  const lines = out.split('\n').filter((l) => l.trim() && !/ systemd\[\d+\]: /.test(l)).slice(-LOG_LINES).map((l) => redact(l).slice(0, 300));
+  const lines = out.split('\n').map((l) => l.slice(0, LINE_MAX)).filter((l) => l.trim() && !/ systemd\[\d{1,10}\]: /.test(l)).slice(-LOG_LINES).map((l) => redact(l).slice(0, 300));
   let n = 0;
   return lines.reverse().filter((l) => (n += l.length + 1) <= LOG_CHARS).reverse();
 }
@@ -215,13 +220,15 @@ export function noteReport(env, box, { boot, units } = {}, nowMs = Date.now(), o
         }
         b.boot = { id: boot.id, kernel: boot.kernel, up: boot.up, at: new Date(nowMs - boot.up * 1000).toISOString() };
       }
-      if (units && Array.isArray(units.units)) {
+      // A sample whose log text is more than a box should ever send is dropped whole (it's unread, not "all fine").
+      const logChars = units && Array.isArray(units.units) ? units.units.slice(0, UNITS_MAX).reduce((n, u) => n + (Array.isArray(u?.log) ? u.log.slice(0, 50).reduce((m, l) => m + String(l).length, 0) + Math.max(0, u.log.length - 50) * LINE_MAX : 0), 0) : 0;
+      if (units && Array.isArray(units.units) && logChars <= UNITS_LOG_MAX) {
         const had = b.units ?? {};
         const next = {};
         for (const u of units.units.slice(0, UNITS_MAX)) {
           if (!UNIT.test(u?.unit ?? '') || !['user', 'system'].includes(u.scope) || !['failed', 'looping'].includes(u.state)) continue;
           const key = `${u.scope}:${u.unit}`;
-          const log = (Array.isArray(u.log) ? u.log : []).slice(-LOG_LINES).map((l) => printable(redact(l), 300));
+          const log = (Array.isArray(u.log) ? u.log : []).slice(-LOG_LINES).map((l) => printable(redact(String(l).slice(0, LINE_MAX)), 300));
           const was = had[key];
           // Since when: systemd's word if the box had it (and it's a sane time), else when loom first heard.
           const since = was?.since ?? (ISO_OK(u.since, nowMs) ? new Date(Date.parse(u.since)).toISOString() : new Date(nowMs).toISOString());
