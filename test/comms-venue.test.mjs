@@ -93,6 +93,32 @@ test('presence goes to core: working with the message ids, then done when the tu
   assert.deepEqual(w.adapterCalls, []);
 });
 
+test('done reaches core even when its first try fails, or core couldn\'t list the venues at that tick (t-1881)', async () => {
+  const w = world();
+  await deliver(w.env, ownerMsg(w, 'work on it'), w.o);
+  await tick(w.env, w.o);
+  const status = () => w.core.commsCalls.filter((x) => x.op === 'status').map((x) => x.status);
+  const c = loadConv(w.env, cvOf('art', 'loom', thread));
+  w.runner.finish(c.body);
+  // Core is down for the first done (a deploy restarting it): its answer never comes.
+  w.core.commsAnswer = (b) => { if (b.op === 'status' && b.status === 'done') throw new Error('core didn\'t answer comms/adapter: connect ECONNREFUSED'); return { ok: true }; };
+  await tick(w.env, w.o);
+  assert.equal(status().at(-1), 'done', 'tried');
+  const tried = status().length;
+  // Then the venues can't be had for a tick: nothing's dropped for that either.
+  w.core.commsAnswer = null;
+  const venues = w.o.venues;
+  w.o.venues = () => { throw new Error('core didn\'t answer venues'); };
+  await tick(w.env, w.o);
+  w.o.venues = venues;
+  await tick(w.env, w.o);
+  assert.equal(status().length, tried + 1, 'done again, once core answers');
+  assert.equal(status().at(-1), 'done');
+  assert.equal(loadConv(w.env, cvOf('art', 'loom', thread)).presence, undefined, 'and only then forgotten');
+  await tick(w.env, w.o);
+  assert.equal(status().length, tried + 1, 'never again after it landed');
+});
+
 test('a stop from core ends the body', async () => {
   const w = world();
   await deliver(w.env, ownerMsg(w, 'long job'), w.o);

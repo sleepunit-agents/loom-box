@@ -82,7 +82,8 @@ test('Claude Code: fed mid-turn through its inbox (the hook\'s layout and lock);
   assert.deepEqual(r.feed(b, { text: 'later' }), { fed: false, reason: 'its turn is over: resume it' });
   const slot = r.slotOf(b);
   const again = r.resume(slot, { brief: 'later', model: 'm', cwd: h.D, env: h.env });
-  assert.notEqual(again.id, b.id);
+  // As Claude Code does it: the resumed session is back under its own job id (t-1881), claimed by this launch's token.
+  assert.equal(again.id, b.id);
   assert.deepEqual(again.slot, slot);
   assert.deepEqual(h.argv().filter((a) => a[0] === '--bg').at(-1).slice(-2), ['--resume', slot.session]);
   // End: stopped, and its inbox closed (the hook then hands over nothing).

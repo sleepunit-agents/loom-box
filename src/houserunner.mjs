@@ -378,7 +378,13 @@ export class HouseRunner {
           const id = bodyIdOf(house, d.id);
           // The composed id must still be a body ref (bodies.mjs REF: 4-64 of [A-Za-z0-9-]): the house's id takes room.
           if (!BODY_REF.test(id)) throw new RunnerError(`${house} reported a body id too long to be one here (${d.id.length} characters; at most ${MAX_BODY_ID - house.length - 1})`);
-          if (existsSync(join(dataDir(this.env), 'bodies', `${this.harness}-${id}.json`))) throw new RunnerError(`${house} reported ${d.id}, which is already a body's`);
+          // An id that's a body's already is refused, but for a resume of a body that ended: Claude Code gives a resumed
+          // session back its own job id, so the house reports the body it was (t-1881). That record is the resumed
+          // body's now; refusing it left the resumed body running in the house, unknown here, beside a fresh one.
+          const rec = (() => { try { return JSON.parse(readFileSync(join(dataDir(this.env), 'bodies', `${this.harness}-${id}.json`), 'utf-8')); } catch { return null; } })();
+          if (rec && !(resume && rec.ended)) throw new RunnerError(`${house} reported ${d.id}, which is already a body's`);
+          // The stop its last run had is over: it's never this body's.
+          if (rec) hostLocked(this.env, () => { const h = loadHost(this.env, o.agent); const x = houseRec(h, house); if (x?.stop?.[d.id]) { delete x.stop[d.id]; writeJson(hostFile(this.env, o.agent), h); } });
           return { id, harness: this.harness, model: o.model, house, ...(resume ? { slot: resume } : {}) };
         }
         if (d?.error) throw new RunnerError(d.error);
@@ -462,6 +468,8 @@ export class HouseRunner {
       const x = houseRec(h, body.house);
       if (!x) return;
       (x.stop ??= {})[raw] ??= { pack: false, at: this.now().getTime() };
+      // A body asked to stop gives up its id's claim: a resume of its session comes back under it (t-1881).
+      if (x.claimed) delete x.claimed[raw];
       writeJson(hostFile(this.env, body.agent), h);
     });
   }
@@ -480,6 +488,7 @@ export class HouseRunner {
       const x = houseRec(h, body.house);
       if (!x) return false;
       (x.stop ??= {})[raw] = { pack: true, at: this.now().getTime() };
+      if (x.claimed) delete x.claimed[raw];
       writeJson(hostFile(this.env, body.agent), h);
       return true;
     });
