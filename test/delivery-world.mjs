@@ -69,9 +69,10 @@ export function fakeRunner(log, root, harness = 'claude', { inboxDir } = {}) {
     alive: (b) => !r.dead.has(b.id),
     slotOf: (b) => (session[b.id] ? { harness, session: session[b.id] } : null),
     sessionFiles(slot) { return { keep: slot && existsSync(tfile(slot.session)) ? [{ root: 'sess', rel: `${slot.session}.jsonl` }] : [], drop: [] }; },
-    /** What a body waits on (runners.mjs, waiting): {tool, what} while a test says it's at a permission prompt. */
+    /** What a body waits on (runners.mjs, waiting): {tool, what} while a test says it's at a permission prompt; 'unknown': it can't say. */
     waits: {},
-    waiting: (b) => r.waits[b.id] ?? null,
+    waiting: (b, _env, { fresh = false } = {}) => { if (fresh) r.freshLooks.push(b.id); return r.waits[b.id] === 'unknown' ? undefined : r.waits[b.id] ?? null; },
+    freshLooks: [],
     /** How a turn went, as its harness says (runners.mjs, turn): what finish(ref, turn) was given, else nothing. */
     turns: {},
     turn: (b) => r.turns[b.id] ?? null,

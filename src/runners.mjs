@@ -137,14 +137,18 @@ export class ClaudeRunner {
 
   /**
    * {tool, what} while `claude agents --json` lists the body waiting on a permission prompt (status waiting, or none,
-   * and waitingFor naming one), else null. The list is asked at most once a WAIT_LOOK_MS per harness: the tick runs
-   * every few seconds.
+   * and waitingFor naming one), else null; undefined when the list can't be had (it can't say). The list is asked at
+   * most once a WAIT_LOOK_MS per harness (the tick runs every few seconds), or now with `fresh`: before a stop.
    */
-  waiting(body, env) {
+  waiting(body, env, { fresh = false } = {}) {
     const key = `${this.claude}\0${this.jobsDir}`;
     let seen = waitLooks.get(key);
-    if (!seen || Date.now() - seen.at >= WAIT_LOOK_MS) waitLooks.set(key, (seen = { at: Date.now(), rows: this.agents(env) }));
-    const a = (seen.rows ?? []).find((x) => x && x.id === body.id);
+    if (fresh || !seen || Date.now() - seen.at >= WAIT_LOOK_MS) {
+      const rows = this.agents(env);
+      if (!rows) return undefined;
+      waitLooks.set(key, (seen = { at: Date.now(), rows }));
+    }
+    const a = seen.rows.find((x) => x && x.id === body.id);
     if (!a || !['waiting', undefined].includes(a.status) || !/permission/i.test(String(a.waitingFor ?? ''))) return null;
     const session = a.sessionId ?? this.job(body.id)?.sessionId;
     const found = typeof session === 'string' && SESSION.test(session)

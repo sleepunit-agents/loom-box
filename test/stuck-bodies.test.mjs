@@ -10,7 +10,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { deliver, deliveryNotices, loadConv, stuckAfterOf, tick } from '../src/delivery.mjs';
 import { ClaudeRunner } from '../src/runners.mjs';
-import { lastToolUse, redact } from '../src/stuck.mjs';
+import { lastToolUse, redact, taskComment } from '../src/stuck.mjs';
 import { cvOf, fakeRunner, world } from './delivery-world.mjs';
 import { scratch } from './scratch.mjs';
 
@@ -92,6 +92,46 @@ describe('a local body stuck on a permission prompt', () => {
     assert.equal(ended(id), false, '4 minutes this time, not 12');
   });
 
+  test('a harness that can\'t say for a look neither starts nor resets the count; the stop is checked uncached first', async () => {
+    const { w, localRunner, lwake, idOf, ended } = setup();
+    await deliver(w.env, lwake('wake:w-1', 'go', 'lane'), w.o);
+    const id = idOf('wake:w-1');
+    localRunner.waits[id] = { tool: 'Bash', what: 'x' };
+    await tick(w.env, w.o);
+    w.clock.advance(8 * MIN);
+    localRunner.waits[id] = 'unknown';
+    await tick(w.env, w.o);
+    localRunner.waits[id] = { tool: 'Bash', what: 'x' };
+    w.clock.advance(3 * MIN);
+    assert.deepEqual(localRunner.freshLooks, []);
+    await tick(w.env, w.o);
+    assert.ok(localRunner.freshLooks.includes(id), 'asked again, uncached, before the stop');
+    assert.equal(ended(id), true, '11 minutes, a blind look in the middle');
+  });
+
+  test('a body after a stuck one never inherits its count', async () => {
+    const { w, localRunner, lwake, conv, idOf, ended } = setup();
+    await deliver(w.env, lwake('wake:w-1', 'go', 'lane'), w.o);
+    const first = idOf('wake:w-1');
+    localRunner.waits[first] = { tool: 'Bash', what: 'x' };
+    await tick(w.env, w.o);
+    w.clock.advance(11 * MIN);
+    // Ended some other way while it waited (its count left on the conversation), and a new body started there.
+    const c = conv('wake:w-1');
+    assert.equal(c.waitingSince.body, c.body);
+    localRunner.finish(c.body);
+    delete localRunner.waits[first];
+    await deliver(w.env, lwake('wake:w-1', 'again', 'lane'), w.o);
+    const c2 = conv('wake:w-1');
+    c2.waitingSince = { body: c.body, at: w.clock.now().getTime() - 20 * MIN };
+    writeFileSync(join(w.env.LOOM_BOX_DATA, 'delivery', 'conversations', `${c2.conversation}.json`), JSON.stringify(c2));
+    const second = c2.body.split(':')[1];
+    assert.notEqual(second, first);
+    localRunner.waits[second] = { tool: 'Bash', what: 'x' };
+    await tick(w.env, w.o);
+    assert.equal(ended(second), false, 'its own count starts now');
+  });
+
   test('an alert triage (no task in its label): stopped and the owner hears, with no comment', async () => {
     const { w, localRunner, comments, lwake, idOf, ended } = setup();
     await deliver(w.env, lwake('alert:art-chain-check', 'art-chain-check: 2 dead chains', undefined), w.o);
@@ -150,6 +190,29 @@ describe('the Claude runner says when a body waits on a permission prompt', () =
   test('redact and lastToolUse', () => {
     assert.equal(redact('curl -H "Authorization: Bearer abc.def" https://u:p@x.io/?token=zzz').includes('abc.def'), false);
     assert.equal(redact('git push https://user:ghp_abcdefghijklmnopqrstuvwx@github.com/x').includes('ghp_'), false);
+    assert.equal(redact('{"password":"hunter2","token": "abc"}').includes('hunter2'), false, 'a quoted key, as JSON has it');
+    assert.equal(redact('{"password":"hunter2","token": "abc"}').includes('abc'), false);
     assert.deepEqual(lastToolUse('/does/not/exist'), { tool: '', what: '' });
+    // A structured input (not a command): a secret-looking key's value is out before it's serialized.
+    const D = scratch('rt-stuck-scrub-');
+    const f = join(D, 't.jsonl');
+    writeFileSync(f, JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'mcp__x__call', input: { url: 'https://x.io', headers: { Authorization: 'Bearer s3cr3t-value' }, api_key: 'k-12345', note: 'fine' } }] } }) + '\n');
+    const got = lastToolUse(f);
+    assert.equal(got.tool, 'mcp__x__call');
+    assert.equal(got.what.includes('s3cr3t'), false);
+    assert.equal(got.what.includes('k-12345'), false);
+    assert.match(got.what, /"note":"fine"/);
+  });
+
+  test('the task comment runs with a body\'s basics, never the runtime\'s own environment', () => {
+    const calls = [];
+    const run = (bin, args, o) => { calls.push({ bin, args, o }); return { status: 0 }; };
+    const env = { PATH: '/usr/bin', LOOM_RUNTIME_TOKEN_FILE: '/secret/token', LOOM_RUNTIME_TASK_COMMENT: '["/opt/tc","{task}","{text}"]' };
+    assert.equal(taskComment(env, 't-40', 'hello', { childEnv: { HOME: '/home/art' }, run }), true);
+    assert.deepEqual(calls[0].args, ['t-40', 'hello']);
+    assert.deepEqual(calls[0].o.env, { HOME: '/home/art', PATH: '/usr/bin' });
+    assert.equal(taskComment({ ...env, LOOM_RUNTIME_TASK_COMMENT: 'off' }, 't-40', 'x', { run }), false);
+    assert.equal(taskComment({ PATH: '/nowhere' }, 't-40', 'x', { run }), false, 'no taskstore on the PATH: nothing run');
+    assert.equal(calls.length, 1);
   });
 });

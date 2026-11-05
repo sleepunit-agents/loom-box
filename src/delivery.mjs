@@ -313,7 +313,7 @@ export function depsOf(env, o = {}) {
     // What the runtime noticed, to the owner's alert command (alerthook.mjs, t-1830); a test hands in its own.
     alert: o.alert ?? raiseAlert,
     // A stopped stuck body, noted on the task its label names (stuck.mjs, taskComment); a test hands in its own.
-    comment: o.comment ?? ((task, text) => { const lb = localBodiesOf(env); return taskComment(env, task, text, { cwd: lb?.cwd, path: lb?.path }); }),
+    comment: o.comment ?? ((task, text) => { const lb = localBodiesOf(env); return taskComment(env, task, text, { cwd: lb?.cwd, path: lb?.path, childEnv: bodyEnvOf(env, {}) }); }),
     // Who may do what (policy.mjs): the owner's policy and the gates, from the runtime's own store; a person's card,
     // from core's CLI; and the venue's adapter, through its declared send argv (describe, presence).
     policy: o.policy ?? ((agent) => policyOf(storeOf(env, o), agent).doc),
@@ -1264,12 +1264,16 @@ function expireSlot(env, c, d) {
 // on the conversation's record (so a loop of them pauses it), a note turn on the conversation, a notice and an alert
 // for the owner, and a comment on the task its label names. Its session is kept in its slot, as an eviction's.
 
-/** What its body waits on ({tool, what}) while its harness says it's at a permission prompt, else null. */
-function waitingOf(env, c, d) {
+/**
+ * What its body waits on ({tool, what}) while its harness says it's at a permission prompt, null when it isn't, and
+ * undefined when its harness can't say (its list failed: the count neither starts nor resets).
+ */
+function waitingOf(env, c, d, fresh = false) {
   try {
     const rec = readBody(env, c.body);
     if (rec.ended) return null;
-    const w = d.runner(rec.harness, rec.local).waiting?.(bodyOf(c.body, rec));
+    const w = d.runner(rec.harness, rec.local).waiting?.(bodyOf(c.body, rec), undefined, { fresh });
+    if (w === undefined) return undefined;
     return w && typeof w === 'object' ? { tool: String(w.tool ?? ''), what: String(w.what ?? '') } : null;
   } catch { return null; }
 }
@@ -1284,13 +1288,18 @@ async function stopStuck(env, op, d) {
   locked(env, () => {
     const c = loadConv(env, op.cv);
     if (!c) return;
-    if (c.body === op.body) { c.body = undefined; c.idleSince = undefined; }
     if (ours(c, op)) delete c.starting;
-    if (saved.slot) c.slot = { ...saved.slot, rules: c.bodyRules ?? { guest: false } }; else if (c.body === undefined) delete c.slot;
+    // The conversation moved on while it was stopped (its marker ran out, another body started): that body's slot and
+    // run aren't this one's to touch.
+    if (c.body === op.body) {
+      c.body = undefined;
+      c.idleSince = undefined;
+      if (saved.slot) c.slot = { ...saved.slot, rules: c.bodyRules ?? { guest: false } }; else delete c.slot;
+      // Its run failed, on the record the loop check reads (loops.mjs, judge).
+      const r = (c.runLog ?? []).findLast((x) => x.run === c.run);
+      if (r) { if (!Number.isFinite(r.end)) r.end = at.getTime(); r.fail = reason; }
+    }
     requeue(c, saved.pending);
-    // Its run failed, on the record the loop check reads (loops.mjs, judge).
-    const r = (c.runLog ?? []).findLast((x) => x.run === c.run);
-    if (r) { if (!Number.isFinite(r.end)) r.end = at.getTime(); r.fail = reason; }
     saveConv(env, c);
     c0 = { ...c };
   });
@@ -1352,12 +1361,17 @@ export async function tick(env, o = {}, only, mem = new Map()) {
         }
         // Waiting on a permission prompt nobody can answer (t-1858): stopped once it has waited stuckAfter, counted from
         // when the tick first saw it waiting. Only a harness that can say (runners.mjs, waiting) is ever asked.
-        const w = stuckAfter !== null && (st === 'working' || st === 'idle') ? waitingOf(env, c, d) : null;
-        if (!w && c.waitingSince) { delete c.waitingSince; dirty = true; }
-        if (w && !c.waitingSince) { c.waitingSince = now; dirty = true; }
-        if (w && now - c.waitingSince >= stuckAfter) {
+        // The count is its body's own ({body, at}): a body after it never inherits it.
+        let w = stuckAfter !== null && (st === 'working' || st === 'idle') ? waitingOf(env, c, d) : null;
+        if (c.waitingSince && c.waitingSince.body !== c.body) { delete c.waitingSince; dirty = true; }
+        if (w === null && c.waitingSince) { delete c.waitingSince; dirty = true; }
+        if (w && !c.waitingSince) { c.waitingSince = { body: c.body, at: now }; dirty = true; }
+        // Past its time: asked again, uncached, so a prompt answered in the last few seconds isn't stopped.
+        if (w && now - c.waitingSince.at >= stuckAfter) w = waitingOf(env, c, d, true);
+        if (w === null && c.waitingSince) { delete c.waitingSince; dirty = true; }
+        if (w && c.waitingSince && now - c.waitingSince.at >= stuckAfter) {
           c.starting = mark(now);
-          ops.push({ cv: c.conversation, mark: c.starting.op, type: 'stuck', body: c.body, waited: now - c.waitingSince, tool: w.tool, what: w.what });
+          ops.push({ cv: c.conversation, mark: c.starting.op, type: 'stuck', body: c.body, waited: now - c.waitingSince.at, tool: w.tool, what: w.what });
           delete c.waitingSince;
           saveConv(env, c);
           continue;
