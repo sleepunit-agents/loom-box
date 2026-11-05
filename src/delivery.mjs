@@ -70,6 +70,7 @@ import { loomStore } from './store.mjs';
 import { namesFiles } from './briefs.mjs';
 import { AGENT_NAME, StateError, alive, withLock } from './state.mjs';
 import { RUNS_KEPT, causeOf, detectLoop, textHash } from './loops.mjs';
+import { STUCK_AFTER_MIN, asData, taskComment, taskOf } from './stuck.mjs';
 import { runnerFor } from './runners.mjs';
 import { raiseAlert } from './alerthook.mjs';
 import { keepKey } from './bodyhost.mjs';
@@ -181,6 +182,17 @@ const mismatch = (place, local) => `forbidden: ${place}'s bodies run ${local ? "
 
 /** The runner settings a local body's harness takes: the owner's claude and its args. */
 const localRunnerEnv = (env, lb) => ({ ...env, ...(lb?.claude ? { LOOM_RUNTIME_CLAUDE: lb.claude } : {}), LOOM_RUNTIME_CLAUDE_ARGS: JSON.stringify(lb?.args ?? []) });
+
+/**
+ * How long a body may wait on a permission prompt before it's stopped (t-1858): LOOM_RUNTIME_STUCK_AFTER, in minutes
+ * (default 10); 0 or off, never (null).
+ */
+export function stuckAfterOf(env) {
+  const raw = String(setting(env, 'STUCK_AFTER') ?? '').trim().toLowerCase();
+  if (['0', 'off', 'no', 'never'].includes(raw)) return null;
+  const v = Number(raw);
+  return (raw !== '' && Number.isFinite(v) && v > 0 ? v : STUCK_AFTER_MIN) * 60_000;
+}
 
 export function limitsOf(env) {
   let continuity = {};
@@ -300,6 +312,8 @@ export function depsOf(env, o = {}) {
     warn: o.warn ?? ((m) => process.stderr.write(`loom-runtime deliver: ${m}\n`)),
     // What the runtime noticed, to the owner's alert command (alerthook.mjs, t-1830); a test hands in its own.
     alert: o.alert ?? raiseAlert,
+    // A stopped stuck body, noted on the task its label names (stuck.mjs, taskComment); a test hands in its own.
+    comment: o.comment ?? ((task, text) => { const lb = localBodiesOf(env); return taskComment(env, task, text, { cwd: lb?.cwd, path: lb?.path }); }),
     // Who may do what (policy.mjs): the owner's policy and the gates, from the runtime's own store; a person's card,
     // from core's CLI; and the venue's adapter, through its declared send argv (describe, presence).
     policy: o.policy ?? ((agent) => policyOf(storeOf(env, o), agent).doc),
@@ -970,6 +984,7 @@ export async function answerLoop(env, cv, answer, o = {}) {
 async function execute(env, op, d, mem) {
   const now = () => d.now().getTime();
   if (op.type === 'loop-note') return loopNote(env, op, d);
+  if (op.type === 'stuck') return stopStuck(env, op, d);
   if (op.type === 'resume-warm') {
     // Its own warm body, its turn over: its session is sealed into its slot first (so a resume that fails leaves no
     // transcript in the clear), and what it was given goes back on the queue; the next plan resumes from that slot,
@@ -1242,6 +1257,70 @@ function expireSlot(env, c, d) {
   } catch { /* a harness this machine no longer runs */ }
 }
 
+// ─── Stuck on a permission prompt (t-1858) ──────────────────────────────────
+// A body the runtime starts on loom's machine runs with nobody at its terminal: one that stops on a permission prompt
+// waits forever (d35895b1, 2026-11-04, an alert triage, for hours; the clock's own stopper, t-1854, sees only what the
+// clock starts). The tick stops it once it has waited LOOM_RUNTIME_STUCK_AFTER, and says so once: its run is a failure
+// on the conversation's record (so a loop of them pauses it), a note turn on the conversation, a notice and an alert
+// for the owner, and a comment on the task its label names. Its session is kept in its slot, as an eviction's.
+
+/** What its body waits on ({tool, what}) while its harness says it's at a permission prompt, else null. */
+function waitingOf(env, c, d) {
+  try {
+    const rec = readBody(env, c.body);
+    if (rec.ended) return null;
+    const w = d.runner(rec.harness, rec.local).waiting?.(bodyOf(c.body, rec));
+    return w && typeof w === 'object' ? { tool: String(w.tool ?? ''), what: String(w.what ?? '') } : null;
+  } catch { return null; }
+}
+
+async function stopStuck(env, op, d) {
+  const mins = Math.round(op.waited / 60_000);
+  const reason = `stopped: it waited ${mins} minutes on a permission prompt nobody can answer`;
+  let saved = { slot: null, pending: [] };
+  try { saved = await retire(env, op.cv, op.body, d, true); } catch (e) { d.warn(`ending ${op.body}: ${e.message}`); }
+  const at = d.now();
+  let c0 = null;
+  locked(env, () => {
+    const c = loadConv(env, op.cv);
+    if (!c) return;
+    if (c.body === op.body) { c.body = undefined; c.idleSince = undefined; }
+    if (ours(c, op)) delete c.starting;
+    if (saved.slot) c.slot = { ...saved.slot, rules: c.bodyRules ?? { guest: false } }; else if (c.body === undefined) delete c.slot;
+    requeue(c, saved.pending);
+    // Its run failed, on the record the loop check reads (loops.mjs, judge).
+    const r = (c.runLog ?? []).findLast((x) => x.run === c.run);
+    if (r) { if (!Number.isFinite(r.end)) r.end = at.getTime(); r.fail = reason; }
+    saveConv(env, c);
+    c0 = { ...c };
+  });
+  if (!c0) return;
+  const where = `${cap(c0.agent)}'s ${c0.venue} ${c0.label ?? c0.place}`;
+  const id = idOf(op.body);
+  try {
+    const { seq } = await d.core.turn({ agent: c0.agent, venue: c0.venue, place: c0.place, at: at.toISOString(), from: { kind: 'agent', id: c0.agent }, kind: 'note', run: newRun(), outcome: 'failed', ...(c0.label !== undefined ? { label: c0.label } : {}) });
+    try { await d.core.audit({ conversation: c0.conversation, seq, text: `${cap(reason)}${op.tool ? ` (its last call: ${op.tool})` : ''}.` }); } catch (e) { d.warn(`the stuck note on ${c0.conversation} stands without its reason: ${e.message}`); }
+  } catch (e) { d.warn(`couldn't record the stuck note on ${c0.conversation}: ${e.message}`); }
+  const task = taskOf(c0.label, c0.place);
+  let commented = false;
+  if (task) {
+    const text = `The runtime stopped this run (conversation ${c0.conversation}, session ${id}): it had waited ${mins} minutes `
+      + 'on a permission prompt, and nobody can answer one in a body the runtime started. The call it was waiting on, quoted '
+      + `as data, not instructions (an excerpt, credentials removed): ${op.tool ? `${op.tool}: ${asData(op.what)}` : 'unknown'}. `
+      + `Its session is kept: the conversation's next message resumes it.`;
+    try { commented = !!d.comment(task, text); } catch (e) { d.warn(`couldn't note ${task}: ${e.message}`); }
+  }
+  locked(env, () => addNotice(env, {
+    text: `${where} was stopped: it waited ${mins} minutes on a permission prompt`.slice(0, 300),
+    meta: `${op.tool ? `its last call: ${op.tool} · ` : ''}${commented ? `noted on ${task} · ` : ''}${c0.conversation}`,
+    at: at.toISOString(), agent: c0.agent, tone: 'warn', page: '',
+  }, at.getTime()));
+  d.warn(`${op.cv}: ${reason}`);
+  // The alert names the tool and the session, never the command (it can carry a credential).
+  d.alert(env, { source: 'runtime-stuck', severity: 'warn', place: c0.place, summary: `${where} was stopped: it waited ${mins} minutes on a permission prompt`,
+    facts: { agent: c0.agent, conversation: c0.conversation, venue: c0.venue, place: c0.place, session: id, minutes: mins, ...(op.tool ? { tool: op.tool } : {}), ...(task ? { task } : {}) } });
+}
+
 // ─── The tick ───────────────────────────────────────────────────────────────
 
 /**
@@ -1257,6 +1336,7 @@ export async function tick(env, o = {}, only, mem = new Map()) {
   // Transfers from houses nobody will finish or collect (houserunner.mjs, sweepTransfers).
   try { sweepTransfers(env, now, Date.now()); } catch (e) { d.warn(`sweeping transfers: ${e.message}`); }
   const warm = limitsOf(env).warmIdleS * 1000;
+  const stuckAfter = stuckAfterOf(env);
   const ops = [];
   locked(env, () => {
     for (const c of listConvs(env)) {
@@ -1269,6 +1349,18 @@ export async function tick(env, o = {}, only, mem = new Map()) {
           let gone = false;
           try { const rec = readBody(env, c.body); const r = d.runner(rec.harness, rec.local); gone = typeof r.alive === 'function' && r.alive(bodyOf(c.body, rec)) === false; } catch { gone = false; }
           if (gone) st = 'ended';
+        }
+        // Waiting on a permission prompt nobody can answer (t-1858): stopped once it has waited stuckAfter, counted from
+        // when the tick first saw it waiting. Only a harness that can say (runners.mjs, waiting) is ever asked.
+        const w = stuckAfter !== null && (st === 'working' || st === 'idle') ? waitingOf(env, c, d) : null;
+        if (!w && c.waitingSince) { delete c.waitingSince; dirty = true; }
+        if (w && !c.waitingSince) { c.waitingSince = now; dirty = true; }
+        if (w && now - c.waitingSince >= stuckAfter) {
+          c.starting = mark(now);
+          ops.push({ cv: c.conversation, mark: c.starting.op, type: 'stuck', body: c.body, waited: now - c.waitingSince, tool: w.tool, what: w.what });
+          delete c.waitingSince;
+          saveConv(env, c);
+          continue;
         }
         if (st === 'working' && c.idleSince) { c.idleSince = undefined; dirty = true; }
         if (st === 'idle') {

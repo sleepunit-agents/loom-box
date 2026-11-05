@@ -108,6 +108,17 @@
         "name": "LOOM_RUNTIME_ALERT_COMMAND",
         "label": "The owner's alert command",
         "hint": "a JSON argv; gets <source> --severity --summary --fact k=v for what the runtime notices (bridge down, loop pause, failed start), detached"
+      },
+      {
+        "name": "LOOM_RUNTIME_STUCK_AFTER",
+        "label": "Minutes a body on loom's machine may wait on a permission prompt",
+        "default": "10",
+        "hint": "then it's stopped (its session kept), noted on its task and said once; 0 or off: never"
+      },
+      {
+        "name": "LOOM_RUNTIME_TASK_COMMENT",
+        "label": "How a stopped stuck body is noted on its task",
+        "hint": "a JSON argv with {task} and {text}; unset: taskstore comment {task} {text} when taskstore is on the local bodies' PATH; off: never"
       }
     ],
     "services": [
