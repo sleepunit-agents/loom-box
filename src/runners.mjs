@@ -17,6 +17,10 @@
 //   roots                                  → {name: dir}: where `keep` paths are relative to (and restored into).
 //   usage(body)                            → how full its account was at its last turn ({windows, resets, checked}),
 //                                            or null: what the body host reports when a turn ends (t-1754).
+//   waiting(body, env?)                    → {tool, what} while it waits on a permission prompt (its last tool call,
+//                                            from its transcript), else null. Only where the harness says so (Claude
+//                                            Code's `claude agents --json`); a body nobody can answer is stopped by the
+//                                            tick (delivery.mjs, t-1858).
 //   turn(body)                             → how its turn went, once it's over: {failed, worked, error?} (worked: it
 //                                            did any tool work; null when the harness doesn't say), or null. What
 //                                            the loop check reads (loops.mjs, t-1763).
@@ -33,6 +37,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { keptReading } from './statusline.mjs';
 import { lastRateLimit, tailOf } from './logins.mjs';
+import { lastToolUse } from './stuck.mjs';
 
 export class RunnerError extends Error {}
 
@@ -89,6 +94,10 @@ function feedVia(runner, body, message) {
   return runner.inbox.put(body.id, [{ id, text: String(message.text ?? ''), msg: message.msg ?? id }]) ? { fed: true } : { fed: false, reason: 'its inbox refused it' };
 }
 
+/** `claude agents --json`, as `waiting` last read it, by harness: {at, rows}. */
+const waitLooks = new Map();
+export const WAIT_LOOK_MS = 30_000;
+
 /**
  * Claude Code, `claude --bg`: its daemon owns each body, `claude agents --json` lists them, and each body's job dir
  * (<jobs>/<id8>/state.json) says how its turn is going. A new body is found by a random spawn token on line 2 of its
@@ -125,6 +134,28 @@ export class ClaudeRunner {
   }
 
   job(id) { return readJson(join(this.jobsDir, String(id).slice(0, 8), 'state.json')); }
+
+  /**
+   * {tool, what} while `claude agents --json` lists the body waiting on a permission prompt (status waiting, or none,
+   * and waitingFor naming one), else null; undefined when the list can't be had (it can't say). The list is asked at
+   * most once a WAIT_LOOK_MS per harness (the tick runs every few seconds), or now with `fresh`: before a stop.
+   */
+  waiting(body, env, { fresh = false } = {}) {
+    const key = `${this.claude}\0${this.jobsDir}`;
+    let seen = waitLooks.get(key);
+    if (fresh || !seen || Date.now() - seen.at >= WAIT_LOOK_MS) {
+      const rows = this.agents(env);
+      if (!rows) return undefined;
+      waitLooks.set(key, (seen = { at: Date.now(), rows }));
+    }
+    const a = seen.rows.find((x) => x && x.id === body.id);
+    if (!a || !['waiting', undefined].includes(a.status) || !/permission/i.test(String(a.waitingFor ?? ''))) return null;
+    const session = a.sessionId ?? this.job(body.id)?.sessionId;
+    const found = typeof session === 'string' && SESSION.test(session)
+      ? dirs(this.roots.projects).map((p) => join(this.roots.projects, p, `${session}.jsonl`)).filter((f) => existsSync(f)).sort((x, y) => statSync(y).mtimeMs - statSync(x).mtimeMs)[0]
+      : null;
+    return found ? lastToolUse(found) : { tool: '', what: '' };
+  }
 
   launch({ brief, model, cwd, env, deny = [], resume }) {
     const token = this.token();
