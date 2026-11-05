@@ -177,6 +177,7 @@ export class ClaudeRunner {
     for (let i = 0; i < this.claimPolls; i++) {
       // A resumed session comes back under the job id it had (Claude Code's id is its session's), so for a resume an id
       // seen before is a candidate too (t-1881): the token in its job's intent, this launch's alone, is what claims it.
+      // By id, once: the agents list can carry that id twice (the old job's row and the resumed one's), still one body.
       const found = [...new Map((this.agents(clean) ?? []).filter((a) => a.id && (resume || !before.has(a.id)) && (this.job(a.id)?.intent ?? '').includes(marker)).map((a) => [a.id, a])).values()];
       if (found.length === 1) {
         const a = found[0];

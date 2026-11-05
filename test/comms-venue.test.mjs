@@ -119,6 +119,40 @@ test('done reaches core even when its first try fails, or core couldn\'t list th
   assert.equal(status().length, tried + 1, 'never again after it landed');
 });
 
+test('a done that never lands is given up after DONE_TRIES ticks, not called forever', async () => {
+  const { DONE_TRIES } = await import('../src/delivery.mjs');
+  const w = world();
+  await deliver(w.env, ownerMsg(w, 'work on it'), w.o);
+  await tick(w.env, w.o);
+  w.runner.finish(loadConv(w.env, cvOf('art', 'loom', thread)).body);
+  w.core.commsAnswer = (b) => { if (b.op === 'status' && b.status === 'done') throw new Error('gone'); return { ok: true }; };
+  const dones = () => w.core.commsCalls.filter((x) => x.op === 'status' && x.status === 'done').length;
+  for (let i = 0; i < DONE_TRIES + 3; i++) await tick(w.env, w.o);
+  assert.equal(dones(), DONE_TRIES);
+  assert.equal(loadConv(w.env, cvOf('art', 'loom', thread)).presence, undefined);
+});
+
+test('the stop word\'s done, lost, is said again on the next tick (t-1881)', async () => {
+  const w = world();
+  await deliver(w.env, ownerMsg(w, 'long job'), w.o);
+  await tick(w.env, w.o);
+  let downDone = true;
+  w.core.commsAnswer = (b) => {
+    if (b.op === 'status' && b.status === 'working') return { ok: true, stop: true };
+    if (b.op === 'status' && b.status === 'done' && downDone) { downDone = false; throw new Error('core didn\'t answer'); }
+    return { ok: true };
+  };
+  w.clock.advance(16_000);
+  await tick(w.env, w.o);
+  assert.ok(w.log.some((l) => l[0] === 'end'), 'the body was ended');
+  const dones = () => w.core.commsCalls.filter((x) => x.op === 'status' && x.status === 'done').length;
+  assert.equal(dones(), 1, 'tried, and lost');
+  w.core.commsAnswer = null;
+  await tick(w.env, w.o);
+  assert.equal(dones(), 2, 'said again');
+  assert.equal(loadConv(w.env, cvOf('art', 'loom', thread)).presence, undefined);
+});
+
 test('a stop from core ends the body', async () => {
   const w = world();
   await deliver(w.env, ownerMsg(w, 'long job'), w.o);

@@ -160,6 +160,7 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
         log(`started ${b.id} for ${rid}`);
       } catch (e) { done[rid] = { error: String(e.message).split('\n')[0].slice(0, 300) }; }
     }
+    for (const id of [...stopped.keys()]) if (!got.stop?.[id]) stopped.delete(id);
     for (const [id, s] of Object.entries(got.stop ?? {})) {
       const b = mine.get(id);
       if (!b || b.ended || (stopped.has(id) && stopped.get(id) === s.at)) continue;

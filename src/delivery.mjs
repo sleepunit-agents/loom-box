@@ -891,7 +891,8 @@ async function presencePass(env, c, d, now) {
     return;
   }
   // Done, until it lands (t-1881): a venue shows "working" until it hears it, so a lost one is tried again each tick,
-  // DONE_TRIES times at most (core also stops showing it on its own once nothing says working).
+  // DONE_TRIES times at most. Past that it's given up (a venue gone for good mustn't be called forever): core's own
+  // venue stops showing working on its own once nothing says working (loom comms.ts WORKING_STALE_MS).
   let failed = false;
   try { await callAdapter(d, v, c, ['--status', 'done']); } catch (e) { failed = true; d.warn(`${c.venue} couldn't clear ${c.conversation}'s presence: ${e.message}`); }
   locked(env, () => {

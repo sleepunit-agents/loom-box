@@ -84,6 +84,9 @@ test('Claude Code: fed mid-turn through its inbox (the hook\'s layout and lock);
   const again = r.resume(slot, { brief: 'later', model: 'm', cwd: h.D, env: h.env });
   // As Claude Code does it: the resumed session is back under its own job id (t-1881), claimed by this launch's token.
   assert.equal(again.id, b.id);
+  // Its inbox is a new one: nothing of what the first run was fed, and it can be fed.
+  assert.deepEqual(r.feed(again, { id: 'm2', text: 'and this' }), { fed: true });
+  assert.deepEqual(lines(join(h.inbox, again.id, 'pending.jsonl')).map((p) => p.id), ['m2']);
   assert.deepEqual(again.slot, slot);
   assert.deepEqual(h.argv().filter((a) => a[0] === '--bg').at(-1).slice(-2), ['--resume', slot.session]);
   // End: stopped, and its inbox closed (the hook then hands over nothing).
