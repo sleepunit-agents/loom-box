@@ -908,7 +908,10 @@ async function activityPass(env, c, d) {
   const { out, next } = changedCards(cards, c.cardsSent ?? {});
   if (!out.length) return;
   // Refused for good (no live thread, or a card core won't take): they're marked told, so they aren't sent again.
-  try { await d.core.activity({ conversation: c.conversation, run: c.run, cards: out }); } catch (e) { if (e?.status !== 409 && e?.status !== 400) throw e; }
+  try { await d.core.activity({ conversation: c.conversation, run: c.run, cards: out }); } catch (e) {
+    if (e?.status !== 409 && e?.status !== 400) throw e;
+    d.warn(`${c.conversation}: core took none of ${out.length} activity cards (${e.message}); they're not sent again`);
+  }
   locked(env, () => { const x = loadConv(env, c.conversation); if (x && x.body === c.body) { x.cardsSent = next; saveConv(env, x); } });
 }
 

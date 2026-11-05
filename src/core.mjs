@@ -48,12 +48,12 @@ async function callCore(env, token, method, path, body, { fetchImpl = fetch, tim
 }
 
 export function coreFrom(env, { fetchImpl = fetch, timeoutMs = 5000 } = {}) {
-  const call = async (method, path, body) => {
+  const call = async (method, path, body, ms = timeoutMs) => {
     const tokenFile = setting(env, 'TOKEN_FILE');
     if (!tokenFile) throw new CoreError('no runtime token (LOOM_RUNTIME_TOKEN_FILE): the runtime can\'t write to core');
     let token;
     try { token = readFileSync(tokenFile, 'utf-8').trim(); } catch { throw new CoreError(`can't read the runtime token file ${tokenFile}`); }
-    return callCore(env, token, method, path, body, { fetchImpl, timeoutMs });
+    return callCore(env, token, method, path, body, { fetchImpl, timeoutMs: ms });
   };
   const post = (path, body) => call('POST', path, body);
   return {
@@ -70,8 +70,9 @@ export function coreFrom(env, { fetchImpl = fetch, timeoutMs = 5000 } = {}) {
     deliver: (b) => post('deliver', b),
     venues: async () => venuesOf(await call('GET', 'venues')),
     // Venue loom's adapter calls and its threads' tool cards (loom docs/specs/comms.md): core is that venue's adapter.
-    comms: (b) => post('comms/adapter', b),
-    activity: (b) => post('comms/activity', b),
+    // The same 15 s an adapter's argv has (delivery.mjs SEND_MS, ADAPTER_MS): core is this venue's adapter.
+    comms: (b) => call('POST', 'comms/adapter', b, 15_000),
+    activity: (b) => call('POST', 'comms/activity', b, 15_000),
     // The review job's: its settings, and a token for one run.
     reviewConfig: async () => reviewConfigOf(await call('GET', 'review/config')),
     async reviewToken() {

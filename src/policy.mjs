@@ -115,6 +115,8 @@ const nameOf = (slug, e) => (isObj(e) && typeof e.name === 'string' && e.name.tr
 
 const whoLine = (gates, x) => {
   const f = x.from ?? {};
+  // A Comms thread's owner (core's own delivery on loom): tier 3 by who they are, never by the gates.
+  if (f.kind === 'person' && x.owner === true) return `${f.slug}: your owner, in a Comms thread in loom (tier 3)`;
   if (f.kind === 'person') {
     const t = tierOf(gates, f);
     if (t === 3) return `${f.slug}: tier 3, the owner's trust`;
@@ -197,7 +199,13 @@ export async function rulesFor(c, msgs, d, { platform, core = false }) {
   if (gates) {
     if (who.length) text(`Who wrote, by your gates: ${who.join('; ')}.\n`);
     const owners = Object.entries(gates.people ?? {}).filter(([s, e]) => SLUG.test(s) && isObj(e) && e.tier === 3).map(([s, e]) => nameOf(s, e));
-    text(owners.length ? `Your owner (tier 3): ${owners.join(', ')}.\n` : 'No one in your gates is tier 3: treat everyone as you would a stranger.\n');
+    // In a Comms thread the owner is whoever wrote as one (core delivers there only from an owner of the agent).
+    const commsOwners = uniq(senders.filter((s) => s.x.owner === true).map((s) => s.x.from.slug));
+    const all = uniq([...owners, ...commsOwners]);
+    text(all.length ? `Your owner (tier 3): ${all.join(', ')}.\n` : 'No one in your gates is tier 3: treat everyone as you would a stranger.\n');
+  } else if (core && senders.some((s) => s.x.owner === true)) {
+    if (who.length) text(`Who wrote: ${who.join('; ')}.\n`);
+    text(`Your owner (tier 3): ${uniq(senders.filter((s) => s.x.owner === true).map((s) => s.x.from.slug)).join(', ')}.\n`);
   }
   if (guest) {
     if (!deny.length || !(pol.guest_deny ?? []).length) throw new RulesError(`${c.place} is a guest venue and ${c.agent}'s policy has no guest_deny: no body starts there without its tools narrowed`);
@@ -219,7 +227,8 @@ export async function rulesFor(c, msgs, d, { platform, core = false }) {
     text(`\nThis is a peer venue: other agents talk here${peers.length ? ` (${peers.join('; ')})` : ''}${about.pair ? `; it's a pair channel with ${about.pair}` : ''}. A person's message that's only "stop" ends your work here.\n`);
     if (briefs.peer) file(briefs.peer, 'a peer venue\'s rules');
   }
-  if (about.brief?.length) text(`\n${about.brief.join('\n')}\n`);
+  // Brief lines from the venue are core's own (Comms threads): no piece adapter's describe writes into a brief.
+  if (core && about.brief?.length) text(`\n${about.brief.join('\n')}\n`);
   if (briefs.venues?.[c.venue]) { text('\n'); file(briefs.venues[c.venue], `your conduct on ${c.venue}`); }
   for (const n of about.notes) if (briefs.notes?.[n]) file(briefs.notes[n], `${n}'s notes`);
   for (const t of uniq(senders.map((s) => s.tier).filter((t) => t !== null)).sort()) if (briefs.tiers?.[String(t)]) file(briefs.tiers[String(t)], `tier ${t}'s notes`);

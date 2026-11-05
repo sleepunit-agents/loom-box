@@ -33,6 +33,18 @@ test('a Codex run: item.started makes a card, item.completed finishes it; failed
   assert.ok(!JSON.stringify(cards).includes('nonexistent-dir'), 'never the command line');
 });
 
+test('Codex\'s other tool items: an MCP call in words, a file change by its path, a search by its words; never a result, a diff or reasoning', () => {
+  // Built to the shapes codex exec --json writes for these items (the recorded run above has commands only).
+  const cards = codexCards(read('codex-tools.jsonl'), 'b2:');
+  assert.deepEqual(cards.map((c) => [c.tool, c.summary, c.state]), [
+    ['mcp_tool_call', 'Recalled memories', 'done'],
+    ['file_change', 'Changed a.ts', 'done'],
+    ['web_search', 'Searched the web for how comm screens look', 'done'],
+  ]);
+  const all = JSON.stringify(cards);
+  for (const never of ['RESULT-THAT', 'DIFF-THAT', 'REASONING-THAT', 'secret plans', '/home/art']) assert.ok(!all.includes(never), never);
+});
+
 test('the fixed table: never a command line, a relative path, searches cut at 60, MCP tools in words', () => {
   assert.equal(claudeSummary('Bash', { command: 'curl -H "Authorization: x" ...' }), 'Ran a command');
   assert.equal(claudeSummary('Read', { file_path: '/etc/shadow' }, '/home/art/repo'), 'Read shadow');
