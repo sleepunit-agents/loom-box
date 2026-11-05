@@ -582,7 +582,8 @@ function boxIssues(env, b, nowMs, w) {
   for (const c of Object.values(w?.conditions ?? {})) {
     if (!c.alerted || !c.title) continue;
     const t = String(c.title);
-    const short = t.startsWith(`${b.label}: `) ? t.slice(b.label.length + 2) : t.startsWith(`${b.label}'s `) ? `its ${t.slice(b.label.length + 3)}` : t.startsWith(`${b.label} `) ? t.slice(b.label.length + 1) : t;
+    // "thor: / is nearly full" -> "/ is nearly full", "thor is short of memory" -> "short of memory", "thor's swap is …" -> "swap is …".
+    const short = [`${b.label}: `, `${b.label} is `, `${b.label}'s `].reduce((x, pre) => (x === t && t.startsWith(pre) ? t.slice(pre.length) : x), t);
     say(c.severity === 'bad' ? bad : warn, t, short);
   }
   for (const ep of Object.values(w?.units ?? {})) say(bad, `${ep.unit} on ${b.label} ${ep.state === 'looping' ? 'keeps restarting' : 'failed'}`, `${ep.unit} ${ep.state === 'looping' ? 'keeps restarting' : 'failed'}`);
