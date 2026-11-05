@@ -18,7 +18,7 @@ import { asks as gateAsks, answer as gateAnswer, gatesPage, mergePeople, status 
 import { GRANTS, KEY as GRANTS_KEY, GrantsError, grantsProblem, householdOf, setPiece, setRelay } from './grants.mjs';
 import { relayNotices } from './relay.mjs';
 import { nowManifest, nowPage } from './nowboard.mjs';
-import { checkDark, watchAsks, watchNotices, watchRows } from './watch.mjs';
+import { checkDark, watchAsks, watchNotices, watchOf, watchRows } from './watch.mjs';
 import { coreFrom } from './core.mjs';
 
 /**
@@ -550,40 +550,97 @@ function boxSettingsPanel(b) {
   ], action: { action: 'revoke-box', label: `Revoke ${b.label}`, tone: 'danger', confirm: `${b.label} is cut off: its credential stops working and its houses lose their tokens.`, fields: { name: b.id } } };
 }
 
+/** What the runtime's watch last heard from each box (watch.mjs): its health sample, its conditions, its failing units. */
+function watchBoxes(env) { try { return watchOf(env).boxes ?? {}; } catch { return {}; } }
+
+/**
+ * One box's own problems, worst first, in words: what its row on Boxes flags and its own page leads with. Each is
+ * `text`, which names the box (the headline's), and `short`, which doesn't (its own row's).
+ */
+function boxIssues(env, s, b, nowMs, w) {
+  const bad = [], warn = [];
+  // `state`: it's the box's state itself (its row's value says it), so the row's detail doesn't say it twice.
+  const say = (to, text, short, state = false) => to.push({ text, short, state });
+  if (!b.local && !b.lastSeen) say(warn, `${b.label} hasn't joined yet`, 'not joined yet', true);
+  else if (!b.local && nowMs - Date.parse(b.lastSeen) > 10 * 60_000) say(bad, `${b.label} hasn't been heard from since ${ago(b.lastSeen, nowMs)}`, `not heard from since ${ago(b.lastSeen, nowMs)}`, true);
+  const loomC = ownCommit();
+  const rt = b.runtime ?? {};
+  if (loomC && !b.local && b.lastSeen && rt.commit !== loomC) {
+    const u = rt.upgrade?.commit === loomC ? rt.upgrade : null;
+    if (u && ['failed', 'refused', 'rolling-back'].includes(u.state)) say(bad, `${b.label}'s runtime update didn't work`, 'its runtime update didn\'t work');
+    else if (!rt.commit) say(warn, `${b.label} is on the old box piece`, 'on the old box piece');
+  }
+  for (const [h, def] of Object.entries(LOGIN_HARNESSES)) {
+    const st = b.harnesses?.[h];
+    if (st?.installed && st.unhealthy) say(bad, `${def.label} on ${b.label} isn't usable`, `${def.label} isn't usable`);
+    else if (st?.installed && !st.loggedIn) say(warn, `${def.label} isn't logged in on ${b.label}`, `${def.label} isn't logged in`);
+  }
+  const disk = b.local ? diskUse(env) : null;
+  if (disk && disk.used >= 0.95) say(bad, `${b.label}'s disk is nearly full`, 'its disk is nearly full');
+  else if (disk && disk.used >= 0.9) say(warn, `${b.label}'s disk is ${Math.round(disk.used * 100)}% full`, `disk ${Math.round(disk.used * 100)}% full`);
+  // What its watch alerted on (health.mjs titles start with the box's name), and its units failing or crash-looping.
+  for (const c of Object.values(w?.conditions ?? {})) {
+    if (!c.alerted || !c.title) continue;
+    const t = String(c.title);
+    const short = t.startsWith(`${b.label}: `) ? t.slice(b.label.length + 2) : t.startsWith(`${b.label}'s `) ? `its ${t.slice(b.label.length + 3)}` : t.startsWith(`${b.label} `) ? t.slice(b.label.length + 1) : t;
+    say(c.severity === 'bad' ? bad : warn, t, short);
+  }
+  for (const ep of Object.values(w?.units ?? {})) say(bad, `${ep.unit} on ${b.label} ${ep.state === 'looping' ? 'keeps restarting' : 'failed'}`, `${ep.unit} ${ep.state === 'looping' ? 'keeps restarting' : 'failed'}`);
+  return { bad, warn };
+}
+
 /** What's wrong across the boxes, worst first, in words: the Boxes page's headline. */
-function boxProblems(env, s, boxes, live, view, nowMs) {
+function boxProblems(env, s, boxes, view, nowMs, watch) {
   const bad = [], warn = [];
   for (const b of boxes) {
-    if (!b.local && !b.lastSeen) warn.push(`${b.label} hasn't joined yet`);
-    else if (!b.local && nowMs - Date.parse(b.lastSeen) > 10 * 60_000) bad.push(`${b.label} hasn't been heard from since ${ago(b.lastSeen, nowMs)}`);
-    const loomC = ownCommit();
-    const rt = b.runtime ?? {};
-    if (loomC && !b.local && b.lastSeen && rt.commit !== loomC) {
-      const u = rt.upgrade?.commit === loomC ? rt.upgrade : null;
-      if (u && ['failed', 'refused', 'rolling-back'].includes(u.state)) bad.push(`${b.label}'s runtime update didn't work`);
-      else if (!rt.commit) warn.push(`${b.label} is on the old box piece`);
-    }
-    for (const [h, def] of Object.entries(LOGIN_HARNESSES)) {
-      const st = b.harnesses?.[h];
-      if (st?.installed && st.unhealthy) bad.push(`${def.label} on ${b.label} isn't usable`);
-      else if (st?.installed && !st.loggedIn) warn.push(`${def.label} isn't logged in on ${b.label}`);
-    }
-    const disk = b.local ? diskUse(env) : null;
-    if (disk && disk.used >= 0.95) bad.push(`${b.label}'s disk is nearly full`);
-    else if (disk && disk.used >= 0.9) warn.push(`${b.label}'s disk is ${Math.round(disk.used * 100)}% full`);
+    const i = boxIssues(env, s, b, nowMs, watch[b.id]);
+    bad.push(...i.bad.map((x) => x.text)); warn.push(...i.warn.map((x) => x.text));
   }
   for (const v of view.services.filter((x) => x.want === 'up')) {
     if (v.state === 'failed' || v.state === 'lost') bad.push(`${who(v.agent)}'s ${v.name} is down`);
   }
   const asking = pendingJoins(s).length;
   if (asking) warn.push(asking === 1 ? 'A box asks to join' : `${asking} boxes ask to join`);
-  void live;
   return { bad, warn };
 }
 
-function boxesPage(env, nowMs, caller = OWNER) {
-  // A box's logins and Update now are its owner's (control.mjs, assertBoxOwner): another household owner sees, doesn't press.
-  const mayAct = (b) => isBoxOwner(env, caller, b.id);
+/** A box's state: up (how long, or when it was last heard from), quiet, or not joined yet. `short` is its row's word. */
+function boxState(b, nowMs) {
+  if (b.local) return { value: `Up ${span(uptime() * 1000)}`, short: `Up ${span(uptime() * 1000)}`, tone: 'ok' };
+  if (!b.lastSeen) return { value: 'Not joined yet', detail: `Run loom box join on ${b.label}`, short: 'Not joined yet', tone: 'warn' };
+  if (nowMs - Date.parse(b.lastSeen) > 10 * 60_000) return { value: `Not heard from since ${ago(b.lastSeen, nowMs)}`, short: `Quiet since ${ago(b.lastSeen, nowMs)}`, tone: 'bad' };
+  return { value: 'Up', detail: `Seen ${ago(b.lastSeen, nowMs)}`, short: `Up · seen ${ago(b.lastSeen, nowMs)}`, tone: 'ok' };
+}
+
+/** What a box is for, in a few words: "loom's own", "report-only · always on", "hosts houses". */
+function boxRole(b) {
+  const hosts = b.mayHost === '*' || (b.mayHost ?? []).length;
+  return [b.local ? 'loom\'s own' : null, b.reportOnly ? 'report-only' : hosts ? 'hosts houses' : 'hosts nothing', !b.local && b.alwaysOn ? 'always on' : null].filter(Boolean).join(' · ');
+}
+
+/** A box's one health fact, from its last sample: how full its fullest disk is, and its swap once it's half used. */
+function healthFact(env, b, w) {
+  const parts = [];
+  const disk = b.local ? diskUse(env) : null;
+  const fullest = [...(w?.health?.fs ?? [])].filter((f) => Number.isFinite(f?.used_pct)).sort((x, y) => y.used_pct - x.used_pct)[0];
+  if (disk) parts.push(`disk ${Math.round(disk.used * 100)}%`);
+  else if (fullest) parts.push(`disk ${Math.round(fullest.used_pct)}%`);
+  const m = w?.health?.mem;
+  if (m?.swap_total > 0 && Number.isFinite(m.swap_free)) {
+    const used = Math.round(100 - (100 * m.swap_free) / m.swap_total);
+    if (used >= 50) parts.push(`swap ${used}%`);
+  }
+  return parts.join(' · ');
+}
+
+const TONE_RANK = { bad: 0, warn: 1, ok: 2, muted: 3 };
+
+/**
+ * The Boxes page: how things are in a line, then a row per box (its state, its houses, what it's for or what's wrong
+ * with it), each a tap from its own page. Jonathan, 2026-11-05: "the first page should be a summary of everything
+ * that's easy to digest and then drill into each box."
+ */
+function boxesPage(env, nowMs) {
   const s = load(env);
   const view = list(env, OWNER);
   const agents = Object.keys(s.agents).sort();
@@ -593,9 +650,10 @@ function boxesPage(env, nowMs, caller = OWNER) {
   const live_boxes = view.boxes.filter((b) => !b.revoked).map((b) => ({ ...b, label: boxLabelOf(s, b.id) }));
   const up = live_boxes.filter((b) => b.local || (b.lastSeen && nowMs - Date.parse(b.lastSeen) <= 10 * 60_000));
   const svcUp = view.services.filter((v) => v.want === 'up');
+  const watch = watchBoxes(env);
 
   // The headline: how things are, in words; what's wrong first. Tiles under it.
-  const { bad, warn } = boxProblems(env, s, live_boxes, live, view, nowMs);
+  const { bad, warn } = boxProblems(env, s, live_boxes, view, nowMs, watch);
   const counts = `${plural(up.length, 'box', 'boxes')} up · ${plural(running.length, 'house')} running`;
   const worst = [...bad, ...warn];
   const disk = diskUse(env);
@@ -622,43 +680,21 @@ function boxesPage(env, nowMs, caller = OWNER) {
     ] });
   }
 
-  // A card per box (a page holds ten sections, so past three boxes, one panel with each box behind a tap).
-  if (live_boxes.length > 3) {
-    sections.push({ id: 'all-boxes', title: 'Boxes', blocks: [{ type: 'panel', rows: live_boxes.map((b) => {
-      const n = live.filter((h) => h.box === b.id).length;
-      const seen = b.local ? 'loom\'s own' : b.lastSeen ? `Seen ${ago(b.lastSeen, nowMs)}` : 'Not joined yet';
-      return { label: b.label, value: `${seen} · ${plural(n, 'house')}`, tone: b.local || b.lastSeen ? 'ok' : 'warn',
-        sheet: { title: b.label, blocks: [
-          { type: 'panel', rows: [...(b.lastSeen || b.local ? runtimePanelRows(env, b, nowMs, mayAct(b)) : []), ...harnessPanelRows(s, b, nowMs, mayAct(b))].map(({ sheet: _s, ...r }) => r) },
-          { type: 'panel', title: 'Watch', rows: [...watchRowsOf(env, b.id, nowMs).map(({ sheet: _s, ...r }) => r), ...watchControlRows(b)] },
-          ...(b.local ? [] : [boxSettingsPanel(b)]),
-        ] } };
-    }) }] });
-  }
-  for (const b of live_boxes.length > 3 ? [] : live_boxes) {
-    const here = live.filter((h) => h.box === b.id);
-    const state = b.local ? { value: `Up ${span(uptime() * 1000)}`, tone: 'ok' }
-      : !b.lastSeen ? { value: 'Not joined yet', detail: `Run loom box join on ${b.label}`, tone: 'warn' }
-        : nowMs - Date.parse(b.lastSeen) > 10 * 60_000 ? { value: `Not heard from since ${ago(b.lastSeen, nowMs)}`, tone: 'bad' }
-          : { value: 'Up', detail: `Seen ${ago(b.lastSeen, nowMs)}`, tone: 'ok' };
-    sections.push({ id: `box-${b.id}`, title: b.local ? `${b.label} · loom's own` : b.label, ...(state.tone === 'ok' ? {} : { tone: 'warn' }), blocks: [
-      { type: 'panel', rows: [
-        { label: 'State', ...state },
-        machineRow(b),
-        ...(b.lastSeen || b.local ? runtimePanelRows(env, b, nowMs, mayAct(b)) : []),
-        ...harnessPanelRows(s, b, nowMs, mayAct(b)),
-        // When it last came back, and its units failing (watch.mjs).
-        ...watchRowsOf(env, b.id, nowMs),
-        // Whether silence is an alert, and whether it hosts anything: the owner's (control.mjs, setBoxWatch).
-        ...watchControlRows(b),
-      ] },
-      // Its disk is the headline's tile (only loom's own box measures one).
-      here.length
-        ? { type: 'panel', title: `Houses on ${b.label}`, rows: here.slice(0, 30).map((h) => housePanelRow(s, h, nowMs)) }
-        : { type: 'text', tone: 'muted', text: 'No houses on it now.' },
-      ...(b.local ? [] : [boxSettingsPanel(b)]),
-    ] });
-  }
+  // A row per box, what's wrong first: its state and houses, then its trouble or what it's for. Everything else is a tap away.
+  const rows = live_boxes.map((b, i) => {
+    const st = boxState(b, nowMs);
+    const w = watch[b.id];
+    const { bad: worse, warn: warns } = boxIssues(env, s, b, nowMs, w);
+    const trouble = [...worse, ...warns].filter((x) => !x.state);
+    const n = live.filter((h) => h.box === b.id).length;
+    const tone = worse.length || st.tone === 'bad' ? 'bad' : warns.length || st.tone === 'warn' ? 'warn' : 'ok';
+    // What's wrong first (and how many more), then what it's for; a fine box's one health fact in its place.
+    const first = trouble.length ? `${trouble[0].short}${trouble.length > 1 ? ` (and ${trouble.length - 1} more)` : ''}` : '';
+    return { i, row: { label: b.label, value: `${st.short} · ${plural(n, 'house')}`,
+      detail: cap([first, boxRole(b), first ? '' : healthFact(env, b, w)].filter(Boolean).join(' · ')),
+      tone, page: `box/${b.id}` } };
+  }).sort((x, y) => TONE_RANK[x.row.tone] - TONE_RANK[y.row.tone] || x.i - y.i).map((x) => x.row);
+  sections.push({ id: 'boxes', title: 'Boxes', blocks: [rows.length ? { type: 'panel', rows } : { type: 'text', tone: 'muted', text: 'No boxes yet: add one below.' }] });
 
   sections.push(loginsSection(env, s, live_boxes, nowMs, false));
 
@@ -688,6 +724,48 @@ function boxesPage(env, nowMs, caller = OWNER) {
     { label: 'Now', value: 'Bridges and the quota', page: 'now' },
   ] }] });
   return { title: 'Boxes', intro: 'The machines agents run on, and their houses: an agent\'s container, started for a task or kept up as a service.', sections };
+}
+
+/**
+ * One box's own page, a tap from its row on Boxes: how it is in a line (what's wrong first), then everything about it:
+ * its state, machine, runtime and Update now, its sign-ins, its health and boot, its watch, its houses, and its settings.
+ * A box's logins and Update now are its owner's (control.mjs, assertBoxOwner): another household owner sees, doesn't press.
+ */
+function boxPage(env, id, nowMs, caller = OWNER) {
+  const s = load(env);
+  const view = list(env, OWNER);
+  const found = view.boxes.find((x) => x.id === id && !x.revoked);
+  if (!found) return { title: 'Not found', sections: [{ id: 'gone', blocks: [{ type: 'text', tone: 'muted', text: 'There\'s no such box (or it was revoked).' }, { type: 'link', text: 'All boxes', page: '' }] }] };
+  const b = { ...found, label: boxLabelOf(s, id) };
+  const may = isBoxOwner(env, caller, b.id);
+  const here = view.houses.filter((h) => LIVE.has(h.state) && h.box === b.id);
+  const st = boxState(b, nowMs);
+  const i = boxIssues(env, s, b, nowMs, watchBoxes(env)[b.id]);
+  const bad = i.bad.map((x) => x.text), warn = i.warn.map((x) => x.text);
+  const worst = [...bad, ...warn];
+  const running = here.filter((h) => h.state === 'running').length;
+  const counts = `${st.short} · ${plural(running, 'house')} running`;
+  return { title: b.label, intro: cap(boxRole(b)), sections: [
+    { id: 'status', blocks: [{ type: 'health', tone: bad.length || st.tone === 'bad' ? 'bad' : warn.length || st.tone === 'warn' ? 'warn' : 'ok',
+      text: worst.length ? `${cap(worst[0])}${worst.length > 1 ? ` (and ${worst.length - 1} more)` : ''}` : counts,
+      detail: worst.length ? `${worst.slice(1, 4).map(cap).join('. ')}${worst.length > 1 ? '. ' : ''}${counts}.` : 'Nothing needs you.' }] },
+    { id: `box-${b.id}`, blocks: [
+      { type: 'panel', rows: [
+        { label: 'State', value: st.value, ...(st.detail ? { detail: st.detail } : {}), tone: st.tone },
+        machineRow(b),
+        ...(b.lastSeen || b.local ? runtimePanelRows(env, b, nowMs, may) : []),
+        ...harnessPanelRows(s, b, nowMs, may),
+        // When it last came back, and its units failing (watch.mjs).
+        ...watchRowsOf(env, b.id, nowMs),
+        // Whether silence is an alert, and whether it hosts anything: the owner's (control.mjs, setBoxWatch).
+        ...watchControlRows(b),
+      ] },
+      here.length
+        ? { type: 'panel', title: `Houses on ${b.label}`, rows: here.slice(0, 30).map((h) => housePanelRow(s, h, nowMs)) }
+        : { type: 'text', tone: 'muted', text: 'No houses on it now.' },
+      ...(b.local ? [] : [boxSettingsPanel(b)]),
+    ] },
+  ] };
 }
 
 const short7 = (c) => (c ? c.slice(0, 7) : '?');
@@ -775,7 +853,7 @@ const windowWords = (k) => (k === '7d' ? 'week' : /^\d+h$/.test(k) ? `${k.slice(
 
 /**
  * Model logins (docs/model-accounts.md): the accounts the boxes' logins make, each a row with how full it is in words
- * and its windows as meters a tap away. Each box's harnesses are on its own card (harnessPanelRows).
+ * and its windows as meters a tap away. Each box's harnesses are on its own page (harnessPanelRows).
  */
 function loginsSection(env, s, boxes, nowMs, rows) {
   void rows;
@@ -793,7 +871,7 @@ function loginsSection(env, s, boxes, nowMs, rows) {
         tone: !w.length ? 'muted' : top >= 0.95 ? 'bad' : top >= 0.8 ? 'warn' : 'ok',
         ...(w.length ? { sheet: { title: a.label, blocks: [{ type: 'meter', items: w.map(([k, v]) => ({ label: cap(windowWords(k)), value: Math.max(0, Math.min(1, v)), detail: pct(v), ...(v >= 0.95 ? { tone: 'bad' } : v >= 0.8 ? { tone: 'warn' } : {}) })) }] } } : {}) };
     }) }] : [{ type: 'text', tone: 'muted', text: reported ? 'No account has reported its usage yet.' : 'No box has reported its harnesses yet.' }]),
-    { type: 'text', tone: 'muted', text: 'Each box signs in to Claude and Codex itself, with its owner\'s own subscription: Log in, on its card, runs the CLI\'s own login on that box. loom never sees the login.' },
+    { type: 'text', tone: 'muted', text: 'Each box signs in to Claude and Codex itself, with its owner\'s own subscription: Log in, on its page, runs the CLI\'s own login on that box. loom never sees the login.' },
   ] };
 }
 
@@ -1053,16 +1131,20 @@ function agentOwnerPage(env, caller, nowMs) {
   return { title: 'Houses', sections };
 }
 
+/** A box's own page: box/<its id>. */
+const BOX_PAGE = /^box\/[a-z0-9][a-z0-9-]{0,63}$/;
+
 export function page(env, { path, caller: c }, nowMs = Date.now()) {
   const caller = pageCaller(c);
   const scope = scopeOf(env);
-  // A box's login is its owner's, the way the login actions are: never an agent's tab or an agent owner's page.
-  if (typeof path === 'string' && path.startsWith('login/') && (scope || Array.isArray(caller.agents))) {
+  // A box's login and its own page are the household owner's, the way their actions are: never an agent's tab or an agent owner's page.
+  if (typeof path === 'string' && (path.startsWith('login/') || path.startsWith('box/')) && (scope || Array.isArray(caller.agents))) {
     return { status: 403, title: 'Not allowed', sections: [{ id: 'no', blocks: [{ type: 'text', tone: 'muted', text: 'A box\'s login is the household owner\'s.' }] }] };
   }
   if (scope && (path === '' || path === undefined)) return agentTabPage(env, scope, caller, nowMs);
   if (Array.isArray(caller.agents)) return path === '' || path === undefined ? agentOwnerPage(env, caller, nowMs) : { title: 'Not found', sections: [] };
-  if (path === '' || path === undefined) return boxesPage(env, nowMs, caller);
+  if (path === '' || path === undefined) return boxesPage(env, nowMs);
+  if (typeof path === 'string' && BOX_PAGE.test(path)) return boxPage(env, path.slice(4), nowMs, caller);
   if (path === 'agents') return agentsPage(env);
   if (path === 'permissions') return permissionsPage(env);
   if (path === 'now') {
@@ -1104,6 +1186,9 @@ function targetOf(env, action, fields) {
   return fields.agent;
 }
 
+/** Where a box's own action lands: its page, when it names a box by its id; else Boxes. */
+const boxPath = (name) => (typeof name === 'string' && BOX_PAGE.test(`box/${name}`) ? `box/${name}` : '');
+
 const AGENT_ACTIONS = new Set(['agent-flag', 'up', 'down', 'service-up', 'service-down', 'service-restart', 'service-move', 'remote-up', 'remote-down', 'set-primary', 'set-agent']);
 
 export function act(env, effects, { action, fields: raw = {}, caller: c }, publicUrl) {
@@ -1135,16 +1220,16 @@ export function act(env, effects, { action, fields: raw = {}, caller: c }, publi
       case 'block-join': { const r = blockJoin(env, effects, fields); return { ok: true, message: `Blocked ${r.name}'s request.`, page: '' }; }
       case 'block-all-joins': { const r = blockAllJoins(env, effects); return { ok: true, message: `Blocked ${r.blocked} waiting request${r.blocked === 1 ? '' : 's'}.`, page: '' }; }
       case 'revoke-box': { const r = revokeBox(env, effects, fields); return { ok: true, message: `Revoked ${r.name}. Its houses lost their tokens.`, page: '' }; }
-      case 'box-watch': { const r = setBoxWatch(env, effects, { name: fields.name, alwaysOn: fields.always_on, reportOnly: fields.report_only }); return { ok: true, message: `${r.name}: ${r.reportOnly ? 'report-only' : 'hosts what it may'}, ${r.alwaysOn ? 'always on' : 'not always on'}.`, page: '' }; }
-      case 'may-host': { const r = setMayHost(env, effects, fields); return { ok: true, message: `Saved who ${r.name} may host.`, page: '' }; }
-      case 'box-owner': { const r = setBoxOwner(env, effects, fields); return { ok: true, message: `${r.name} is ${r.owner}'s.`, page: '' }; }
-      case 'box-lend': { const r = lendBox(env, effects, fields); return { ok: true, message: r.lentTo.length ? `${r.name} is lent to ${r.lentTo.join(', ')}.` : `${r.name} is lent to no one.`, page: '' }; }
+      case 'box-watch': { const r = setBoxWatch(env, effects, { name: fields.name, alwaysOn: fields.always_on, reportOnly: fields.report_only }); return { ok: true, message: `${r.name}: ${r.reportOnly ? 'report-only' : 'hosts what it may'}, ${r.alwaysOn ? 'always on' : 'not always on'}.`, page: boxPath(fields.name) }; }
+      case 'may-host': { const r = setMayHost(env, effects, fields); return { ok: true, message: `Saved who ${r.name} may host.`, page: boxPath(fields.name) }; }
+      case 'box-owner': { const r = setBoxOwner(env, effects, fields); return { ok: true, message: `${r.name} is ${r.owner}'s.`, page: boxPath(fields.name) }; }
+      case 'box-lend': { const r = lendBox(env, effects, fields); return { ok: true, message: r.lentTo.length ? `${r.name} is lent to ${r.lentTo.join(', ')}.` : `${r.name} is lent to no one.`, page: boxPath(fields.name) }; }
       case 'login-start': {
         const r = loginStart(env, effects, fields);
         return { ok: true, message: `${label(r.box)} is starting ${LOGIN_HARNESSES[r.harness].label}'s own login; its link shows here in a few seconds.`, page: `login/${r.id}` };
       }
       case 'login-code': { loginCode(env, effects, fields); return { ok: true, message: 'Got it: the box is checking the code.', page: `login/${fields.id}` }; }
-      case 'box-update-now': { const r = boxUpdateNow(env, effects, fields); return { ok: true, message: `${r.name} tries loom's runtime on its next poll.`, page: '' }; }
+      case 'box-update-now': { const r = boxUpdateNow(env, effects, fields); return { ok: true, message: `${r.name} tries loom's runtime on its next poll.`, page: boxPath(fields.name) }; }
       case 'login-cancel': { loginCancel(env, effects, fields); return { ok: true, message: 'Cancelled.', page: '' }; }
       case 'set-primary': { const r = setPrimary(env, effects, fields); return { ok: true, message: `${r.agent}'s primary is ${label(r.primary)}.`, page: '' }; }
       case 'set-agent': { const r = setAgent(env, effects, fields); return { ok: true, message: `Saved ${r.agent}'s house.`, page: '' }; }

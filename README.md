@@ -25,7 +25,7 @@ With nothing else enrolled, every agent's primary is this machine, so `loom box 
 
 On another machine: see [Adding a box](#adding-a-box) below.
 
-The Boxes page lists the boxes and what each one has, starts and stops houses, sets primaries and revokes boxes.
+The Boxes page is a summary: a row per box (its state, its houses, what it is for or what is wrong with it, worst first). Tap a box for its own page: health, sign-ins, runtime version and Update now, watch, houses, settings and Revoke. Boxes also starts and stops houses and sets primaries.
 
 ## Adding a box
 
