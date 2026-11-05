@@ -557,7 +557,7 @@ function watchBoxes(env) { try { return watchOf(env).boxes ?? {}; } catch { retu
  * One box's own problems, worst first, in words: what its row on Boxes flags and its own page leads with. Each is
  * `text`, which names the box (the headline's), and `short`, which doesn't (its own row's).
  */
-function boxIssues(env, s, b, nowMs, w) {
+function boxIssues(env, b, nowMs, w) {
   const bad = [], warn = [];
   // `state`: it's the box's state itself (its row's value says it), so the row's detail doesn't say it twice.
   const say = (to, text, short, state = false) => to.push({ text, short, state });
@@ -590,12 +590,9 @@ function boxIssues(env, s, b, nowMs, w) {
 }
 
 /** What's wrong across the boxes, worst first, in words: the Boxes page's headline. */
-function boxProblems(env, s, boxes, view, nowMs, watch) {
+function boxProblems(s, issues, view) {
   const bad = [], warn = [];
-  for (const b of boxes) {
-    const i = boxIssues(env, s, b, nowMs, watch[b.id]);
-    bad.push(...i.bad.map((x) => x.text)); warn.push(...i.warn.map((x) => x.text));
-  }
+  for (const i of issues) { bad.push(...i.bad.map((x) => x.text)); warn.push(...i.warn.map((x) => x.text)); }
   for (const v of view.services.filter((x) => x.want === 'up')) {
     if (v.state === 'failed' || v.state === 'lost') bad.push(`${who(v.agent)}'s ${v.name} is down`);
   }
@@ -615,7 +612,7 @@ function boxState(b, nowMs) {
 /** What a box is for, in a few words: "loom's own", "report-only · always on", "hosts houses". */
 function boxRole(b) {
   const hosts = b.mayHost === '*' || (b.mayHost ?? []).length;
-  return [b.local ? 'loom\'s own' : null, b.reportOnly ? 'report-only' : hosts ? 'hosts houses' : 'hosts nothing', !b.local && b.alwaysOn ? 'always on' : null].filter(Boolean).join(' · ');
+  return [b.local ? 'loom\'s own' : null, b.reportOnly ? 'report-only' : hosts ? 'hosts houses' : 'hosts nothing', !b.local && (b.alwaysOn || b.reportOnly) ? 'always on' : null].filter(Boolean).join(' · ');
 }
 
 /** A box's one health fact, from its last sample: how full its fullest disk is, and its swap once it's half used. */
@@ -633,7 +630,15 @@ function healthFact(env, b, w) {
   return parts.join(' · ');
 }
 
-const TONE_RANK = { bad: 0, warn: 1, ok: 2, muted: 3 };
+const TONE_RANK = { bad: 0, warn: 1, ok: 2 };
+
+/** A status headline: the worst thing in words (and how many more), the next few under it; else the counts. `floor`: a tone it's at least. */
+function headline(bad, warn, counts, fine, floor = 'ok') {
+  const worst = [...bad, ...warn];
+  return { type: 'health', tone: bad.length || floor === 'bad' ? 'bad' : warn.length || floor === 'warn' ? 'warn' : 'ok',
+    text: worst.length ? `${cap(worst[0])}${worst.length > 1 ? ` (and ${worst.length - 1} more)` : ''}` : counts,
+    detail: worst.length ? `${worst.slice(1, 4).map(cap).join('. ')}${worst.length > 1 ? '. ' : ''}${counts}.` : fine };
+}
 
 /**
  * The Boxes page: how things are in a line, then a row per box (its state, its houses, what it's for or what's wrong
@@ -653,15 +658,14 @@ function boxesPage(env, nowMs) {
   const watch = watchBoxes(env);
 
   // The headline: how things are, in words; what's wrong first. Tiles under it.
-  const { bad, warn } = boxProblems(env, s, live_boxes, view, nowMs, watch);
+  // Each box's problems, once: the headline says them all, each box's row its own.
+  const issues = live_boxes.map((b) => boxIssues(env, b, nowMs, watch[b.id]));
+  const { bad, warn } = boxProblems(s, issues, view);
   const counts = `${plural(up.length, 'box', 'boxes')} up · ${plural(running.length, 'house')} running`;
-  const worst = [...bad, ...warn];
   const disk = diskUse(env);
   const local = live_boxes.find((b) => b.local);
   sections.push({ id: 'status', blocks: [
-    { type: 'health', tone: bad.length ? 'bad' : warn.length ? 'warn' : 'ok',
-      text: worst.length ? `${cap(worst[0])}${worst.length > 1 ? ` (and ${worst.length - 1} more)` : ''}` : counts,
-      detail: worst.length ? `${worst.slice(1, 4).map(cap).join('. ')}${worst.length > 1 ? '. ' : ''}${counts}.` : `${plural(svcUp.length, 'service')} up${live.length > running.length ? ` · ${live.length - running.length} starting or waiting` : ''}. Nothing needs you.` },
+    headline(bad, warn, counts, `${plural(svcUp.length, 'service')} up${live.length > running.length ? ` · ${live.length - running.length} starting or waiting` : ''}. Nothing needs you.`),
     { type: 'stats', items: [
       { label: 'Boxes', value: String(up.length), detail: live_boxes.length > up.length ? `of ${live_boxes.length}` : 'all up', tone: live_boxes.length > up.length ? 'warn' : 'ok' },
       { label: 'Houses', value: String(running.length), detail: live.length > running.length ? `${live.length - running.length} more on the way` : 'running' },
@@ -681,19 +685,19 @@ function boxesPage(env, nowMs) {
   }
 
   // A row per box, what's wrong first: its state and houses, then its trouble or what it's for. Everything else is a tap away.
-  const rows = live_boxes.map((b, i) => {
+  const rows = live_boxes.map((b, k) => {
     const st = boxState(b, nowMs);
-    const w = watch[b.id];
-    const { bad: worse, warn: warns } = boxIssues(env, s, b, nowMs, w);
-    const trouble = [...worse, ...warns].filter((x) => !x.state);
+    const { bad: badOnes, warn: warnOnes } = issues[k];
+    const trouble = [...badOnes, ...warnOnes].filter((x) => !x.state);
     const n = live.filter((h) => h.box === b.id).length;
-    const tone = worse.length || st.tone === 'bad' ? 'bad' : warns.length || st.tone === 'warn' ? 'warn' : 'ok';
+    const tone = badOnes.length || st.tone === 'bad' ? 'bad' : warnOnes.length || st.tone === 'warn' ? 'warn' : 'ok';
     // What's wrong first (and how many more), then what it's for; a fine box's one health fact in its place.
-    const first = trouble.length ? `${trouble[0].short}${trouble.length > 1 ? ` (and ${trouble.length - 1} more)` : ''}` : '';
-    return { i, row: { label: b.label, value: `${st.short} · ${plural(n, 'house')}`,
-      detail: cap([first, boxRole(b), first ? '' : healthFact(env, b, w)].filter(Boolean).join(' · ')),
-      tone, page: `box/${b.id}` } };
-  }).sort((x, y) => TONE_RANK[x.row.tone] - TONE_RANK[y.row.tone] || x.i - y.i).map((x) => x.row);
+    const problem = trouble.length ? `${cap(trouble[0].short)}${trouble.length > 1 ? ` (and ${trouble.length - 1} more)` : ''}` : '';
+    const role = boxRole(b);
+    return { label: b.label, value: `${st.short} · ${plural(n, 'house')}`,
+      detail: [problem, problem ? role : (role.startsWith('loom') ? role : cap(role)), problem ? '' : healthFact(env, b, watch[b.id])].filter(Boolean).join(' · '),
+      tone, page: `box/${b.id}` };
+  }).sort((x, y) => TONE_RANK[x.tone] - TONE_RANK[y.tone]);
   sections.push({ id: 'boxes', title: 'Boxes', blocks: [rows.length ? { type: 'panel', rows } : { type: 'text', tone: 'muted', text: 'No boxes yet: add one below.' }] });
 
   sections.push(loginsSection(env, s, live_boxes, nowMs, false));
@@ -740,15 +744,12 @@ function boxPage(env, id, nowMs, caller = OWNER) {
   const may = isBoxOwner(env, caller, b.id);
   const here = view.houses.filter((h) => LIVE.has(h.state) && h.box === b.id);
   const st = boxState(b, nowMs);
-  const i = boxIssues(env, s, b, nowMs, watchBoxes(env)[b.id]);
+  const i = boxIssues(env, b, nowMs, watchBoxes(env)[b.id]);
   const bad = i.bad.map((x) => x.text), warn = i.warn.map((x) => x.text);
-  const worst = [...bad, ...warn];
   const running = here.filter((h) => h.state === 'running').length;
   const counts = `${st.short} · ${plural(running, 'house')} running`;
   return { title: b.label, intro: cap(boxRole(b)), sections: [
-    { id: 'status', blocks: [{ type: 'health', tone: bad.length || st.tone === 'bad' ? 'bad' : warn.length || st.tone === 'warn' ? 'warn' : 'ok',
-      text: worst.length ? `${cap(worst[0])}${worst.length > 1 ? ` (and ${worst.length - 1} more)` : ''}` : counts,
-      detail: worst.length ? `${worst.slice(1, 4).map(cap).join('. ')}${worst.length > 1 ? '. ' : ''}${counts}.` : 'Nothing needs you.' }] },
+    { id: 'status', blocks: [headline(bad, warn, counts, 'Nothing needs you.', st.tone)] },
     { id: `box-${b.id}`, blocks: [
       { type: 'panel', rows: [
         { label: 'State', value: st.value, ...(st.detail ? { detail: st.detail } : {}), tone: st.tone },
@@ -1132,14 +1133,14 @@ function agentOwnerPage(env, caller, nowMs) {
 }
 
 /** A box's own page: box/<its id>. */
-const BOX_PAGE = /^box\/[a-z0-9][a-z0-9-]{0,63}$/;
+const BOX_PAGE = /^box\/[a-z0-9][a-z0-9._-]{0,63}$/; // a box's id or, from before ids, its name (state.mjs, BOX_NAME)
 
 export function page(env, { path, caller: c }, nowMs = Date.now()) {
   const caller = pageCaller(c);
   const scope = scopeOf(env);
   // A box's login and its own page are the household owner's, the way their actions are: never an agent's tab or an agent owner's page.
   if (typeof path === 'string' && (path.startsWith('login/') || path.startsWith('box/')) && (scope || Array.isArray(caller.agents))) {
-    return { status: 403, title: 'Not allowed', sections: [{ id: 'no', blocks: [{ type: 'text', tone: 'muted', text: 'A box\'s login is the household owner\'s.' }] }] };
+    return { status: 403, title: 'Not allowed', sections: [{ id: 'no', blocks: [{ type: 'text', tone: 'muted', text: path.startsWith('box/') ? 'A box\'s page is the household owner\'s.' : 'A box\'s login is the household owner\'s.' }] }] };
   }
   if (scope && (path === '' || path === undefined)) return agentTabPage(env, scope, caller, nowMs);
   if (Array.isArray(caller.agents)) return path === '' || path === undefined ? agentOwnerPage(env, caller, nowMs) : { title: 'Not found', sections: [] };

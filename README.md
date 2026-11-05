@@ -134,8 +134,9 @@ systemctl --user is-enabled loom-piece-box-run      # enabled: it comes back aft
 journalctl --user -u loom-piece-box-run -n 5        # no errors
 ```
 
-The Boxes page now lists the box with its facts (CPUs, memory, podman) and
-when it was last seen. It may host any agent; open it there to narrow that.
+The Boxes page now has a row for the box, with when it was last seen; tap it
+for its own page and its facts (CPUs, memory, podman). It may host any agent;
+change that under Settings on its page.
 
 **The other way, with a credential:** Boxes, then **Add a box**, shows a
 credential once. Run `loom box join <url> --name <name> --credential` and
@@ -232,7 +233,7 @@ Without the spec, the house fails, and its log names that command.
 ### Keeping it up to date
 
 A box installs the runtime commit loom runs by itself: canonical `main` only,
-forward only. Its card shows its commit next to loom's, "updating…" while it's
+forward only. Its page shows its commit next to loom's, "updating…" while it's
 behind, and why an update failed and when it'll try again, with **Update now**.
 A box still on the old `box` piece shows the one line to run on it once.
 See [docs/upgrading.md](docs/upgrading.md).

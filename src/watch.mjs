@@ -471,6 +471,9 @@ export function checkDark(env, s, nowMs = Date.now(), o = {}) {
 }
 
 /** The Inbox's alerts: each unit failing or looping on a box. Its text holds while it lasts (pushed once). */
+/** A box's own page on Boxes (ui.mjs), where its health and failing units are: Look lands there. */
+const boxPage = (box) => (/^[a-z0-9][a-z0-9._-]{0,63}$/.test(box) ? `box/${box}` : '');
+
 export function watchAsks(env, labelOf = (b) => b, revoked = () => false) {
   const w = readWatch(env);
   const asks = [];
@@ -478,11 +481,11 @@ export function watchAsks(env, labelOf = (b) => b, revoked = () => false) {
     if (revoked(box)) continue;
     // Five a box: one box's many conditions can't crowd out the others' (as FYIs are five a box).
     for (const c of Object.values(b.conditions ?? {}).filter((x) => x.alerted).sort((x, y) => (x.severity === 'bad' ? -1 : 0) - (y.severity === 'bad' ? -1 : 0)).slice(0, 5)) {
-      asks.push({ text: c.title, meta: c.detail, at: c.since, page: '', label: 'Look', kind: 'alert' });
+      asks.push({ text: c.title, meta: c.detail, at: c.since, page: boxPage(box), label: 'Look', kind: 'alert' });
     }
     for (const ep of Object.values(b.units ?? {})) {
       asks.push({ text: `${ep.unit} ${ep.state === 'looping' ? 'keeps restarting' : 'failed'} on ${labelOf(box)}`, meta: lastLine(ep.log) || `${ep.scope} unit, since ${clock(Date.parse(ep.since))}`,
-        at: ep.since, page: '', label: 'Look', kind: 'alert' });
+        at: ep.since, page: boxPage(box), label: 'Look', kind: 'alert' });
     }
   }
   return asks.sort((x, y) => Date.parse(y.at) - Date.parse(x.at)).slice(0, 20);

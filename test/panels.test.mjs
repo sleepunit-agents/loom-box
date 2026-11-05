@@ -38,7 +38,12 @@ test('Boxes with three or more boxes: one row each (state, houses, what it is or
   const owner = { kind: 'owner' };
   const add = (name, extra = {}) => { const r = api(env, fx, { caller: owner, path: 'add-box', body: { name, mayHost: 'anyone', ...extra } }); assert.equal(r.status, 200, JSON.stringify(r.body)); return r.body.box; };
   const poll = (box, body = {}) => assert.equal(api(env, fx, { caller: { kind: 'piece', subject: box }, path: 'poll', body }).status, 200);
-  const thor = add('thor'), odin = add('odin'), loki = add('loki');
+  // At one box and at three, the same: rows only, never a box's card on the index.
+  const noCards = (what) => { const p = page(env, { path: '' }); valid(what, p); assert.ok(!p.sections.some((x) => x.id.startsWith('box-')), `${what}: no box card on the index`); return section(p, 'boxes').blocks[0].rows; };
+  assert.equal(noCards('one box').length, 1);
+  const thor = add('thor'), odin = add('odin');
+  assert.equal(noCards('three boxes').length, 3);
+  const loki = add('loki');
   // thor is fine and always on; odin has a sign-in missing; loki never joined.
   poll(thor, { harnesses: { claude: { installed: true, loggedIn: true } } });
   poll(odin, { harnesses: { claude: { installed: true, loggedIn: false } } });
@@ -63,7 +68,7 @@ test('Boxes with three or more boxes: one row each (state, houses, what it is or
   assert.equal(rows.find((r) => r.label === 'loki').value, 'Not joined yet · 0 houses');
   assert.match(rows.find((r) => r.label === 'thor').value, /^Up · seen just now · 0 houses$/);
   assert.equal(rows.find((r) => r.label === 'thor').detail, 'Hosts houses · always on');
-  assert.match(rows.find((r) => r.label === 'one').detail, /^Loom's own · hosts houses/);
+  assert.match(rows.find((r) => r.label === 'one').detail, /^loom's own · hosts houses/);
   // No box's detail on the index: no per-box card, no runtime, sign-in or settings rows.
   for (const id of ['one', thor, odin, loki]) assert.equal(section(p, `box-${id}`), undefined);
   assert.ok(!/Log in|Update now|Revoke|May host/.test(JSON.stringify(section(p, 'boxes'))));
@@ -82,6 +87,10 @@ test('Boxes with three or more boxes: one row each (state, houses, what it is or
   assert.equal(settings.action.action, 'revoke-box');
   // A box that isn't there (or a made-up path) is Not found, never another box's page.
   assert.equal(page(env, { path: 'box/nope' }).title, 'Not found');
+  // A box from before ids, keyed by a name with a dot or an underscore, still has its page.
+  const old = { ...env, LOOM_BOX_LOCAL_NAME: 'wunder_01.lan', LOOM_BOX_HOME: join(env.HOME, 'state-named'), LOOM_BOX_DATA: join(env.HOME, 'data-named') };
+  assert.deepEqual(section(page(old, { path: '' }), 'boxes').blocks[0].rows.map((r) => r.page), ['box/wunder_01.lan']);
+  assert.equal(page(old, { path: 'box/wunder_01.lan' }).title, 'wunder_01.lan');
   // A box's page is the household owner's: never an agent's tab or an agent owner's page.
   assert.equal(page({ ...env, LOOM_SCOPE: 'art' }, { path: `box/${odin}` }).status, 403);
   assert.equal(page(env, { path: `box/${odin}`, caller: { kind: 'owner', who: 'loren', agents: ['art'] } }).status, 403);
