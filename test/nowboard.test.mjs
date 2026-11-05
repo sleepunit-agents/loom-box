@@ -8,7 +8,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { api } from '../src/control.mjs';
 import { runFor } from '../src/gates-api.mjs';
-import { boardDir, bridgesOf, nowManifest, nowPage, talking } from '../src/nowboard.mjs';
+import { boardDir, bridgesOf, nowAgentPage, nowManifest, nowPage, talking } from '../src/nowboard.mjs';
 import { manifest, page } from '../src/ui.mjs';
 import { memStore } from '../src/store.mjs';
 import { scratch } from './scratch.mjs';
@@ -102,7 +102,7 @@ describe('the board on the runtime\'s page and in its manifest', () => {
     const m = nowManifest(env, now);
     assert.equal(m.asks.length, 1);
     assert.match(m.asks[0].text, /^Mark's discord bridge is down: no word since /);
-    assert.deepEqual([m.asks[0].kind, m.asks[0].agent, m.asks[0].page], ['alert', 'mark', 'now']);
+    assert.deepEqual([m.asks[0].kind, m.asks[0].agent, m.asks[0].page], ['alert', 'mark', 'now/mark'], 'Look opens the agent\'s own board');
     assert.deepEqual(m.agents.art[0], { text: 'Talking with Grace Aquino', kind: 'talk', where: 'Discord discord-dm · active 2m ago', since: new Date((now - 300) * 1000).toISOString() });
     assert.equal(m.agents.mark, undefined);
     // The whole manifest carries them, beside the runtime's own.
@@ -119,7 +119,47 @@ describe('the board on the runtime\'s page and in its manifest', () => {
     assert.deepEqual([stats[3].meter, stats[3].tone, stats[3].detail], [0.97, 'bad', 'Claude Max, week']);
     assert.deepEqual(p.sections[1].blocks[0].items.map((x) => x.label), ['Claude Max · 5 hours', 'Claude Max · week']);
     assert.equal(p.sections[1].blocks[0].items[1].tone, 'bad');
-    assert.deepEqual(p.sections.map((s) => s.id), ['now', 'quota', 'board-art', 'board-mark']);
+    assert.deepEqual(p.sections.map((s) => s.id), ['now', 'quota', 'agents']);
+    // A row per agent, the one with a bridge down first; each a tap to its own board.
+    const rows = p.sections[2].blocks[0].rows;
+    assert.deepEqual(rows.map((r) => [r.label, r.value, r.tone, r.page]), [['Mark', 'Discord bridge is down', 'bad', 'now/mark'], ['Art', 'Discord bridge is live', 'ok', 'now/art']]);
+    assert.equal(rows[1].detail, '1 body talking · 1 of 5 slots in use');
+    assert.equal(rows[0].detail, 'Nothing current from its bodies');
+    // An agent's own board: its bridges, who it's talking with.
+    const a = page(env, { path: 'now/art' });
+    assert.equal(a.title, 'Art\'s bridges');
+    assert.deepEqual(a.sections.map((s) => s.id), ['status', 'bridges', 'talking', 'back']);
+    assert.equal(a.sections[2].blocks[0].items[0].text, 'Grace Aquino');
+    assert.equal(page(env, { path: 'now/nobody' }).title, 'Not found');
+    // The household owner's, as Now is: an agent owner gets neither, not even their own agent's board.
+    const markOwner = { kind: 'owner', who: 'pat', agents: ['mark'] };
+    for (const path of ['now', 'now/art', 'now/mark']) {
+      const got = page(env, { path, caller: markOwner });
+      assert.deepEqual([got.title, got.sections.length], ['Not found', 0], path);
+    }
+  });
+
+  test('twelve agents: every one has its row (a page holds ten sections; a section each dropped the last ones)', async () => {
+    const env = world();
+    const now = Date.now() / 1000;
+    const names = ['art', 'mark', 'ada', 'bo', 'cy', 'di', 'ed', 'flo', 'gus', 'hal', 'ivy', 'jo'];
+    for (const [k, a] of names.entries()) {
+      await api(env, fx, { caller: { kind: 'agent', agent: a, house: `h-${k}`, service: 'discord' }, path: 'now/snapshot', body: { bridge: 'discord', snap: snap(k === 7 ? now - 3600 : now, k === 4 ? { waiting: [{ chan: 'C1', who: ['Pat'], reason: 'cap' }] } : {}) } });
+    }
+    const p = nowPage(env, { nowS: now });
+    assert.ok(p.sections.length <= 10, 'within a page\'s ten sections');
+    const rows = p.sections.find((s) => s.id === 'agents').blocks[0].rows;
+    assert.deepEqual(rows.map((r) => r.agent).sort(), [...names].sort(), 'all twelve present');
+    assert.deepEqual(rows.slice(0, 2).map((r) => [r.agent, r.tone]), [['flo', 'bad'], ['cy', 'warn']], 'problems first');
+    assert.equal(rows[1].detail, 'No body talking · 1 waiting for a body · 1 of 5 slots in use');
+    for (const r of rows) assert.equal(r.page, `now/${r.agent}`);
+    assert.equal(nowAgentPage(env, 'flo', { nowS: now }).sections[0].blocks[0].text, 'Discord bridge is down');
+    if (vocab) {
+      const pg = vocab.parsePage(page(env, { path: 'now' }));
+      assert.notEqual(typeof pg, 'string', pg);
+      assert.equal(pg.sections.find((s) => s.id === 'agents').blocks[0].rows.length, 12, 'loom keeps all twelve rows');
+      assert.notEqual(typeof vocab.parsePage(page(env, { path: 'now/flo' })), 'string');
+    }
   });
 
   test('loom\'s validator takes the Now page and the manifest with a board in it', { skip: !vocab && 'no built loom to validate against' }, async () => {

@@ -315,9 +315,11 @@ day is a heads-up on loom's Inbox (`LOOM_RUNTIME_RELAY_HEADS_UP`). From a house,
 **The now board** (agent-runtime.md, "The sources"; `src/nowboard.mjs`): live state, the runtime's own. A bridge in a
 house writes its board through loom's piece API as its agent (shuttle's nowlog with `SHUTTLE_NOW_REMOTE=runtime/now`):
 `now/snapshot` `{bridge, snap}` and `now/event` `{record}`, into `<LOOM_RUNTIME_NOW_DIR>/<agent>-now` (the layout
-loom-now kept). `loom runtime now talking` from a house reads its own. The runtime's page **Now** shows each agent's
-bridges, who they're talking with, what waits, and the accounts' quota. Its manifest makes a bridge actually down an
-alert on loom's Inbox (pushed once) and each live conversation its agent's `doing`. A board holds no message text.
+loom-now kept). `loom runtime now talking` from a house reads its own. The runtime's page **Now** shows the accounts'
+quota and a row per agent (its bridges and bodies in words, what's wrong first); a tap opens `now/<agent>`, its
+bridges, who they're talking with and what waits. An alert's **Look** and a back-again FYI open that agent's board.
+Its manifest makes a bridge actually down an alert on loom's Inbox (pushed once) and each live conversation its
+agent's `doing`. A board holds no message text.
 
 A bridge the runtime is restarting (its service's house wanted, starting, stopping, being moved or just up) shows as
 **restarting**, never an alert. It's **down** after `LOOM_RUNTIME_BRIDGE_DARK_S` (default 300) of silence while its

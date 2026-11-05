@@ -11,7 +11,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { api, serviceRestart } from '../src/control.mjs';
 import { load } from '../src/state.mjs';
-import { darkAfterS, nowManifest, nowPage } from '../src/nowboard.mjs';
+import { darkAfterS, nowAgentPage, nowManifest, nowPage } from '../src/nowboard.mjs';
 import { agentReports } from '../src/ui.mjs';
 import { scratch } from './scratch.mjs';
 
@@ -49,7 +49,7 @@ function snap(name = 'slack') {
   writeFileSync(join(d, `${name}.json`), JSON.stringify({ v: 1, bridge: name, at: nowS(), interval_s: 5, talking: [], waiting: [] }));
 }
 const view = () => nowManifest(env, nowS());
-const row = () => nowPage(env, { nowS: nowS() }).sections.find((s) => s.id === 'board-art').blocks[0].items[0];
+const row = () => nowAgentPage(env, 'art', { nowS: nowS() }).sections.find((s) => s.id === 'bridges').blocks[0].items[0];
 function bridgeUp(name = 'slack') {
   ok(call(art, 'service-up', { name }));
   startWanted();
@@ -107,7 +107,7 @@ test('silence past the threshold while its house runs is an alert, its text fixe
   at(301);
   const a = view().asks;
   assert.equal(a.length, 1);
-  assert.deepEqual([a[0].text, a[0].kind, a[0].agent, a[0].page], ['Art\'s slack bridge is down: no word since 14:00 UTC', 'alert', 'art', 'now']);
+  assert.deepEqual([a[0].text, a[0].kind, a[0].agent, a[0].page], ['Art\'s slack bridge is down: no word since 14:00 UTC', 'alert', 'art', 'now/art']);
   assert.match(a[0].meta, /while its house is up/);
   at(900);
   assert.equal(view().asks[0].text, a[0].text, 'the same ask, so loom pushes it once (its key is its text)');
@@ -203,7 +203,7 @@ test('a short blip leaves nothing; a long outage that recovers leaves one FYI, n
   snap();
   const m = view();
   assert.deepEqual(m.asks, [], 'recovery clears the alert');
-  assert.deepEqual(m.notices, [{ text: 'Art\'s slack bridge was down 7 min, back at 14:09 UTC', at: new Date(clock).toISOString(), agent: 'art', page: 'now' }]);
+  assert.deepEqual(m.notices, [{ text: 'Art\'s slack bridge was down 7 min, back at 14:09 UTC', at: new Date(clock).toISOString(), agent: 'art', page: 'now/art' }]);
   at(130 + 8 * 60); snap();
   assert.equal(view().notices.length, 1, 'one FYI, not one per read');
 });
@@ -219,7 +219,7 @@ test('a snapshot whose time is no time (NaN, Infinity, far future, negative) is 
   at(500);
   const m = view();
   assert.deepEqual(m.asks.map((a) => a.text), ['Art\'s slack bridge is down: no word since 14:00 UTC'], 'only the readable bridge, and it is noted');
-  assert.deepEqual(nowPage(env, { nowS: nowS() }).sections.find((s) => s.id === 'board-art').blocks[0].items.map((x) => x.text), ['Slack bridge']);
+  assert.deepEqual(nowAgentPage(env, 'art', { nowS: nowS() }).sections.find((s) => s.id === 'bridges').blocks[0].items.map((x) => x.text), ['Slack bridge']);
   at(520); snap();
   assert.equal(view().notices.length, 1, 'the good bridge\'s outage ended, with its FYI');
 });
