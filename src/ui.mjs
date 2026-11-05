@@ -17,7 +17,7 @@ import { loomStore } from './store.mjs';
 import { asks as gateAsks, answer as gateAnswer, gatesPage, mergePeople, status as gatesStatus, proposals as gateProposals, PROPOSALS as PROPOSALS_COLLECTION } from './gates.mjs';
 import { GRANTS, KEY as GRANTS_KEY, GrantsError, grantsProblem, householdOf, setPiece, setRelay } from './grants.mjs';
 import { relayNotices } from './relay.mjs';
-import { nowManifest, nowPage } from './nowboard.mjs';
+import { nowAgentPage, nowManifest, nowPage } from './nowboard.mjs';
 import { boxPagePath, checkDark, watchAsks, watchNotices, watchOf, watchRows } from './watch.mjs';
 import { coreFrom } from './core.mjs';
 
@@ -1155,6 +1155,7 @@ export function page(env, { path, caller: c }, nowMs = Date.now()) {
     try { usage = stateAccounts(env).usage(); } catch { usage = []; }
     return nowPage(env, { usage, nowS: nowMs / 1000 });
   }
+  if (typeof path === 'string' && /^now\/[a-z][a-z0-9-]{0,39}$/.test(path)) return nowAgentPage(env, path.slice(4), { nowS: nowMs / 1000 });
   if (typeof path === 'string' && /^gates\/[a-z][a-z0-9-]{0,39}$/.test(path)) {
     const st = permsStore(env);
     return st ? gatesPage(st, path.slice(6)) : { title: 'Not found', sections: [] };
