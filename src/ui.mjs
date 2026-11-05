@@ -5,10 +5,10 @@
 import { appendFileSync, existsSync, readFileSync, statfsSync } from 'node:fs';
 import { uptime } from 'node:os';
 import { join } from 'node:path';
-import { StateError, load, localBoxName, stateDir } from './state.mjs';
+import { BOX_NAME, StateError, load, localBoxName, stateDir } from './state.mjs';
 import { sessionsBusy } from './busy.mjs';
 import { allowJoin, blockAllJoins, blockJoin, pendingJoins } from './enroll.mjs';
-import { addBox, assertBoxOwner, isBoxOwner, boxLabelOf, boxOfCall, boxUpdateNow, loginOver, factsOf, lendBox, list, loginCancel, loginCode, loginStart, loginView, primaryOf, remoteDown, remoteUp, revokeBox, shownTask, serviceDown, serviceMove, serviceRestart, serviceUp, setAgent, isHostHouse, setBoxOwner, setMayHost, setBoxWatch, setPrimary, up, down, LIVE } from './control.mjs';
+import { addBox, assertBoxOwner, resolveBox, isBoxOwner, boxLabelOf, boxOfCall, boxUpdateNow, loginOver, factsOf, lendBox, list, loginCancel, loginCode, loginStart, loginView, primaryOf, remoteDown, remoteUp, revokeBox, shownTask, serviceDown, serviceMove, serviceRestart, serviceUp, setAgent, isHostHouse, setBoxOwner, setMayHost, setBoxWatch, setPrimary, up, down, LIVE } from './control.mjs';
 import { LOGIN_HARNESSES } from './logins.mjs';
 import { ownCommit, swapCommand } from './version.mjs';
 import { stateAccounts } from './accounts.mjs';
@@ -18,7 +18,7 @@ import { asks as gateAsks, answer as gateAnswer, gatesPage, mergePeople, status 
 import { GRANTS, KEY as GRANTS_KEY, GrantsError, grantsProblem, householdOf, setPiece, setRelay } from './grants.mjs';
 import { relayNotices } from './relay.mjs';
 import { nowManifest, nowPage } from './nowboard.mjs';
-import { checkDark, watchAsks, watchNotices, watchOf, watchRows } from './watch.mjs';
+import { boxPagePath, checkDark, watchAsks, watchNotices, watchOf, watchRows } from './watch.mjs';
 import { coreFrom } from './core.mjs';
 
 /**
@@ -579,14 +579,15 @@ function boxIssues(env, b, nowMs, w) {
   if (disk && disk.used >= 0.95) say(bad, `${b.label}'s disk is nearly full`, 'its disk is nearly full');
   else if (disk && disk.used >= 0.9) say(warn, `${b.label}'s disk is ${Math.round(disk.used * 100)}% full`, `disk ${Math.round(disk.used * 100)}% full`);
   // What its watch alerted on (health.mjs titles start with the box's name), and its units failing or crash-looping.
-  for (const c of Object.values(w?.conditions ?? {})) {
-    if (!c.alerted || !c.title) continue;
+  for (const [key, c] of Object.entries(w?.conditions ?? {})) {
+    // Gone dark is the box's state (not heard from since …), said once.
+    if (!c.alerted || !c.title || (key === 'dark' && !b.local)) continue;
     const t = String(c.title);
     // "thor: / is nearly full" -> "/ is nearly full", "thor is short of memory" -> "short of memory", "thor's swap is …" -> "swap is …".
     const short = [`${b.label}: `, `${b.label} is `, `${b.label}'s `].reduce((x, pre) => (x === t && t.startsWith(pre) ? t.slice(pre.length) : x), t);
     say(c.severity === 'bad' ? bad : warn, t, short);
   }
-  for (const ep of Object.values(w?.units ?? {})) say(bad, `${ep.unit} on ${b.label} ${ep.state === 'looping' ? 'keeps restarting' : 'failed'}`, `${ep.unit} ${ep.state === 'looping' ? 'keeps restarting' : 'failed'}`);
+  for (const ep of Object.values(w?.units ?? {})) say(bad, `unit ${ep.unit} on ${b.label} ${ep.state === 'looping' ? 'keeps restarting' : 'failed'}`, `unit ${ep.unit} ${ep.state === 'looping' ? 'keeps restarting' : 'failed'}`);
   return { bad, warn };
 }
 
@@ -749,7 +750,7 @@ function boxPage(env, id, nowMs, caller = OWNER) {
   const bad = i.bad.map((x) => x.text), warn = i.warn.map((x) => x.text);
   const running = here.filter((h) => h.state === 'running').length;
   const counts = `${st.short} · ${plural(running, 'house')} running`;
-  return { title: b.label, intro: cap(boxRole(b)), sections: [
+  return { title: b.label, intro: b.local ? boxRole(b) : cap(boxRole(b)), sections: [
     { id: 'status', blocks: [headline(bad, warn, counts, 'Nothing needs you.', st.tone)] },
     { id: `box-${b.id}`, blocks: [
       { type: 'panel', rows: [
@@ -1134,7 +1135,7 @@ function agentOwnerPage(env, caller, nowMs) {
 }
 
 /** A box's own page: box/<its id>. */
-const BOX_PAGE = /^box\/[a-z0-9][a-z0-9._-]{0,63}$/; // a box's id or, from before ids, its name (state.mjs, BOX_NAME)
+const BOX_PAGE = new RegExp(`^box/${BOX_NAME.source.slice(1, -1)}$`); // a box's id or, from before ids, its name (state.mjs, BOX_NAME)
 
 export function page(env, { path, caller: c }, nowMs = Date.now()) {
   const caller = pageCaller(c);
@@ -1188,8 +1189,8 @@ function targetOf(env, action, fields) {
   return fields.agent;
 }
 
-/** Where a box's own action lands: its page, when it names a box by its id; else Boxes. */
-const boxPath = (name) => (typeof name === 'string' && BOX_PAGE.test(`box/${name}`) ? `box/${name}` : '');
+/** Where a box's own action lands: the page of the box it named (by id or name, resolved); else Boxes. */
+const boxPath = (env, name) => { try { return boxPagePath(resolveBox(load(env), name)); } catch { return ''; } };
 
 const AGENT_ACTIONS = new Set(['agent-flag', 'up', 'down', 'service-up', 'service-down', 'service-restart', 'service-move', 'remote-up', 'remote-down', 'set-primary', 'set-agent']);
 
@@ -1222,16 +1223,16 @@ export function act(env, effects, { action, fields: raw = {}, caller: c }, publi
       case 'block-join': { const r = blockJoin(env, effects, fields); return { ok: true, message: `Blocked ${r.name}'s request.`, page: '' }; }
       case 'block-all-joins': { const r = blockAllJoins(env, effects); return { ok: true, message: `Blocked ${r.blocked} waiting request${r.blocked === 1 ? '' : 's'}.`, page: '' }; }
       case 'revoke-box': { const r = revokeBox(env, effects, fields); return { ok: true, message: `Revoked ${r.name}. Its houses lost their tokens.`, page: '' }; }
-      case 'box-watch': { const r = setBoxWatch(env, effects, { name: fields.name, alwaysOn: fields.always_on, reportOnly: fields.report_only }); return { ok: true, message: `${r.name}: ${r.reportOnly ? 'report-only' : 'hosts what it may'}, ${r.alwaysOn ? 'always on' : 'not always on'}.`, page: boxPath(fields.name) }; }
-      case 'may-host': { const r = setMayHost(env, effects, fields); return { ok: true, message: `Saved who ${r.name} may host.`, page: boxPath(fields.name) }; }
-      case 'box-owner': { const r = setBoxOwner(env, effects, fields); return { ok: true, message: `${r.name} is ${r.owner}'s.`, page: boxPath(fields.name) }; }
-      case 'box-lend': { const r = lendBox(env, effects, fields); return { ok: true, message: r.lentTo.length ? `${r.name} is lent to ${r.lentTo.join(', ')}.` : `${r.name} is lent to no one.`, page: boxPath(fields.name) }; }
+      case 'box-watch': { const r = setBoxWatch(env, effects, { name: fields.name, alwaysOn: fields.always_on, reportOnly: fields.report_only }); return { ok: true, message: `${r.name}: ${r.reportOnly ? 'report-only' : 'hosts what it may'}, ${r.alwaysOn ? 'always on' : 'not always on'}.`, page: boxPath(env, fields.name) }; }
+      case 'may-host': { const r = setMayHost(env, effects, fields); return { ok: true, message: `Saved who ${r.name} may host.`, page: boxPath(env, fields.name) }; }
+      case 'box-owner': { const r = setBoxOwner(env, effects, fields); return { ok: true, message: `${r.name} is ${r.owner}'s.`, page: boxPath(env, fields.name) }; }
+      case 'box-lend': { const r = lendBox(env, effects, fields); return { ok: true, message: r.lentTo.length ? `${r.name} is lent to ${r.lentTo.join(', ')}.` : `${r.name} is lent to no one.`, page: boxPath(env, fields.name) }; }
       case 'login-start': {
         const r = loginStart(env, effects, fields);
         return { ok: true, message: `${label(r.box)} is starting ${LOGIN_HARNESSES[r.harness].label}'s own login; its link shows here in a few seconds.`, page: `login/${r.id}` };
       }
       case 'login-code': { loginCode(env, effects, fields); return { ok: true, message: 'Got it: the box is checking the code.', page: `login/${fields.id}` }; }
-      case 'box-update-now': { const r = boxUpdateNow(env, effects, fields); return { ok: true, message: `${r.name} tries loom's runtime on its next poll.`, page: boxPath(fields.name) }; }
+      case 'box-update-now': { const r = boxUpdateNow(env, effects, fields); return { ok: true, message: `${r.name} tries loom's runtime on its next poll.`, page: boxPath(env, fields.name) }; }
       case 'login-cancel': { loginCancel(env, effects, fields); return { ok: true, message: 'Cancelled.', page: '' }; }
       case 'set-primary': { const r = setPrimary(env, effects, fields); return { ok: true, message: `${r.agent}'s primary is ${label(r.primary)}.`, page: '' }; }
       case 'set-agent': { const r = setAgent(env, effects, fields); return { ok: true, message: `Saved ${r.agent}'s house.`, page: '' }; }

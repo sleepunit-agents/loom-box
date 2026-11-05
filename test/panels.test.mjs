@@ -96,6 +96,46 @@ test('Boxes with three or more boxes: one row each (state, houses, what it is or
   assert.equal(page(env, { path: `box/${odin}`, caller: { kind: 'owner', who: 'loren', agents: ['art'] } }).status, 403);
 });
 
+test('a box\'s watch on Boxes: a failing unit makes its row bad and first, a condition says its words without the box\'s name, a fine box gives a health fact, Look opens the box', () => {
+  const { env } = setup();
+  const owner = { kind: 'owner' };
+  const add = (name) => { const r = api(env, fx, { caller: owner, path: 'add-box', body: { name, mayHost: 'anyone' } }); assert.equal(r.status, 200); return r.body.box; };
+  const poll = (box) => assert.equal(api(env, fx, { caller: { kind: 'piece', subject: box }, path: 'poll', body: {} }).status, 200);
+  const thor = add('thor'), odin = add('odin');
+  poll(thor); poll(odin);
+  const now = new Date().toISOString();
+  mkdirSync(env.LOOM_BOX_DATA, { recursive: true });
+  writeFileSync(join(env.LOOM_BOX_DATA, 'box-watch.json'), JSON.stringify({ v: 1, notices: [], boxes: {
+    [thor]: { healthAt: now, health: { fs: [{ mount: '/', used_pct: 72.4 }, { mount: '/srv', used_pct: 30 }], mem: { total: 100, available: 50, swap_total: 100, swap_free: 30 } } },
+    [odin]: { healthAt: now, health: { fs: [{ mount: '/', used_pct: 10 }] },
+      conditions: { mem: { since: now, title: 'odin is short of memory', detail: '1 GB of 32 GB left', severity: 'warn', alerted: now, said: now },
+        dark: { since: now, title: 'odin is dark', detail: 'x', severity: 'bad', alerted: now, said: now } },
+      units: { 'jobs.service': { unit: 'jobs.service', scope: 'user', state: 'failed', since: now, log: [] } } },
+  } }));
+  const p = page(env, { path: '' });
+  valid('boxes with a watch', p);
+  const rows = section(p, 'boxes').blocks[0].rows;
+  // Worst first: odin (a unit failed: bad) above loom's own box and thor (fine).
+  assert.deepEqual([rows[0].label, rows[0].tone], ['odin', 'bad']);
+  assert.equal(rows[0].detail, 'Unit jobs.service failed (and 1 more) · hosts houses');
+  assert.ok(!/dark/i.test(rows[0].detail + rows[0].value), 'gone dark is its state, never a second problem');
+  // A fine box's one health fact: its fullest disk, and its swap once it's half used.
+  assert.equal(rows.find((r) => r.label === 'thor').detail, 'Hosts houses · disk 72% · swap 70%');
+  // The headline counts them, every box's, worst first.
+  const h = section(p, 'status').blocks[0];
+  assert.deepEqual([h.tone, h.text], ['bad', 'Unit jobs.service on odin failed (and 1 more)']);
+  assert.match(h.detail, /^Odin is short of memory\./);
+  // Look, on an alert in the Inbox, opens the box's own page.
+  const looks = manifest(env).asks.filter((a) => a.kind === 'alert');
+  assert.ok(looks.length >= 2);
+  for (const a of looks) assert.equal(a.page, `box/${odin}`, a.text);
+  // A box's action by its name comes back to its page by id.
+  assert.equal(act(env, fx, { action: 'box-watch', fields: { name: 'thor', always_on: 'on' } }).page, `box/${thor}`);
+  assert.equal(page(env, { path: 'box/loom-nope' }).title, 'Not found');
+  // loom's own box's page doesn't capitalise loom.
+  assert.match(page(env, { path: 'box/one' }).intro, /^loom's own/);
+});
+
 test('a box\'s sign-ins and Update now on its own page stay its owner\'s: another household owner sees them, can\'t press', () => {
   const { env } = setup();
   writeFileSync(join(env.LOOM_HOME, 'household.json'), JSON.stringify({ v: 1, agents: ['art', 'mark'], members: [{ person: 'alice', agents: '*' }, { person: 'bob', agents: '*' }] }));
