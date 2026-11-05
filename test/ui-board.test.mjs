@@ -53,7 +53,7 @@ test("an agent's Houses tab: its houses, services with Restart, its sessions wit
   // No box session yet: where it runs is a form, behind a details.
   assert.ok(sess.blocks.some((b) => b.type === 'details' && /first box session/.test(b.summary)));
   // A card for the box: its houses with their agent, and the machine's facts folded.
-  assert.ok(section(board, 'box-one').blocks[0].rows.some((r) => r.label === 'Machine' && r.sheet));
+  assert.ok(section(page(env, { path: 'box/one' }), 'box-one').blocks[0].rows.some((r) => r.label === 'Machine' && r.sheet));
   // From art's tab: art's things only, none of the household's.
   const scoped = { ...env, LOOM_SCOPE: 'art' };
   assert.match(act(scoped, fx, { action: 'service-restart', fields: { agent: 'mark', name: 'remote' } }).message, /art's page/);
@@ -134,7 +134,7 @@ test("the Houses tab names each house by what it is (its service, its wake), no 
   const st = load(env);
   st.boxes.one.facts = ['os:linux', 'arch:x86_64', 'cpus:64', 'mem:94g', 'gpu:nvidia-geforce-rtx-5090', 'runtime:podman'];
   writeFileSync(join(env.LOOM_BOX_HOME, 'state.json'), JSON.stringify(st));
-  const machine = section(page(env, { path: '' }), 'box-one').blocks[0].rows.find((r) => r.label === 'Machine');
+  const machine = section(page(env, { path: 'box/one' }), 'box-one').blocks[0].rows.find((r) => r.label === 'Machine');
   assert.equal(machine.value, 'Linux · 64 CPUs · 94 GB · NVIDIA GeForce RTX 5090');
   const kv = machine.sheet.blocks[0].items;
   assert.deepEqual(kv.slice(0, 6), [

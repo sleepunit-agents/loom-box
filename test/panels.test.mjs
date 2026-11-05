@@ -33,6 +33,121 @@ function setup() {
 const section = (p, id) => p.sections.find((s) => s.id === id);
 const valid = (what, p) => { if (vocab) { const v = vocab.parsePage(p); assert.notEqual(typeof v, 'string', `${what}: ${v}`); } };
 
+test('Boxes with three or more boxes: one row each (state, houses, what it is or what\'s wrong, worst first), each a tap from its own page with everything', () => {
+  const { env } = setup();
+  const owner = { kind: 'owner' };
+  const add = (name, extra = {}) => { const r = api(env, fx, { caller: owner, path: 'add-box', body: { name, mayHost: 'anyone', ...extra } }); assert.equal(r.status, 200, JSON.stringify(r.body)); return r.body.box; };
+  const poll = (box, body = {}) => assert.equal(api(env, fx, { caller: { kind: 'piece', subject: box }, path: 'poll', body }).status, 200);
+  // At one box and at three, the same: rows only, never a box's card on the index.
+  const noCards = (what) => { const p = page(env, { path: '' }); valid(what, p); assert.ok(!p.sections.some((x) => x.id.startsWith('box-')), `${what}: no box card on the index`); return section(p, 'boxes').blocks[0].rows; };
+  assert.equal(noCards('one box').length, 1);
+  const thor = add('thor'), odin = add('odin');
+  assert.equal(noCards('three boxes').length, 3);
+  const loki = add('loki');
+  // thor is fine and always on; odin has a sign-in missing; loki never joined.
+  poll(thor, { harnesses: { claude: { installed: true, loggedIn: true } } });
+  poll(odin, { harnesses: { claude: { installed: true, loggedIn: false } } });
+  assert.equal(act(env, fx, { action: 'box-watch', fields: { name: thor, always_on: 'on' } }).page, `box/${thor}`, 'a box\'s own action comes back to its page');
+  // Before (2026-11-05): up to three boxes were each a whole card on Boxes (state, machine, runtime, sign-ins, health,
+  // watch, houses, settings), a wall of detail per box. Now: one row each.
+  const p = page(env, { path: '' });
+  valid('boxes, four', p);
+  const rows = section(p, 'boxes').blocks[0].rows;
+  assert.equal(rows.length, 4, 'one row per box');
+  assert.deepEqual(rows.map((r) => r.page).sort(), ['box/one', `box/${thor}`, `box/${odin}`, `box/${loki}`].sort(), 'each row links to its own box');
+  for (const r of rows) {
+    assert.match(r.page, /^box\/[a-z0-9-]+$/, `${r.label} links to its own page`);
+    assert.ok(['ok', 'warn', 'bad'].includes(r.tone), `${r.label} says how it is`);
+    assert.ok(r.value && r.detail, `${r.label} has its state and one fact`);
+    for (const k of ['sheet', 'act', 'edit', 'toggle', 'choice']) assert.equal(r[k], undefined, `${r.label}'s row is a link, nothing else`);
+  }
+  // What's wrong first, and said on the row; a fine box says what it's for.
+  assert.deepEqual(rows.slice(0, 2).map((r) => [r.label, r.tone]).sort(), [['loki', 'warn'], ['odin', 'warn']]);
+  assert.equal(rows.find((r) => r.label === 'odin').detail, 'Claude isn\'t logged in · hosts houses');
+  assert.equal(rows.find((r) => r.label === 'loki').detail, 'Hosts houses', 'not joined is its state, said once');
+  assert.equal(rows.find((r) => r.label === 'loki').value, 'Not joined yet · 0 houses');
+  assert.match(rows.find((r) => r.label === 'thor').value, /^Up · seen just now · 0 houses$/);
+  assert.equal(rows.find((r) => r.label === 'thor').detail, 'Hosts houses · always on');
+  assert.match(rows.find((r) => r.label === 'one').detail, /^loom's own · hosts houses/);
+  // No box's detail on the index: no per-box card, no runtime, sign-in or settings rows.
+  for (const id of ['one', thor, odin, loki]) assert.equal(section(p, `box-${id}`), undefined);
+  assert.ok(!/Log in|Update now|Revoke|May host/.test(JSON.stringify(section(p, 'boxes'))));
+  // Each box's own page has everything that was on its card: state, machine, runtime, sign-ins (Log in), watch, settings and Revoke.
+  const bp = page(env, { path: `box/${odin}` });
+  valid('a box', bp);
+  assert.equal(bp.title, 'odin');
+  assert.deepEqual([section(bp, 'status').blocks[0].tone, section(bp, 'status').blocks[0].text], ['warn', 'Claude isn\'t logged in on odin']);
+  const card = section(bp, `box-${odin}`);
+  const panel = card.blocks[0].rows;
+  assert.deepEqual(panel.slice(0, 2).map((r) => r.label), ['State', 'Machine']);
+  assert.equal(panel.find((r) => r.label === 'Claude').act.action, 'login-start');
+  assert.ok(panel.some((r) => r.label === 'Watch' && r.act?.action === 'box-watch'));
+  const settings = card.blocks.find((b) => b.type === 'panel' && b.title === 'Settings');
+  assert.deepEqual(settings.rows.map((r) => r.label), ['May host', 'Owner', 'Lent to']);
+  assert.equal(settings.action.action, 'revoke-box');
+  // A box that isn't there (or a made-up path) is Not found, never another box's page.
+  assert.equal(page(env, { path: 'box/nope' }).title, 'Not found');
+  // A box from before ids, keyed by a name with a dot or an underscore, still has its page.
+  const old = { ...env, LOOM_BOX_LOCAL_NAME: 'wunder_01.lan', LOOM_BOX_HOME: join(env.HOME, 'state-named'), LOOM_BOX_DATA: join(env.HOME, 'data-named') };
+  assert.deepEqual(section(page(old, { path: '' }), 'boxes').blocks[0].rows.map((r) => r.page), ['box/wunder_01.lan']);
+  assert.equal(page(old, { path: 'box/wunder_01.lan' }).title, 'wunder_01.lan');
+  // A box's page is the household owner's: never an agent's tab or an agent owner's page.
+  assert.equal(page({ ...env, LOOM_SCOPE: 'art' }, { path: `box/${odin}` }).status, 403);
+  assert.equal(page(env, { path: `box/${odin}`, caller: { kind: 'owner', who: 'loren', agents: ['art'] } }).status, 403);
+});
+
+test('a box\'s watch on Boxes: a failing unit makes its row bad and first, a condition says its words without the box\'s name, a fine box gives a health fact, Look opens the box', () => {
+  const { env } = setup();
+  const owner = { kind: 'owner' };
+  const add = (name) => { const r = api(env, fx, { caller: owner, path: 'add-box', body: { name, mayHost: 'anyone' } }); assert.equal(r.status, 200); return r.body.box; };
+  const poll = (box) => assert.equal(api(env, fx, { caller: { kind: 'piece', subject: box }, path: 'poll', body: {} }).status, 200);
+  const thor = add('thor'), odin = add('odin');
+  poll(thor); poll(odin);
+  const now = new Date().toISOString();
+  mkdirSync(env.LOOM_BOX_DATA, { recursive: true });
+  writeFileSync(join(env.LOOM_BOX_DATA, 'box-watch.json'), JSON.stringify({ v: 1, notices: [], boxes: {
+    [thor]: { healthAt: now, health: { fs: [{ mount: '/', used_pct: 72.4 }, { mount: '/srv', used_pct: 30 }], mem: { total: 100, available: 50, swap_total: 100, swap_free: 30 } } },
+    [odin]: { healthAt: now, health: { fs: [{ mount: '/', used_pct: 10 }] },
+      conditions: { mem: { since: now, title: 'odin is short of memory', detail: '1 GB of 32 GB left', severity: 'warn', alerted: now, said: now },
+        dark: { since: now, title: 'odin is dark', detail: 'x', severity: 'bad', alerted: now, said: now } },
+      units: { 'jobs.service': { unit: 'jobs.service', scope: 'user', state: 'failed', since: now, log: [] } } },
+  } }));
+  const p = page(env, { path: '' });
+  valid('boxes with a watch', p);
+  const rows = section(p, 'boxes').blocks[0].rows;
+  // Worst first: odin (a unit failed: bad) above loom's own box and thor (fine).
+  assert.deepEqual([rows[0].label, rows[0].tone], ['odin', 'bad']);
+  assert.equal(rows[0].detail, 'Unit jobs.service failed (and 1 more) · hosts houses');
+  assert.ok(!/dark/i.test(rows[0].detail + rows[0].value), 'gone dark is its state, never a second problem');
+  // A fine box's one health fact: its fullest disk, and its swap once it's half used.
+  assert.equal(rows.find((r) => r.label === 'thor').detail, 'Hosts houses · disk 72% · swap 70%');
+  // The headline counts them, every box's, worst first.
+  const h = section(p, 'status').blocks[0];
+  assert.deepEqual([h.tone, h.text], ['bad', 'Unit jobs.service on odin failed (and 1 more)']);
+  assert.match(h.detail, /^Odin is short of memory\./);
+  // Look, on an alert in the Inbox, opens the box's own page.
+  const looks = manifest(env).asks.filter((a) => a.kind === 'alert');
+  assert.ok(looks.length >= 2);
+  for (const a of looks) assert.equal(a.page, `box/${odin}`, a.text);
+  // A box's action by its name comes back to its page by id.
+  assert.equal(act(env, fx, { action: 'box-watch', fields: { name: 'thor', always_on: 'on' } }).page, `box/${thor}`);
+  assert.equal(page(env, { path: 'box/loom-nope' }).title, 'Not found');
+  // loom's own box's page doesn't capitalise loom.
+  assert.match(page(env, { path: 'box/one' }).intro, /^loom's own/);
+});
+
+test('a box\'s sign-ins and Update now on its own page stay its owner\'s: another household owner sees them, can\'t press', () => {
+  const { env } = setup();
+  writeFileSync(join(env.LOOM_HOME, 'household.json'), JSON.stringify({ v: 1, agents: ['art', 'mark'], members: [{ person: 'alice', agents: '*' }, { person: 'bob', agents: '*' }] }));
+  const owner = { kind: 'owner' };
+  assert.equal(api(env, fx, { caller: { kind: 'piece', subject: 'one' }, path: 'poll', body: { harnesses: { claude: { installed: true, loggedIn: false } } } }).status, 200);
+  assert.equal(api(env, fx, { caller: owner, path: 'box-owner', body: { name: 'one', owner: 'alice' } }).status, 200);
+  const claude = (who) => section(page(env, { path: 'box/one', caller: { kind: 'owner', who } }), 'box-one').blocks[0].rows.find((r) => r.label === 'Claude');
+  assert.equal(claude('alice').act.action, 'login-start');
+  assert.equal(claude('bob').act, undefined);
+  assert.equal(act(env, fx, { action: 'login-start', fields: { box: 'one', harness: 'claude' }, caller: { kind: 'owner', who: 'bob' } }).ok, false);
+});
+
 test('Boxes is a status screen: a headline in words and tiles first; a body host is named, never its command', () => {
   const { env } = setup();
   // A body host's house: before, its row read "loom-runtime body-host --piece runtime --host-key …".
@@ -44,11 +159,16 @@ test('Boxes is a status screen: a headline in words and tiles first; a body host
   assert.equal(stats.type, 'stats');
   assert.match(health.text, /^1 box up · 0 houses running$/);
   assert.deepEqual(stats.items.slice(0, 3).map((x) => x.label), ['Boxes', 'Houses', 'Services']);
-  const houses = section(p, 'box-one').blocks.find((b) => b.type === 'panel' && /^Houses/.test(b.title ?? '')).rows;
+  // The box's houses are on its own page, a tap from its row.
+  assert.equal(section(p, 'boxes').blocks[0].rows[0].page, 'box/one');
+  const bp = page(env, { path: 'box/one' });
+  valid('a box', bp);
+  const houses = section(bp, 'box-one').blocks.find((b) => b.type === 'panel' && /^Houses/.test(b.title ?? '')).rows;
   assert.deepEqual(houses.map((r) => [r.label, r.value, r.agent]), [["Art's body host", 'Waiting for a box', 'art']]);
   // The command and the id are a tap away, the boot key never anywhere.
   assert.match(JSON.stringify(houses[0].sheet), /body-host --piece runtime --host-key …/);
   assert.ok(!JSON.stringify(p).includes('f'.repeat(32)));
+  assert.ok(!JSON.stringify(bp).includes('f'.repeat(32)));
   // Something wrong leads the headline: a box asking to join.
   const j = api(env, fx, { caller: { kind: 'stranger', address: '10.0.0.9' }, path: 'join-request', body: { name: 'thor', proof_hash: 'a'.repeat(64) } });
   assert.equal(j.status, 200, JSON.stringify(j.body));

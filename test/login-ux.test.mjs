@@ -37,7 +37,7 @@ const loginPage = (id) => page(env, { path: `login/${id}` });
 /** The sign-in section's blocks, and the callout that leads it. */
 const blocksOf = (p) => p.sections[0].blocks;
 const calloutOf = (p) => blocksOf(p).find((b) => b.type === 'callout');
-const boxCard = () => page(env, { path: '' }).sections.find((x) => x.id === 'box-one');
+const boxCard = () => page(env, { path: 'box/one' }).sections.find((x) => x.id === 'box-one');
 // The card's panel: a row per thing (State, Machine, Runtime, each harness), its state in words.
 const rowsOf = (card) => card.blocks.find((b) => b.type === 'panel' && b.rows.some((i) => i.label === 'Claude')).rows;
 
@@ -233,7 +233,7 @@ test('the box\'s card: its runtime against loom\'s (one source: ownCommit), upda
   // A box of its own (not loom's own machine, which runs loom's runtime by definition), so it can lag.
   const thor = ok(control.api(env, fx, { caller: owner, path: 'add-box', body: { name: 'thor', mayHost: 'art' } })).box;
   const boxCall = (path, body = {}) => control.api(env, fx, { caller: { kind: 'piece', subject: thor }, path, body });
-  const boxCard = () => ui.page(env, { path: '' }).sections.find((x) => x.id === `box-${thor}`);
+  const boxCard = () => ui.page(env, { path: `box/${thor}` }).sections.find((x) => x.id === `box-${thor}`);
   const rows = () => boxCard().blocks.find((b) => b.type === 'panel').rows;
   const runtimeRow = () => rows().find((i) => i.label === 'Runtime');
   const sheetBlock = (row, type) => row.sheet?.blocks.find((b) => b.type === type);
@@ -275,7 +275,7 @@ test('the box\'s card: its runtime against loom\'s (one source: ownCommit), upda
   const claude = rows().find((i) => i.label === 'Claude');
   assert.deepEqual([claude.value, claude.detail, claude.act.label], ['Logged in', 'claude.ai, Max', 'Log in again']);
   // A dev checkout (this repo's own code) has no commit: "loom's version unknown", nothing to press.
-  const dev = page(env, { path: '' }).sections.find((x) => x.id === `box-${thor}`).blocks.find((b) => b.type === 'panel').rows.find((i) => i.label === 'Runtime');
+  const dev = page(env, { path: `box/${thor}` }).sections.find((x) => x.id === `box-${thor}`).blocks.find((b) => b.type === 'panel').rows.find((i) => i.label === 'Runtime');
   assert.deepEqual([dev.value, dev.act], ['Can\'t compare: loom\'s version is unknown', undefined]);
 });
 
@@ -297,7 +297,7 @@ test('a box\'s logins and Update now are its owner\'s: another household owner g
   assert.equal(act(env, fx, { action: 'box-update-now', fields: { name: 'one' }, caller: bob }).ok, false);
   ok(as(alice, 'box-update-now', { name: 'one' }));
   // Bob sees the box's card, with nothing to press on it.
-  const claudeRow = (c) => page(env, { path: '', caller: c }).sections.find((x) => x.id === 'box-one').blocks.find((b) => b.type === 'panel').rows.find((r) => r.label === 'Claude');
+  const claudeRow = (c) => page(env, { path: 'box/one', caller: c }).sections.find((x) => x.id === 'box-one').blocks.find((b) => b.type === 'panel').rows.find((r) => r.label === 'Claude');
   ok(as(alice, 'login-cancel', { id: l.id }));
   ok(boxCall('poll', {}));
   assert.equal(claudeRow(bob).act, undefined);

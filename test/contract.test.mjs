@@ -41,6 +41,10 @@ test('the manifest, both pages and every action result are valid page vocabulary
   api(env, fx, { caller: one, path: 'poll', body: { boot: { id: `${K}:2`, kernel: K, up: 9 }, units: { at: '', units: [{ unit: 'a.service', scope: 'user', state: 'failed', log: ['l1'] }] } } });
   check('full manifest', vocab.parseManifest(manifest(env)));
   check('full page', vocab.parsePage(page(env, { path: '' })));
+  // A box's own page: its watch, boot and failing units with their journal sheets moved there off the index.
+  check('a box page', vocab.parsePage(page(env, { path: 'box/one' })));
+  check('a box that isn\'t there', vocab.parsePage(page(env, { path: 'box/nope' })));
+  for (const a of manifest(env).asks.filter((x) => x.kind === 'alert')) assert.equal(a.page, 'box/one', `${a.text}: Look opens the box's page`);
   check('full agents page', vocab.parsePage(page(env, { path: 'agents' })));
   check("art's Houses tab", vocab.parsePage(page({ ...env, LOOM_SCOPE: 'art' }, { path: '' })));
   check("an agent owner's Houses tab", vocab.parsePage(page({ ...env, LOOM_SCOPE: 'art' }, { path: '', caller: { kind: 'owner', agents: ['art'] } })));
