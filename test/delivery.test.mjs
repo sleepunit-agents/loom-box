@@ -454,7 +454,11 @@ test('H. two plans at once start one body; an op that outlived its marker can\'t
   const slowId = w.log.find((l) => l[0] === 'start' && plain(l[2]).endsWith('slow one'))[1];
   assert.ok(w.log.some((l) => l[0] === 'end' && l[1] === slowId), 'its body was ended');
   await tick(w.env, w.o);
-  assert.ok(w.log.some((l) => l[0] === 'feed' && l[1] === owner.split(':')[1] && plain(l[2]) === 'loren: slow one'), 'its message went to the conversation\'s body');
+  // Its message went to the conversation's body, once: given back when its marker expired, so in that body's brief
+  // (t-1853), and not fed to it again when the late op finished.
+  const ownerStart = w.log.find((l) => l[0] === 'start' && l[1] === owner.split(':')[1]);
+  assert.match(plain(ownerStart[2]), /loren: slow one\n[\s\S]*loren: fast one$/, 'its message went to the conversation\'s body');
+  assert.equal(w.log.filter((l) => l[0] === 'feed').length, 0, 'once');
 });
 
 test('I. a conversation id from core is checked before it names any path', async () => {
@@ -624,6 +628,61 @@ test('a body that fails to start is the runtime\'s to retry, on its tick, with b
   assert.ok(w.log.find((l) => l[0] === 'start')[2].endsWith('Your lane is routines/knowledge.md.'));
   assert.deepEqual([Object.values(c.outcomes)[0].body, c.startFails, c.retryAt, c.queue.length], ['started', undefined, undefined, 0]);
   assert.equal(w.core.turns.filter((t) => t.conversation === cv).length, 1, 'one wake turn: retrying wrote nothing more');
+});
+
+test('a start whose process died (the runtime restarted under it) leaves its messages queued: the tick starts them, once (t-1853)', async () => {
+  const w = world();
+  const venues = { ...w.o.venues(), wake: { kind: 'scheduled', piece: 'loom' } };
+  // The house is slow to come up: the start is still waiting on it when its process is killed.
+  const hung = { ...w.runner, start: () => new Promise(() => {}) };
+  const o = { ...w.o, venues: () => venues };
+  const wake = { source: 'clock', id: 'w-a4a8ed', agent: 'art', venue: 'wake', place: 'lane:backup', label: 'backup', from: { kind: 'schedule' }, kind: 'wake', at: w.clock.now().toISOString(), text: 'Resume the Drive backup: it was approved.' };
+  const a = await deliver(w.env, wake, { ...o, runner: () => hung });
+  assert.deepEqual([a.body, a.reason], ['queued', 'its body is still starting']);
+  const cv = cvOf('art', 'wake', 'lane:backup');
+  // The worker is gone (loom-http-local restarted at 12:10:45, h-971 was 2 s old): its marker names a dead process.
+  const dead = spawnSync(process.execPath, ['-e', '0']).pid;
+  const path = join(deliveryDir(w.env), 'conversations', `${cv}.json`);
+  const c0 = JSON.parse(readFileSync(path, 'utf-8'));
+  writeFileSync(path, JSON.stringify({ ...c0, starting: { ...c0.starting, pid: dead } }));
+  // The runtime's tick, after: the wake still reaches a body (before, it was gone with the worker's memory).
+  w.clock.advance(60_000);
+  await tick(w.env, o);
+  const starts = w.log.filter((l) => l[0] === 'start');
+  assert.equal(starts.length, 1, 'the dead start\'s wake is started again');
+  assert.ok(starts[0][2].endsWith('Resume the Drive backup: it was approved.'));
+  const c = loadConv(w.env, cv);
+  assert.deepEqual([Object.values(c.outcomes)[0].body, c.queue.length, c.starting], ['started', 0, undefined]);
+  w.clock.advance(60_000);
+  await tick(w.env, o);
+  assert.equal(w.log.filter((l) => l[0] === 'start').length, 1, 'once');
+  assert.equal(w.core.turns.filter((t) => t.conversation === cv).length, 1, 'one wake turn: nothing written again');
+});
+
+test('a start that outlived its marker and finishes late: its messages, started again since, aren\'t given to a body again (t-1853)', async () => {
+  const w = world();
+  const venues = { ...w.o.venues(), wake: { kind: 'scheduled', piece: 'loom' } };
+  const o = { ...w.o, venues: () => venues };
+  let finish;
+  const slow = { ...w.runner, start: (oo) => new Promise((res) => { finish = () => res(w.runner.start(oo)); }) };
+  const wake = { source: 'clock', id: 'w-5be092', agent: 'art', venue: 'wake', place: 'lane:backup', label: 'backup', from: { kind: 'schedule' }, kind: 'wake', at: w.clock.now().toISOString(), text: 'Resume the Drive backup.' };
+  let drained;
+  await deliver(w.env, wake, { ...o, runner: () => slow, onDrain: (p) => { drained = p; } });
+  const cv = cvOf('art', 'wake', 'lane:backup');
+  // Past its time (4 min): the tick gives it up and starts the wake again.
+  w.clock.advance(241_000);
+  await tick(w.env, o);
+  assert.equal(w.log.filter((l) => l[0] === 'start').length, 1);
+  const body = loadConv(w.env, cv).body;
+  // The first start comes back at last: its body isn't the conversation's, and the wake goes nowhere again.
+  finish();
+  await drained;
+  await tick(w.env, o);
+  const c = loadConv(w.env, cv);
+  assert.equal(w.log.filter((l) => l[0] === 'start').length, 2, 'the late one started, and nothing after');
+  assert.deepEqual(w.log.filter((l) => l[0] === 'feed'), [], 'nor fed again to the body that has it');
+  assert.deepEqual([c.body, c.queue.length], [body, 0]);
+  assert.ok(w.log.some((l) => l[0] === 'end'), 'the late body is ended');
 });
 
 test('a body that never starts: given up after its tries, with a failed note on the conversation and a notice for the owner (t-1744)', async () => {

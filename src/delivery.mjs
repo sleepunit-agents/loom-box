@@ -755,6 +755,19 @@ const isStarting = (c, now) => !!c.starting && alive(c.starting.pid) && now - c.
 /** A marker of one op's own: only that op clears it (H: an op that outlived its marker can't clear the next one's). */
 const mark = (now) => ({ pid: process.pid, since: now, op: randomBytes(6).toString('hex') });
 const ours = (c, op) => !!c?.starting && c.starting.op === op.mark;
+/**
+ * A start or resume given up (its process died: the runtime restarted under it, t-1853): what it took off the queue
+ * goes back on it, the marker only having held it. A message only in that process's memory (no age) is gone, and said so.
+ */
+function abandon(c, now) {
+  const msgs = c.starting?.msgs ?? [];
+  delete c.starting;
+  const lost = msgs.filter((x) => !x.sealed).map((x) => x.key);
+  if (lost.length) outcome(c, lost, { body: 'failed', reason: 'its start was cut off, and the runtime can\'t keep its text to try again (no age)' }, now);
+  requeue(c, msgs.filter((x) => x.sealed));
+}
+/** What an op took that's still its own: not given back by abandon() since (another op has it now, or a body took it). */
+const stillMine = (c, msgs) => msgs.filter((x) => !c.starting?.msgs?.some((y) => y.key === x.key) && !['started', 'resumed', 'fed'].includes(c.outcomes?.[x.key]?.body));
 
 /** An agent's bodies, for capacity: busy (mid-turn, or starting) and warm (busy, or idle and still up). */
 function census(env, agent, d, now) {
@@ -883,10 +896,12 @@ function plan(env, cv, d, mem) {
   };
   if (c.starting) {
     if (isStarting(c, now)) return wait('its body is starting');
-    delete c.starting;
+    abandon(c, now);
   }
   const take = () => { const q = c.queue; c.queue = []; delete c.waiting; return q; };
-  const begin = (op) => { c.starting = mark(now); saveConv(env, c); return { cv, mark: c.starting.op, ...op }; };
+  // What a start or resume takes off the queue is kept with its marker until it's done: a process that dies holding it
+  // (the runtime restarted under it) leaves it to go back on the queue (abandon), never only in that process's memory.
+  const begin = (op) => { c.starting = { ...mark(now), ...(op.msgs?.length ? { msgs: op.msgs } : {}) }; saveConv(env, c); return { cv, mark: c.starting.op, ...op }; };
   const st = statusOf(env, c, d);
   if (st === 'working') {
     // A guest's message never reaches a body that isn't a guest venue's (its tools aren't narrowed, its brief has no
@@ -1287,8 +1302,9 @@ async function execute(env, op, d, mem) {
         const c = loadConv(env, op.cv);
         if (!c) return;
         delete c.slot;
+        const msgs = ours(c, op) ? op.msgs : stillMine(c, op.msgs);
         if (ours(c, op)) delete c.starting;
-        requeue(c, op.msgs);
+        requeue(c, msgs);
         saveConv(env, c);
       });
       return;
@@ -1340,7 +1356,7 @@ async function execute(env, op, d, mem) {
       if (!ours(c, op)) {
         // This op outlived its marker (another took the conversation): its body isn't the conversation's. Its messages
         // go back on the queue, for whichever body is.
-        requeue(c, [...op.msgs, ...pending]);
+        requeue(c, [...stillMine(c, op.msgs), ...pending]);
         saveConv(env, c);
         return false;
       }
@@ -1404,13 +1420,15 @@ async function execute(env, op, d, mem) {
     locked(env, () => {
       const c = loadConv(env, op.cv);
       if (!c) return;
+      // An op that outlived its marker: what abandon() gave back since is another op's now, never tried twice.
+      const msgs = ours(c, op) ? op.msgs : stillMine(c, op.msgs);
       if (ours(c, op)) delete c.starting;
       if ((way?.how ?? op.type) === 'resume') {
         // A slot that won't resume is no slot: cleared, and the messages go back for a fresh body, in this same drain.
         // A home slot that won't is no home either.
         rmSync(way?.file ?? slotFile(env, op.cv), { force: true });
         if (way?.home) delete c.home; else delete c.slot;
-        requeue(c, op.msgs);
+        requeue(c, msgs);
       } else {
         // A body that fails to start: the turn stands, and the runtime tries again on its tick, after a wait that
         // grows. Only a message it keeps sealed can wait; one it can't (no age) is failed now.
@@ -1423,8 +1441,8 @@ async function execute(env, op, d, mem) {
         else logRun(c, { run: `start-${randomBytes(4).toString('hex')}`, at: now(), end: now(), ...causeOf(op.msgs), batch, fail: `it couldn't start: ${reason}` });
         const delays = retryDelaysOf(env);
         const tries = (c.startFails ?? 0) + 1;
-        const keep = op.msgs.filter((x) => x.sealed);
-        const lost = op.msgs.filter((x) => !x.sealed).map((x) => x.key);
+        const keep = msgs.filter((x) => x.sealed);
+        const lost = msgs.filter((x) => !x.sealed).map((x) => x.key);
         if (lost.length) outcome(c, lost, { body: 'failed', reason: `${reason}, and the runtime can't keep its text to try again (no age)` }, now());
         if (keep.length && tries <= delays.length) {
           c.startFails = tries;
@@ -1732,7 +1750,7 @@ export async function tick(env, o = {}, only, mem = new Map()) {
   locked(env, () => {
     for (const c of listConvs(env)) {
       let dirty = false;
-      if (c.starting && !isStarting(c, now)) { delete c.starting; dirty = true; }
+      if (c.starting && !isStarting(c, now)) { abandon(c, now); dirty = true; }
       if (!c.starting && c.body) {
         let st = statusOf(env, c, d);
         if (st === 'working') {
