@@ -14,9 +14,9 @@
 // A board holds no message text: nowlog never writes any (its own tests pin it).
 //
 // What the runtime shows of it: on its page, the Now board (the model accounts' quota, the old status board's tiles,
-// and a row per agent, its bridges and bodies in words; a tap opens now/<agent>: its bridges, who they're talking with,
-// what waits and why); in its manifest, a bridge that's
-// actually down (an alert on loom's Inbox), one back after an outage (an FYI) and each agent's `doing` (its card on Home).
+// and a row per agent, its bridges and bodies in words; a tap opens now/<agent>: its bridges, who they're talking
+// with, what waits and why); in its manifest, a bridge that's actually down (an alert on loom's Inbox), one back
+// after an outage (an FYI) and each agent's `doing` (its card on Home).
 //
 // A bridge's state (bridgeStatus; Jonathan, 2026-11-03: notify when it's actually down, not on every blip):
 //
@@ -401,29 +401,32 @@ export function nowPage(env, { usage = [], nowS = Date.now() / 1000, state = und
   const meters = windows.map(({ u, w, v }) => ({ label: `${u.label} · ${windowName(w)}`, value: v, detail: `${Math.round(v * 100)}%${u.resets?.[w] ? `, resets ${clock(u.resets[w])}` : ''}`, ...toneOfUse(v) }));
   sections.push({ id: 'quota', title: 'Quota', side: true, blocks: [meters.length ? { type: 'meter', items: meters.slice(0, 12) } : { type: 'text', tone: 'muted', text: 'No account has reported its usage yet.' }] });
   // A row per agent, what's wrong first: its bridges and its bodies in words, a tap from its own board (now/<agent>).
-  // One section, whatever the count: a page holds ten, and a section per agent dropped the eighth one on (t-1869).
-  const rows = Object.entries(all).map(([agent, bs]) => agentRow(agent, bs, nowS)).sort((x, y) => RANK[x.tone] - RANK[y.tone]);
-  sections.push({ id: 'agents', title: 'Agents', blocks: [rows.length ? { type: 'panel', rows } : { type: 'text', tone: 'muted', text: 'No agent\'s bridge has reported yet.' }] });
-  return { title: 'Now', intro: 'Live state: each agent\'s bridges, who they\'re talking with and what waits. Nothing anyone said is kept here.', sections };
+  // One section, whatever the count: a page holds ten, and a section per agent broke Now at the ninth (t-1869). A panel
+  // holds ROWS_MAX rows (loom's vocab, LIMITS.items); past that the rest are counted, never silently dropped.
+  const rows = Object.entries(all).map(([agent, bs]) => agentSummary(agent, bs, nowS)).sort((x, y) => RANK[x.tone] - RANK[y.tone]);
+  sections.push({ id: 'agents', title: 'Agents', blocks: rows.length
+    ? [{ type: 'panel', rows: rows.slice(0, ROWS_MAX) }, ...(rows.length > ROWS_MAX ? [{ type: 'text', tone: 'muted', text: `And ${rows.length - ROWS_MAX} more agents, fine ones last.` }] : [])]
+    : [{ type: 'text', tone: 'muted', text: 'No agent\'s bridge has reported yet.' }] });
+  return { title: 'Now', intro: 'Live state: a row per agent, its bridges and bodies; tap one for who it\'s talking with and what waits. Nothing anyone said is kept here.', sections };
 }
 
 const RANK = { bad: 0, warn: 1, ok: 2, muted: 3 };
+const ROWS_MAX = 200;
 const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
-/** What an agent's bridges are, worst first: each one's state in words with its tone, from bridgeRow. */
-function bridgeTrouble(bs, nowS) {
+/** An agent's bridges, worst first: each with its row (badge, tone, why) from bridgeRow. */
+function rankBridges(bs, nowS) {
   return bs.map((b) => ({ b, ...bridgeRow(b, nowS) })).sort((x, y) => RANK[x.tone] - RANK[y.tone]);
 }
 
 /** A bridge's state as a few words for an agent's row: "Discord bridge is down". */
 function bridgeWords(b) {
   const n = `${cap(b.name)} bridge`;
-  return { looping: `${n} keeps restarting`, dark: `${n} is down`, restarting: `${n} is restarting`, down: `${n} is off`, late: `${n} is late` }[b.state] ?? `${n} is live`;
+  return { looping: `${n} keeps restarting`, dark: `${n} is down`, restarting: `${n} is restarting`, down: `${n} is off`, late: `${n} is late`, live: `${n} is live` }[b.state] ?? `${n} is ${b.state}`;
 }
 
-/** An agent's row on the Now page: its bridges in a few words (the worst first), then its bodies: who they're with, what waits. */
-function agentRow(agent, bs, nowS) {
-  const ranked = bridgeTrouble(bs, nowS);
+/** An agent in a line (its row on Now, its headline on its own board): its bridges' worst state, then its bodies. */
+function agentSummary(agent, bs, nowS, ranked = rankBridges(bs, nowS)) {
   const worst = ranked[0];
   const troubled = ranked.filter((r) => r.tone === 'bad' || r.tone === 'warn');
   const live = bs.filter((b) => b.state === 'live' || b.state === 'late').length;
@@ -436,7 +439,7 @@ function agentRow(agent, bs, nowS) {
   const current = bs.filter((b) => !b.stale);
   const talk = current.reduce((n, b) => n + b.talking.length, 0);
   const wait = current.reduce((n, b) => n + b.waiting.length, 0);
-  const slots = current.filter((b) => b.slots && Number.isFinite(Number(b.slots.cap)));
+  const slots = current.filter((b) => b.slots && Number(b.slots.cap) > 0);
   const used = slots.reduce((n, b) => n + (Number(b.slots.used) || 0), 0), capN = slots.reduce((n, b) => n + Number(b.slots.cap), 0);
   const bodies = current.length
     ? [talk ? `${plural(talk, 'body', 'bodies')} talking` : 'No body talking', ...(wait ? [`${wait} waiting for a body`] : []), ...(slots.length ? [`${used} of ${capN} slots in use`] : [])].join(' · ')
@@ -451,12 +454,13 @@ export function nowAgentPage(env, agent, { nowS = Date.now() / 1000, state = und
   const bs = all[agent];
   const back = { type: 'link', text: 'Back to Now', page: 'now' };
   if (!bs) return { title: 'Not found', sections: [{ id: 'gone', blocks: [{ type: 'text', tone: 'muted', text: `No bridge of ${cap(agent)}'s has reported here.` }, back] }] };
-  const row = agentRow(agent, bs, nowS);
-  const rows = bridgeTrouble(bs, nowS).map(({ b, ...r }) => ({ text: `${cap(b.name)} bridge`, agent, ...r }));
+  const ranked = rankBridges(bs, nowS);
+  const sum = agentSummary(agent, bs, nowS, ranked);
+  const rows = ranked.map(({ b, ...r }) => ({ text: `${cap(b.name)} bridge`, agent, ...r }));
   const talk = bs.filter((b) => !b.stale).flatMap((b) => b.talking.map((t) => ({ text: withWhom(t), meta: b.name })));
   const wait = bs.filter((b) => !b.stale).flatMap((b) => b.waiting.map((w) => ({ text: withWhom(w), meta: [b.name, why(w)].filter(Boolean).join(' · '), tone: 'warn' })));
   return { title: `${cap(agent)}'s bridges`, sections: [
-    { id: 'status', blocks: [{ type: 'health', tone: row.tone === 'muted' ? 'muted' : row.tone, text: row.value, detail: row.detail }] },
+    { id: 'status', blocks: [{ type: 'health', tone: sum.tone, text: sum.value, detail: sum.detail }] },
     { id: 'bridges', title: 'Bridges', blocks: [{ type: 'list', items: rows }] },
     ...(talk.length ? [{ id: 'talking', title: 'Talking now', blocks: [{ type: 'list', items: talk.slice(0, 20) }] }] : []),
     ...(wait.length ? [{ id: 'waiting', title: 'Waiting', blocks: [{ type: 'list', items: wait.slice(0, 20) }] }] : []),

@@ -131,6 +131,12 @@ describe('the board on the runtime\'s page and in its manifest', () => {
     assert.deepEqual(a.sections.map((s) => s.id), ['status', 'bridges', 'talking', 'back']);
     assert.equal(a.sections[2].blocks[0].items[0].text, 'Grace Aquino');
     assert.equal(page(env, { path: 'now/nobody' }).title, 'Not found');
+    // The household owner's, as Now is: an agent owner gets neither, not even their own agent's board.
+    const markOwner = { kind: 'owner', who: 'pat', agents: ['mark'] };
+    for (const path of ['now', 'now/art', 'now/mark']) {
+      const got = page(env, { path, caller: markOwner });
+      assert.deepEqual([got.title, got.sections.length], ['Not found', 0], path);
+    }
   });
 
   test('twelve agents: every one has its row (a page holds ten sections; a section each dropped the last ones)', async () => {
