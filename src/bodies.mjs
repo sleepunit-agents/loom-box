@@ -67,7 +67,8 @@ export async function startBody(env, { agent, brief: b, venue, venueKind, prefer
   if (typeof venue !== 'string' || !/^[a-z][a-z0-9-]{0,39}$/.test(venue)) fail('which venue (wake, relay, session, discord, slack, …)');
   const pick = await resolveFor(env, { agent, venue, venueKind, prefer, accounts: d.accounts, now: d.now(), fetchImpl: d.fetchImpl });
   const runner = d.runner(pick.harness, !!local);
-  const body = await runner.start({ agent, brief: forRunner(runner, text, cwd), model: pick.model, cwd, env: o.bodyEnv, deny });
+  // A Comms thread's body (venue loom) has its tool steps read as activity cards (activity.mjs); no other venue's is.
+  const body = await runner.start({ agent, brief: forRunner(runner, text, cwd), model: pick.model, cwd, env: o.bodyEnv, deny, ...(venue === 'loom' ? { activity: true } : {}) });
   const rec = {
     body: `${body.harness}:${body.id}`, agent, venue, kind: pick.kind, ...(place ? { place: String(place).slice(0, 200) } : {}),
     // What it was started with of its rules (tool names, never the brief): for the owner's `loom runtime bodies`.
@@ -101,7 +102,7 @@ export async function resumeBody(env, { body: ref, slot, agent, venue, venueKind
   const pick = await resolveFor(env, { agent: who, venue: where, venueKind: rec?.kind ?? venueKind, prefer: [...prefer, ...(rec ? [rec.model] : [])], harness: slot.harness, accounts: d.accounts, now: d.now(), fetchImpl: d.fetchImpl });
   const here = !!(local ?? rec?.local);
   const runner = d.runner(slot.harness, here);
-  const body = await runner.resume(slot, { agent: who, brief: forRunner(runner, brief(b), cwd), model: pick.model, cwd, env: o.bodyEnv, deny, ...(files ? { files } : {}) });
+  const body = await runner.resume(slot, { agent: who, brief: forRunner(runner, brief(b), cwd), model: pick.model, cwd, env: o.bodyEnv, deny, ...(files ? { files } : {}), ...(venue === 'loom' ? { activity: true } : {}) });
   const next = {
     body: `${body.harness}:${body.id}`, agent: who, venue: where, kind: pick.kind, ...(rec?.place ? { place: rec.place } : {}),
     ...(deny.length ? { deny: [...deny] } : {}), ...(guest ? { guest: true } : {}), ...(here ? { local: true } : {}),

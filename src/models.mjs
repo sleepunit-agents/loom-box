@@ -23,7 +23,7 @@ const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:/\[\]-]{0,79}$/;
 const AGENT = /^[a-z][a-z0-9-]{0,39}$/;
 export const VENUE_KINDS = ['live', 'scheduled', 'agent'];
 /** The venues whose kind the runtime knows without being told (conversations.md: core's own, and the adapters'). */
-export const VENUE_KIND = { session: 'live', discord: 'live', slack: 'live', wake: 'scheduled', relay: 'agent' };
+export const VENUE_KIND = { session: 'live', discord: 'live', slack: 'live', loom: 'live', wake: 'scheduled', relay: 'agent' };
 /** How much higher another model's graded value must be to demote the preference (the spec's 1.0). */
 export const DEMOTE_BY = 1.0;
 /** The scorecard window the resolver reads, and the fewest graded samples a model needs in it to count. */

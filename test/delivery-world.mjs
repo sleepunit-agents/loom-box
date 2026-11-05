@@ -85,6 +85,15 @@ export function fakeCore(log, now = () => new Date()) {
   const keys = new Map();
   const c = {
     turns: [], audits: [], down: false, auditDown: false,
+    // Venue loom's adapter (loom src/comms.ts): its calls, and what it answers (a test sets commsAnswer).
+    commsCalls: [], commsAnswer: null, activityCalls: [],
+    async comms(b) {
+      c.commsCalls.push(b);
+      log.push(['comms', b.op, b.place]);
+      if (c.commsAnswer) return c.commsAnswer(b);
+      return b.op === 'post' ? { ok: true, id: String(c.commsCalls.length) } : b.op === 'describe' ? { ok: true, readers: ['jonathan'], brief: ['A private thread in loom\'s app with your owner, Jonathan. Only they read it.'] } : { ok: true };
+    },
+    async activity(b) { c.activityCalls.push(b); return { ok: true, added: b.cards.length, updated: 0 }; },
     async turn(t) {
       if (c.down) throw new CoreError('core didn\'t answer conversations/turn: connect ECONNREFUSED', 503);
       // Its idempotency key, as core's turn route has it: the same key and turn answer the first write; the same key
@@ -144,7 +153,7 @@ export function world(extra = {}, { inboxDir } = {}) {
   const o = {
     core, runner: () => runner, sealer: testSealer, now: clock.now, warn: () => {},
     accounts: staticAccounts({ accounts: [{ name: 'max', provider: 'anthropic', harness: 'claude', kind: 'login', agents: ['art', 'mark', 'pip'], credentials: [{ kind: 'login', status: 'valid' }], usage: {} }] }),
-    venues: () => ({ slack: { kind: 'live', send: [process.execPath, join(here, 'fake-send.mjs')] }, relay: { kind: 'agent' } }),
+    venues: () => ({ slack: { kind: 'live', send: [process.execPath, join(here, 'fake-send.mjs')] }, relay: { kind: 'agent' }, loom: { kind: 'live', piece: 'loom', adapter: 'core' } }),
     // Who may do what (policy.mjs): no policy, gates that name no one, an adapter that describes every place as an
     // ordinary one and takes every presence call. A test hands in its own.
     policy: () => null,

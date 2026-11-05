@@ -145,6 +145,9 @@ export function cleanAbout(a) {
     readers: Array.isArray(a.readers) ? a.readers.filter((s) => typeof s === 'string' && SLUG.test(s)).slice(0, READERS_MAX) : [],
     notes: Array.isArray(a.notes) ? a.notes.filter((s) => typeof s === 'string' && NOTE.test(s)).slice(0, 8) : [],
     ...(typeof a.pair === 'string' && a.pair.length <= 40 ? { pair: a.pair } : {}),
+    // Lines of words for the body's brief about the place (core's Comms threads: loom docs/specs/comms.md): at most
+    // 3, each one printable line of at most 300.
+    brief: Array.isArray(a.brief) ? a.brief.filter((s) => typeof s === 'string' && s.length >= 1 && s.length <= 300 && !/[\x00-\x1f\x7f]/.test(s)).slice(0, 3) : [],
   };
 }
 
@@ -158,7 +161,7 @@ const keyOf = (guest, deny) => createHash('sha256').update(JSON.stringify([guest
  * `d`: policy(agent) → doc|null; gates(agent) → doc (throws when unreadable); describe() → the adapter's answer for
  * the place (throws when it can't); card(slug) → its text or null. `platform`: the venue has a send (an adapter).
  */
-export async function rulesFor(c, msgs, d, { platform }) {
+export async function rulesFor(c, msgs, d, { platform, core = false }) {
   let pol;
   try { pol = d.policy(c.agent); } catch (e) { throw new RulesError(`${c.agent}'s policy can't be read (${e.message})`); }
   if (pol && policyProblem(pol)) throw new RulesError(`${c.agent}'s policy isn't one: ${policyProblem(pol)}`);
@@ -167,7 +170,9 @@ export async function rulesFor(c, msgs, d, { platform }) {
   try { gates = d.gates(c.agent); } catch (e) {
     // Without the gates, a person's tier is unknown: a platform venue, any message from a person, or one whose tier
     // couldn't be read when it came, gets no body (only the schedule's and an agent's relays go on without them).
-    if (platform || msgs.some((x) => x.from?.kind === 'person' || x.tierUnread)) throw new RulesError(`${c.agent}'s gates can't be read (${e.message}): no body for a person's message without them`);
+    // A Comms thread (a venue core adapts) whose messages are all its owner's needs no gates: its sender is tier 3.
+    const ownersOnly = core && msgs.every((x) => x.owner === true || x.from?.kind !== 'person');
+    if (!ownersOnly && (platform || msgs.some((x) => x.from?.kind === 'person' || x.tierUnread))) throw new RulesError(`${c.agent}'s gates can't be read (${e.message}): no body for a person's message without them`);
   }
   let about = cleanAbout({});
   if (platform) {
@@ -175,7 +180,7 @@ export async function rulesFor(c, msgs, d, { platform }) {
     try { a = await d.describe(); } catch (e) { throw new RulesError(`the ${c.venue} adapter couldn't describe ${c.place} (${e.message})`); }
     about = cleanAbout(a);
   }
-  const senders = msgs.map((x) => ({ x, tier: tierOf(gates, x.from) ?? (Number.isInteger(x.tier) ? x.tier : null) }));
+  const senders = msgs.map((x) => ({ x, tier: x.owner === true ? 3 : tierOf(gates, x.from) ?? (Number.isInteger(x.tier) ? x.tier : null) }));
   const guestSenders = senders.filter((s) => s.tier === 1).map((s) => s.x.from.slug);
   const owned = pol.guest_places?.[c.venue]?.[c.place];
   const venueGuests = guestsOf(gates, about.venue);
@@ -214,6 +219,7 @@ export async function rulesFor(c, msgs, d, { platform }) {
     text(`\nThis is a peer venue: other agents talk here${peers.length ? ` (${peers.join('; ')})` : ''}${about.pair ? `; it's a pair channel with ${about.pair}` : ''}. A person's message that's only "stop" ends your work here.\n`);
     if (briefs.peer) file(briefs.peer, 'a peer venue\'s rules');
   }
+  if (about.brief?.length) text(`\n${about.brief.join('\n')}\n`);
   if (briefs.venues?.[c.venue]) { text('\n'); file(briefs.venues[c.venue], `your conduct on ${c.venue}`); }
   for (const n of about.notes) if (briefs.notes?.[n]) file(briefs.notes[n], `${n}'s notes`);
   for (const t of uniq(senders.map((s) => s.tier).filter((t) => t !== null)).sort()) if (briefs.tiers?.[String(t)]) file(briefs.tiers[String(t)], `tier ${t}'s notes`);

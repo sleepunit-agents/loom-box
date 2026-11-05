@@ -32,6 +32,7 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { keptReading } from './statusline.mjs';
+import { claudeCards, codexCards } from './activity.mjs';
 import { lastRateLimit, tailOf } from './logins.mjs';
 
 export class RunnerError extends Error {}
@@ -201,6 +202,20 @@ export class ClaudeRunner {
     return session ? { harness: 'claude', session } : null;
   }
 
+  /**
+   * Its tool steps as activity cards (activity.mjs), from its session's transcript: only ever asked for a body in a
+   * Comms thread. Tool-use ids are unique across sessions, so they need no prefix.
+   */
+  activity(body) {
+    const session = this.slotOf(body)?.session;
+    if (typeof session !== 'string' || !SESSION.test(session)) return [];
+    for (const p of dirs(this.roots.projects)) {
+      const f = join(this.roots.projects, p, `${session}.jsonl`);
+      if (existsSync(f)) return claudeCards(lines(f));
+    }
+    return [];
+  }
+
   end(body, env) {
     this.run(this.claude, ['stop', body.id], { env, stdio: 'ignore', timeout: 20_000 });
     this.inbox?.close(body.id);
@@ -296,6 +311,9 @@ export class CodexRunner {
     }
     return null;
   }
+
+  /** Its tool steps as activity cards (activity.mjs), from its events: item ids repeat per run, so they carry its id. */
+  activity(body) { return codexCards(this.events(body.id), `${body.id}:`); }
 
   events(id) {
     try {
