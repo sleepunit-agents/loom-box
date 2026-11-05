@@ -1,0 +1,6 @@
+{"type":"item.started","item":{"id":"item_3","type":"mcp_tool_call","server":"loom","tool":"recall","arguments":{"query":"secret plans"},"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_3","type":"mcp_tool_call","server":"loom","tool":"recall","arguments":{"query":"secret plans"},"result":{"content":[{"type":"text","text":"RESULT-THAT-MUST-NOT-SHOW"}]},"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_4","type":"file_change","changes":[{"path":"/home/art/repo/src/a.ts","kind":"update","diff":"+DIFF-THAT-MUST-NOT-SHOW"}],"status":"completed"}}
+{"type":"item.started","item":{"id":"item_5","type":"web_search","query":"how comm screens look"}}
+{"type":"item.completed","item":{"id":"item_5","type":"web_search","query":"how comm screens look"}}
+{"type":"item.completed","item":{"id":"item_6","type":"reasoning","text":"REASONING-THAT-MUST-NOT-SHOW"}}

@@ -111,7 +111,9 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
       if (status === 'working') delete b.turn;
       else if ((status === 'idle' || status === 'ended') && b.turn === undefined) { try { b.turn = r.turn?.({ id, ...(b.slot ? { slot: b.slot } : {}) }) ?? null; } catch { b.turn = null; } }
       const turn = status === 'idle' || status === 'ended' ? b.turn : null;
-      bodies[id] = { harness: b.harness, status, ...(slot?.session ? { session: slot.session } : {}), feedable: !!r.inbox, pending, ...(turn ? { turn } : {}) };
+      // A Comms thread's body: its tool steps, the newest 100, read from its harness's own record (activity.mjs).
+      const cards = b.activity ? (() => { try { return (r.activity?.({ id, ...(b.slot ? { slot: b.slot } : {}) }) ?? []).slice(-100); } catch { return []; } })() : null;
+      bodies[id] = { harness: b.harness, status, ...(slot?.session ? { session: slot.session } : {}), feedable: !!r.inbox, pending, ...(turn ? { turn } : {}), ...(cards ? { cards } : {}) };
     }
     await reportUsage(turnsOver);
     const packed = {};
@@ -150,7 +152,7 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
         try {
           if (q.resume) { written = restoreFiles(r, q.files); b = await r.resume({ harness: q.harness, session: q.resume }, o); } else b = await r.start(o);
         } catch (e) { for (const w of written) rmSync(w, { recursive: true, force: true }); throw e; }
-        mine.set(b.id, { harness: q.harness, seen: 'started', ...(b.slot ? { slot: b.slot } : {}), ...(cv ? { cv, key: q.key } : {}) });
+        mine.set(b.id, { harness: q.harness, seen: 'started', ...(b.slot ? { slot: b.slot } : {}), ...(cv ? { cv, key: q.key } : {}), ...(q.activity === true ? { activity: true } : {}) });
         done[rid] = { id: b.id };
         log(`started ${b.id} for ${rid}`);
       } catch (e) { done[rid] = { error: String(e.message).split('\n')[0].slice(0, 300) }; }

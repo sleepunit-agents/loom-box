@@ -1,0 +1,9 @@
+{"type":"thread.started","thread_id":"01a1acf4-5b87-7010-ba5e-ab3df0664dd9"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I’ll run the two commands in order."}}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/usr/bin/bash -lc 'echo hi'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/usr/bin/bash -lc 'echo hi'","aggregated_output":"hi\n","exit_code":0,"status":"completed"}}
+{"type":"item.started","item":{"id":"item_2","type":"command_execution","command":"/usr/bin/bash -lc 'ls /nonexistent-dir'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_2","type":"command_execution","command":"/usr/bin/bash -lc 'ls /nonexistent-dir'","aggregated_output":"ls: cannot access '/nonexistent-dir': No such file or directory\n","exit_code":2,"status":"failed"}}
+{"type":"item.completed","item":{"id":"item_3","type":"agent_message","text":"done"}}
+{"type":"turn.completed","usage":{"input_tokens":42403,"cached_input_tokens":38528,"cache_write_input_tokens":0,"output_tokens":68,"reasoning_output_tokens":0}}

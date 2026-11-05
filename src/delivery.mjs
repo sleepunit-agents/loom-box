@@ -73,6 +73,7 @@ import { RUNS_KEPT, causeOf, detectLoop, textHash } from './loops.mjs';
 import { STUCK_AFTER_MIN, asData, taskComment, taskOf } from './stuck.mjs';
 import { runnerFor } from './runners.mjs';
 import { raiseAlert } from './alerthook.mjs';
+import { changed as changedCards } from './activity.mjs';
 import { keepKey } from './bodyhost.mjs';
 import { readRelays } from './relay.mjs';
 
@@ -119,6 +120,8 @@ const NOTICES_MAX = 20;
 const KINDS = ['message', 'wake'];
 const FROM_KINDS = ['person', 'agent', 'schedule', 'unknown'];
 const VENUE = /^[a-z][a-z0-9-]{0,31}$/;
+/** Core's Comms venue (loom docs/specs/comms.md): its threads are an agent's owners talking with it in loom's app. */
+export const COMMS_VENUE = 'loom';
 const PIECE = /^[a-z][a-z0-9-]{0,39}$/;
 export const CV = /^cv-[0-9a-f]{12}$/;
 
@@ -391,6 +394,34 @@ function adapterCall(argv, c, args, ms) {
  */
 export const recordsOnly = (v) => !v?.send && !v?.orphaned && v?.kind === 'scheduled';
 
+/**
+ * A venue core carries itself (`loom`, Comms threads: loom docs/specs/comms.md): no send argv, `adapter: "core"`. Its
+ * three adapter calls (post, describe, status) go to core's POST /api/loom/comms/adapter with the runtime's token,
+ * under the same limits, with the same answers.
+ */
+export const coreAdapted = (v) => v?.adapter === 'core' && !v?.orphaned;
+/** Whether a venue has somewhere to post: a declared send argv, or core as its adapter. */
+export const posts = (v) => !!v?.send || coreAdapted(v);
+
+/** A venue adapter's call that posts nothing (`--describe`, `--status …`), through its argv or core's route. */
+async function callAdapter(d, v, c, args) {
+  if (!coreAdapted(v)) return d.adapter(v.send, c, args);
+  const body = args[0] === '--describe'
+    ? { op: 'describe' }
+    : { op: 'status', status: args[1], ...(args.includes('--message') ? { messages: args.filter((_, i) => args[i - 1] === '--message') } : {}) };
+  const a = await d.core.comms({ ...body, place: c.place, agent: c.agent });
+  if (a?.ok === true) return a;
+  throw new Error(typeof a?.reason === 'string' ? a.reason.slice(0, 300) : 'core said no');
+}
+
+/** A post through core's adapter route: sendOnce's answer shape. A refusal core gave is answered; no answer isn't. */
+async function coreSend(d, c, text, run) {
+  let a;
+  try { a = await d.core.comms({ op: 'post', place: c.place, agent: c.agent, text, ...(run ? { run } : {}) }); } catch (e) { return { ok: false, answered: false, reason: e.message }; }
+  if (a?.ok === true) return { ok: true, ...(typeof a.id === 'string' && a.id.length <= 200 ? { id: a.id } : {}) };
+  return { ok: false, answered: true, reason: typeof a?.reason === 'string' ? a.reason.slice(0, 300) : 'core said no', ...(a?.permanent === true ? { permanent: true } : {}) };
+}
+
 /** A venue as core has it ({kind, piece, send?}), or undefined: none, or core couldn't say. */
 async function venueOf(d, name) {
   try { return (await d.venues())?.[name]; } catch (e) { d.warn(`core couldn't list the venues: ${e.message}`); return undefined; }
@@ -520,7 +551,11 @@ async function deliverOnce(env, raw, o) {
     // it (plan). A person whose tier can't be read waits for a body that resolves it at its start.
     let tier = null;
     let tierUnread = false;
-    if (m.from.kind === 'person') { try { tier = tierOf(d.gates(m.agent), m.from); } catch { tierUnread = true; } }
+    // A Comms thread's message (venue loom, from core's own source loom) is its owner's: core delivers there only
+    // from a member who owns the agent (loom docs/specs/comms.md), so it's tier 3 and the gates aren't read.
+    const owner = m.venue === COMMS_VENUE && m.source === 'loom' && m.from.kind === 'person';
+    if (owner) tier = 3;
+    else if (m.from.kind === 'person') { try { tier = tierOf(d.gates(m.agent), m.from); } catch { tierUnread = true; } }
     let sealed = null;
     try { sealed = d.sealer.seal(Buffer.from(m.text, 'utf-8')).toString('base64'); } catch (e) { d.warn(`can't seal the message (${e.message}): it goes to the body from memory, and can't wait`); }
     const venueInfo = await venueOf(d, m.venue);
@@ -533,7 +568,7 @@ async function deliverOnce(env, raw, o) {
       if (m.kind === 'wake' && !!c.local !== local) return mismatch(m.place, c.local);
       if (m.label !== undefined) c.label = m.label;
       // A retry after a crash may find its message already queued (or already answered): never twice.
-      if (!c.queue.some((x) => x.key === key) && !c.outcomes?.[key]) c.queue.push({ key, id: m.id, at: m.at, from: m.from, kind: m.kind, ...(local ? { local: true } : {}), ...(tier ? { tier } : {}), ...(tierUnread ? { tierUnread: true } : {}), ...(sealed ? { sealed } : { mem: true }) });
+      if (!c.queue.some((x) => x.key === key) && !c.outcomes?.[key]) c.queue.push({ key, id: m.id, at: m.at, from: m.from, kind: m.kind, ...(local ? { local: true } : {}), ...(tier ? { tier } : {}), ...(owner ? { owner: true } : {}), ...(tierUnread ? { tierUnread: true } : {}), ...(sealed ? { sealed } : { mem: true }) });
       c.last = d.now().toISOString();
       saveConv(env, c);
       return null;
@@ -800,7 +835,7 @@ export async function drain(env, cv, d = depsOf(env), mem = new Map()) {
 /** What policy.mjs's rulesFor reads, for one conversation in its venue. */
 const rulesDeps = (d, v, c) => ({
   policy: d.policy, gates: d.gates, card: d.card,
-  describe: () => (v?.send ? d.adapter(v.send, c, ['--describe']) : {}),
+  describe: () => (posts(v) ? callAdapter(d, v, c, ['--describe']) : {}),
 });
 
 /** Messages that reached a body: the adapter is told, on the drain's way out (announce). */
@@ -819,8 +854,8 @@ async function announce(env, cv, d) {
   if (!c?.acks?.length) return;
   const ids = c.acks;
   const v = await venueOf(d, c.venue);
-  if (v?.send) {
-    try { await d.adapter(v.send, c, ['--status', 'working', ...ids.flatMap((i) => ['--message', i])]); } catch (e) { d.warn(`${c.venue} couldn't show ${cv}'s body at work: ${e.message}`); }
+  if (posts(v)) {
+    try { await callAdapter(d, v, c, ['--status', 'working', ...ids.flatMap((i) => ['--message', i])]); } catch (e) { d.warn(`${c.venue} couldn't show ${cv}'s body at work: ${e.message}`); }
   }
   const now = d.now().getTime();
   locked(env, () => {
@@ -828,7 +863,7 @@ async function announce(env, cv, d) {
     if (!x) return;
     x.acks = (x.acks ?? []).filter((i) => !ids.includes(i));
     if (!x.acks.length) delete x.acks;
-    if (v?.send) x.presence = { since: x.presence?.since ?? now, last: now };
+    if (posts(v)) x.presence = { since: x.presence?.since ?? now, last: now };
     saveConv(env, x);
   });
 }
@@ -840,17 +875,17 @@ async function announce(env, cv, d) {
  */
 async function presencePass(env, c, d, now) {
   const v = await venueOf(d, c.venue);
-  if (!v?.send) { locked(env, () => { const x = loadConv(env, c.conversation); if (x) { delete x.presence; saveConv(env, x); } }); return; }
+  if (!posts(v)) { locked(env, () => { const x = loadConv(env, c.conversation); if (x) { delete x.presence; saveConv(env, x); } }); return; }
   const working = isStarting(c, now) || statusOf(env, c, d) === 'working';
   if (working) {
     if (now - (c.presence.last ?? 0) < PRESENCE_MS) return;
     let a = null;
-    try { a = await d.adapter(v.send, c, ['--status', 'working']); } catch (e) { d.warn(`${c.venue} couldn't show ${c.conversation}'s body at work: ${e.message}`); }
+    try { a = await callAdapter(d, v, c, ['--status', 'working']); } catch (e) { d.warn(`${c.venue} couldn't show ${c.conversation}'s body at work: ${e.message}`); }
     if (a?.stop === true && c.body && !isStarting(c, now)) return stopBody(env, c, d, v);
     locked(env, () => { const x = loadConv(env, c.conversation); if (x?.presence) { x.presence.last = now; saveConv(env, x); } });
     return;
   }
-  try { await d.adapter(v.send, c, ['--status', 'done']); } catch (e) { d.warn(`${c.venue} couldn't clear ${c.conversation}'s presence: ${e.message}`); }
+  try { await callAdapter(d, v, c, ['--status', 'done']); } catch (e) { d.warn(`${c.venue} couldn't clear ${c.conversation}'s presence: ${e.message}`); }
   locked(env, () => { const x = loadConv(env, c.conversation); if (x) { delete x.presence; saveConv(env, x); } });
 }
 
@@ -872,7 +907,26 @@ async function stopBody(env, c, d, v) {
   // What its inbox held when it stopped isn't asked for any more either.
   locked(env, () => { const x = loadConv(env, c.conversation); if (x) { x.queue = []; delete x.presence; delete x.acks; saveConv(env, x); } });
   d.warn(`${c.conversation}: stopped by the stop word`);
-  try { await d.adapter(v.send, c, ['--status', 'done']); } catch { /* best effort */ }
+  try { await callAdapter(d, v, c, ['--status', 'done']); } catch { /* best effort */ }
+}
+
+/**
+ * A Comms thread's body's tool steps (activity.mjs), new or moved since last told, to core's POST
+ * /api/loom/comms/activity. Only for venue loom. A thread core says is gone (409) is told nothing more of them.
+ */
+async function activityPass(env, c, d) {
+  let rec, r;
+  try { rec = readBody(env, c.body); r = d.runner(rec.harness, rec.local); } catch { return; }
+  if (typeof r.activity !== 'function') return;
+  const cards = r.activity(bodyOf(c.body, rec)) ?? [];
+  const { out, next } = changedCards(cards, c.cardsSent ?? {});
+  if (!out.length) return;
+  // Refused for good (no live thread, or a card core won't take): they're marked told, so they aren't sent again.
+  try { await d.core.activity({ conversation: c.conversation, run: c.run, cards: out }); } catch (e) {
+    if (e?.status !== 409 && e?.status !== 400) throw e;
+    d.warn(`${c.conversation}: core took none of ${out.length} activity cards (${e.message}); they're not sent again`);
+  }
+  locked(env, () => { const x = loadConv(env, c.conversation); if (x && x.body === c.body) { x.cardsSent = next; saveConv(env, x); } });
 }
 
 const newRun = () => `run-${randomBytes(6).toString('hex')}`;
@@ -1045,9 +1099,9 @@ async function execute(env, op, d, mem) {
     const msgs = op.msgs.map((x) => ({ ...x, text: open(d, x, mem) })).filter((x) => x.text !== null);
     if (!msgs.length) throw new DeliveryError('its messages\' text is gone');
     const v0 = await venueOf(d, c0.venue);
-    const sends = v0?.send ? 'post' : recordsOnly(v0) ? 'record' : null;
+    const sends = posts(v0) ? 'post' : recordsOnly(v0) ? 'record' : null;
     // Its rules (policy.mjs): what it's told and what it may use. Any that can't be had is no body (fail closed).
-    rules = await rulesFor(c0, msgs.filter((x) => !isNote(x)), rulesDeps(d, v0, c0), { platform: !!v0?.send });
+    rules = await rulesFor(c0, msgs.filter((x) => !isNote(x)), rulesDeps(d, v0, c0), { platform: posts(v0), core: coreAdapted(v0) });
     if (op.type === 'resume' && (op.slot?.rules?.guest ?? false) !== rules.guest) {
       // A session is resumed only under the rules it began with: a guest venue's never as anyone else's, nor the other
       // way. Its slot goes, and its messages go back for a fresh body, in this same drain.
@@ -1403,6 +1457,7 @@ export async function tick(env, o = {}, only, mem = new Map()) {
   });
   for (const op of ops) await execute(env, op, d, new Map());
   for (const c of listConvs(env)) if (c.presence) { try { await presencePass(env, c, d, now); } catch (e) { d.warn(`presence for ${c.conversation}: ${e.message}`); } }
+  for (const c of listConvs(env)) if (c.venue === COMMS_VENUE && c.body && !c.starting) { try { await activityPass(env, c, d); } catch (e) { d.warn(`activity for ${c.conversation}: ${e.message}`); } }
   for (const c of listConvs(env)) if (c.queue?.length) await drain(env, c.conversation, d);
 }
 
@@ -1481,7 +1536,7 @@ export async function send(env, { conversation, text, key, session, person, via 
     to = r.to;
   } else {
     const v = await venueOf(d, c.venue);
-    if (!v?.send && !recordsOnly(v)) return { ok: false, reason: `venue ${c.venue} declares no send: nothing posts there` };
+    if (!posts(v) && !recordsOnly(v)) return { ok: false, reason: `venue ${c.venue} declares no send: nothing posts there` };
   }
   const ref = `out-${randomBytes(6).toString('hex')}`;
   const out = { body: c.body, run: c.run, ...(to ? { to } : {}) };
@@ -1589,9 +1644,10 @@ export async function post(env, conversation, ref, text, { body, run, to } = {},
   const at = dm ? { agent: c.agent, venue: dm.venue, place: dm.place, label: dm.label } : c;
   const v = await venueOf(d, at.venue);
   // A scheduled venue with no send (a wake) posts nowhere: its message is only recorded.
-  let r = v?.send ? await sendOnce(d, pieceArgv(env, v.send), at, text) : !dm && recordsOnly(v) ? { ok: true, recorded: true } : { ok: false, answered: true, reason: `venue ${at.venue} declares no send` };
+  const once = () => (coreAdapted(v) && !dm ? coreSend(d, at, text, run ?? c.run) : sendOnce(d, pieceArgv(env, v.send), at, text));
+  let r = (v?.send || (coreAdapted(v) && !dm)) ? await once() : !dm && recordsOnly(v) ? { ok: true, recorded: true } : { ok: false, answered: true, reason: `venue ${at.venue} declares no send` };
   // Said no for now: once more. Said no for good (permanent): never again.
-  if (!r.ok && r.answered && !r.permanent && v?.send) r = await sendOnce(d, pieceArgv(env, v.send), at, text);
+  if (!r.ok && r.answered && !r.permanent && (v?.send || (coreAdapted(v) && !dm))) r = await once();
   let rec = null;
   try { rec = body ? readBody(env, body) : null; } catch { /* its body is gone: the turn says no model */ }
   const turn = {

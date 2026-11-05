@@ -141,6 +141,17 @@ export const hostTask = (env, bootKey) => `loom-runtime body-host --piece ${piec
 
 // ─── The host's sync (the piece API's `body-sync`) ─────────────────────────
 
+/** A host's activity cards, as core takes them (loom src/comms.ts postActivity): anything else is left out. */
+function cleanCards(cards) {
+  return cards.slice(-100).flatMap((c) => {
+    if (!c || typeof c !== 'object' || typeof c.id !== 'string' || !/^[A-Za-z0-9_.:\-]{1,80}$/.test(c.id)) return [];
+    if (typeof c.tool !== 'string' || !/^[A-Za-z0-9_.:\-]{1,64}$/.test(c.tool)) return [];
+    if (typeof c.summary !== 'string' || !c.summary || c.summary.length > 120 || /[\x00-\x1f\x7f\u2028\u2029]/.test(c.summary)) return [];
+    if (!['running', 'done', 'failed'].includes(c.state)) return [];
+    return [{ id: c.id, at: typeof c.at === 'string' && c.at.length <= 40 ? c.at : new Date().toISOString(), tool: c.tool, summary: c.summary, state: c.state }];
+  });
+}
+
 function cleanReport(r) {
   const bodies = {};
   for (const [id, b] of Object.entries(r?.bodies ?? {}).slice(0, 64)) {
@@ -151,6 +162,8 @@ function cleanReport(r) {
       ...(typeof b.session === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{3,127}$/.test(b.session) ? { session: b.session } : {}),
       feedable: b.feedable === true,
       pending: Array.isArray(b.pending) ? b.pending.filter((k) => typeof k === 'string' && k.length <= 64).slice(0, 64) : [],
+      // A Comms thread's body's tool steps (activity.mjs), checked here as core will check them.
+      ...(Array.isArray(b.cards) ? { cards: cleanCards(b.cards) } : {}),
       // How its turn went, once over (runners.mjs, turn): a host before t-1763 says nothing.
       ...(b.turn && typeof b.turn === 'object' ? { turn: { failed: b.turn.failed === true, worked: typeof b.turn.worked === 'boolean' ? b.turn.worked : null, ...(typeof b.turn.error === 'string' && b.turn.error ? { error: b.turn.error.slice(0, 200) } : {}) } } : {}),
     };
@@ -339,7 +352,7 @@ export class HouseRunner {
     // gets one (an older host would start the body without them).
     const parts = isParts(o.brief);
     const rid = randomBytes(8).toString('hex');
-    const ask = { harness: this.harness, model: o.model, deny: o.deny ?? [], ...(parts ? { parts: o.brief } : { brief: o.brief }), key: o.env?.LOOM_BODY_KEY, ...(o.env?.LOOM_BODY_CONVERSATION ? { conversation: o.env.LOOM_BODY_CONVERSATION } : {}), ...(resume ? { resume: resume.session, files: o.files ?? [] } : {}) };
+    const ask = { harness: this.harness, model: o.model, deny: o.deny ?? [], ...(parts ? { parts: o.brief } : { brief: o.brief }), key: o.env?.LOOM_BODY_KEY, ...(o.env?.LOOM_BODY_CONVERSATION ? { conversation: o.env.LOOM_BODY_CONVERSATION } : {}), ...(o.activity ? { activity: true } : {}), ...(resume ? { resume: resume.session, files: o.files ?? [] } : {}) };
     const sealed = this.transit.seal(Buffer.from(JSON.stringify(ask)));
     // Asked of the house warm() gave, only while it's still the agent's house (not drained since): else warm again.
     let house;
@@ -406,6 +419,8 @@ export class HouseRunner {
   slotOf(body) { const s = this.entry(body)?.session; return s ? { harness: this.harness, session: s } : null; }
   /** How its turn went, as its house's host reports it: null from a host that doesn't say. */
   turn(body) { return this.entry(body)?.turn ?? null; }
+  /** Its activity cards, as its host last reported them (only a Comms thread's body has any). */
+  activity(body) { return this.entry(body)?.cards ?? []; }
 
   feed(body, message) {
     const e = this.entry(body);

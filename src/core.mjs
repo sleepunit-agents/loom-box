@@ -8,7 +8,9 @@
 // Both with the runtime's token (role `runtime`, LOOM_RUNTIME_TOKEN_FILE), at loom's URL (LOOM_RUNTIME_LOOM_URL, its
 // /mcp dropped). A refusal keeps core's status; anything else (no URL, no token, core down, a timeout) is a 503.
 //
-//   GET  /api/loom/venues              → {venues: [{name, label, kind, piece, send?: [argv], orphaned?}]}  (loom#424)
+//   GET  /api/loom/venues              → {venues: [{name, label, kind, piece, send?: [argv], adapter?: 'core', orphaned?}]}  (loom#424, comms.md)
+//   POST /api/loom/comms/adapter       {op: post|describe|status, place, agent, …}: venue loom's adapter (comms.md)
+//   POST /api/loom/comms/activity      {conversation, run, cards}: a loom thread's tool cards (comms.md, section 3)
 //                                      the venues registry, as core keeps it (conversations.md, "Venues"; agent-runtime.md,
 //                                      "Outbound"). A piece reads only its own store, so the runtime asks core, never the
 //                                      other pieces' files; a venue's send runs as core answered its argv.
@@ -46,12 +48,12 @@ async function callCore(env, token, method, path, body, { fetchImpl = fetch, tim
 }
 
 export function coreFrom(env, { fetchImpl = fetch, timeoutMs = 5000 } = {}) {
-  const call = async (method, path, body) => {
+  const call = async (method, path, body, ms = timeoutMs) => {
     const tokenFile = setting(env, 'TOKEN_FILE');
     if (!tokenFile) throw new CoreError('no runtime token (LOOM_RUNTIME_TOKEN_FILE): the runtime can\'t write to core');
     let token;
     try { token = readFileSync(tokenFile, 'utf-8').trim(); } catch { throw new CoreError(`can't read the runtime token file ${tokenFile}`); }
-    return callCore(env, token, method, path, body, { fetchImpl, timeoutMs });
+    return callCore(env, token, method, path, body, { fetchImpl, timeoutMs: ms });
   };
   const post = (path, body) => call('POST', path, body);
   return {
@@ -67,6 +69,10 @@ export function coreFrom(env, { fetchImpl = fetch, timeoutMs = 5000 } = {}) {
     // A delivery the runtime itself makes (a gate's follow-up relay): core's deliver route, as the runtime.
     deliver: (b) => post('deliver', b),
     venues: async () => venuesOf(await call('GET', 'venues')),
+    // Venue loom's adapter calls and its threads' tool cards (loom docs/specs/comms.md): core is that venue's adapter.
+    // The same 15 s an adapter's argv has (delivery.mjs SEND_MS, ADAPTER_MS): core is this venue's adapter.
+    comms: (b) => call('POST', 'comms/adapter', b, 15_000),
+    activity: (b) => call('POST', 'comms/activity', b, 15_000),
     // The review job's: its settings, and a token for one run.
     reviewConfig: async () => reviewConfigOf(await call('GET', 'review/config')),
     async reviewToken() {
@@ -113,7 +119,10 @@ export function venuesOf(raw) {
     if (!v || !VENUE.test(v.name ?? '') || !['live', 'scheduled', 'agent'].includes(v.kind)) continue;
     const send = Array.isArray(v.send) && v.send.length >= 1 && v.send.length <= 16 && v.send.every((a) => typeof a === 'string' && a && a.length <= 200) ? [...v.send] : undefined;
     // An orphaned venue (its piece removed) keeps its name and kind, and posts nowhere.
-    out[v.name] = { kind: v.kind, ...(typeof v.label === 'string' ? { label: v.label.slice(0, 40) } : {}), ...(typeof v.piece === 'string' ? { piece: v.piece } : {}), ...(send && v.orphaned !== true ? { send } : {}), ...(v.orphaned === true ? { orphaned: true } : {}) };
+    out[v.name] = { kind: v.kind, ...(typeof v.label === 'string' ? { label: v.label.slice(0, 40) } : {}), ...(typeof v.piece === 'string' ? { piece: v.piece } : {}), ...(send && v.orphaned !== true ? { send } : {}),
+      // A venue core carries itself (loom): its adapter is core's route, never an argv, and only core's own name it.
+      ...(v.adapter === 'core' && v.piece === 'loom' && !send && v.orphaned !== true ? { adapter: 'core' } : {}),
+      ...(v.orphaned === true ? { orphaned: true } : {}) };
   }
   return out;
 }
