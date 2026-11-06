@@ -1,0 +1,114 @@
+// house/install-tools: the command line every house shares (Art's and Mark's).
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, lstatSync, readlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+const TOOLS = join(ROOT, 'house', 'install-tools');
+const NODE_DIR = dirname(process.execPath);
+const SYS = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
+
+function house() {
+  const home = mkdtempSync(join(tmpdir(), 'house-tools-'));
+  const profileD = join(home, 'profile.d');
+  mkdirSync(profileD);
+  // The house's own taskstore build, as the images lay it down.
+  mkdirSync(join(home, '.local/share/taskstore/dist'), { recursive: true });
+  writeFileSync(join(home, '.local/share/taskstore/dist/cli.js'), 'console.log("local taskstore", process.env.TASKSTORE_DB || "", process.argv.slice(2).join(" "))\n');
+  const path = `${home}/.local/bin:${home}/bin:${NODE_DIR}:${SYS}`;
+  return { home, profileD, path };
+}
+
+function install(h, ...args) {
+  return spawnSync('sh', [TOOLS, ...args], { env: { HOME: h.home, PATH: h.path, LOOM_HOUSE_PROFILE_D: h.profileD }, encoding: 'utf8' });
+}
+
+// A command as a login shell runs it: /etc/profile's PATH, then the profile.d file.
+function login(h, cmd, env = {}) {
+  const script = `PATH=${SYS}; export PATH; . ${h.profileD}/loom-house.sh; ${cmd}`;
+  return spawnSync('sh', ['-c', script], { env: { HOME: h.home, PATH: SYS, ...env }, encoding: 'utf8' });
+}
+
+test('it writes the shared wrappers into ~/.local/bin', () => {
+  const h = house();
+  const r = install(h);
+  assert.equal(r.status, 0, r.stderr);
+  for (const name of ['piece-call', 'loom-runtime', 'taskstore', 'loom-tasks', 'wake', 'approvals']) {
+    assert.ok(existsSync(join(h.home, '.local/bin', name)), `${name} written`);
+  }
+  assert.ok(lstatSync(join(h.home, '.local/bin/piece-call')).isSymbolicLink());
+  assert.equal(readlinkSync(join(h.home, '.local/bin/piece-call')), join(ROOT, 'house/piece-call'));
+  assert.match(readFileSync(join(h.home, '.local/bin/wake'), 'utf8'), /piece-call" clock "\$@"/);
+  assert.match(readFileSync(join(h.home, '.local/bin/approvals'), 'utf8'), /piece-call" approvals "\$@"/);
+});
+
+test('a login shell gets the house PATH back, and node, loom-runtime and the pieces resolve', () => {
+  const h = house();
+  assert.equal(install(h).status, 0);
+  const r = login(h, 'echo "$PATH"; for c in node loom-runtime taskstore wake approvals piece-call; do command -v $c; done');
+  assert.equal(r.status, 0, r.stderr);
+  const [path, ...found] = r.stdout.trim().split('\n');
+  assert.equal(path, h.path);
+  assert.deepEqual(found, [join(NODE_DIR, 'node'),
+    ...['loom-runtime', 'taskstore', 'wake', 'approvals', 'piece-call'].map((n) => join(h.home, '.local/bin', n))]);
+});
+
+test('loom-runtime runs on node by its full path, even with node off PATH', () => {
+  const h = house();
+  assert.equal(install(h).status, 0);
+  const r = spawnSync(join(h.home, '.local/bin/loom-runtime'), ['body-host'], { env: { HOME: h.home, PATH: SYS }, encoding: 'utf8' });
+  assert.match(r.stdout + r.stderr, /LOOM_URL and LOOM_TOKEN_FILE/);
+});
+
+test('the profile file reads ~/.house-env (LOOM_TOKEN_FILE for a shell Codex started)', () => {
+  const h = house();
+  assert.equal(install(h).status, 0);
+  writeFileSync(join(h.home, '.house-env'), 'export LOOM_TOKEN_FILE=/run/secrets/loom-token\n');
+  assert.equal(login(h, 'echo "$LOOM_TOKEN_FILE"').stdout.trim(), '/run/secrets/loom-token');
+  // and is harmless without one
+  const bare = house();
+  assert.equal(install(bare).status, 0);
+  assert.equal(login(bare, 'echo ok').stdout.trim(), 'ok');
+});
+
+test('wake, taskstore and approvals go through piece-call; a TASKSTORE_DB call runs the local build', () => {
+  const h = house();
+  assert.equal(install(h).status, 0);
+  // A stand-in piece-call that records its argv, where the wrappers look for it.
+  writeFileSync(join(h.home, 'fake-piece-call'), '#!/bin/sh\nfor a in "$@"; do printf "[%s]" "$a"; done; echo\n', { mode: 0o755 });
+  spawnSync('ln', ['-sfn', join(h.home, 'fake-piece-call'), join(h.home, '.local/bin/piece-call')]);
+  const run = (cmd, env) => login(h, cmd, env).stdout.trim();
+  assert.equal(run('wake in 4h --note "two words"'), '[clock][in][4h][--note][two words]');
+  assert.equal(run('taskstore ready'), '[tasks][ready]');
+  assert.equal(run('loom-tasks show t-1'), '[tasks][show][t-1]');
+  assert.equal(run('approvals list'), '[approvals][list]');
+  assert.equal(run('taskstore ready', { TASKSTORE_DB: '/tmp/x.db' }), 'local taskstore /tmp/x.db ready');
+  assert.equal(run('taskstore ready', { TANK_LOCAL_PIECES: '1' }), 'local taskstore  ready');
+});
+
+test('--pieces puts the piece wrappers back over links a house laid down, and nothing else', () => {
+  const h = house();
+  assert.equal(install(h).status, 0);
+  spawnSync('ln', ['-sfn', '/nowhere/wake', join(h.home, '.local/bin/wake')]);
+  writeFileSync(join(h.profileD, 'loom-house.sh'), '# untouched\n');
+  assert.equal(install(h, '--pieces').status, 0);
+  assert.ok(!lstatSync(join(h.home, '.local/bin/wake')).isSymbolicLink());
+  assert.equal(readFileSync(join(h.profileD, 'loom-house.sh'), 'utf8'), '# untouched\n');
+});
+
+test('an unknown flag is a usage error', () => {
+  const h = house();
+  const r = install(h, '--nope');
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /usage: install-tools/);
+});
+
+test('piece-call says what it needs when loom is not configured', () => {
+  const r = spawnSync('python3', [join(ROOT, 'house/piece-call'), 'clock', '--help'], { env: { PATH: SYS }, encoding: 'utf8' });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /LOOM_URL and LOOM_TOKEN_FILE must be set/);
+});

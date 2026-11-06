@@ -1,0 +1,90 @@
+#!/usr/bin/env python3
+"""piece-call — run a loom piece's CLI from a body that isn't on loom's machine.
+
+    piece-call tasks ready
+    piece-call clock in 4h -f routines/plan.md --note "t-1 round 2"
+
+POSTs {argv} to loom's piece API (`/api/<piece>/run`, loom docs/extensions.md
+"The API") as this body's own token, then prints the command's stdout and
+stderr and exits with its exit code, so it reads exactly like the local
+command. In a house, house/install-tools puts `taskstore`, `wake` and
+`approvals` in front of this (as tasks, clock and approvals). Needs LOOM_URL
+(the /mcp URL is fine) and LOOM_TOKEN_FILE, or a house's /run/secrets/loom-token.
+
+The one copy every house runs (loom-box house/). sleepunit-agents/art keeps
+bin/piece-call, the same program, for loom's own machine.
+
+Exit 1 with loom's words when the call itself fails (refused, unreachable).
+"""
+import base64
+import gzip
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+
+def inline_file(piece, argv):
+    """`tasks comment <id> --file <path|->`: the text is read here and sent as the comment's own argument.
+    Only argv crosses to loom, so loom's CLI would read an empty stdin or a path it can't see (t-1854's
+    safe form failed in every house with "--file - has no text", 2026-11-04 reflect)."""
+    if piece != "tasks" or not argv or argv[0] != "comment" or "--file" not in argv:
+        return argv
+    i = argv.index("--file")
+    if i + 1 >= len(argv):
+        return argv
+    src = argv[i + 1]
+    if src == "-":
+        text = sys.stdin.read()
+    else:
+        with open(src) as f:
+            text = f.read()
+    return argv[:i] + argv[i + 2:] + [text.rstrip("\n")]
+
+
+def main():
+    if len(sys.argv) < 3:
+        sys.exit(__doc__.strip().splitlines()[0] + "\nusage: piece-call <piece> <args...>")
+    piece, argv = sys.argv[1], inline_file(sys.argv[1], sys.argv[2:])
+    url, tokfile = os.environ.get("LOOM_URL"), os.environ.get("LOOM_TOKEN_FILE")
+    if not tokfile and os.environ.get("HOUSE_ID") and os.path.exists("/run/secrets/loom-token"):
+        tokfile = "/run/secrets/loom-token"  # a house's own token, where loom-box put it
+    if not url or not tokfile:
+        sys.exit("piece-call: LOOM_URL and LOOM_TOKEN_FILE must be set")
+    base = url.rstrip("/")
+    if base.endswith("/mcp"):
+        base = base[: -len("/mcp")]
+    with open(tokfile) as f:
+        token = f.read().strip()
+    req = urllib.request.Request(
+        f"{base}/api/{piece}/run", data=json.dumps({"argv": argv}).encode(), method="POST",
+        headers={"content-type": "application/json", "authorization": f"Bearer {token}"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            body = json.load(r)
+    except urllib.error.HTTPError as e:
+        try:
+            why = json.load(e).get("error")
+        except ValueError:
+            why = None
+        sys.exit(f"piece-call: loom refused {piece} {argv[0]}: {why or f'{e.code} {e.reason}'}")
+    except (urllib.error.URLError, OSError) as e:
+        sys.exit(f"piece-call: couldn't reach loom at {base}: {e}")
+    out = body.get("stdout")
+    if out is None and body.get("stdoutGz"):
+        out = gzip.decompress(base64.b64decode(body["stdoutGz"])).decode()
+    code = body.get("exit")
+    code = code if isinstance(code, int) else 1
+    try:
+        sys.stdout.write(out or "")
+        sys.stdout.flush()
+    except BrokenPipeError:
+        # A reader that stopped early (| head): not an error of the command's.
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+    sys.stderr.write(body.get("stderr") or "")
+    sys.exit(code)
+
+
+if __name__ == "__main__":
+    main()
