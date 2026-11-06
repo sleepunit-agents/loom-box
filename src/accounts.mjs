@@ -19,6 +19,7 @@
 //   - per window, the newest reading (by `checked`) is the account's: usage only rises within a window, so a newer
 //     reading is the truth, whether it's higher or (after a reset) lower; a box's own reading doesn't outrank a newer
 //     house reading;
+//   - a box not seen lately offers nothing, but its readings still count for the account (it may hold the newest);
 //   - a copy that read nothing adds nothing: an unread box can't mask a known-full reading (it's one quota);
 //   - a full reading whose reset time has passed counts as reset (windowNow), with nothing newer to say otherwise;
 //   - only an account with no reading at all fails open (has room), as it did: its first turn reads it, and a refusal
@@ -48,6 +49,8 @@ export class AccountsError extends Error {}
 const cap = (t) => (t ? t[0].toUpperCase() + t.slice(1) : t);
 const windowOk = (k) => /^[0-9]+[hd](_[a-z0-9]+)?$/.test(k);
 
+const checkedOf = (r) => (r && typeof r.checked === 'number' ? r.checked : 0);
+
 /**
  * Usage readings, newest per window, flattened to {"7d": 0.6, reset_7d: …, checked}: the rule above. On a tie in
  * `checked`, the fuller reading (two copies read at the same second can't both be right; the fuller one can't
@@ -58,20 +61,23 @@ function mergeUsage(readings) {
   const at = {};
   for (const r of readings) {
     if (!r || typeof r !== 'object') continue;
-    const t = typeof r.checked === 'number' ? r.checked : 0;
+    const t = checkedOf(r);
     for (const [w, v] of Object.entries(r.windows ?? {})) {
       if (!windowOk(w) || typeof v !== 'number') continue;
       if (at[w] !== undefined && (at[w] > t || (at[w] === t && u[w] >= v))) continue;
       at[w] = t; u[w] = v;
+      // A newer reading that says no reset keeps the older one's while it's still ahead of the newer reading (the same
+      // window): otherwise a full window would have no reset at all, and nothing would ever run on it to read it again.
+      const prev = u[`reset_${w}`];
       delete u[`reset_${w}`];
       if (typeof r.resets?.[w] === 'number') u[`reset_${w}`] = r.resets[w];
+      else if (typeof prev === 'number' && prev > t) u[`reset_${w}`] = prev;
     }
     if (t > (u.checked ?? 0)) u.checked = t;
   }
   return u;
 }
 
-const checkedOf = (r) => (r && typeof r.checked === 'number' ? r.checked : 0);
 function newestFrom(box, house) {
   const b = Math.max(-1, ...box.map(checkedOf)), h = Math.max(-1, ...house.map(checkedOf));
   return b < 0 && h < 0 ? null : b >= h ? 'box' : 'house';
@@ -81,10 +87,12 @@ function newestFrom(box, house) {
 export function deriveAccounts(s, { members, nowMs = Date.now() } = {}) {
   const agents = Object.keys(s.agents ?? {});
   const by = new Map();
+  const staleReadings = new Map();
   for (const [id, b] of Object.entries(s.boxes ?? {})) {
     if (b.revoked) continue;
-    // A box not seen lately can't run anything now: its logins offer nothing.
-    if (!(b.local || (b.lastSeen && nowMs - Date.parse(b.lastSeen) < STALE_MS))) continue;
+    // A box not seen lately can't run anything now: its logins offer nothing. Its readings still count for an account a
+    // box seen lately offers (one quota: the newest reading may be the one a box that's gone quiet took).
+    const stale = !(b.local || (b.lastSeen && nowMs - Date.parse(b.lastSeen) < STALE_MS));
     const fresh = true;
     for (const [h, st] of Object.entries(b.harnesses ?? {})) {
       const def = LOGIN_HARNESSES[h];
@@ -94,6 +102,15 @@ export function deriveAccounts(s, { members, nowMs = Date.now() } = {}) {
       // keeps one box from merging into another owner's account; the salt keeps the hash meaningless elsewhere.
       const owner = boxOwner(b, members ?? [{ person: 'owner', agents: '*' }]);
       const name = `${owner}:${h}-${createHash('sha256').update(`${s.accountSalt ?? ''}\0${owner}\0${st.account ?? `box:${id}`}`).digest('hex').slice(0, 10)}`;
+      if (stale) {
+        const u = b.usage?.[h];
+        const slot = u && (u.box || u.house) ? u : u?.windows ? { box: u } : {};
+        const r = staleReadings.get(name) ?? { box: [], house: [] };
+        if (slot.box) r.box.push(slot.box);
+        if (slot.house) r.house.push(slot.house);
+        staleReadings.set(name, r);
+        continue;
+      }
       const a = by.get(name) ?? { name, owner, provider: def.provider, harness: h, kind: 'login', label: '', plan: '', method: st.method ?? '', boxes: [], agents: new Set(), boxReadings: [], houseReadings: [], fresh: false };
       a.boxes.push(id);
       a.fresh ||= !!fresh;
@@ -109,6 +126,10 @@ export function deriveAccounts(s, { members, nowMs = Date.now() } = {}) {
       for (const ag of agents) if (mayUseLogin(b, s.agents[ag], ag, h, members ?? [{ person: 'owner', agents: '*' }])) a.agents.add(ag);
       by.set(name, a);
     }
+  }
+  for (const [name, r] of staleReadings) {
+    const a = by.get(name);
+    if (a) { a.boxReadings.push(...r.box); a.houseReadings.push(...r.house); }
   }
   const accounts = [...by.values()].map((a) => ({
     name: a.name, provider: a.provider, harness: a.harness, kind: 'login',

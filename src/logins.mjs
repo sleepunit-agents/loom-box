@@ -138,8 +138,8 @@ export function credentialState(env, harness, { uid = process.getuid?.() } = {})
  * copy unread (and so, to the resolver, roomy). `identify` asks the CLI itself, with the network: Claude fetches
  * its profile on a proper start-up (`claude mcp list`, which spends no usage) and then says who it is; Codex's app
  * server answers `account/read` (its account id and email). Only a hash of those leaves the box (accountKey). It's
- * asked after a login and every IDENTIFY_MS, not every status check; an answer is kept while the login lasts, and
- * a check that can't reach the provider keeps the last one.
+ * asked after a login and every IDENTIFY_MS, not every status check (IDENTIFY_RETRY_MS while it has no answer); an
+ * answer is kept while the login lasts, and a check that can't reach the provider keeps the last one.
  *
  * The image is one that has the CLIs: LOOM_RUNTIME_LOGIN_IMAGE if the box's owner set one, else the newest house
  * image built on this box for an agent the control plane says may use that login (its owner owns this box, and
@@ -164,7 +164,7 @@ const CONTAINER_SCRIPTS = {
     identify: `command -v codex >/dev/null 2>&1 || exit 99; mkdir -p "$CODEX_HOME"; ln -s ${AT('codex')}/auth.json "$CODEX_HOME/auth.json"; cd /tmp/cli; `
       + ': >rpc-out; mkfifo rpc-in; codex app-server <rpc-in >rpc-out 2>/dev/null & p=$!; exec 3>rpc-in; '
       + `printf '%s\\n' '${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { clientInfo: { name: 'loom', version: '0' } } })}' '${JSON.stringify({ jsonrpc: '2.0', method: 'initialized' })}' '${JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'account/read', params: {} })}' >&3; `
-      + 'i=0; while [ $i -lt 60 ] && ! grep -q \'"id":2\' rpc-out; do sleep 0.25; i=$((i+1)); done; exec 3>&-; kill $p 2>/dev/null; grep \'"id":2\' rpc-out',
+      + 'i=0; while [ $i -lt 15 ] && ! grep -q \'"id":2\' rpc-out; do sleep 1; i=$((i+1)); done; exec 3>&-; kill $p 2>/dev/null; grep \'"id":2\' rpc-out',
   },
 };
 export const podmanBin = (env) => env.LOOM_BOX_PODMAN || 'podman';
@@ -197,7 +197,8 @@ export function cliRunArgs(env, harness, what, image, { name } = {}) {
   const login = what === 'login';
   if (!def[what]) throw new LoginError(`no ${what} for ${harness}`);
   return ['run', '--rm', ...(login ? ['-i', '-t'] : []), '--label', `${CLI_LABEL}=${what}`, ...(name ? ['--name', name] : []), '--user', '0:0', '--cap-drop', 'all', '--security-opt', 'no-new-privileges',
-    ...(what === 'status' ? ['--network', 'none'] : []), '--tmpfs', '/tmp:rw,nosuid,nodev,size=64m',
+    // The network only where it's needed to reach the provider (a login, an identity check); anything else, none.
+    ...(what === 'login' || what === 'identify' ? [] : ['--network', 'none']), '--tmpfs', '/tmp:rw,nosuid,nodev,size=64m',
     ...Object.entries({ ...def.env, NO_COLOR: '1', BROWSER: '/bin/false' }).flatMap(([k, v]) => ['-e', `${k}=${v}`]),
     '-v', `${loginDir(env, harness)}:${AT(harness)}:rw,nosuid,nodev,noexec`,
     '--entrypoint', 'sh', image, '-c', def[what]];
@@ -258,7 +259,9 @@ export function cliIdentify(env, h, image, run = spawnSync) {
 
 /** How often a box asks again who its logins are (a re-login asks at once). */
 export const IDENTIFY_MS = 6 * 3600_000;
-// What each login dir's CLI last said it is: {account, plan?, at}. Kept while it stays logged in.
+/** How soon it asks again when the CLI couldn't say (the provider unreachable). */
+export const IDENTIFY_RETRY_MS = 30 * 60_000;
+// What each login dir's CLI last said it is: {account?, plan?, at (asked)}. Kept while it stays logged in.
 const IDENTITIES = new Map();
 
 /** One harness's status, as its CLI says it, run in a throwaway container. */
@@ -290,11 +293,12 @@ export function harnessStatus(env = process.env, { run = spawnSync, agents = {},
     if (!out[h].loggedIn || out[h].method === 'api-key') { IDENTITIES.delete(key); continue; }
     if (out[h].account) continue;
     let known = IDENTITIES.get(key);
-    if (force || !known || nowMs - known.at >= IDENTIFY_MS) {
+    if (force || !known || nowMs - known.at >= (known.account ? IDENTIFY_MS : IDENTIFY_RETRY_MS)) {
       const got = cliIdentify(env, h, img.image, run);
-      if (got) IDENTITIES.set(key, known = { ...got, at: nowMs });
+      // An answer replaces the last; no answer keeps the last answer (or notes the try, for the retry's pacing).
+      IDENTITIES.set(key, known = got ? { ...got, at: nowMs } : { ...known, at: nowMs });
     }
-    if (known) out[h] = { ...out[h], account: known.account, ...(known.plan && !out[h].plan ? { plan: known.plan } : {}) };
+    if (known.account) out[h] = { ...out[h], account: known.account, ...(known.plan && !out[h].plan ? { plan: known.plan } : {}) };
   }
   return out;
 }

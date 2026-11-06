@@ -145,7 +145,7 @@ function fakeBox(only) {
   for (const h of ['claude', 'codex']) {
     if (only && only !== h) continue;
     // The provider unreachable (FAKE_LOGIN_OFFLINE) while clis/offline exists: a container sees only the env it's given.
-    writeFileSync(join(cli, h), `#!/bin/sh\n[ -e "${join(cli, 'offline')}" ] && export FAKE_LOGIN_OFFLINE=1\nFAKE_LOGIN_AS=${h} FAKE_LOGIN_DEVICE_MS=300 exec "${process.execPath}" "${FAKE}" "$@"\n`);
+    writeFileSync(join(cli, h), `#!/bin/sh\n[ -e "${join(cli, 'offline')}" ] && export FAKE_LOGIN_OFFLINE=1\n[ -e "${join(cli, 'who')}" ] && export FAKE_LOGIN_WHO="$(cat "${join(cli, 'who')}")"\nFAKE_LOGIN_AS=${h} FAKE_LOGIN_DEVICE_MS=300 exec "${process.execPath}" "${FAKE}" "$@"\n`);
     chmodSync(join(cli, h), 0o755);
   }
   writeFileSync(join(bin, 'podman-state', 'config.json'), JSON.stringify({ cliBin: cli }));
@@ -167,6 +167,9 @@ test('logging a box in to Claude runs the CLI\'s own login there: its link to th
   // Who the login is: the provider asked (network), still the one mount, no terminal.
   const c = cliRunArgs(env, 'claude', 'identify', 'img');
   assert.deepEqual([c.includes('--network'), c.includes('-t'), c.filter((x, i) => c[i - 1] === '-v').length, c.at(-1).includes('claude mcp list')], [false, false, 1, true]);
+  const x = cliRunArgs(env, 'codex', 'identify', 'img');
+  assert.deepEqual([x.includes('--network'), x.includes('-t'), x.filter((y, i) => x[i - 1] === '-v'), x.at(-1).includes('account/read')], [false, false, [`${loginDir(env, 'codex')}:/run/loom/login/codex:rw,nosuid,nodev,noexec`], true]);
+  assert.throws(() => cliRunArgs(env, 'claude', 'other', 'img'), /no other for claude/);
   assert.deepEqual(st().claude, { installed: true, loggedIn: false });
   assert.deepEqual(st().codex, { installed: false, loggedIn: false });
   const said = [];
@@ -263,12 +266,75 @@ test('a box whose identity check can\'t reach the provider keeps the account it 
   offline(false);
   const named = harnessStatus(env, { force: true });
   assert.match(named.claude.account, /^claude-/);
-  // The provider unreachable again: the name it gave holds (a status check doesn't ask again every time either).
+  // The provider unreachable again: the name it gave holds.
   offline(true);
   assert.equal(harnessStatus(env, { force: true }).claude.account, named.claude.account);
   // Logged out: forgotten.
   rmSync(join(loginDir(env, 'claude'), '.credentials.json'));
   assert.deepEqual(harnessStatus(env).claude, { installed: true, loggedIn: false });
+});
+
+const loggedInBox = (who) => {
+  const env = fakeBox();
+  writeFileSync(join(loginDir(env, 'claude'), '.credentials.json'), '{"fake":true}', { mode: 0o600 });
+  writeFileSync(join(loginDir(env, 'codex'), 'auth.json'), '{"fake":true}', { mode: 0o600 });
+  if (who) writeFileSync(join(env.HOME, 'clis', 'who'), who);
+  return env;
+};
+
+test('one owner\'s two different accounts stay two: the key is who the CLI says the login is', () => {
+  const [a, b] = [loggedInBox('alice'), loggedInBox('bob')].map((env) => harnessStatus(env, { force: true }));
+  for (const h of ['claude', 'codex']) assert.notEqual(a[h].account, b[h].account, h);
+  const seen = '2026-11-06T18:59:00Z';
+  const l = deriveAccounts({ agents: {}, accountSalt: 'salt', boxes: { x: { local: true, harnesses: a }, y: { lastSeen: seen, harnesses: b } } }, { nowMs: Date.parse('2026-11-06T19:00:00Z') });
+  assert.deepEqual(l.accounts.map((x) => `${x.harness}:${x.boxes}`).sort(), ['claude:x', 'claude:y', 'codex:x', 'codex:y']);
+});
+
+test('who a login is: asked again at once after a login (force), every 6 hours, and every 30 minutes while unanswered', async () => {
+  const { IDENTIFY_MS, IDENTIFY_RETRY_MS } = await import('../src/logins.mjs');
+  const env = loggedInBox('alice');
+  const t0 = Date.parse('2026-11-06T12:00:00Z');
+  const alice = harnessStatus(env, { nowMs: t0 }).claude.account;
+  writeFileSync(join(env.HOME, 'clis', 'who'), 'bob');
+  assert.equal(harnessStatus(env, { nowMs: t0 + 60_000 }).claude.account, alice, 'not asked again on every status check');
+  const bob = harnessStatus(env, { nowMs: t0 + 120_000, force: true }).claude.account;
+  assert.notEqual(bob, alice, 'a re-login (force) asks at once');
+  writeFileSync(join(env.HOME, 'clis', 'who'), 'carol');
+  assert.equal(harnessStatus(env, { nowMs: t0 + 120_000 + IDENTIFY_MS - 1 }).claude.account, bob);
+  assert.notEqual(harnessStatus(env, { nowMs: t0 + 120_000 + IDENTIFY_MS }).claude.account, bob, 'asked again after IDENTIFY_MS');
+  // Never answered: tried again after IDENTIFY_RETRY_MS, not on every status check.
+  const env2 = loggedInBox('dave');
+  writeFileSync(join(env2.HOME, 'clis', 'offline'), '');
+  assert.equal(harnessStatus(env2, { nowMs: t0 }).claude.account, undefined);
+  rmSync(join(env2.HOME, 'clis', 'offline'));
+  assert.equal(harnessStatus(env2, { nowMs: t0 + 60_000 }).claude.account, undefined, 'not tried again within IDENTIFY_RETRY_MS');
+  assert.match(harnessStatus(env2, { nowMs: t0 + IDENTIFY_RETRY_MS }).claude.account, /^claude-/);
+});
+
+test('a box gone quiet still holds its readings for the account: the newest may be the one it took', () => {
+  const nowMs = Date.parse('2026-11-06T19:00:00Z');
+  const nowS = nowMs / 1000;
+  const hs = { claude: { installed: true, loggedIn: true, plan: 'max', account: 'claude-aaaaaaaaaa' } };
+  const l = deriveAccounts({ agents: {}, accountSalt: 'salt', boxes: {
+    loom: { local: true, harnesses: hs, usage: { claude: { box: { windows: { '7d': 0.3 }, checked: nowS - 36000 } } } },
+    laptop: { lastSeen: '2026-11-06T12:00:00Z', harnesses: hs, usage: { claude: { house: { windows: { '7d': 0.99 }, resets: { '7d': nowS + 86400 }, checked: nowS - 25200 } } } },
+  } }, { nowMs });
+  assert.deepEqual(l.accounts.map((a) => [a.boxes, a.usage['7d']]), [[['loom'], 0.99]]);
+  assert.equal(hasRoom(l.accounts[0], undefined, nowMs), false);
+});
+
+test('a newer reading that says no reset keeps the window\'s known reset, so a full account isn\'t full forever', async () => {
+  const { roomAt } = await import('../src/accounts.mjs');
+  const nowMs = Date.parse('2026-11-06T19:00:00Z');
+  const nowS = nowMs / 1000;
+  const hs = { claude: { installed: true, loggedIn: true, account: 'claude-aaaaaaaaaa' } };
+  const reset = nowS + 86400;
+  const [a] = deriveAccounts({ agents: {}, accountSalt: 'salt', boxes: {
+    loom: { local: true, harnesses: hs, usage: { claude: { house: { windows: { '7d': 0.9 }, resets: { '7d': reset }, checked: nowS - 7200 } } } },
+    one: { lastSeen: '2026-11-06T18:59:00Z', harnesses: hs, usage: { claude: { house: { windows: { '7d': 0.99 }, checked: nowS - 60 } } } },
+  } }, { nowMs }).accounts;
+  assert.deepEqual([a.usage['7d'], a.usage.reset_7d, roomAt(a, undefined, nowMs)], [0.99, reset, reset]);
+  assert.equal(hasRoom(a, undefined, reset * 1000 + 1000), true, 'past the reset: room again');
 });
 
 test('a house gets the box\'s login for each harness it runs, and the env that points its CLI there; nothing else', async () => {

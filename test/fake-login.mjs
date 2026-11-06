@@ -21,16 +21,19 @@ try {
   if (notify) execSync(notify);
 } catch { /* no config */ }
 const args = process.argv.slice(2).join(' ');
+// Who the login is (FAKE_LOGIN_WHO, default the owner): a different one is a different account.
+const who = process.env.FAKE_LOGIN_WHO || '';
+const email = `${who || 'owner'}@example.com`, org = who ? `org-${who}` : 'org-1', acctId = who ? `acct-${who}` : 'acct-1';
 const profile = join(process.env.CLAUDE_CONFIG_DIR || home, '.claude.json');
 const profiled = () => { try { return !!JSON.parse(readFileSync(profile, 'utf-8')).oauthAccount; } catch { return false; } };
 if (as === 'claude' && args === 'auth status --json') {
   process.stdout.write(JSON.stringify(existsSync(marker)
-    ? { loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty', email: profiled() ? 'owner@example.com' : null, orgId: profiled() ? 'org-1' : null, orgName: null, subscriptionType: 'max' }
+    ? { loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty', email: profiled() ? email : null, orgId: profiled() ? org : null, orgName: null, subscriptionType: 'max' }
     : { loggedIn: false }));
   process.exit(0);
 }
 if (as === 'claude' && args === 'mcp list') {
-  if (existsSync(marker) && process.env.FAKE_LOGIN_OFFLINE !== '1') writeFileSync(profile, JSON.stringify({ oauthAccount: { emailAddress: 'owner@example.com', organizationUuid: 'org-1' } }));
+  if (existsSync(marker) && process.env.FAKE_LOGIN_OFFLINE !== '1') writeFileSync(profile, JSON.stringify({ oauthAccount: { emailAddress: email, organizationUuid: org } }));
   process.stdout.write('No MCP servers configured.\n');
   process.exit(0);
 }
@@ -46,7 +49,7 @@ if (as === 'codex' && args === 'app-server') {
       if (m.method === 'account/read') {
         const result = !existsSync(marker) ? { account: null, requiresOpenaiAuth: true }
           : process.env.FAKE_LOGIN_OFFLINE === '1' ? null
-          : { account: { type: 'chatgpt', email: 'owner@example.com', planType: 'pro' }, requiresOpenaiAuth: true, workspaceRouting: { chatgptAccountId: 'acct-1' } };
+          : { account: { type: 'chatgpt', email, planType: 'pro' }, requiresOpenaiAuth: true, workspaceRouting: { chatgptAccountId: acctId } };
         process.stdout.write(`${JSON.stringify(result ? { id: m.id, result } : { id: m.id, error: { code: -32603, message: 'workspace routing discovery timed out' } })}\n`);
       }
     }

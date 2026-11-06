@@ -68,7 +68,9 @@ to those binaries. It does not log in for them.
   start-up that fetches its profile (`claude mcp list`, which spends no
   usage), Codex through its app server's `account/read`. Only a hash of the
   org (or account id) and email is reported. A check that can't reach the
-  provider keeps the last answer; a login never named is an account of its
+  provider keeps the last answer (and tries again in 30 minutes, not every
+  status check). A box not seen lately offers nothing, but its readings
+  still count for the account. A login never named is an account of its
   own (t-1913: box `one` and loom's machine, on one Claude Max and one Codex
   Pro, showed as four accounts).
   A box knows a login exists only because the CLI's status says so. loom never
