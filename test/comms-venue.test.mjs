@@ -5,7 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { venuesOf } from '../src/core.mjs';
-import { deliver, loadConv, tick } from '../src/delivery.mjs';
+import { deliver, loadConv, silentRun, tick } from '../src/delivery.mjs';
 import { cvOf, world, plain } from './delivery-world.mjs';
 
 const thread = 'th:abcdefghij';
@@ -93,7 +93,7 @@ test('presence goes to core: working with the message ids, then done when the tu
   assert.deepEqual(w.adapterCalls, []);
 });
 
-test('a turn that ends with nothing sent says so to core: done carries replied false and its run, once; one that sent, or was refused for a usage limit, doesn\'t (t-1900)', async () => {
+test('a turn that ends with nothing sent says so to core: done carries replied false and its run, once; one that sent doesn\'t (t-1900)', async () => {
   const w = world();
   const cv = cvOf('art', 'loom', thread);
   const dones = () => w.core.commsCalls.filter((x) => x.op === 'status' && x.status === 'done');
@@ -119,14 +119,19 @@ test('a turn that ends with nothing sent says so to core: done carries replied f
   assert.deepEqual(Object.keys(dones().at(-1)).sort(), ['agent', 'op', 'place', 'status'], 'a turn that sent: no replied, no run');
 });
 
-test('silentRun: only a run that is over, sent nothing, and wasn\'t refused for a usage limit', async () => {
-  const { silentRun } = await import('../src/delivery.mjs');
-  const at = (r) => silentRun({ run: 'run-a', runLog: [{ run: 'run-a', at: 1, sent: 0, ...r }] });
+test('silentRun: the newest run over since presence began, that sent nothing, wasn\'t refused for a usage limit or stopped, not yet said', async () => {
+  const at = (r, presence = { since: 1 }) => silentRun({ run: 'run-a', presence, runLog: [{ run: 'run-a', at: 1, sent: 0, ...r }] });
   assert.deepEqual(at({ end: 2 }), { replied: false, run: 'run-a' });
+  assert.deepEqual(at({ end: 2, refused: 1 }), { replied: false, run: 'run-a' }, 'every send refused: nothing posted');
   assert.deepEqual(at({}), {}, 'still going');
   assert.deepEqual(at({ end: 2, sent: 1 }), {}, 'it sent');
   assert.deepEqual(at({ end: 2, turn: { failed: true, worked: true, limited: true } }), {}, 'refused for a usage limit: run again elsewhere');
-  assert.deepEqual(silentRun({ run: 'run-b', runLog: [{ run: 'run-a', at: 1, end: 2, sent: 0 }] }), {}, 'not the current run');
+  assert.deepEqual(at({ end: 2, stopped: true }), {}, 'the member stopped it');
+  assert.deepEqual(at({ end: 2, saidSilent: true }), {}, 'said already');
+  assert.deepEqual(at({ end: 2 }, { since: 5 }), {}, 'ended before presence began: a run from before is never said');
+  assert.deepEqual(at({ end: 2 }, null), {}, 'no presence');
+  // A new run started while the done was retried: the ended one is still said.
+  assert.deepEqual(silentRun({ run: 'run-b', presence: { since: 1 }, runLog: [{ run: 'run-a', at: 1, end: 2, sent: 0 }, { run: 'run-b', at: 3, sent: 0 }] }), { replied: false, run: 'run-a' });
   assert.deepEqual(silentRun({}), {});
 });
 

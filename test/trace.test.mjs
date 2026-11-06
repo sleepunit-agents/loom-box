@@ -103,6 +103,11 @@ test('steps belong to their run: a later run\'s error card isn\'t this one\'s; o
   const r2 = { run: 'run-bbbbbbbbbbbb', started: '2026-11-06T05:00:00.000Z', ended: '2026-11-06T05:01:00.000Z', sent: 0, posts: [], fail: 'stopped: it waited 30 minutes on a permission prompt nobody can answer' };
   const thread = { messages: [{ seq: 2, at: '2026-11-06T04:00:30.000Z', kind: 'reply', run: r1.run }, { seq: 4, at: '2026-11-06T05:00:30.000Z', kind: 'error', error: { code: 'post-failed', words: 'Art\'s reply couldn\'t be shown.' } }] };
   assert.ok(!stepsOf(c, r1, thread, r2).some((s) => /error card/.test(s.words)), 'run 2\'s card isn\'t run 1\'s');
+  // A run that posted nothing: said plainly, never that it didn't call send (a send can be turned away before it's
+  // counted or refused on the record, t-1900).
+  const quiet = stepsOf(c, r2, thread, null).find((s) => s.step === 'posted');
+  assert.equal(quiet.words, 'Nothing was posted from this run.');
+  assert.ok(!stepsOf(c, r2, thread, null).some((s) => /never called|No send reached/.test(s.words)));
   const two = stepsOf(c, r2, thread, null);
   assert.ok(two.some((s) => /error card/.test(s.words)));
   // A run from before runs carried their body, stopped later: stopped, never "couldn't start".
