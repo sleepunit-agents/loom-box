@@ -183,29 +183,27 @@ test('a runner\'s turn() says limited, and when: Claude Code from its transcript
 });
 
 test('a Codex body turns every denied MCP server off, wherever it is defined or not; a tool-level deny refuses', async () => {
-  assert.deepEqual(codexDeny(['mcp__handoff', 'mcp__claude_ai_Gmail', 'mcp__loom'], new Set(['loom'])).args, [
+  assert.deepEqual(codexDeny(['mcp__handoff', 'mcp__claude_ai_Gmail', 'mcp__loom']).args, [
     '-c', 'mcp_servers.claude_ai_Gmail={enabled=false, command="false"}',
     '-c', 'mcp_servers.handoff={enabled=false, command="false"}',
-    '-c', 'mcp_servers.loom={enabled=false, url="http://127.0.0.1:9/denied"}']);
+    '-c', 'mcp_servers.loom={enabled=false, command="false"}']);
   // What Codex can't be trusted to keep: one tool of a server, a built-in, a name that isn't one.
   for (const d of ['mcp__loom__note_write', 'WebFetch', 'mcp__a b', 'mcp__']) assert.match(codexDeny([d]).error, /can't deny/, d);
-  // Launched: a server only in a profile, only in the project's config, only under the body env's CODEX_HOME, or in
-  // no config at all, is still on the command line, turned off. No scan decides whether it's denied.
+  // Launched: a server in the real home's config, in a profile there, under the body env's CODEX_HOME, or in no config
+  // at all, is in no config the body's Codex reads (its made home's), and is turned off on its command line too.
   const h = (() => { const D = scratch('rt-codexdeny-'); return { D, env: { ...process.env, FAKE_HARNESS: D } }; })();
-  mkdirSync(join(h.D, 'home', 'sessions'), { recursive: true });
   mkdirSync(join(h.D, 'other'), { recursive: true });
-  mkdirSync(join(h.D, 'repo', '.codex'), { recursive: true });
-  writeFileSync(join(h.D, 'home', 'config.toml'), '[profiles.p.mcp_servers.inprofile]\ncommand = "x"\n');
-  writeFileSync(join(h.D, 'repo', '.codex', 'config.toml'), '[mcp_servers.inproject]\nurl = "http://x"\n');
-  writeFileSync(join(h.D, 'other', 'config.toml'), '[mcp_servers."inbodyhome"]\nurl = "http://y"\n');
-  const r = new CodexRunner({ codex: join(dirname(fileURLToPath(import.meta.url)), 'fake-codex.mjs'), runsDir: join(h.D, 'runs'), sessionsDir: join(h.D, 'home', 'sessions') });
-  const deny = ['mcp__inprofile', 'mcp__inproject', 'mcp__inbodyhome', 'mcp__nowhere'];
+  mkdirSync(join(h.D, 'repo'), { recursive: true });
+  writeFileSync(join(h.D, 'other', 'config.toml'), 'profile = "p"\n[mcp_servers."inbodyhome"]\nurl = "http://y"\n[mcp_servers.kept]\ncommand = "k"\n[profiles.p.mcp_servers.inprofile]\ncommand = "x"\n');
+  writeFileSync(join(h.D, 'other', 'p.config.toml'), '[mcp_servers.inprofile]\ncommand = "x"\n');
+  const r = new CodexRunner({ codex: join(dirname(fileURLToPath(import.meta.url)), 'fake-codex.mjs'), runsDir: join(h.D, 'runs'), codexHome: join(h.D, 'home'), sessionsDir: join(h.D, 'home', 'sessions'), systemDir: join(h.D, 'etc') });
+  const deny = ['mcp__inprofile', 'mcp__inbodyhome', 'mcp__nowhere'];
   const b = r.start({ brief: 'x', model: 'm', cwd: join(h.D, 'repo'), env: { ...h.env, CODEX_HOME: join(h.D, 'other') }, deny });
   const until = Date.now() + 5000;
   while (!existsSync(join(h.D, 'argv.log')) && Date.now() < until) await new Promise((res) => setTimeout(res, 20));
-  const args = JSON.parse(readFileSync(join(h.D, 'argv.log'), 'utf-8').trim().split('\n')[0]).args;
-  for (const n of ['inprofile', 'nowhere']) assert.ok(args.includes(`mcp_servers.${n}={enabled=false, command="false"}`), n);
-  for (const n of ['inproject', 'inbodyhome']) assert.ok(args.includes(`mcp_servers.${n}={enabled=false, url="http://127.0.0.1:9/denied"}`), n);
+  const { args, home } = JSON.parse(readFileSync(join(h.D, 'argv.log'), 'utf-8').trim().split('\n')[0]);
+  for (const n of ['inprofile', 'inbodyhome', 'nowhere']) assert.ok(args.includes(`mcp_servers.${n}={enabled=false, command="false"}`), n);
+  assert.equal(readFileSync(join(home, 'config.toml'), 'utf-8').replace(/^#.*\n/gm, '').trim(), '[mcp_servers.kept]\ncommand = "k"');
   r.end(b);
   assert.throws(() => r.start({ brief: 'x', model: 'm', cwd: h.D, env: h.env, deny: ['mcp__loom__note_write'] }), /can't deny mcp__loom__note_write/);
 });
@@ -394,10 +392,30 @@ test('a body whose deny list Codex can\'t keep never falls back to Codex; with C
   // A server-level deny Codex keeps: it falls back as any body does.
   const w2 = twoHarnesses();
   w2.o.policy = () => ({ deny: ['mcp__handoff'] });
+  w2.codex.wontRun = () => null;
   w2.max.usage = { held: Math.floor(w2.clock.now().getTime() / 1000) + 600 };
   await deliver(w2.env, w2.msg('dm:U1', 'hi'), w2.o);
   assert.match(w2.conv().body, /^codex:/);
   assert.deepEqual(w2.codex.denies[w2.conv().body.split(':')[1]], ['mcp__handoff']);
+  // One this runtime's Codex won't run here (runners.mjs, wontRun: a config layer its made home can't replace, or
+  // LOOM_RUNTIME_CODEX_PROFILE): kept off Codex as well, asked with the body's deny list, cwd and env.
+  const w3 = twoHarnesses();
+  const asked = [];
+  w3.codex.wontRun = (deny, cwd, env) => { asked.push({ deny, cwd, key: !!env?.LOOM_BODY_KEY }); return 'Codex would read /x/.codex/config.toml too'; };
+  w3.o.policy = () => ({ deny: ['mcp__handoff'] });
+  w3.max.usage = { held: Math.floor(w3.clock.now().getTime() / 1000) + 600 };
+  await deliver(w3.env, w3.msg('dm:U1', 'hi'), w3.o);
+  assert.equal(w3.starts().length, 0, 'no Codex body where its deny list could be undone');
+  assert.deepEqual(asked.map((a) => a.deny), [['mcp__handoff']]);
+  assert.equal(asked[0].cwd, w3.o.cwd);
+  assert.equal(asked[0].key, true, 'with the body\'s env (its run key)');
+  assert.match(w3.alerts[0].facts.cant, /codex can't keep its deny list here: Codex would read \/x\/\.codex\/config\.toml too/, 'the reason reaches the owner');
+  // Refused there while Claude has room: the body runs on Claude, as it would anyway.
+  const w4 = twoHarnesses();
+  w4.codex.wontRun = () => 'Codex would read /x/.codex/config.toml too';
+  w4.o.policy = () => ({ deny: ['mcp__handoff'] });
+  await deliver(w4.env, w4.msg('dm:U1', 'hi'), w4.o);
+  assert.match(w4.conv().body, /^claude:/);
 });
 
 test('a refusal holds only the account the body ran on, not another of the same label', async () => {
