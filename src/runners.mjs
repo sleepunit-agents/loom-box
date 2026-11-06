@@ -33,15 +33,16 @@
 // the bridges piece's inbox hook reads (<inbox dir>/<id8>/pending.jsonl, under flock), so a house whose harness
 // has that hook hears follow-ups mid-turn. With no inbox dir, a body can't be fed.
 import { spawn as nodeSpawn, spawnSync } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { createHash, randomBytes } from 'node:crypto';
+import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { keptReading } from './statusline.mjs';
 import { claudeCards, codexCards } from './activity.mjs';
 import { lastRateLimit, lastRefusal, refusedUntil, tailOf } from './logins.mjs';
 import { lastToolUse } from './stuck.mjs';
+import { parse as parseToml, stringify as stringifyToml } from './vendor/smol-toml/index.js';
 
 export class RunnerError extends Error {}
 
@@ -293,18 +294,16 @@ function turnOver(job) {
 const scrub = (env) => Object.fromEntries(Object.entries(env).filter(([k]) => !k.startsWith('CLAUDE_CODE_') && k !== 'CLAUDECODE' && k !== 'CLAUDE_JOB_DIR'));
 
 /**
- * A body's deny list (Claude Code's tool names), as Codex can keep it (t-1907): whole MCP servers, by name.
- *   mcp__<server>   always `-c mcp_servers.<server>={enabled=false, …}`, whether or not any config Codex reads defines
- *                   it (its home's, the body env's CODEX_HOME, the project's): `-c` merges over all of them (a profile's
- *                   own would win, so no body with a deny list runs under one: CodexRunner.refusal),
- *                   so the server is off wherever it's defined. The stub's transport is `command` unless `urls` (what a
- *                   scan of the configs found, a hint only) names it as a URL server; a wrong hint makes Codex refuse
- *                   to start (a stdio stub over a URL server, or the other way), which fails closed.
+ * A body's deny list (Claude Code's tool names), as Codex can keep it (t-1907, t-1916): whole MCP servers, by name.
+ *   mcp__<server>   left out of the Codex home the runner makes for the body (CodexRunner.homeFor), so no config Codex
+ *                   reads for it defines the server; and, a second layer, `-c mcp_servers.<server>={enabled=false,
+ *                   command="false"}` on its command line. A stub, not a bare `enabled=false`: Codex refuses a server
+ *                   entry with no transport ("invalid transport", codex-cli 0.162.1), and the server is defined nowhere.
  * Anything else (one tool of a server, mcp__<server>__<tool>, or a built-in like Bash) Codex can't be trusted to keep:
- * an error, and no body. Delivery avoids Codex for such a body and says so. → {args} | {error}.
+ * an error, and no body. Delivery avoids Codex for such a body and says so. → {args, off} | {error}.
  */
 const SERVER_NAME = /^[A-Za-z0-9_-]{1,64}$/;
-export function codexDeny(deny, urls = new Set()) {
+export function codexDeny(deny) {
   const off = new Set();
   const bad = [];
   for (const d of deny ?? []) {
@@ -315,24 +314,65 @@ export function codexDeny(deny, urls = new Set()) {
   }
   if (bad.length) return { error: `the codex runner can't deny ${bad.join(', ')} (it turns off whole MCP servers, nothing else): refusing to start a body that would keep them` };
   const args = [];
-  for (const s of [...off].sort()) args.push('-c', `mcp_servers.${s}={enabled=false, ${urls.has(s) ? 'url="http://127.0.0.1:9/denied"' : 'command="false"'}}`);
-  return { args };
+  for (const s of [...off].sort()) args.push('-c', `mcp_servers.${s}={enabled=false, command="false"}`);
+  return { args, off };
 }
+
+/**
+ * The config layers Codex reads besides its home's own config.toml, which no CODEX_HOME replaces (Codex's docs,
+ * t-1916: https://learn.chatgpt.com/docs/config-file/config-basic, …/config-advanced,
+ * https://learn.chatgpt.com/codex/enterprise/managed-configuration): the machine's /etc/codex/config.toml, its managed
+ * defaults (managed_config.toml, which win over `-c`) and requirements (requirements.toml); and a project's
+ * .codex/config.toml, in every dir from the project root (the nearest dir above the cwd with a .git; else the cwd)
+ * down to the cwd. No documented flag turns them off (`codex exec --ignore-user-config` skips only the home's), and
+ * Codex reads a project's whether or not the project is trusted (codex-cli 0.162.1, checked 2026-11-06 with a
+ * throwaway home). So they're never parsed here, only looked for: from the cwd up to /, whatever the root, and in
+ * /etc/codex. The one exception is the real Codex home's own config.toml (`home`, the one the made home replaces)
+ * when it sits above the project root, where Codex never reads it as a project's: ~/.codex above ~/Art.
+ * → the paths found ([] for none). A path that can't be looked at counts as found.
+ */
+export function codexLayers(cwd, { home, systemDir = '/etc/codex' } = {}) {
+  const there = (p) => { try { lstatSync(p); return true; } catch (e) { return !['ENOENT', 'ENOTDIR'].includes(e.code); } };
+  const dirsUp = [];
+  for (let d = resolve(cwd ?? process.cwd()); ; d = dirname(d)) { dirsUp.push(d); if (dirname(d) === d) break; }
+  const rootAt = dirsUp.findIndex((d) => there(join(d, '.git')));
+  const found = [];
+  dirsUp.forEach((d, i) => {
+    const f = join(d, '.codex', 'config.toml');
+    const aboveRoot = i > (rootAt < 0 ? 0 : rootAt);
+    if (aboveRoot && home && resolve(home) === join(d, '.codex')) return;
+    if (there(f)) found.push(f);
+  });
+  for (const n of ['config.toml', 'managed_config.toml', 'requirements.toml']) if (there(join(systemDir, n))) found.push(join(systemDir, n));
+  return found;
+}
+
+/** What a made Codex home links from the real one: its login, and what tells the body how to work. Never its config. */
+const HOME_LINKS = ['auth.json', 'AGENTS.md', 'skills', 'rules'];
 
 /**
  * Codex, `codex exec --json`: a body is one process, started in its own session with the brief on stdin, its events
  * in <runs>/<key>/events.jsonl. Its id is a key picked at launch (so its env can carry it as SHUTTLE_BODY for the
  * inbox hook); the thread id Codex reports first is its slot (`codex exec resume <thread>`). Files, not pipes, so a
- * body outlives whatever started it. A deny list is kept as Codex can (codexDeny): MCP servers and their tools only.
+ * body outlives whatever started it.
+ *
+ * A deny list is kept by construction (t-1916): every body runs with CODEX_HOME set to a home this runner makes
+ * (homeFor), whose config.toml it writes itself with only the MCP servers the body may use, read from the real
+ * home's config (a TOML parse; nothing else carries over: no profiles, no other keys). The real home is the body
+ * env's CODEX_HOME, else this runner's `codexHome`. The made home links the real one's login and instructions
+ * (HOME_LINKS), and its sessions dir is this runner's (roots.sessions), so resume, usage and session files read
+ * where Codex writes. A config layer no CODEX_HOME replaces (codexLayers) refuses a body with a deny list.
  */
 export class CodexRunner {
   harness = 'codex';
 
-  constructor({ codex = 'codex', profile, runsDir = join(homedir(), '.local', 'share', 'loom-runtime', 'codex-runs'), sessionsDir = join(process.env.CODEX_HOME || join(homedir(), '.codex'), 'sessions'), inboxDir, spawn = nodeSpawn, run = spawnSync, key = hex8 } = {}) {
-    Object.assign(this, { codex, profile, runsDir, spawn, run, key });
+  constructor({ codex = 'codex', profile, runsDir = join(homedir(), '.local', 'share', 'loom-runtime', 'codex-runs'), codexHome = process.env.CODEX_HOME || join(homedir(), '.codex'), sessionsDir, homesDir, systemDir = '/etc/codex', inboxDir, spawn = nodeSpawn, run = spawnSync, key = hex8 } = {}) {
+    Object.assign(this, { codex, profile, runsDir, codexHome, systemDir, spawn, run, key });
+    this.homesDir = homesDir ?? join(dirname(runsDir), 'codex-homes');
     this.inbox = inboxDir ? inbox(inboxDir, { run }) : null;
-    // Codex keeps a thread's rollout at <CODEX_HOME>/sessions/YYYY/MM/DD/rollout-<when>-<thread>.jsonl.
-    this.roots = { sessions: sessionsDir };
+    // Codex keeps a thread's rollout at <CODEX_HOME>/sessions/YYYY/MM/DD/rollout-<when>-<thread>.jsonl: every made
+    // home's sessions is a link to this one.
+    this.roots = { sessions: sessionsDir ?? join(codexHome, 'sessions') };
   }
 
   sessionFiles(slot, body) {
@@ -353,15 +393,15 @@ export class CodexRunner {
   }
 
   launch({ brief, model, cwd, env, deny = [], resume }) {
-    const why = this.refusal(deny, cwd, env);
-    if (why) throw new RunnerError(why);
-    const off = codexDeny(deny, this.urlServers(cwd, env));
+    const plan = this.plan(deny, cwd, env);
+    if (plan.why) throw new RunnerError(plan.why);
+    const home = this.homeFor(plan);
     const key = this.key();
     const dir = join(this.runsDir, key);
     mkdirSync(dir, { recursive: true, mode: 0o700 });
-    const e = { ...scrub(env ?? process.env), SHUTTLE_BODY: key, ...(this.inbox ? { SHUTTLE_INBOX_DIR: this.inbox.dir } : {}) };
+    const e = { ...scrub(env ?? process.env), CODEX_HOME: home, SHUTTLE_BODY: key, ...(this.inbox ? { SHUTTLE_INBOX_DIR: this.inbox.dir } : {}) };
     const argv = ['exec', '--json', '--skip-git-repo-check', '--dangerously-bypass-hook-trust', '--dangerously-bypass-approvals-and-sandbox',
-      ...(model ? ['-m', model] : []), ...off.args, '-C', cwd ?? process.cwd(), '-o', join(dir, 'last.txt'),
+      ...(model ? ['-m', model] : []), ...plan.args, '-C', cwd ?? process.cwd(), '-o', join(dir, 'last.txt'),
       ...(resume ? ['resume', resume] : []), '-'];
     const out = openSync(join(dir, 'events.jsonl'), 'a', 0o600);
     const err = openSync(join(dir, 'stderr.txt'), 'a', 0o600);
@@ -379,52 +419,58 @@ export class CodexRunner {
   }
 
   /**
-   * Why this runner won't start a body here, or null (t-1916). A Codex profile's own `mcp_servers` win over the
-   * top-level `-c mcp_servers.<s>.enabled=false` that keeps a deny list, so a denied server could come back on under
-   * one: LOOM_RUNTIME_CODEX_PROFILE isn't supported (nobody set it; set, every body is refused, said so), and a body
-   * with a deny list isn't started where a config Codex reads selects a profile (a top-level `profile =`), or where
-   * one it reads can't be read. Plus a deny list Codex can't keep at all (codexDeny).
+   * What a body here would run with: {src, servers, args} (its real home, the MCP servers it may use, the `-c`s that
+   * turn the denied ones off), or {why} it won't run here. LOOM_RUNTIME_CODEX_PROFILE isn't supported (set, every
+   * body is refused, said so: a profile's own servers would come back on); a deny list Codex can't keep (codexDeny);
+   * with a deny list, a config layer the made home can't replace (codexLayers); a real config that can't be read.
    */
-  refusal(deny, cwd, env) {
-    if (this.profile) return `LOOM_RUNTIME_CODEX_PROFILE is set (${String(this.profile).slice(0, 64)}): a Codex profile can turn a denied tool server back on, so the codex runner runs no body under one; unset it`;
+  plan(deny, cwd, env) {
+    if (this.profile) return { why: `LOOM_RUNTIME_CODEX_PROFILE is set (${String(this.profile).slice(0, 64)}): a Codex profile can turn a denied tool server back on, so the codex runner runs no body under one; unset it` };
     const off = codexDeny(deny);
-    if (off.error) return off.error;
-    if (!deny?.length) return null;
-    for (const f of this.configFiles(cwd, env)) {
-      let text;
-      try { text = readFileSync(f, 'utf-8'); } catch (e) { if (e.code === 'ENOENT') continue; return `the codex runner can't read ${f} to check it selects no profile: refusing a body with a deny list`; }
-      for (const line of text.split('\n')) {
-        if (/^\s*\[/.test(line)) break;
-        if (/^\s*["']?profile["']?\s*=/.test(line)) return `${f} selects a Codex profile (${line.trim().slice(0, 80)}), whose own tool servers could undo the deny list: refusing a body with one`;
-      }
+    if (off.error) return { why: off.error };
+    const src = resolve(env?.CODEX_HOME || this.codexHome);
+    if (off.off.size) {
+      const layers = codexLayers(cwd, { home: src, systemDir: this.systemDir });
+      if (layers.length) return { why: `Codex would read ${layers.join(', ')} too, a config the runtime can't replace, which could turn a denied tool server back on: refusing a body with a deny list here (remove it, or keep this agent off Codex)` };
     }
-    return null;
+    let conf = {};
+    const f = join(src, 'config.toml');
+    try { conf = parseToml(readFileSync(f, 'utf-8')); } catch (e) {
+      if (e.code !== 'ENOENT') return { why: `the codex runner can't read ${f} for the tool servers a body may use (${String(e.message).split('\n')[0].slice(0, 120)}): refusing to start one` };
+    }
+    const all = conf.mcp_servers && typeof conf.mcp_servers === 'object' && !Array.isArray(conf.mcp_servers) ? conf.mcp_servers : {};
+    const servers = Object.fromEntries(Object.entries(all).filter(([n]) => !off.off.has(n)));
+    return { src, servers, args: off.args };
   }
 
-  /** The config.toml files Codex reads for a body here: its home's, the body env's CODEX_HOME, the project's. */
-  configFiles(cwd, env) {
-    const homes = [this.codexHome ?? dirname(this.roots.sessions), ...(env?.CODEX_HOME ? [env.CODEX_HOME] : [])];
-    return [...homes.map((h) => join(h, 'config.toml')), ...(cwd ? [join(cwd, '.codex', 'config.toml')] : [])];
-  }
+  /** Why this runner won't start a body here, or null: what delivery reads to keep the body off Codex. */
+  wontRun(deny, cwd, env) { return this.plan(deny, cwd, env).why ?? null; }
 
   /**
-   * Which MCP servers the configs Codex reads define by URL (home's, the body env's CODEX_HOME, the project's): only
-   * a hint for which stub codexDeny writes. Every denied server is turned off whatever this finds.
+   * The Codex home for a body (0700): one per real home and deny list, under homesDir, so bodies alike share one and
+   * Codex's own state there (its thread database) carries from run to run. Its config.toml is written each launch
+   * (whole, 0600, renamed into place): the allowed servers, as the real config has them now. Its links: the real
+   * home's login and instructions (HOME_LINKS, where they exist) and this runner's sessions dir.
    */
-  urlServers(cwd, env) {
-    const urls = new Set();
-    for (const f of this.configFiles(cwd, env)) {
-      let text = '';
-      try { text = readFileSync(f, 'utf-8'); } catch { continue; }
+  homeFor({ src, servers, args }) {
+    const id = createHash('sha256').update(JSON.stringify([src, args])).digest('hex').slice(0, 16);
+    const home = join(this.homesDir, id);
+    mkdirSync(home, { recursive: true, mode: 0o700 });
+    chmodSync(home, 0o700);
+    const tmp = join(home, `.config.toml.${process.pid}.${hex8()}`);
+    writeFileSync(tmp, `# Written by loom's runtime for its Codex bodies (runners.mjs, CodexRunner.homeFor): only the MCP servers\n# a body may use, from ${join(src, 'config.toml')}. Rewritten at each start; edit that one.\n\n${Object.keys(servers).length ? stringifyToml({ mcp_servers: servers }) : ''}`, { mode: 0o600 });
+    renameSync(tmp, join(home, 'config.toml'));
+    mkdirSync(this.roots.sessions, { recursive: true, mode: 0o700 });
+    const links = [...HOME_LINKS.filter((n) => existsSync(join(src, n))).map((n) => [n, join(src, n)]), ['sessions', resolve(this.roots.sessions)]];
+    for (const [n, to] of links) {
+      const at = join(home, n);
       let cur = null;
-      for (const line of text.split('\n')) {
-        const t = /^\s*\[\s*(?:profiles\.[^\]]*?\.)?mcp_servers\s*\.\s*(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9_-]+))\s*\]/.exec(line);
-        if (t) { cur = t[1] ?? t[2] ?? t[3]; continue; }
-        if (/^\s*\[/.test(line)) { cur = null; continue; }
-        if (cur && /^\s*url\s*=/.test(line)) urls.add(cur);
-      }
+      try { cur = readlinkSync(at); } catch { /* none, or not a link */ }
+      if (cur === to) continue;
+      rmSync(at, { recursive: true, force: true });
+      symlinkSync(to, at);
     }
-    return urls;
+    return home;
   }
 
   start(o) { return this.launch(o); }
@@ -515,7 +561,7 @@ export function runnerFor(harness, env = process.env, opts = {}) {
     return new ClaudeRunner({ claude: env.LOOM_RUNTIME_CLAUDE || 'claude', usageDir: usageDirOf(env), ...(env.LOOM_RUNTIME_CLAUDE_JOBS ? { jobsDir: env.LOOM_RUNTIME_CLAUDE_JOBS } : {}), ...(env.LOOM_RUNTIME_CLAUDE_PROJECTS ? { projectsDir: env.LOOM_RUNTIME_CLAUDE_PROJECTS } : {}), args: argv(env.LOOM_RUNTIME_CLAUDE_ARGS), inboxDir, ...opts });
   }
   if (harness === 'codex') {
-    return new CodexRunner({ codex: env.LOOM_RUNTIME_CODEX || 'codex', profile: env.LOOM_RUNTIME_CODEX_PROFILE || undefined, ...(env.LOOM_RUNTIME_CODEX_RUNS ? { runsDir: env.LOOM_RUNTIME_CODEX_RUNS } : {}), ...(env.LOOM_RUNTIME_CODEX_SESSIONS ? { sessionsDir: env.LOOM_RUNTIME_CODEX_SESSIONS } : {}), inboxDir, ...opts });
+    return new CodexRunner({ codex: env.LOOM_RUNTIME_CODEX || 'codex', profile: env.LOOM_RUNTIME_CODEX_PROFILE || undefined, ...(env.CODEX_HOME ? { codexHome: env.CODEX_HOME } : {}), ...(env.LOOM_RUNTIME_CODEX_RUNS ? { runsDir: env.LOOM_RUNTIME_CODEX_RUNS } : {}), ...(env.LOOM_RUNTIME_CODEX_SESSIONS ? { sessionsDir: env.LOOM_RUNTIME_CODEX_SESSIONS } : {}), inboxDir, ...opts });
   }
   throw new RunnerError(`no runner for harness ${JSON.stringify(harness)}`);
 }
