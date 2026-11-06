@@ -13,6 +13,18 @@
 // `agents` is which agents the account may do work for: the agents whose owner owns one of its boxes (owners.mjs).
 // Nothing here ever holds a credential.
 //
+// **One login, one quota** (t-1913). Boxes on one account are one entry, wherever it's listed (accounts, usage, the
+// resolver), keyed by what the box's CLI says the account is (logins.mjs, identify). Its usage is every copy's
+// readings, box- or house-taken, from any of its boxes, merged by one rule (mergeUsage):
+//   - per window, the newest reading (by `checked`) is the account's: usage only rises within a window, so a newer
+//     reading is the truth, whether it's higher or (after a reset) lower; a box's own reading doesn't outrank a newer
+//     house reading;
+//   - a box not seen lately offers nothing, but its readings still count for the account (it may hold the newest);
+//   - a copy that read nothing adds nothing: an unread box can't mask a known-full reading (it's one quota);
+//   - a full reading whose reset time has passed counts as reset (windowNow), with nothing newer to say otherwise;
+//   - only an account with no reading at all fails open (has room), as it did: its first turn reads it, and a refusal
+//     holds it at once.
+//
 // A **hold** (t-1907): an account its provider has just refused for a usage limit (a body's turn ended on one,
 // runners.mjs `turn().limited`) has no room until the refusal's reset, whatever the readings say. Readings come from
 // status lines and rollouts, after a turn, so they lag: a hold closes that gap the moment a refusal is seen.
@@ -37,33 +49,50 @@ export class AccountsError extends Error {}
 const cap = (t) => (t ? t[0].toUpperCase() + t.slice(1) : t);
 const windowOk = (k) => /^[0-9]+[hd](_[a-z0-9]+)?$/.test(k);
 
-/** Usage readings, newest per window, flattened to {"7d": 0.6, reset_7d: …, checked}. */
+const checkedOf = (r) => (r && typeof r.checked === 'number' ? r.checked : 0);
+
+/**
+ * Usage readings, newest per window, flattened to {"7d": 0.6, reset_7d: …, checked}: the rule above. On a tie in
+ * `checked`, the fuller reading (two copies read at the same second can't both be right; the fuller one can't
+ * overspend).
+ */
 function mergeUsage(readings) {
   const u = {};
   const at = {};
   for (const r of readings) {
     if (!r || typeof r !== 'object') continue;
-    const t = typeof r.checked === 'number' ? r.checked : 0;
+    const t = checkedOf(r);
     for (const [w, v] of Object.entries(r.windows ?? {})) {
       if (!windowOk(w) || typeof v !== 'number') continue;
-      if (at[w] !== undefined && at[w] > t) continue;
+      if (at[w] !== undefined && (at[w] > t || (at[w] === t && u[w] >= v))) continue;
       at[w] = t; u[w] = v;
+      // A newer reading that says no reset keeps the older one's while it's still ahead of the newer reading (the same
+      // window): otherwise a full window would have no reset at all, and nothing would ever run on it to read it again.
+      const prev = u[`reset_${w}`];
       delete u[`reset_${w}`];
       if (typeof r.resets?.[w] === 'number') u[`reset_${w}`] = r.resets[w];
+      else if (typeof prev === 'number' && prev > t) u[`reset_${w}`] = prev;
     }
     if (t > (u.checked ?? 0)) u.checked = t;
   }
   return u;
 }
 
+function newestFrom(box, house) {
+  const b = Math.max(-1, ...box.map(checkedOf)), h = Math.max(-1, ...house.map(checkedOf));
+  return b < 0 && h < 0 ? null : b >= h ? 'box' : 'house';
+}
+
 /** The accounts, from the state's box reports and agents' secrets. Pure but for the clock. */
 export function deriveAccounts(s, { members, nowMs = Date.now() } = {}) {
   const agents = Object.keys(s.agents ?? {});
   const by = new Map();
+  const staleReadings = new Map();
   for (const [id, b] of Object.entries(s.boxes ?? {})) {
     if (b.revoked) continue;
-    // A box not seen lately can't run anything now: its logins offer nothing.
-    if (!(b.local || (b.lastSeen && nowMs - Date.parse(b.lastSeen) < STALE_MS))) continue;
+    // A box not seen lately can't run anything now: its logins offer nothing. Its readings still count for an account a
+    // box seen lately offers (one quota: the newest reading may be the one a box that's gone quiet took).
+    const stale = !(b.local || (b.lastSeen && nowMs - Date.parse(b.lastSeen) < STALE_MS));
     const fresh = true;
     for (const [h, st] of Object.entries(b.harnesses ?? {})) {
       const def = LOGIN_HARNESSES[h];
@@ -73,6 +102,15 @@ export function deriveAccounts(s, { members, nowMs = Date.now() } = {}) {
       // keeps one box from merging into another owner's account; the salt keeps the hash meaningless elsewhere.
       const owner = boxOwner(b, members ?? [{ person: 'owner', agents: '*' }]);
       const name = `${owner}:${h}-${createHash('sha256').update(`${s.accountSalt ?? ''}\0${owner}\0${st.account ?? `box:${id}`}`).digest('hex').slice(0, 10)}`;
+      if (stale) {
+        const u = b.usage?.[h];
+        const slot = u && (u.box || u.house) ? u : u?.windows ? { box: u } : {};
+        const r = staleReadings.get(name) ?? { box: [], house: [] };
+        if (slot.box) r.box.push(slot.box);
+        if (slot.house) r.house.push(slot.house);
+        staleReadings.set(name, r);
+        continue;
+      }
       const a = by.get(name) ?? { name, owner, provider: def.provider, harness: h, kind: 'login', label: '', plan: '', method: st.method ?? '', boxes: [], agents: new Set(), boxReadings: [], houseReadings: [], fresh: false };
       a.boxes.push(id);
       a.fresh ||= !!fresh;
@@ -89,15 +127,20 @@ export function deriveAccounts(s, { members, nowMs = Date.now() } = {}) {
       by.set(name, a);
     }
   }
+  for (const [name, r] of staleReadings) {
+    const a = by.get(name);
+    if (a) { a.boxReadings.push(...r.box); a.houseReadings.push(...r.house); }
+  }
   const accounts = [...by.values()].map((a) => ({
     name: a.name, provider: a.provider, harness: a.harness, kind: 'login',
     // What anyone but the household owner sees of an account: this label, never its key.
     label: `${LOGIN_HARNESSES[a.harness].label}${a.plan ? ` ${cap(a.plan)}` : ''} (${a.owner}'s)`,
     plan: a.plan, boxes: a.boxes.sort(), agents: [...a.agents].sort(),
     credentials: [{ kind: 'login', status: a.fresh ? 'valid' : 'unknown' }],
-    // The box's own readings when it has any (read from the harness's files on the box), else what houses reported.
-    usage: mergeUsage(a.boxReadings.length ? a.boxReadings : a.houseReadings),
-    usageFrom: a.boxReadings.length ? 'box' : a.houseReadings.length ? 'house' : null,
+    // Every copy's readings, box- or house-taken, on every box of the account: the newest per window (above).
+    usage: mergeUsage([...a.boxReadings, ...a.houseReadings]),
+    // Where the newest reading came from (a box's own, or a house's).
+    usageFrom: newestFrom(a.boxReadings, a.houseReadings),
   }));
   // Holds: an account its provider refused for a usage limit, until that limit resets (above).
   const nowS = Math.floor(nowMs / 1000);

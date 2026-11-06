@@ -420,7 +420,7 @@ function rootless(env) {
  * on loom's own machine); `loomUrl` is what a house is told loom is.
  */
 export function runner(env, client, { loomUrl, labels = [], log = (m) => process.stderr.write(`loom-box: ${m}\n`), hasSocket = (p) => existsSync(p), hasCdi = () => CDI_SPECS.some((p) => existsSync(p)), upgrade = maybeUpgrade,
-  status = (agents) => harnessStatus(env, { agents }), login = (h, o) => startLogin(env, h, o), codexUsage = () => null, clock = () => Date.now(), secureChannel = true,
+  status = (agents, force) => harnessStatus(env, { agents, force }), login = (h, o) => startLogin(env, h, o), codexUsage = () => null, clock = () => Date.now(), secureChannel = true,
   sweep = () => sweepCliContainers(env), runtime = () => ({ commit: ownCommit(), piece: ownPiece() }),
   buildOf = (c) => buildNow(env, c), houseImage = (id) => imageOf(env, id), sampleUnits: unitsImpl = undefined, bootInfo: bootImpl = undefined, sampleHealth: healthImpl = undefined, reportOnly = undefined }) {
   const houses = new Map(); // id -> { child, dir, stopAt? }
@@ -437,7 +437,7 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
     // Not before the first poll: the CLI runs in an image of an agent the control plane names.
     if (!loginAgents) return harnesses;
     if (force || !harnesses || clock() - asked >= STATUS_MS) {
-      try { harnesses = status(loginAgents); } catch (e) { log(`harness status: ${e.message}`); }
+      try { harnesses = status(loginAgents, !!force); } catch (e) { log(`harness status: ${e.message}`); }
       asked = clock();
     }
     return harnesses;

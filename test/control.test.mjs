@@ -604,14 +604,16 @@ test('a house gets the box\'s logins only on a box its agent\'s owner owns, and 
   ok(call(owner, 'set-agent', { agent: 'pond-bot', repo: 'https://x/pond-bot.git', logins: 'codex' }));
   assert.deepEqual(onRig(), ['codex']);
   assert.equal(call(owner, 'set-agent', { agent: 'pond-bot', repo: 'https://x/pond-bot.git', logins: 'gemini' }).status, 400);
-  // A house's reading and the box's own: the account shows the box's.
+  // A house's reading and the box's own: the account shows the newer (t-1913: one quota, the newest reading).
   const h = ok(call(owner, 'up', { agent: 'art', box: 'one', task: 't' }));
   ok(call(box('one'), 'poll'));
   ok(call(box('one'), 'claim', { id: h.id }));
-  ok(call({ ...art, house: h.id }, 'usage', { harness: 'codex', reading: { windows: { '7d': 0.9 } } }));
+  ok(call({ ...art, house: h.id }, 'usage', { harness: 'codex', reading: { windows: { '7d': 0.9 }, checked: 1792890000 } }));
   const codexOf = () => stateAccounts(env, { now: () => Date.parse('2026-10-25T03:00:00Z') }).list().accounts.find((x) => x.harness === 'codex' && x.boxes.includes('one'));
   assert.deepEqual([codexOf().usage['7d'], codexOf().usageFrom], [0.9, 'house']);
-  ok(call(box('one'), 'poll', { usage: { codex: { windows: { '7d': 0.2 }, checked: 1792890000 } } }));
+  ok(call(box('one'), 'poll', { usage: { codex: { windows: { '7d': 0.95 }, checked: 1792880000 } } }));
+  assert.deepEqual([codexOf().usage['7d'], codexOf().usageFrom], [0.9, 'house'], 'an older box reading doesn\'t outrank a newer house one');
+  ok(call(box('one'), 'poll', { usage: { codex: { windows: { '7d': 0.2 }, checked: 1792895000 } } }));
   assert.deepEqual([codexOf().usage['7d'], codexOf().usageFrom], [0.2, 'box']);
 });
 

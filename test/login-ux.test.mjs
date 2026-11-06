@@ -111,7 +111,7 @@ test('Codex: the page shows the code and the link, then flips to logged in by it
   assert.equal(blocksOf(p).find((b) => b.type === 'link' && b.href).href, 'https://auth.openai.com/codex/device');
   assert.deepEqual([calloutOf(p).busy, calloutOf(p).title, p.refresh], [true, 'Waiting for you to enter the code at OpenAI…', 3]);
   const done = await until(() => { const x = loginPage(id); return calloutOf(x)?.tone === 'ok' && x; });
-  assert.equal(calloutOf(done).title, '✓ Codex logged in (ChatGPT)');
+  assert.equal(calloutOf(done).title, '✓ Codex logged in (ChatGPT, Pro)', 'its plan, now that the box asks who it is (t-1913)');
   assert.equal(done.refresh, undefined);
 });
 
