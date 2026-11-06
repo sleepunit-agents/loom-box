@@ -88,7 +88,7 @@ import { namesFiles } from './briefs.mjs';
 import { AGENT_NAME, StateError, alive, withLock } from './state.mjs';
 import { RUNS_KEPT, causeOf, detectLoop, textHash } from './loops.mjs';
 import { STUCK_AFTER_MIN, asData, taskComment, taskOf } from './stuck.mjs';
-import { runnerFor } from './runners.mjs';
+import { codexDeny, runnerFor } from './runners.mjs';
 import { raiseAlert } from './alerthook.mjs';
 import { changed as changedCards } from './activity.mjs';
 import { keepKey } from './bodyhost.mjs';
@@ -346,14 +346,15 @@ function accountsOfBody(d, rec) {
  * Said plainly in the conversation, as its agent (the venue's own send), and to the owner: no model the agent may use
  * has room, or a refused turn's one retry was refused too. Once per run of it: `c.allOut` says it was said.
  */
-async function sayOut(env, cv, { out = [], retried = false, run, alert = true }, d) {
+async function sayOut(env, cv, { out = [], retried = false, run, alert = true, cant = [] }, d) {
   const now = d.now();
   const c = loadConv(env, cv);
   if (!c) return;
   const accts = out.filter((o) => o.account);
   const list = accts.length ? accts.map((o) => outWords(o, env, now.getTime())).join('; ') : 'none of my model accounts has room';
   const soon = accts.map((o) => o.until).filter(Number.isFinite);
-  const back = soon.length ? ` Ask me again after ${whenWords(Math.min(...soon), env, now.getTime())}.` : ' Ask me again later.';
+  const back = (cant.length ? ` ${cant.map(harnessWords).join(' and ')} can't keep this conversation's tool limits, so I can't answer on ${cant.length === 1 ? 'it' : 'them'} here.` : '')
+    + (soon.length ? ` Ask me again after ${whenWords(Math.min(...soon), env, now.getTime())}.` : ' Ask me again later.');
   const text = retried
     ? `I couldn't finish answering this: my model accounts ran out of quota partway through (${list}).${back}`
     : `I can't answer right now: every model account I may use is out of quota (${list}).${back}`;
@@ -371,7 +372,7 @@ async function sayOut(env, cv, { out = [], retried = false, run, alert = true },
   if (!alert) return;
   locked(env, () => addNotice(env, { text: `${where} got no answer: ${retried ? 'its retry ran out of quota too' : 'every model account it may use is out of quota'}`.slice(0, 300), meta: `${list} · ${cv}`.slice(0, 300), at: now.toISOString(), agent: c.agent, tone: 'warn', page: '' }, now.getTime()));
   d.alert(env, { source: 'runtime-quota', severity: 'bad', place: c.place, summary: `${where} got no answer: ${retried ? 'a refused turn\'s retry ran out of quota too' : 'every model account it may use is out of quota'}`,
-    facts: { agent: c.agent, conversation: cv, venue: c.venue, place: c.place, out: list } });
+    facts: { agent: c.agent, conversation: cv, venue: c.venue, place: c.place, out: list, ...(cant.length ? { cant: `${cant.join(', ')} can't keep its deny list` } : {}) } });
   d.warn(`${cv}: out of quota everywhere (${list})`);
 }
 
@@ -1239,6 +1240,7 @@ async function execute(env, op, d, mem) {
   const keys = op.msgs.map((x) => x.key);
   let restored = [];
   let way = null;
+  let cant = [];
   const pending = [];
   let r;
   let rules;
@@ -1277,7 +1279,10 @@ async function execute(env, op, d, mem) {
     const base = { agent: c0.agent, venue: c0.venue, venueKind: c0.kind, cwd: local ? lb.cwd : d.cwd, deny: rules.deny, guest: rules.guest, ...(local ? { local: true } : {}) };
     // Out of quota (t-1907): which session this run continues, on which harness. Its home slot, when the harness it
     // switched away from has room again; its own slot, when that one's harness has room; else a fresh body elsewhere.
-    way = await routeOf(env, c0, op, rules, d);
+    // A deny list Codex can't keep (a tool within a server, a built-in: runners.mjs, codexDeny) keeps this body off
+    // Codex: never an unrestricted body there, and said so if nothing else has room.
+    cant = codexDeny(rules.deny).error ? ['codex'] : [];
+    way = await routeOf(env, c0, op, rules, d, cant);
     const notes = quotaNotes(c0, way);
     if (way.how === 'start') {
       r = await startBody(env, { ...base, place: c0.place, avoid: way.avoid, brief: startBrief(c0, [...notes, ...msgs], run, sends, rules) }, bodyDeps);
@@ -1352,7 +1357,7 @@ async function execute(env, op, d, mem) {
         return was;
       });
       // Each delivery it fails is answered; the owner hears of it once, until a body runs again.
-      await sayOut(env, op.cv, { out: e.out, retried: !!c0.quota, alert: !told }, d);
+      await sayOut(env, op.cv, { out: e.out, retried: !!c0.quota, alert: !told, cant }, d);
       return;
     }
     for (const p of restored) rmSync(p, { recursive: true, force: true });
@@ -1408,9 +1413,9 @@ async function execute(env, op, d, mem) {
  *   - else a fresh body, avoiding that harness (and the one a refused turn ran on): the slot is parked as its home,
  *     unless it already has one on another harness (then it's dropped: the digests carry it).
  */
-async function routeOf(env, c0, op, rules, d) {
+async function routeOf(env, c0, op, rules, d, cant = []) {
   const now = d.now().getTime();
-  const avoid = c0.quota?.from ? [c0.quota.from] : [];
+  const avoid = [...new Set([...(c0.quota?.from ? [c0.quota.from] : []), ...cant])];
   const home = c0.home && Date.parse(c0.home.until) > now && existsSync(homeFile(env, op.cv)) ? c0.home : null;
   if (home && (home.rules?.guest ?? false) === rules.guest && !avoid.includes(home.harness)
     && !(Number.isFinite(c0.fallback?.until) && now < c0.fallback.until * 1000) && await roomOn(env, c0, home.harness, d)) {

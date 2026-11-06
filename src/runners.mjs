@@ -297,31 +297,28 @@ function turnOver(job) {
 const scrub = (env) => Object.fromEntries(Object.entries(env).filter(([k]) => !k.startsWith('CLAUDE_CODE_') && k !== 'CLAUDECODE' && k !== 'CLAUDE_JOB_DIR'));
 
 /**
- * A body's deny list (Claude Code's tool names), as Codex can keep it (t-1907): an MCP server's tools by its name.
- *   mcp__<server>          the whole server: `-c mcp_servers.<server>.enabled=false`
- *   mcp__<server>__<tool>  one tool: `-c mcp_servers.<server>.disabled_tools=[…]`
- * A server Codex doesn't load (`servers`, from its config) is denied already: it can't be reached (claude.ai's
- * connectors, mcp__claude_ai_*, are Claude's alone). Any other name (a built-in, like Bash) Codex can't deny: an error,
- * and no body (fail closed, as before). → {args} | {error}.
+ * A body's deny list (Claude Code's tool names), as Codex can keep it (t-1907): whole MCP servers, by name.
+ *   mcp__<server>   always `-c mcp_servers.<server>={enabled=false, …}`, whether or not any config Codex reads defines
+ *                   it (its home's, the body env's CODEX_HOME, a profile, the project's): `-c` merges over all of them,
+ *                   so the server is off wherever it's defined. The stub's transport is `command` unless `urls` (what a
+ *                   scan of the configs found, a hint only) names it as a URL server; a wrong hint makes Codex refuse
+ *                   to start (a stdio stub over a URL server, or the other way), which fails closed.
+ * Anything else (one tool of a server, mcp__<server>__<tool>, or a built-in like Bash) Codex can't be trusted to keep:
+ * an error, and no body. Delivery avoids Codex for such a body and says so. → {args} | {error}.
  */
-export function codexDeny(deny, servers = new Set()) {
+const SERVER_NAME = /^[A-Za-z0-9_-]{1,64}$/;
+export function codexDeny(deny, urls = new Set()) {
   const off = new Set();
-  const tools = new Map();
   const bad = [];
-  for (const d of deny) {
-    const m = /^mcp__([A-Za-z0-9_-]+?)(?:__([A-Za-z0-9_.-]+))?$/.exec(String(d));
-    // A server's name can hold single underscores (claude_ai_Gmail); a tool is after the first double one.
-    const parts = String(d).startsWith('mcp__') ? String(d).slice(5).split('__') : null;
-    if (!m || !parts || parts.length > 2 || !parts[0]) { bad.push(d); continue; }
-    const [server, tool] = parts;
-    if (!servers.has(server)) continue;
-    if (tool) (tools.get(server) ?? tools.set(server, []).get(server)).push(tool);
-    else off.add(server);
+  for (const d of deny ?? []) {
+    const name = String(d).startsWith('mcp__') ? String(d).slice(5) : null;
+    // A server's name can hold single underscores (claude_ai_Gmail); a double one is a tool within it.
+    if (!name || name.includes('__') || !SERVER_NAME.test(name)) { bad.push(String(d)); continue; }
+    off.add(name);
   }
-  if (bad.length) return { error: `the codex runner can't deny ${bad.join(', ')} (it turns off MCP servers and their tools by name, nothing else): refusing to start a body that would keep them` };
+  if (bad.length) return { error: `the codex runner can't deny ${bad.join(', ')} (it turns off whole MCP servers, nothing else): refusing to start a body that would keep them` };
   const args = [];
-  for (const s of [...off].sort()) args.push('-c', `mcp_servers.${s}.enabled=false`);
-  for (const [s, t] of [...tools].sort()) if (!off.has(s)) args.push('-c', `mcp_servers.${s}.disabled_tools=${JSON.stringify([...new Set(t)].sort())}`);
+  for (const s of [...off].sort()) args.push('-c', `mcp_servers.${s}={enabled=false, ${urls.has(s) ? 'url="http://127.0.0.1:9/denied"' : 'command="false"'}}`);
   return { args };
 }
 
@@ -359,7 +356,7 @@ export class CodexRunner {
   }
 
   launch({ brief, model, cwd, env, deny = [], resume }) {
-    const off = codexDeny(deny, this.mcpServers(cwd));
+    const off = codexDeny(deny, this.urlServers(cwd, env));
     if (off.error) throw new RunnerError(off.error);
     const key = this.key();
     const dir = join(this.runsDir, key);
@@ -384,18 +381,24 @@ export class CodexRunner {
   }
 
   /**
-   * The MCP servers Codex would load: [mcp_servers.<name>] tables in its home's config.toml and the project's
-   * (<cwd>/.codex/config.toml). Only their names: a deny turns them off by name (codexDeny).
+   * Which MCP servers the configs Codex reads define by URL (home's, the body env's CODEX_HOME, the project's): only
+   * a hint for which stub codexDeny writes. Every denied server is turned off whatever this finds.
    */
-  mcpServers(cwd) {
-    const home = this.codexHome ?? dirname(this.roots.sessions);
-    const names = new Set();
-    for (const f of [join(home, 'config.toml'), ...(cwd ? [join(cwd, '.codex', 'config.toml')] : [])]) {
+  urlServers(cwd, env) {
+    const homes = [this.codexHome ?? dirname(this.roots.sessions), ...(env?.CODEX_HOME ? [env.CODEX_HOME] : [])];
+    const urls = new Set();
+    for (const f of [...homes.map((h) => join(h, 'config.toml')), ...(cwd ? [join(cwd, '.codex', 'config.toml')] : [])]) {
       let text = '';
       try { text = readFileSync(f, 'utf-8'); } catch { continue; }
-      for (const m of text.matchAll(/^\s*\[\s*mcp_servers\s*\.\s*(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9_-]+))\s*[\].]/gm)) names.add(m[1] ?? m[2] ?? m[3]);
+      let cur = null;
+      for (const line of text.split('\n')) {
+        const t = /^\s*\[\s*(?:profiles\.[^\]]*?\.)?mcp_servers\s*\.\s*(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9_-]+))\s*\]/.exec(line);
+        if (t) { cur = t[1] ?? t[2] ?? t[3]; continue; }
+        if (/^\s*\[/.test(line)) { cur = null; continue; }
+        if (cur && /^\s*url\s*=/.test(line)) urls.add(cur);
+      }
     }
-    return names;
+    return urls;
   }
 
   start(o) { return this.launch(o); }

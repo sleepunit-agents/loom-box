@@ -9,7 +9,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { deriveAccounts, hasRoom, holdAccount, roomAt, staticAccounts, supposeOut } from '../src/accounts.mjs';
 import { readBody } from '../src/bodies.mjs';
 import { deliver, deliveryDir, deliveryNotices, loadConv, readFallbacks, tick } from '../src/delivery.mjs';
@@ -168,18 +169,32 @@ test('a runner\'s turn() says limited, and when: Claude Code from its transcript
   assert.equal(judge({ turn: { failed: true, limited: true, worked: false }, posts: [] }).failed, null);
 });
 
-test('a Codex body keeps an MCP deny list (its config turns servers and tools off); a built-in still refuses', () => {
-  assert.deepEqual(codexDeny(['mcp__handoff', 'mcp__claude_ai_Gmail', 'mcp__loom__note_write'], new Set(['handoff', 'loom'])),
-    { args: ['-c', 'mcp_servers.handoff.enabled=false', '-c', 'mcp_servers.loom.disabled_tools=["note_write"]'] });
-  assert.match(codexDeny(['WebFetch']).error, /can't deny WebFetch/);
-  // The servers it loads: its home's config and the project's.
-  const D = scratch('rt-codexdeny-');
-  mkdirSync(join(D, 'home', 'sessions'), { recursive: true });
-  mkdirSync(join(D, 'repo', '.codex'), { recursive: true });
-  writeFileSync(join(D, 'home', 'config.toml'), '[mcp_servers.loom]\nurl = "http://x"\n[mcp_servers."handoff"]\ncommand = "h"\n[mcp_servers.loom.env]\nA = "b"\n');
-  writeFileSync(join(D, 'repo', '.codex', 'config.toml'), '[mcp_servers.spotify]\ncommand = "s"\n');
-  const r = new CodexRunner({ sessionsDir: join(D, 'home', 'sessions') });
-  assert.deepEqual([...r.mcpServers(join(D, 'repo'))].sort(), ['handoff', 'loom', 'spotify']);
+test('a Codex body turns every denied MCP server off, wherever it is defined or not; a tool-level deny refuses', async () => {
+  assert.deepEqual(codexDeny(['mcp__handoff', 'mcp__claude_ai_Gmail', 'mcp__loom'], new Set(['loom'])).args, [
+    '-c', 'mcp_servers.claude_ai_Gmail={enabled=false, command="false"}',
+    '-c', 'mcp_servers.handoff={enabled=false, command="false"}',
+    '-c', 'mcp_servers.loom={enabled=false, url="http://127.0.0.1:9/denied"}']);
+  // What Codex can't be trusted to keep: one tool of a server, a built-in, a name that isn't one.
+  for (const d of ['mcp__loom__note_write', 'WebFetch', 'mcp__a b', 'mcp__']) assert.match(codexDeny([d]).error, /can't deny/, d);
+  // Launched: a server only in a profile, only in the project's config, only under the body env's CODEX_HOME, or in
+  // no config at all, is still on the command line, turned off. No scan decides whether it's denied.
+  const h = (() => { const D = scratch('rt-codexdeny-'); return { D, env: { ...process.env, FAKE_HARNESS: D } }; })();
+  mkdirSync(join(h.D, 'home', 'sessions'), { recursive: true });
+  mkdirSync(join(h.D, 'other'), { recursive: true });
+  mkdirSync(join(h.D, 'repo', '.codex'), { recursive: true });
+  writeFileSync(join(h.D, 'home', 'config.toml'), '[profiles.p.mcp_servers.inprofile]\ncommand = "x"\n');
+  writeFileSync(join(h.D, 'repo', '.codex', 'config.toml'), '[mcp_servers.inproject]\nurl = "http://x"\n');
+  writeFileSync(join(h.D, 'other', 'config.toml'), '[mcp_servers."inbodyhome"]\nurl = "http://y"\n');
+  const r = new CodexRunner({ codex: join(dirname(fileURLToPath(import.meta.url)), 'fake-codex.mjs'), runsDir: join(h.D, 'runs'), sessionsDir: join(h.D, 'home', 'sessions') });
+  const deny = ['mcp__inprofile', 'mcp__inproject', 'mcp__inbodyhome', 'mcp__nowhere'];
+  const b = r.start({ brief: 'x', model: 'm', cwd: join(h.D, 'repo'), env: { ...h.env, CODEX_HOME: join(h.D, 'other') }, deny });
+  const until = Date.now() + 5000;
+  while (!existsSync(join(h.D, 'argv.log')) && Date.now() < until) await new Promise((res) => setTimeout(res, 20));
+  const args = JSON.parse(readFileSync(join(h.D, 'argv.log'), 'utf-8').trim().split('\n')[0]).args;
+  for (const n of ['inprofile', 'nowhere']) assert.ok(args.includes(`mcp_servers.${n}={enabled=false, command="false"}`), n);
+  for (const n of ['inproject', 'inbodyhome']) assert.ok(args.includes(`mcp_servers.${n}={enabled=false, url="http://127.0.0.1:9/denied"}`), n);
+  r.end(b);
+  assert.throws(() => r.start({ brief: 'x', model: 'm', cwd: h.D, env: h.env, deny: ['mcp__loom__note_write'] }), /can't deny mcp__loom__note_write/);
 });
 
 // ─── Delivery ───────────────────────────────────────────────────────────────
@@ -350,4 +365,22 @@ test('when nothing is out, delivery runs as before: the preferred harness, no sw
   assert.deepEqual(readFallbacks(w.env), {});
   assert.equal(deliveryNotices(w.env, w.clock.now().getTime()).length, 0);
   assert.equal(w.accounts.holds.length, 0);
+});
+
+test('a body whose deny list Codex can\'t keep never falls back to Codex; with Claude out it says so plainly', async () => {
+  const w = twoHarnesses();
+  w.o.policy = () => ({ deny: ['mcp__loom__note_write'] });
+  w.max.usage = { held: Math.floor(w.clock.now().getTime() / 1000) + 600 };
+  await deliver(w.env, w.msg('th:abcdefghij', 'hi', { venue: 'loom', label: 'Comms' }), w.o);
+  assert.equal(w.starts().length, 0, 'no unrestricted Codex body');
+  const said = w.core.commsCalls.filter((b) => b.op === 'post').at(-1).text;
+  assert.match(said, /^I can't answer right now: every model account I may use is out of quota \(Claude Max \(jonathan's\) is out until .+\)\. Codex can't keep this conversation's tool limits, so I can't answer on it here\./);
+  assert.match(w.alerts[0].facts.cant, /codex can't keep its deny list/);
+  // A server-level deny Codex keeps: it falls back as any body does.
+  const w2 = twoHarnesses();
+  w2.o.policy = () => ({ deny: ['mcp__handoff'] });
+  w2.max.usage = { held: Math.floor(w2.clock.now().getTime() / 1000) + 600 };
+  await deliver(w2.env, w2.msg('dm:U1', 'hi'), w2.o);
+  assert.match(w2.conv().body, /^codex:/);
+  assert.deepEqual(w2.codex.denies[w2.conv().body.split(':')[1]], ['mcp__handoff']);
 });
