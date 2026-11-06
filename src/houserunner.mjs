@@ -254,7 +254,9 @@ export function bodySync(env, caller, body, o = {}) {
     // A stop is done once its body is gone from the report (and its pack, if it was asked for, is in).
     for (const id of Object.keys(x.stop ?? {})) {
       const gone = !bodies[id] || bodies[id].status === 'ended';
-      if (gone && (!x.stop[id].pack || existsSync(packedFile(env, agent, house, id)) || now - x.stop[id].at > CLAIM_MS)) delete x.stop[id];
+      // Done, and its id's claim with it: a resume of its session comes back under that id (t-1881). Only now, once
+      // it's gone from the house, never while it may still run there.
+      if (gone && (!x.stop[id].pack || existsSync(packedFile(env, agent, house, id)) || now - x.stop[id].at > CLAIM_MS)) { delete x.stop[id]; if (x.claimed) delete x.claimed[id]; }
     }
     const req = {};
     for (const [rid, r] of Object.entries(x.req ?? {})) {
@@ -378,7 +380,13 @@ export class HouseRunner {
           const id = bodyIdOf(house, d.id);
           // The composed id must still be a body ref (bodies.mjs REF: 4-64 of [A-Za-z0-9-]): the house's id takes room.
           if (!BODY_REF.test(id)) throw new RunnerError(`${house} reported a body id too long to be one here (${d.id.length} characters; at most ${MAX_BODY_ID - house.length - 1})`);
-          if (existsSync(join(dataDir(this.env), 'bodies', `${this.harness}-${id}.json`))) throw new RunnerError(`${house} reported ${d.id}, which is already a body's`);
+          // An id that's a body's already is refused, but for a resume of a body that ended: Claude Code gives a resumed
+          // session back its own job id, so the house reports the body it was (t-1881). That record is the resumed
+          // body's now; refusing it left the resumed body running in the house, unknown here, beside a fresh one.
+          // (Refused, an id that's a live body's is left alone: it is that body's harness job, and stopping it would end the body it is.)
+          const rec = readJson(join(dataDir(this.env), 'bodies', `${this.harness}-${id}.json`));
+          if (rec && !(resume && rec.ended)) throw new RunnerError(`${house} reported ${d.id}, which is already a body's`);
+          if (rec) this.forgetStop(o.agent, house, d.id);
           return { id, harness: this.harness, model: o.model, house, ...(resume ? { slot: resume } : {}) };
         }
         if (d?.error) throw new RunnerError(d.error);
@@ -392,6 +400,11 @@ export class HouseRunner {
     } finally {
       hostLocked(this.env, () => { const h = loadHost(this.env, o.agent); const x = houseRec(h, house); if (x?.req?.[rid]) { delete x.req[rid]; writeJson(hostFile(this.env, o.agent), h); } });
     }
+  }
+
+  /** The stop a body's last run had, gone from its house's record: it was that run's, never this body's (t-1881). */
+  forgetStop(agent, house, raw) {
+    hostLocked(this.env, () => { const h = loadHost(this.env, agent); const x = houseRec(h, house); if (x?.stop?.[raw]) { delete x.stop[raw]; writeJson(hostFile(this.env, agent), h); } });
   }
 
   start(o) { return this.launch(o); }
@@ -461,7 +474,9 @@ export class HouseRunner {
       const h = loadHost(this.env, body.agent);
       const x = houseRec(h, body.house);
       if (!x) return;
-      (x.stop ??= {})[raw] ??= { pack: false, at: this.now().getTime() };
+      // A stop of its own, with its own time (a pack already asked for stays one): its host carries out each stop once,
+      // so an older one still on the record would never end this body (bodyhost.mjs, t-1881).
+      (x.stop ??= {})[raw] = { pack: x.stop[raw]?.pack ?? false, at: this.now().getTime() };
       writeJson(hostFile(this.env, body.agent), h);
     });
   }

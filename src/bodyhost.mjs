@@ -74,6 +74,9 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
   const done = {};          // rid -> {id} | {error}
   const packing = new Map(); // id -> {parts: [string], next}
   const heard = new Map();   // id -> Set of follow-up ids fed to it (each is fed once, however often it's sent)
+  // id -> the stop (its `at`) this host carried out for it: a stop is one body's, so the same stop still on the record
+  // never ends the body that came back under that id (a resumed Claude session has its old job id; t-1881).
+  const stopped = new Map();
   let acks = {};             // id -> [follow-up ids] fed since the last answered sync: sent until one is answered
   const sentUsage = {};      // harness -> the last reading sent (JSON): the same one isn't sent twice
   // Each turn that ended: its harness's own reading (runners.mjs, usage), through the house's `usage` path, as a house
@@ -157,9 +160,11 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
         log(`started ${b.id} for ${rid}`);
       } catch (e) { done[rid] = { error: String(e.message).split('\n')[0].slice(0, 300) }; }
     }
+    for (const id of [...stopped.keys()]) if (!got.stop?.[id]) stopped.delete(id);
     for (const [id, s] of Object.entries(got.stop ?? {})) {
       const b = mine.get(id);
-      if (!b || b.ended) continue;
+      if (!b || b.ended || (stopped.has(id) && stopped.get(id) === s.at)) continue;
+      stopped.set(id, s.at);
       const r = runner(b.harness);
       try { r.end({ id }); } catch { /* already gone */ }
       if (b.cv) dropKey(env, b.cv, b.key);

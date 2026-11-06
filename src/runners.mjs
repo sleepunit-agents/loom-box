@@ -59,6 +59,9 @@ export function inbox(dir, { run = spawnSync } = {}) {
   return {
     dir,
     open(id, meta) {
+      // A new body's inbox is a new one: a resumed Claude session has its old job id (t-1881), and must not inherit
+      // that body's closed inbox, nor what it was fed.
+      rmSync(at(id), { recursive: true, force: true });
       mkdirSync(at(id), { recursive: true, mode: 0o700 });
       writeFileSync(join(at(id), 'meta.json'), JSON.stringify(meta), { mode: 0o600 });
     },
@@ -172,7 +175,10 @@ export class ClaudeRunner {
     // Claim: a new agent whose job intent carries this launch's token.
     const marker = `(bridge spawn token ${token}:`;
     for (let i = 0; i < this.claimPolls; i++) {
-      const found = (this.agents(clean) ?? []).filter((a) => a.id && !before.has(a.id) && (this.job(a.id)?.intent ?? '').includes(marker));
+      // A resumed session comes back under the job id it had (Claude Code's id is its session's), so for a resume an id
+      // seen before is a candidate too (t-1881): the token in its job's intent, this launch's alone, is what claims it.
+      // By id, once: the agents list can carry that id twice (the old job's row and the resumed one's), still one body.
+      const found = [...new Map((this.agents(clean) ?? []).filter((a) => a.id && (resume || !before.has(a.id)) && (this.job(a.id)?.intent ?? '').includes(marker)).map((a) => [a.id, a])).values()];
       if (found.length === 1) {
         const a = found[0];
         const session = a.sessionId ?? this.job(a.id)?.sessionId;

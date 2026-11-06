@@ -254,6 +254,7 @@ loom runtime body end claude:99553cf9  |  loom runtime body list
 - **The harness** is the model's. `claude` runs `claude --bg` with the brief on stdin, never on argv (`LOOM_RUNTIME_CLAUDE`, extra flags in `LOOM_RUNTIME_CLAUDE_ARGS` as a JSON argv, e.g. `["--dangerously-skip-permissions"]` for an agent that runs unattended). `codex` runs `codex exec --json` (`LOOM_RUNTIME_CODEX`, `LOOM_RUNTIME_CODEX_PROFILE`), and can't deny tools, so a body with a deny list isn't started on it.
 - **Feeding** goes through the body's inbox, in the layout the bridges' inbox hook reads, under `LOOM_RUNTIME_INBOX_DIR`. Without one, or once the turn is over, a body isn't fed: resume it.
 - **A body's record** (`<LOOM_BOX_DATA>/bodies`, 0600) holds its agent, venue, model, harness and slot, never its brief or a message.
+- **A resumed Claude body keeps its id.** Claude Code gives a resumed session back its own job id, so `body resume` of a body that ended answers the same id, and its record becomes the resumed body's (a new inbox, a new run). A house reports it the same way, and the runtime takes it as that resume.
 
 ## Delivery
 

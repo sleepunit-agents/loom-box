@@ -99,6 +99,8 @@ const STARTING_MS = 240_000;
 const OUTCOME_MS = 3_600_000;
 /** How often a working body's presence is said again to its adapter (and its stop word asked after). */
 export const PRESENCE_MS = 15_000;
+/** How many ticks a venue's `done` is tried before it's given up on (presencePass). */
+export const DONE_TRIES = 20;
 /** A presence or describe call to an adapter has this long. */
 const ADAPTER_MS = 15_000;
 /** The same words to the same person from one conversation within this long: once. */
@@ -874,7 +876,10 @@ async function announce(env, cv, d) {
  * as any end) and drops what waited.
  */
 async function presencePass(env, c, d, now) {
-  const v = await venueOf(d, c.venue);
+  // Core couldn't say what the venues are this time: nothing's dropped for that (a dropped presence never says done).
+  let all;
+  try { all = await d.venues(); } catch (e) { d.warn(`core couldn't list the venues: ${e.message}`); return; }
+  const v = all?.[c.venue];
   if (!posts(v)) { locked(env, () => { const x = loadConv(env, c.conversation); if (x) { delete x.presence; saveConv(env, x); } }); return; }
   const working = isStarting(c, now) || statusOf(env, c, d) === 'working';
   if (working) {
@@ -885,8 +890,18 @@ async function presencePass(env, c, d, now) {
     locked(env, () => { const x = loadConv(env, c.conversation); if (x?.presence) { x.presence.last = now; saveConv(env, x); } });
     return;
   }
-  try { await callAdapter(d, v, c, ['--status', 'done']); } catch (e) { d.warn(`${c.venue} couldn't clear ${c.conversation}'s presence: ${e.message}`); }
-  locked(env, () => { const x = loadConv(env, c.conversation); if (x) { delete x.presence; saveConv(env, x); } });
+  // Done, until it lands (t-1881): a venue shows "working" until it hears it, so a lost one is tried again each tick,
+  // DONE_TRIES times at most. Past that it's given up (a venue gone for good mustn't be called forever): core's own
+  // venue stops showing working on its own once nothing says working (loom comms.ts WORKING_STALE_MS).
+  let failed = false;
+  try { await callAdapter(d, v, c, ['--status', 'done']); } catch (e) { failed = true; d.warn(`${c.venue} couldn't clear ${c.conversation}'s presence: ${e.message}`); }
+  locked(env, () => {
+    const x = loadConv(env, c.conversation);
+    if (!x?.presence) return;
+    const tries = (x.presence.doneTries ?? 0) + 1;
+    if (failed && tries < DONE_TRIES) x.presence.doneTries = tries; else delete x.presence;
+    saveConv(env, x);
+  });
 }
 
 /** A person said the stop word where this body works: it's ended (a slot kept), and nothing that waited goes on. */
@@ -905,9 +920,11 @@ async function stopBody(env, c, d, v) {
   if (!op) return;
   await execute(env, op, d, new Map());
   // What its inbox held when it stopped isn't asked for any more either.
-  locked(env, () => { const x = loadConv(env, c.conversation); if (x) { x.queue = []; delete x.presence; delete x.acks; saveConv(env, x); } });
+  let said = true;
+  try { await callAdapter(d, v, c, ['--status', 'done']); } catch { said = false; }
+  // Its done, said; or kept for the tick's presence pass to say again (a lost one leaves the venue showing it at work).
+  locked(env, () => { const x = loadConv(env, c.conversation); if (x) { x.queue = []; if (said) delete x.presence; delete x.acks; saveConv(env, x); } });
   d.warn(`${c.conversation}: stopped by the stop word`);
-  try { await callAdapter(d, v, c, ['--status', 'done']); } catch { /* best effort */ }
 }
 
 /**

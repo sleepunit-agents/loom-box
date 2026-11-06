@@ -19,7 +19,8 @@ if (args[0] === '--bg') {
   // What reached the body's environment: names, and its run's key (the tests check nothing of the runtime's got here).
   appendFileSync(join(D, 'env.log'), JSON.stringify({ names: Object.keys(process.env).sort(), key: process.env.LOOM_BODY_KEY ?? null }) + '\n');
   const at = args.indexOf('--resume');
-  const id = randomBytes(4).toString('hex');
+  // As Claude Code: a job's id is its session's first 8 characters, so a resumed session comes back under the id it had.
+  const id = at >= 0 ? args[at + 1].slice(0, 8) : randomBytes(4).toString('hex');
   const sessionId = at >= 0 ? args[at + 1] : `${id}-${randomUUID().slice(9)}`;
   mkdirSync(join(D, 'jobs', id), { recursive: true });
   writeFileSync(job(id), JSON.stringify({ state: 'working', intent: prompt, sessionId, respawnFlags: args.slice(1) }));
