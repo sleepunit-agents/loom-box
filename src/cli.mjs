@@ -81,6 +81,10 @@
 //   loom runtime gates follow-merge <from> <into>        the owner's: after a card merge, every agent's gates follow
 //   loom runtime policy --agent a [--json] | policy set --agent a < doc   what an agent's bodies may use and are told (policy.mjs)
 //   loom runtime secrets-map --json                      which secret each agent's houses get (for: | loom secrets policy houses-import)
+// A reply's trace (loom comms.md, "Tracing a reply"; trace.mjs, t-1895): what happened, from the message in to shown.
+//   loom runtime trace tool --agent a [--house h] < {thread?, run?, conversation?}   the comms_trace MCP tool core runs
+//   loom runtime trace --thread th:… | --run run-… | --conversation cv-… [--json]   in a house: its own agent's, through
+//                      the piece API; at loom's machine: the owner's, any agent's
 // Relay (agent-runtime.md, section 5, "Agent-to-agent relay"; relay.mjs):
 //   loom runtime relay tool --agent a [--house h] [--service s] < {to, say, why?, reply_to?, from?, approval?}
 //                      the relay MCP tool core offers an agent's session: {text, isError?}
@@ -213,7 +217,7 @@ async function main(argv, env) {
     case 'ui': {
       const sub = rest[0] === '--json' ? '' : rest[0];
       if (sub === '') return out(manifest(env));
-      if (sub === 'page') return out(page(env, JSON.parse(await readStdin())));
+      if (sub === 'page') return out(await page(env, JSON.parse(await readStdin())));
       if (sub === 'act') return out(await act(env, realEffects(env), JSON.parse(await readStdin()), setting(env, 'PUBLIC_URL')));
       throw new Fail(USAGE, 2);
     }
@@ -435,9 +439,11 @@ async function main(argv, env) {
       // From a body in its house: through the piece API, as its own agent (its house's token), with its run's key.
       // The key for that conversation as its house keeps it (bodyhost.mjs), else this body's environment's.
       const conversation = flag(rest, '--conversation');
-      // And its harness's own session id (Claude Code sets it per session, under a shared daemon too): the runtime
-      // checks it's the session holding the conversation.
-      const session = env.CLAUDE_CODE_SESSION_ID || undefined;
+      // And its harness's own session id: the runtime checks it's the session holding the conversation. Claude Code
+      // sets CLAUDE_CODE_SESSION_ID per session (under a shared daemon too); Codex gives each command it runs
+      // CODEX_THREAD_ID, the thread its `thread.started` named, which is a Codex body's slot (runners.mjs). Without
+      // it every send from a Codex body was refused as naming no session (t-1898, Mark's Comms reply of 2026-11-06).
+      const session = env.CLAUDE_CODE_SESSION_ID || env.CODEX_THREAD_ID || undefined;
       // --person <slug> --via <venue>: one DM to that person instead, through that venue's adapter (delivery.mjs).
       const person = flag(rest, '--person');
       const via = flag(rest, '--via');
@@ -456,6 +462,23 @@ async function main(argv, env) {
     }
     case 'models': return models(rest, env, json);
     case 'grants': return grantsCli(rest, env);
+    case 'trace': {
+      const { trace, traceText, traceTool } = await import('./trace.mjs');
+      if (rest[0] === 'tool') {
+        const r = await traceTool(env, rest.slice(1), await readStdin());
+        process.stdout.write(`${JSON.stringify(r.answer)}\n`);
+        process.exitCode = r.exit;
+        return;
+      }
+      const q = {};
+      for (const k of ['thread', 'run', 'conversation']) { const v = flag(rest, `--${k}`); if (v !== undefined) q[k] = v; }
+      // In a house: its own agent's, as its token says, through the piece API. At loom's machine: the owner's.
+      const t = env.LOOM_URL && env.LOOM_TOKEN_FILE ? await pieceCall(env, flag(rest, '--piece'))('trace', q) : await trace(env, { agents: '*' }, q);
+      if (t?.ok === false || t?.error) { process.stderr.write(`${t.reason ?? t.error}\n`); process.exitCode = 1; return; }
+      if (json) return out(t);
+      process.stdout.write(`${traceText(t)}\n`);
+      return;
+    }
     case 'relay': {
       if (rest[0] !== 'tool') throw new Fail('loom runtime relay is a body\'s, from its house (its token): loom runtime relay --to <agent> --say <text>; the tool core runs is `relay tool`', 2);
       const { relayTool } = await import('./relay.mjs');

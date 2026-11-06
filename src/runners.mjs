@@ -167,7 +167,8 @@ export class ClaudeRunner {
     const prompt = nl < 0 ? `${brief}\n${ClaudeRunner.TOKEN_LINE.replace('{token}', token)}\n`
       : `${brief.slice(0, nl)}\n${ClaudeRunner.TOKEN_LINE.replace('{token}', token)}\n${brief.slice(nl + 1)}`;
     // A Codex body's key, inherited by a launcher started under one: a Claude body must never key its inbox on it.
-    const { SHUTTLE_BODY: _drop, ...clean } = env ?? process.env;
+    // Nor a Codex thread's id (a launcher running under Codex has one): `send` names a Claude body's own session.
+    const { SHUTTLE_BODY: _drop, CODEX_THREAD_ID: _thread, ...clean } = env ?? process.env;
     const before = new Set((this.agents(clean) ?? []).map((a) => a.id));
     const argv = ['--bg', ...(model ? ['--model', model] : []), ...this.statusLine(), ...this.args, ...(deny.length ? ['--disallowedTools', ...deny] : []), ...(resume ? ['--resume', resume] : [])];
     const r = this.run(this.claude, argv, { cwd, env: clean, input: prompt, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 60_000 });
