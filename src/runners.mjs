@@ -40,7 +40,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { keptReading } from './statusline.mjs';
 import { claudeCards, codexCards } from './activity.mjs';
-import { lastRateLimit, lastRefusal, refusedUntil, tailOf } from './logins.mjs';
+import { CRED_FILE, lastRateLimit, lastRefusal, refusedUntil, tailOf } from './logins.mjs';
 import { lastToolUse } from './stuck.mjs';
 import { parse as parseToml, stringify as stringifyToml } from './vendor/smol-toml/index.js';
 
@@ -300,7 +300,7 @@ const scrub = (env) => Object.fromEntries(Object.entries(env).filter(([k]) => !k
  *                   command="false"}` on its command line. A stub, not a bare `enabled=false`: Codex refuses a server
  *                   entry with no transport ("invalid transport", codex-cli 0.162.1), and the server is defined nowhere.
  * Anything else (one tool of a server, mcp__<server>__<tool>, or a built-in like Bash) Codex can't be trusted to keep:
- * an error, and no body. Delivery avoids Codex for such a body and says so. → {args, off} | {error}.
+ * an error, and no body. Delivery avoids Codex for such a body and says so. → {args, denied} | {error}.
  */
 const SERVER_NAME = /^[A-Za-z0-9_-]{1,64}$/;
 export function codexDeny(deny) {
@@ -315,7 +315,7 @@ export function codexDeny(deny) {
   if (bad.length) return { error: `the codex runner can't deny ${bad.join(', ')} (it turns off whole MCP servers, nothing else): refusing to start a body that would keep them` };
   const args = [];
   for (const s of [...off].sort()) args.push('-c', `mcp_servers.${s}={enabled=false, command="false"}`);
-  return { args, off };
+  return { args, denied: off };
 }
 
 /**
@@ -327,11 +327,11 @@ export function codexDeny(deny) {
  * down to the cwd. No documented flag turns them off (`codex exec --ignore-user-config` skips only the home's), and
  * Codex reads a project's whether or not the project is trusted (codex-cli 0.162.1, checked 2026-11-06 with a
  * throwaway home). So they're never parsed here, only looked for: from the cwd up to /, whatever the root, and in
- * /etc/codex. The one exception is the real Codex home's own config.toml (`home`, the one the made home replaces)
+ * /etc/codex. The one exception is the real Codex home's own config.toml (`realHome`, the one the made home replaces)
  * when it sits above the project root, where Codex never reads it as a project's: ~/.codex above ~/Art.
  * → the paths found ([] for none). A path that can't be looked at counts as found.
  */
-export function codexLayers(cwd, { home, systemDir = '/etc/codex' } = {}) {
+export function codexLayers(cwd, { realHome, systemDir = '/etc/codex' } = {}) {
   const there = (p) => { try { lstatSync(p); return true; } catch (e) { return !['ENOENT', 'ENOTDIR'].includes(e.code); } };
   const dirsUp = [];
   for (let d = resolve(cwd ?? process.cwd()); ; d = dirname(d)) { dirsUp.push(d); if (dirname(d) === d) break; }
@@ -340,7 +340,7 @@ export function codexLayers(cwd, { home, systemDir = '/etc/codex' } = {}) {
   dirsUp.forEach((d, i) => {
     const f = join(d, '.codex', 'config.toml');
     const aboveRoot = i > (rootAt < 0 ? 0 : rootAt);
-    if (aboveRoot && home && resolve(home) === join(d, '.codex')) return;
+    if (aboveRoot && realHome && resolve(realHome) === join(d, '.codex')) return;
     if (there(f)) found.push(f);
   });
   for (const n of ['config.toml', 'managed_config.toml', 'requirements.toml']) if (there(join(systemDir, n))) found.push(join(systemDir, n));
@@ -348,7 +348,8 @@ export function codexLayers(cwd, { home, systemDir = '/etc/codex' } = {}) {
 }
 
 /** What a made Codex home links from the real one: its login, and what tells the body how to work. Never its config. */
-const HOME_LINKS = ['auth.json', 'AGENTS.md', 'skills', 'rules'];
+// The login is linked, never read: its file's name is logins.mjs's (CRED_FILE), which moves it between homes unread.
+const HOME_LINKS = [CRED_FILE.codex, 'AGENTS.md', 'skills', 'rules'];
 
 /**
  * Codex, `codex exec --json`: a body is one process, started in its own session with the brief on stdin, its events
@@ -428,9 +429,10 @@ export class CodexRunner {
     if (this.profile) return { why: `LOOM_RUNTIME_CODEX_PROFILE is set (${String(this.profile).slice(0, 64)}): a Codex profile can turn a denied tool server back on, so the codex runner runs no body under one; unset it` };
     const off = codexDeny(deny);
     if (off.error) return { why: off.error };
+    const { denied } = off;
     const src = resolve(env?.CODEX_HOME || this.codexHome);
-    if (off.off.size) {
-      const layers = codexLayers(cwd, { home: src, systemDir: this.systemDir });
+    if (denied.size) {
+      const layers = codexLayers(cwd, { realHome: src, systemDir: this.systemDir });
       if (layers.length) return { why: `Codex would read ${layers.join(', ')} too, a config the runtime can't replace, which could turn a denied tool server back on: refusing a body with a deny list here (remove it, or keep this agent off Codex)` };
     }
     let conf = {};
@@ -439,7 +441,7 @@ export class CodexRunner {
       if (e.code !== 'ENOENT') return { why: `the codex runner can't read ${f} for the tool servers a body may use (${String(e.message).split('\n')[0].slice(0, 120)}): refusing to start one` };
     }
     const all = conf.mcp_servers && typeof conf.mcp_servers === 'object' && !Array.isArray(conf.mcp_servers) ? conf.mcp_servers : {};
-    const servers = Object.fromEntries(Object.entries(all).filter(([n]) => !off.off.has(n)));
+    const servers = Object.fromEntries(Object.entries(all).filter(([n]) => !denied.has(n)));
     return { src, servers, args: off.args };
   }
 
@@ -467,7 +469,9 @@ export class CodexRunner {
       let cur = null;
       try { cur = readlinkSync(at); } catch { /* none, or not a link */ }
       if (cur === to) continue;
-      rmSync(at, { recursive: true, force: true });
+      // Whatever else is there is moved aside, never deleted: a real dir at `sessions` may hold a body's rollouts.
+      if (cur === null && existsSync(at)) renameSync(at, `${at}.aside-${Date.now()}-${hex8()}`);
+      else rmSync(at, { force: true });
       symlinkSync(to, at);
     }
     return home;

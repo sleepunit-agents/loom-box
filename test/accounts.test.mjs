@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, copyFileSync, readFileSync, readdirSync, rmSync, writeFileSync, mkdirSync, utimesSync } from 'node:fs';
+import { chmodSync, copyFileSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync, mkdirSync, utimesSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { accountsFrom, deriveAccounts, hasRoom, noAccounts, usageOf } from '../src/accounts.mjs';
@@ -422,7 +422,8 @@ test('the runtime holds no credential: no token endpoint, refresh, client id, pr
   const src = join(here, '..', 'src');
   const markers = [/oauth\/token/i, /refresh_token|refreshToken/, /client_id|CLIENT_ID/, /claudeAiOauth/, /anthropic-beta/i, /setup-token/, /grant_type/,
     /\.credentials\.json/, /auth\.json/, /api\.anthropic\.com/, /api\.openai\.com/, /oauth\/usage/, /CLAUDE_CODE_OAUTH_TOKEN=/, /x-app/i, /claude-cli/];
-  for (const f of readdirSync(src)) {
+  // Every file under src/, the vendored TOML parser's too (src/vendor/smol-toml), by its path there.
+  for (const f of readdirSync(src, { recursive: true }).filter((p) => statSync(join(src, p)).isFile())) {
     const text = readFileSync(join(src, f), 'utf-8');
     for (const m of markers) {
       // logins.mjs names the two credential files, to move them unread between the box's CLI home and the shared dir.

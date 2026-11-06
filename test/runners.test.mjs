@@ -22,9 +22,14 @@ const until = async (f, ms = 10_000) => { const end = Date.now() + ms; while (!f
 function harness() {
   const D = scratch('rt-harness-');
   const inbox = join(D, 'inbox');
-  const env = { ...process.env, FAKE_HARNESS: D };
+  // Never the developer's own CODEX_HOME: a Codex runner reads a body env's as the real home.
+  const { CODEX_HOME: _home, ...base } = process.env;
+  const env = { ...base, FAKE_HARNESS: D };
   return { D, inbox, env, argv: () => lines(join(D, 'argv.log')) };
 }
+
+/** A path as a RegExp that matches it literally. */
+const rx = (p) => new RegExp(p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
 
 const BRIEF = 'You are Art, in a DM with Loren.\nSECRET-ISH MESSAGE TEXT: what did we decide?';
 
@@ -122,6 +127,7 @@ function realCodexHome(D, name = 'real') {
     "[mcp_servers.'claude_ai_Gmail']", 'url = "https://gmail.example/mcp"', '',
     '[profiles.work.mcp_servers.handoff]', 'command = "handoff-mcp"', 'enabled = true', '',
     `[projects."${D}"]`, 'trust_level = "trusted"', ''].join('\n'));
+  // A profile's own file (`codex -p work` reads <home>/work.config.toml since codex 0.134; config-advanced docs).
   writeFileSync(join(home, 'work.config.toml'), '[mcp_servers.handoff]\ncommand = "handoff-mcp"\nenabled = true\n');
   writeFileSync(join(home, 'auth.json'), '{"tokens":"x"}');
   writeFileSync(join(home, 'AGENTS.md'), 'house rules\n');
@@ -131,6 +137,7 @@ function realCodexHome(D, name = 'real') {
 test('Codex: a body runs in a home the runner makes, whose config has only the servers it may use (t-1916)', async () => {
   const h = harness();
   const real = realCodexHome(h.D);
+  const original = readFileSync(join(real, 'config.toml'), 'utf-8');
   const sessions = join(h.D, 'sessions');
   const mk = (o = {}) => new CodexRunner({ codex: join(here, 'fake-codex.mjs'), runsDir: join(h.D, 'runs'), codexHome: real, sessionsDir: sessions, systemDir: join(h.D, 'etc-codex'), ...o });
   mkdirSync(join(h.D, 'repo', '.git'), { recursive: true });
@@ -163,23 +170,33 @@ test('Codex: a body runs in a home the runner makes, whose config has only the s
   r.resume(r.slotOf(b), { brief: 'more', model: 'gpt-x', cwd: join(h.D, 'repo'), env: h.env, deny: ['mcp__handoff', 'mcp__claude_ai_Gmail'] });
   await until(() => h.argv().length === 2);
   assert.equal(h.argv()[1].home, home, 'the same deny list, the same home');
+  // Its config is the real one's as it is at each start: a server changed or added there is in the next start's.
+  writeFileSync(join(real, 'config.toml'), '[mcp_servers.loom]\nurl = "http://127.0.0.1:8787/v2"\n[mcp_servers.handoff]\ncommand = "h"\n');
+  // A real dir where its sessions link goes (something ran with this home before the link): moved aside, never deleted.
+  rmSync(join(home, 'sessions')); mkdirSync(join(home, 'sessions', 'kept'), { recursive: true });
+  r.resume(r.slotOf(b), { brief: 'more', model: 'gpt-x', cwd: join(h.D, 'repo'), env: h.env, deny: ['mcp__handoff', 'mcp__claude_ai_Gmail'] });
+  await until(() => h.argv().length === 3);
+  assert.deepEqual(JSON.parse(JSON.stringify(parseToml(readFileSync(join(home, 'config.toml'), 'utf-8')))), { mcp_servers: { loom: { url: 'http://127.0.0.1:8787/v2' } } });
+  assert.equal(readlinkSync(join(home, 'sessions')), sessions);
+  assert.ok(readdirSync(home).some((n) => n.startsWith('sessions.aside-') && existsSync(join(home, n, 'kept'))));
+  writeFileSync(join(real, 'config.toml'), original);
   // With no deny list every server is there; a body env's CODEX_HOME is the real home it reads.
   r.start({ brief: 'x', model: 'gpt-x', cwd: join(h.D, 'repo'), env: h.env });
-  await until(() => h.argv().length === 3);
-  assert.deepEqual(Object.keys(parseToml(readFileSync(join(h.argv()[2].home, 'config.toml'), 'utf-8')).mcp_servers).sort(), ['claude_ai_Gmail', 'handoff', 'loom']);
+  await until(() => h.argv().length === 4);
+  assert.deepEqual(Object.keys(parseToml(readFileSync(join(h.argv()[3].home, 'config.toml'), 'utf-8')).mcp_servers).sort(), ['claude_ai_Gmail', 'handoff', 'loom']);
   const other = realCodexHome(h.D, 'other');
   writeFileSync(join(other, 'config.toml'), '[mcp_servers.only_here]\ncommand = "x"\n[mcp_servers.handoff]\ncommand = "h"\n');
   r.start({ brief: 'x', model: 'gpt-x', cwd: join(h.D, 'repo'), env: { ...h.env, CODEX_HOME: other }, deny: ['mcp__handoff'] });
-  await until(() => h.argv().length === 4);
-  assert.deepEqual(Object.keys(parseToml(readFileSync(join(h.argv()[3].home, 'config.toml'), 'utf-8')).mcp_servers), ['only_here']);
-  assert.equal(readlinkSync(join(h.argv()[3].home, 'auth.json')), join(other, 'auth.json'));
+  await until(() => h.argv().length === 5);
+  assert.deepEqual(Object.keys(parseToml(readFileSync(join(h.argv()[4].home, 'config.toml'), 'utf-8')).mcp_servers), ['only_here']);
+  assert.equal(readlinkSync(join(h.argv()[4].home, 'auth.json')), join(other, 'auth.json'));
   // A real config that isn't TOML: refused, never guessed.
   writeFileSync(join(other, 'config.toml'), '[mcp_servers.x\n');
   assert.throws(() => r.start({ brief: 'x', model: 'm', cwd: join(h.D, 'repo'), env: { ...h.env, CODEX_HOME: other }, deny: ['mcp__handoff'] }), /can't read .*config\.toml/);
   // LOOM_RUNTIME_CODEX_PROFILE set: refused, deny list or none.
   assert.throws(() => mk({ profile: 'work' }).start({ brief: 'x', model: 'm', cwd: join(h.D, 'repo'), env: h.env }), /LOOM_RUNTIME_CODEX_PROFILE is set \(work\)/);
   assert.match(mk({ profile: 'work' }).wontRun([], join(h.D, 'repo'), h.env), /LOOM_RUNTIME_CODEX_PROFILE/);
-  assert.equal(h.argv().length, 4);
+  assert.equal(h.argv().length, 5);
 });
 
 test('Codex: a config layer no CODEX_HOME replaces (a project\'s .codex, /etc/codex) refuses a body with a deny list (t-1916)', () => {
@@ -196,12 +213,12 @@ test('Codex: a config layer no CODEX_HOME replaces (a project\'s .codex, /etc/co
   const why = (cwd, d = deny) => r.wontRun(d, cwd, h.env);
   // Nothing there: it runs. The real home's own config above the project root isn't a project's (Codex never reads it so).
   assert.equal(why(join(repo, 'sub')), null);
-  assert.deepEqual(codexLayers(join(repo, 'sub'), { home: real, systemDir: etc }), []);
+  assert.deepEqual(codexLayers(join(repo, 'sub'), { realHome: real, systemDir: etc }), []);
   // A project's .codex/config.toml at the cwd, in a parent inside the project, or above the project root: refused.
   for (const at of [join(repo, 'sub'), repo, join(user, 'up')]) {
     mkdirSync(join(at, '.codex'), { recursive: true });
     writeFileSync(join(at, '.codex', 'config.toml'), '');
-    assert.match(why(join(repo, 'sub')), new RegExp(`would read ${join(at, '.codex', 'config.toml').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`), at);
+    assert.match(why(join(repo, 'sub')), rx(`would read ${join(at, '.codex', 'config.toml')}`), at);
     assert.throws(() => r.start({ brief: 'x', model: 'm', cwd: join(repo, 'sub'), env: h.env, deny }), /a config the runtime can't replace/);
     // A body with no deny list has nothing a layer could undo.
     assert.equal(why(join(repo, 'sub'), []), null);
@@ -212,12 +229,12 @@ test('Codex: a config layer no CODEX_HOME replaces (a project\'s .codex, /etc/co
   assert.match(why(repo), /would read/);
   rmSync(join(repo, '.codex'), { recursive: true });
   // The real home's own .codex is a project layer when the cwd is the project root it sits in (~, no .git): refused.
-  assert.match(why(user), new RegExp(`would read ${join(real, 'config.toml').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+  assert.match(why(user), rx(`would read ${join(real, 'config.toml')}`));
   // The machine's: /etc/codex/config.toml, managed_config.toml, requirements.toml.
   mkdirSync(etc, { recursive: true });
   for (const n of ['config.toml', 'managed_config.toml', 'requirements.toml']) {
     writeFileSync(join(etc, n), '');
-    assert.match(why(repo), new RegExp(`would read ${join(etc, n).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`), n);
+    assert.match(why(repo), rx(`would read ${join(etc, n)}`), n);
     rmSync(join(etc, n));
   }
   assert.equal(why(repo), null);

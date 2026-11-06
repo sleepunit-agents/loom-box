@@ -350,7 +350,7 @@ function accountsOfBody(d, rec) {
  * Said plainly in the conversation, as its agent (the venue's own send), and to the owner: no model the agent may use
  * has room, or a refused turn's one retry was refused too. Once per run of it: `c.allOut` says it was said.
  */
-async function sayOut(env, cv, { out = [], retried = false, alert = true, cant = [] }, d) {
+async function sayOut(env, cv, { out = [], retried = false, alert = true, cant = [], cantWhy = '' }, d) {
   const now = d.now();
   const c = loadConv(env, cv);
   if (!c) return;
@@ -376,7 +376,7 @@ async function sayOut(env, cv, { out = [], retried = false, alert = true, cant =
   if (!alert) return;
   locked(env, () => addNotice(env, { text: `${where} got no answer: ${retried ? 'its retry ran out of quota too' : 'every model account it may use is out of quota'}`.slice(0, 300), meta: `${list} · ${cv}`.slice(0, 300), at: now.toISOString(), agent: c.agent, tone: 'warn', page: '' }, now.getTime()));
   d.alert(env, { source: 'runtime-quota', severity: 'bad', place: c.place, summary: `${where} got no answer: ${retried ? 'a refused turn\'s retry ran out of quota too' : 'every model account it may use is out of quota'}`,
-    facts: { agent: c.agent, conversation: cv, venue: c.venue, place: c.place, out: list, ...(cant.length ? { cant: `${cant.join(', ')} can't keep its deny list` } : {}) } });
+    facts: { agent: c.agent, conversation: cv, venue: c.venue, place: c.place, out: list, ...(cant.length ? { cant: `${cant.join(', ')} can't keep its deny list here${cantWhy ? `: ${cantWhy}` : ''}`.slice(0, 400) } : {}) } });
   d.warn(`${cv}: out of quota everywhere (${list})`);
 }
 
@@ -1268,6 +1268,7 @@ async function execute(env, op, d, mem) {
   let restored = [];
   let way = null;
   let cant = [];
+  let cantWhy = '';
   const pending = [];
   let r;
   let rules;
@@ -1308,13 +1309,15 @@ async function execute(env, op, d, mem) {
     // switched away from has room again; its own slot, when that one's harness has room; else a fresh body elsewhere.
     // A deny list Codex can't keep (a tool within a server, a built-in: runners.mjs, codexDeny) keeps this body off
     // Codex: never an unrestricted body there, and said so if nothing else has room.
-    cant = codexDeny(rules.deny).error ? ['codex'] : [];
+    cantWhy = codexDeny(rules.deny).error ?? '';
+    cant = cantWhy ? ['codex'] : [];
     // Or one this runtime's own Codex won't run here (runners.mjs, CodexRunner.wontRun: LOOM_RUNTIME_CODEX_PROFILE set,
     // or a config layer its made home can't replace). A house's runner can't say from here: its host refuses the start.
     if (!cant.length) {
       let cx = null;
       try { cx = d.runner('codex', local); } catch { /* no codex runner: routing says so */ }
-      if (cx?.wontRun?.(rules.deny, base.cwd, bodyEnv)) cant = ['codex'];
+      const why = cx?.wontRun?.(rules.deny, base.cwd, bodyEnv);
+      if (why) { cant = ['codex']; cantWhy = String(why); }
     }
     way = await routeOf(env, c0, op, rules, d, cant);
     const notes = quotaNotes(c0, way);
@@ -1393,7 +1396,7 @@ async function execute(env, op, d, mem) {
         return was;
       });
       // Each delivery it fails is answered; the owner hears of it once, until a body runs again.
-      await sayOut(env, op.cv, { out: e.out, retried: !!c0.quota, alert: !told, cant }, d);
+      await sayOut(env, op.cv, { out: e.out, retried: !!c0.quota, alert: !told, cant, cantWhy }, d);
       return;
     }
     for (const p of restored) rmSync(p, { recursive: true, force: true });

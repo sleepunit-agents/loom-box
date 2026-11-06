@@ -392,6 +392,7 @@ test('a body whose deny list Codex can\'t keep never falls back to Codex; with C
   // A server-level deny Codex keeps: it falls back as any body does.
   const w2 = twoHarnesses();
   w2.o.policy = () => ({ deny: ['mcp__handoff'] });
+  w2.codex.wontRun = () => null;
   w2.max.usage = { held: Math.floor(w2.clock.now().getTime() / 1000) + 600 };
   await deliver(w2.env, w2.msg('dm:U1', 'hi'), w2.o);
   assert.match(w2.conv().body, /^codex:/);
@@ -407,7 +408,14 @@ test('a body whose deny list Codex can\'t keep never falls back to Codex; with C
   assert.equal(w3.starts().length, 0, 'no Codex body where its deny list could be undone');
   assert.deepEqual(asked.map((a) => a.deny), [['mcp__handoff']]);
   assert.equal(asked[0].cwd, w3.o.cwd);
-  assert.match(w3.alerts[0].facts.cant, /codex can't keep its deny list/);
+  assert.equal(asked[0].key, true, 'with the body\'s env (its run key)');
+  assert.match(w3.alerts[0].facts.cant, /codex can't keep its deny list here: Codex would read \/x\/\.codex\/config\.toml too/, 'the reason reaches the owner');
+  // Refused there while Claude has room: the body runs on Claude, as it would anyway.
+  const w4 = twoHarnesses();
+  w4.codex.wontRun = () => 'Codex would read /x/.codex/config.toml too';
+  w4.o.policy = () => ({ deny: ['mcp__handoff'] });
+  await deliver(w4.env, w4.msg('dm:U1', 'hi'), w4.o);
+  assert.match(w4.conv().body, /^claude:/);
 });
 
 test('a refusal holds only the account the body ran on, not another of the same label', async () => {
