@@ -455,6 +455,16 @@ As the owner on loom's machine, add `--agent <name>`. From a body anywhere, with
 
 When the container exits, the box removes its podman secrets and its dirs, then tells the control plane `done`, `failed` (with the exit code and the end of the log) or `stopped`, and the house's token is revoked.
 
+### The house's command line
+
+Every house image already fetches this repo at its runtime pin (for `loom-runtime`), so the command line houses share comes from here too, one copy for all of them: [`house/install-tools`](house/install-tools). Run it in the Containerfile after the last `ENV PATH` (which must hold `~/.local/bin`), as root (a house's user is root inside: see Harnesses above), with node on PATH. It fails rather than leave a house half set up:
+
+```dockerfile
+RUN sh /home/<agent>/.local/share/loom-runtime/house/install-tools
+```
+
+It writes `piece-call`, `loom-runtime` (node by its full path), and `taskstore`/`loom-tasks`, `wake` and `approvals` (loom's tasks, clock and approvals pieces, through `piece-call` as the house's own token) into `~/.local/bin`, and `/etc/profile.d/loom-house.sh`. That last one matters for Codex, which runs every command in a login shell: Debian's `/etc/profile` resets PATH to the system dirs, so without it a Codex body finds no `loom`, no `node` and none of the wrappers. The profile file puts back the image's PATH and reads `~/.house-env`, which the entrypoint writes for later shells. `install-tools --pieces` rewrites only the piece wrappers, for a house that links its own over them at start.
+
 ## How it talks
 
 A box never reads loom's stores, and loom never reaches into a box. The box polls `POST /api/<piece>/<call>` (loom's piece API, docs/extensions.md "The API") with its **box credential**, a loom token with the role `piece:<piece>/<id>` (the box's id is loom's; its name is only a label). That credential reaches this piece's API and nothing else in loom: no MCP, no CLI, no page.
