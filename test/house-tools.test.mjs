@@ -1,7 +1,10 @@
 // house/install-tools: the command line every house shares (Art's and Mark's).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, execFile } from 'node:child_process';
+import { createServer } from 'node:http';
+import { gzipSync } from 'node:zlib';
+import { chmodSync, statSync, rmSync } from 'node:fs';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, lstatSync, readlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -96,8 +99,42 @@ test('--pieces puts the piece wrappers back over links a house laid down, and no
   spawnSync('ln', ['-sfn', '/nowhere/wake', join(h.home, '.local/bin/wake')]);
   writeFileSync(join(h.profileD, 'loom-house.sh'), '# untouched\n');
   assert.equal(install(h, '--pieces').status, 0);
+  writeFileSync(join(h.home, '.local/bin/loom-runtime'), '#!/bin/sh\n# the house\'s own\n');
+  assert.equal(install(h, '--pieces').status, 0);
   assert.ok(!lstatSync(join(h.home, '.local/bin/wake')).isSymbolicLink());
+  assert.match(readFileSync(join(h.home, '.local/bin/wake'), 'utf8'), /piece-call" clock/);
   assert.equal(readFileSync(join(h.profileD, 'loom-house.sh'), 'utf8'), '# untouched\n');
+  assert.equal(readFileSync(join(h.home, '.local/bin/loom-runtime'), 'utf8'), "#!/bin/sh\n# the house's own\n");
+});
+
+test('a TASKSTORE_DB call with no local build fails, and never reaches the piece', () => {
+  const h = house();
+  rmSync(join(h.home, '.local/share/taskstore'), { recursive: true });
+  assert.equal(install(h).status, 0);
+  writeFileSync(join(h.home, 'fake-piece-call'), '#!/bin/sh\necho REACHED-PIECE\n', { mode: 0o755 });
+  spawnSync('ln', ['-sfn', join(h.home, 'fake-piece-call'), join(h.home, '.local/bin/piece-call')]);
+  for (const env of [{ TASKSTORE_DB: '/tmp/x.db' }, { TANK_LOCAL_PIECES: '1' }]) {
+    for (const name of ['taskstore', 'loom-tasks']) {
+      const r = login(h, `${name} ready`, env);
+      assert.equal(r.status, 1);
+      assert.doesNotMatch(r.stdout, /REACHED-PIECE/);
+      assert.match(r.stderr, /no local taskstore build/);
+    }
+  }
+});
+
+test('a PATH without ~/.local/bin is refused, and so is an unwritable profile dir', () => {
+  const h = house();
+  const r = spawnSync('sh', [TOOLS], { env: { HOME: h.home, PATH: `${NODE_DIR}:${SYS}`, LOOM_HOUSE_PROFILE_D: h.profileD }, encoding: 'utf8' });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /isn't on PATH/);
+  if (process.getuid && process.getuid() !== 0) {
+    chmodSync(h.profileD, 0o555);
+    const u = install(h);
+    chmodSync(h.profileD, 0o755);
+    assert.equal(u.status, 1);
+    assert.match(u.stderr, /isn't writable/);
+  }
 });
 
 test('an unknown flag is a usage error', () => {
@@ -111,4 +148,50 @@ test('piece-call says what it needs when loom is not configured', () => {
   const r = spawnSync('python3', [join(ROOT, 'house/piece-call'), 'clock', '--help'], { env: { PATH: SYS }, encoding: 'utf8' });
   assert.equal(r.status, 1);
   assert.match(r.stderr, /LOOM_URL and LOOM_TOKEN_FILE must be set/);
+});
+
+// The real piece-call against a stand-in loom: what it sends, and what it gives back.
+function fakeLoom(reply) {
+  const seen = [];
+  const server = createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => {
+      seen.push({ url: req.url, auth: req.headers.authorization, argv: JSON.parse(body).argv });
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify(reply));
+    });
+  });
+  return new Promise((ok) => server.listen(0, '127.0.0.1', () => ok({ server, seen, url: `http://127.0.0.1:${server.address().port}/mcp` })));
+}
+
+function pieceCall(loomUrl, tok, args, input) {
+  return new Promise((ok) => {
+    const child = execFile(join(ROOT, 'house/piece-call'), args, { env: { PATH: SYS, LOOM_URL: loomUrl, LOOM_TOKEN_FILE: tok } },
+      (err, stdout, stderr) => ok({ code: err ? err.code : 0, stdout, stderr }));
+    if (input !== undefined) child.stdin.end(input); else child.stdin.end();
+  });
+}
+
+test('piece-call posts the argv to /api/<piece>/run as the token, and reads back exit, stdout and stderr', async () => {
+  const tok = join(mkdtempSync(join(tmpdir(), 'pc-')), 'tok');
+  writeFileSync(tok, 'sekrit\n');
+  assert.ok(statSync(join(ROOT, 'house/piece-call')).mode & 0o111, 'piece-call is executable');
+  const a = await fakeLoom({ exit: 3, stdout: 'out\n', stderr: 'err\n' });
+  try {
+    const r = await pieceCall(a.url, tok, ['clock', 'in', '4h', '--note', 'two words']);
+    assert.deepEqual(a.seen, [{ url: '/api/clock/run', auth: 'Bearer sekrit', argv: ['in', '4h', '--note', 'two words'] }]);
+    assert.deepEqual([r.code, r.stdout, r.stderr], [3, 'out\n', 'err\n']);
+    // A bare piece (`wake` alone) asks the piece, with no argv.
+    await pieceCall(a.url, tok, ['clock']);
+    assert.deepEqual(a.seen[1].argv, []);
+  } finally { a.server.close(); }
+  const b = await fakeLoom({ exit: 0, stdoutGz: gzipSync('big\n').toString('base64') });
+  try {
+    const r = await pieceCall(b.url, tok, ['tasks', 'export']);
+    assert.deepEqual([r.code, r.stdout], [0, 'big\n']);
+    // `tasks comment --file -`: the text is read here and sent as the comment's own argument (t-1854).
+    await pieceCall(b.url, tok, ['tasks', 'comment', 't-1', '--file', '-'], 'the text\n');
+    assert.deepEqual(b.seen[1].argv, ['comment', 't-1', 'the text']);
+  } finally { b.server.close(); }
 });

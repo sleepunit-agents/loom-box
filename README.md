@@ -457,7 +457,7 @@ When the container exits, the box removes its podman secrets and its dirs, then 
 
 ### The house's command line
 
-Every house image already fetches this repo at its runtime pin (for `loom-runtime`), so the command line houses share comes from here too, one copy for all of them: [`house/install-tools`](house/install-tools). Run it in the Containerfile after the last `ENV PATH`, as the house's user, with node on PATH:
+Every house image already fetches this repo at its runtime pin (for `loom-runtime`), so the command line houses share comes from here too, one copy for all of them: [`house/install-tools`](house/install-tools). Run it in the Containerfile after the last `ENV PATH` (which must hold `~/.local/bin`), as root (a house's user is root inside: see Harnesses above), with node on PATH. It fails rather than leave a house half set up:
 
 ```dockerfile
 RUN sh /home/<agent>/.local/share/loom-runtime/house/install-tools

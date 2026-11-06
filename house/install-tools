@@ -4,7 +4,7 @@
 # so the houses stop drifting apart (2026-11-06: Mark's house had no `approvals`,
 # an older piece-call, and lost its whole PATH in Codex's shells).
 #
-#   install-tools            the wrappers below, and the login-shell PATH (root only)
+#   install-tools            the wrappers below, and the login-shell PATH
 #   install-tools --pieces   the piece wrappers only (a house that links its own
 #                            over them at start puts these back afterwards)
 #
@@ -14,7 +14,8 @@
 #   taskstore, loom-tasks   loom's tasks piece through piece-call; the house's own
 #                  taskstore build instead when TASKSTORE_DB names a store (a test's
 #                  store: through the piece it would write the one store, t-1520)
-#                  or TANK_LOCAL_PIECES is set
+#                  or TANK_LOCAL_PIECES is set. Without that build such a call
+#                  fails; it never falls through to the piece.
 #   wake           loom's clock piece
 #   approvals      loom's approvals piece
 #
@@ -25,8 +26,10 @@
 # and reads ~/.house-env, which the entrypoint writes for shells started later
 # (LOOM_TOKEN_FILE and the like).
 #
-# Run it as the house's own user, with node on PATH. LOOM_HOUSE_PROFILE_D moves
-# the profile file (the tests).
+# Run it as root, which is a house's user (rootless podman: the box's user), with
+# node on PATH and ~/.local/bin on it: a PATH without it is refused, since the
+# wrappers would resolve nowhere. Without a writable /etc/profile.d it fails.
+# LOOM_HOUSE_PROFILE_D moves the profile file (the tests).
 set -eu
 
 case "${1:-}" in
@@ -39,6 +42,10 @@ KIT=$(cd "$(dirname "$0")/.." && pwd -P)
 BIN="${HOME:?}/.local/bin"
 NODE=$(node -e 'process.stdout.write(process.execPath)')
 TASKSTORE_CLI="$HOME/.local/share/taskstore/dist/cli.js"
+case ":$PATH:" in
+  *":$BIN:"*) ;;
+  *) echo "install-tools: $BIN isn't on PATH ($PATH); set the Containerfile's ENV PATH first" >&2; exit 1 ;;
+esac
 mkdir -p "$BIN"
 
 put() {  # put NAME: stdin becomes $BIN/NAME, executable (replaces a link or file)
@@ -63,7 +70,9 @@ for name in taskstore loom-tasks; do
 # $name: loom's tasks piece, through loom's piece API (loom-box house/install-tools).
 # A call that names its own store (TASKSTORE_DB), or a house kept on its local
 # pieces (TANK_LOCAL_PIECES), runs the house's own taskstore build on it.
-if [ -n "\${TASKSTORE_DB:-}\${TANK_LOCAL_PIECES:-}" ] && [ -f "$TASKSTORE_CLI" ]; then
+# Without that build the call fails: it never goes to the one store instead.
+if [ -n "\${TASKSTORE_DB:-}\${TANK_LOCAL_PIECES:-}" ]; then
+  [ -f "$TASKSTORE_CLI" ] || { echo "$name: TASKSTORE_DB or TANK_LOCAL_PIECES is set, and there's no local taskstore build at $TASKSTORE_CLI" >&2; exit 1; }
   exec "$NODE" "$TASKSTORE_CLI" "\$@"
 fi
 exec "$BIN/piece-call" tasks "\$@"
@@ -82,17 +91,19 @@ EOF
 
 PROFILE_D="${LOOM_HOUSE_PROFILE_D:-/etc/profile.d}"
 if [ -d "$PROFILE_D" ] && [ -w "$PROFILE_D" ]; then
-  q=$(printf '%s' "$PATH" | sed "s/'/'\\\\''/g")
-  cat > "$PROFILE_D/loom-house.sh" <<EOF
+  quoted_path=$(printf '%s' "$PATH" | sed "s/'/'\\\\''/g")
+  cat > "$PROFILE_D/.loom-house.sh.new" <<EOF
 # loom-house.sh (loom-box house/install-tools): a login shell keeps the house's
 # command line. /etc/profile has just reset PATH to the system dirs; Codex runs
 # every command in a login shell. This is the image's PATH, as built.
-PATH='$q'
+PATH='$quoted_path'
 export PATH
 [ -r "\$HOME/.house-env" ] && . "\$HOME/.house-env"
 true
 EOF
-  chmod 0644 "$PROFILE_D/loom-house.sh"
+  chmod 0644 "$PROFILE_D/.loom-house.sh.new"
+  mv -f "$PROFILE_D/.loom-house.sh.new" "$PROFILE_D/loom-house.sh"
 else
-  echo "install-tools: $PROFILE_D isn't writable here; login shells keep /etc/profile's PATH" >&2
+  echo "install-tools: $PROFILE_D isn't writable (run it as root); a login shell would lose the house's PATH" >&2
+  exit 1
 fi

@@ -9,7 +9,9 @@ POSTs {argv} to loom's piece API (`/api/<piece>/run`, loom docs/extensions.md
 stderr and exits with its exit code, so it reads exactly like the local
 command. In a house, house/install-tools puts `taskstore`, `wake` and
 `approvals` in front of this (as tasks, clock and approvals). Needs LOOM_URL
-(the /mcp URL is fine) and LOOM_TOKEN_FILE, or a house's /run/secrets/loom-token.
+(the /mcp URL is fine) and LOOM_TOKEN_FILE, or in a house (HOUSE_ID set) its
+/run/secrets/loom-token. With no arguments it asks the piece itself (`wake`
+alone, like the local command).
 
 The one copy every house runs (loom-box house/). sleepunit-agents/art keeps
 bin/piece-call, the same program, for loom's own machine.
@@ -44,7 +46,7 @@ def inline_file(piece, argv):
 
 
 def main():
-    if len(sys.argv) < 3:
+    if len(sys.argv) < 2:
         sys.exit(__doc__.strip().splitlines()[0] + "\nusage: piece-call <piece> <args...>")
     piece, argv = sys.argv[1], inline_file(sys.argv[1], sys.argv[2:])
     url, tokfile = os.environ.get("LOOM_URL"), os.environ.get("LOOM_TOKEN_FILE")
@@ -68,7 +70,7 @@ def main():
             why = json.load(e).get("error")
         except ValueError:
             why = None
-        sys.exit(f"piece-call: loom refused {piece} {argv[0]}: {why or f'{e.code} {e.reason}'}")
+        sys.exit(f"piece-call: loom refused {' '.join([piece] + argv[:1])}: {why or f'{e.code} {e.reason}'}")
     except (urllib.error.URLError, OSError) as e:
         sys.exit(f"piece-call: couldn't reach loom at {base}: {e}")
     out = body.get("stdout")
