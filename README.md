@@ -371,6 +371,20 @@ The resolver, in order:
 2. **The agent's preference** among those: this body's `--prefer`, then the agent's `prefer`, then the list's order.
 3. **Scorecards** demote the preference when another allowed model's `graded` value for the venue's kind (`live`, `scheduled`, `agent`) is at least 1.0 higher, over the last 14 days, with at least 5 graded samples each. They're read from loom's `GET /api/loom/scorecards` with a runtime token (`LOOM_RUNTIME_TOKEN_FILE`), or a file of rows (`LOOM_RUNTIME_SCORECARDS`). None readable is no demotion.
 
+"Quota left" means: no **hold**, and every window under 97%, where a window past its reset time counts as reset. A hold is written the moment a provider refuses a body's turn for a usage limit, and lasts until that limit's reset (30 minutes when the refusal names none, 8 days at most). Readings come from status lines and rollouts after a turn, so they lag; a hold doesn't. `loom runtime models resolve --agent art --venue slack --suppose-out claude` shows what the resolver would pick if Claude's accounts were out, without holding anything.
+
+### When an account runs out
+
+An agent keeps answering when its harness's account runs out (t-1907):
+
+- **A new body** goes to the best allowed model with room. A pick on another harness than the one the agent would use with quota ignored is a **fallback**; the body's record says `switched`.
+- **A resume** whose slot's harness has no room parks that slot as the conversation's **home** and starts a fresh body elsewhere, which continues from the conversation's digests. Codex can't continue a Claude session, or the other way round.
+- **Going back.** The conversation returns to its home session at its next run once that harness has room again and the reset the switch waited on has passed. The fallback's own session is dropped, since its turns are in the digests, and the home session is told to read them. A live slot lasts up to 14 days, while a window resets in hours or days, so staying on the fallback until the conversation ends would keep a DM off the owner's chosen model for weeks. Every run already resumes from a slot, so going back costs one hand-off, the same as going. Waiting for the reset keeps a conversation from flapping at 97%.
+- **A turn refused mid-way** (Claude Code's `rate_limit`/`billing_error` API error entry, a rejected `rate_limit_event`, or Codex's `usage_limit_exceeded`; never the words) holds that account and runs that same turn once more on another harness. The new body is told what the cut-off run already sent. A retry that's refused too isn't run again.
+- **Everything out.** When no model the agent may use has room, each message is answered plainly in the conversation, as the agent ("I can't answer right now: …, ask me again after …"), and the owner is alerted once (`runtime-quota`).
+- **What the owner sees.** One Inbox FYI per agent per switch ("Art is answering on Codex: Claude Max is out until …") and one when it's back. The agent's card reads "Model: on Codex". A Comms reply from a switched body carries `on: Codex` for its channel line. `loom runtime trace` shows the switch, the return and the retry.
+- **A Codex body's deny list.** A body's `deny` is kept as Codex can keep it. `mcp__<server>` turns that server off (`-c mcp_servers.<server>.enabled=false`), `mcp__<server>__<tool>` turns that tool off, and a server Codex doesn't load is already out of reach. A built-in tool still can't be denied, so a body that would keep one isn't started.
+
 ## The review
 
 The household's daily review (loom's `docs/specs/conversations.md`, "Review"): grading by bare models, then each agent's own introspection. It runs at 04:00 in the household's time zone. household.json's `tz` and `review` are read from core (`GET /api/loom/review/config`), never from the file. The delivery service's tick starts it. A service that was down at 04:00 runs it when it's back that day. A runtime seeing the clock for the first time waits for the next 04:00.

@@ -12,8 +12,12 @@
 //   3. scorecards demote the preference when another allowed model's `graded` value for the venue kind is at
 //      least 1.0 higher.
 // It replaces the clock's WAKE_MODEL and the bridges piece's model resolver.
+//
+// What it would have picked with every account's quota ignored is its **preferred** pick. A pick on another harness
+// than that one is a **fallback** (t-1907): the agent answering on Codex because Claude's account is out. The caller
+// can also `avoid` harnesses for one body (a turn its provider just refused, retried elsewhere).
 import { readFileSync } from 'node:fs';
-import { accountsFor, hasRoom } from './accounts.mjs';
+import { accountsFor, hasRoom, roomAt } from './accounts.mjs';
 import { StateError, load, update } from './state.mjs';
 import { setting } from './piece.mjs';
 
@@ -126,6 +130,27 @@ export function gradedOf(rows, model, kind, { since } = {}) {
   return n >= MIN_GRADED ? sum / n : undefined;
 }
 
+/** Whether a model has an account with room for the agent: {ok, account?} or {ok: false, reason, out}. */
+function resolveRoom({ agent, m, accounts, now }) {
+  const provider = providerOf(m.family);
+  if (!provider) return { ok: true };
+  if (!accounts) return { ok: true, unread: true };
+  // Only an account the model's own harness can run on: a Claude login runs Claude Code, not Codex.
+  const mine = accountsFor(accounts, agent, provider).filter((a) => !a.harness || a.harness === m.harness);
+  const acct = mine.find((a) => hasRoom(a, m.window, now));
+  // A body is told the account's label, never its key.
+  if (acct) return { ok: true, account: acct.label ?? acct.name };
+  // When the soonest of its accounts has room again, as far as its readings and holds say.
+  const back = mine.map((a) => roomAt(a, m.window, now)).filter((t) => t !== null);
+  const until = back.length && back.length === mine.length ? Math.min(...back) : undefined;
+  const held = mine.some((a) => a.usage?.held);
+  return {
+    ok: false,
+    reason: mine.length ? `${mine.map((a) => a.label ?? a.name).join(', ')} out of quota${held ? ' (its provider refused a turn)' : ''}${until ? ` until ${new Date(until * 1000).toISOString()}` : ''}` : `no box of ${agent}'s owner is logged in to ${m.harness}, and ${agent} has no ${provider} API key`,
+    out: { harness: m.harness, ...(mine.length ? { account: mine[0].label ?? mine[0].name } : {}), ...(until ? { until } : {}) },
+  };
+}
+
 /**
  * Pick the model for a body. Pure: everything it reads is passed in.
  *   models     the model list
@@ -133,46 +158,65 @@ export function gradedOf(rows, model, kind, { since } = {}) {
  *   accounts   the accounts view ({accounts}, accounts.mjs: from the boxes' reports), or null when it can't be read
  *   scorecards rows from loom, [] when there are none
  *   prefer     a preference for this one body (the caller's), ahead of the agent's own
- * Returns {model, harness, family, account?, kind, why: [lines]}, or throws a StateError (409) naming why no model
- * is left.
+ * Returns {model, harness, family, account?, kind, why: [lines], preferred: {model, harness}, fallback?: {from, until?,
+ * account?}}, or throws a StateError (409) naming why no model is left (its `out`: [{harness, account?, until?}]).
+ *   avoid      harnesses this body may not use (a turn its provider refused there, retried once elsewhere)
+ *   now        the clock, for holds and windows past their reset (accounts.mjs, hasRoom)
+ *   all        the whole list, when `models` is only some of it (a resume's harness): the preferred pick is from it
  */
-export function resolveModel({ agent, kind, models, settings = {}, accounts, scorecards = [], prefer = [], since }) {
+export function resolveModel({ agent, kind, models, all = models, settings = {}, accounts, scorecards = [], prefer = [], since, avoid = [], now = Date.now() }) {
   const why = [];
   const allowed = settings.allow?.length ? models.filter((m) => settings.allow.includes(m.id)) : models;
   if (!allowed.length) fail(`${agent} may use none of the runtime's models`, 409);
   // 1. Hard limits: allowed, and an account with quota left (a local model needs none).
   const room = new Map();
+  // An avoided harness has no room for this body; its own reason (out of quota) when it has one.
   for (const m of allowed) {
-    const provider = providerOf(m.family);
-    if (!provider) { room.set(m.id, { ok: true }); continue; }
-    if (!accounts) { room.set(m.id, { ok: true, unread: true }); continue; }
-    // Only an account the model's own harness can run on: a Claude login runs Claude Code, not Codex.
-    const mine = accountsFor(accounts, agent, provider).filter((a) => !a.harness || a.harness === m.harness);
-    const acct = mine.find((a) => hasRoom(a, m.window));
-    // A body is told the account's label, never its key.
-    room.set(m.id, acct ? { ok: true, account: acct.label ?? acct.name } : { ok: false, reason: mine.length ? `${mine.map((a) => a.name).join(', ')} out of quota` : `no box of ${agent}'s owner is logged in to ${m.harness}, and ${agent} has no ${provider} API key` });
+    const q = resolveRoom({ agent, m, accounts, now });
+    room.set(m.id, avoid.includes(m.harness) && q.ok ? { ok: false, reason: `${m.harness} avoided for this body`, out: { harness: m.harness } } : q);
   }
   if (!accounts) why.push('quota not checked: no box reports here (off the control plane, or LOOM_RUNTIME_ACCOUNTS=none); fails open, as the resolvers before did');
   const usable = allowed.filter((m) => room.get(m.id).ok);
   for (const m of allowed) if (!room.get(m.id).ok) why.push(`${m.id}: ${room.get(m.id).reason}`);
-  if (!usable.length) fail(`no model is left for ${agent}: ${why.join('; ')}`, 409);
-  // 2. The preference: this body's, then the agent's, then the list's order.
   const order = [...prefer, ...(settings.prefer ?? [])];
-  let pick = order.map((id) => usable.find((m) => m.id === id)).find(Boolean) ?? usable[0];
-  why.push(`${pick.id}: ${order.includes(pick.id) ? 'preferred' : 'first allowed with quota'}`);
-  // 3. Scorecards: another usable model graded at least DEMOTE_BY higher for this kind takes its place.
-  const mineScore = gradedOf(scorecards, pick.id, kind, { since });
-  if (mineScore !== undefined) {
-    const better = usable.map((m) => ({ m, g: gradedOf(scorecards, m.id, kind, { since }) }))
-      .filter((x) => x.m.id !== pick.id && x.g !== undefined && x.g - mineScore >= DEMOTE_BY)
-      .sort((x, y) => y.g - x.g)[0];
-    if (better) {
-      why.push(`${pick.id} demoted for ${kind}: graded ${mineScore.toFixed(2)}, ${better.m.id} ${better.g.toFixed(2)}`);
-      pick = better.m;
+  // 2 and 3, over a set of models: the preference, then the scorecards.
+  const choose = (set, say) => {
+    let pick = order.map((id) => set.find((m) => m.id === id)).find(Boolean) ?? set[0];
+    if (say) why.push(`${pick.id}: ${order.includes(pick.id) ? 'preferred' : 'first allowed with quota'}`);
+    const mineScore = gradedOf(scorecards, pick.id, kind, { since });
+    if (mineScore !== undefined) {
+      const better = set.map((m) => ({ m, g: gradedOf(scorecards, m.id, kind, { since }) }))
+        .filter((x) => x.m.id !== pick.id && x.g !== undefined && x.g - mineScore >= DEMOTE_BY)
+        .sort((x, y) => y.g - x.g)[0];
+      if (better) {
+        if (say) why.push(`${pick.id} demoted for ${kind}: graded ${mineScore.toFixed(2)}, ${better.m.id} ${better.g.toFixed(2)}`);
+        pick = better.m;
+      }
     }
+    return pick;
+  };
+  // What it would pick with quota ignored (and nothing avoided), from the whole list: a pick on another harness is a
+  // fallback. Its room is read as any model's is.
+  const allAllowed = settings.allow?.length ? all.filter((m) => settings.allow.includes(m.id)) : all;
+  const preferred = choose(allAllowed.length ? allAllowed : allowed, false);
+  if (!room.has(preferred.id)) {
+    const sub = resolveRoom({ agent, m: preferred, accounts, now });
+    room.set(preferred.id, sub);
   }
+  if (!usable.length) {
+    const e = new StateError(`no model is left for ${agent}: ${why.join('; ')}`, 409);
+    e.out = allowed.map((m) => room.get(m.id).out).filter(Boolean).filter((o, i, all) => all.findIndex((x) => x.harness === o.harness && x.account === o.account) === i);
+    throw e;
+  }
+  const pick = choose(usable, true);
   const r = room.get(pick.id);
-  return { model: pick.id, harness: pick.harness, family: pick.family, kind, ...(r.account ? { account: r.account } : {}), why };
+  const gone = room.get(preferred.id);
+  const fallback = pick.harness !== preferred.harness && !gone.ok
+    ? { from: preferred.harness, ...(gone.out?.account ? { account: gone.out.account } : {}), ...(gone.out?.until ? { until: gone.out.until } : {}), why: gone.reason }
+    : null;
+  if (fallback) why.push(`a fallback: ${preferred.id} (${preferred.harness}) is preferred, and ${gone.reason}`);
+  return { model: pick.id, harness: pick.harness, family: pick.family, kind, ...(r.account ? { account: r.account } : {}), why,
+    preferred: { model: preferred.id, harness: preferred.harness }, ...(fallback ? { fallback } : {}) };
 }
 
 /** The first day of the scorecard window, YYYY-MM-DD. */
@@ -210,7 +254,7 @@ export async function fetchScorecards(env, { kind, since, fetchImpl = fetch } = 
 }
 
 /** Resolve with what the runtime has: its list (only `harness`'s models, if named), the agent's settings, the accounts provider, loom's scorecards. */
-export async function resolveFor(env, { agent, venue, venueKind: told, prefer = [], harness, accounts, now = new Date(), fetchImpl } = {}) {
+export async function resolveFor(env, { agent, venue, venueKind: told, prefer = [], harness, avoid = [], accounts, now = new Date(), fetchImpl } = {}) {
   if (!AGENT.test(agent ?? '')) fail('which agent');
   const kind = venueKind(venue, told);
   const { list: all, agents } = readModels(env);
@@ -222,7 +266,7 @@ export async function resolveFor(env, { agent, venue, venueKind: told, prefer = 
   try { listed = accounts.kind === 'none' ? null : accounts.list(); } catch { listed = null; }
   const since = sinceDay(now);
   const cards = await fetchScorecards(env, { kind, since, fetchImpl });
-  const r = resolveModel({ agent, kind, models: list, settings: agents[agent] ?? {}, accounts: listed, scorecards: cards.rows, prefer, since });
+  const r = resolveModel({ agent, kind, models: list, all, settings: agents[agent] ?? {}, accounts: listed, scorecards: cards.rows, prefer, since, avoid, now: now.getTime() });
   if (cards.error) r.why.push(cards.error);
   return r;
 }

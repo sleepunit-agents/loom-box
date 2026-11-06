@@ -45,6 +45,23 @@
 // good (`{ok: false, reason, permanent: true}`: shadow mode, no bot, a place it can't post in) isn't retried or
 // queued at all: it's kept on the conversation (`refused`) and the owner hears of it once a day.
 //
+// Out of quota (t-1907): an agent keeps answering when its harness's account runs out.
+//   - A resume whose slot's harness has no room (by the readings, or a hold: a refusal just seen) parks that slot as
+//     the conversation's `home` and starts a fresh body on the best allowed model with room, on another harness; it
+//     continues from the conversation's digests, as a body with no slot does. The body's record says `switched`.
+//   - The conversation goes back to its home slot at its next run once the home harness has room again and the reset
+//     the switch waited on has passed: the fallback's own session is dropped (its turns are in the digests), and the
+//     home session is told to read them. Not "stay until the conversation ends": a live conversation's slot lasts up
+//     to 14 days, a usage window resets in hours (5h) or days (7d), and the preferred model is the owner's choice;
+//     every run already resumes from a slot, so going back costs one hand-off through the digests, the same as going.
+//     Going only after the reset (not at the first reading under FULL) keeps a conversation from flapping at the edge.
+//   - A body whose turn its provider refused for a usage limit (runners.mjs, turn().limited) holds that account until
+//     the limit's reset (accounts.mjs, holdAccount: the resolver sees it at once, however the readings lag), and that
+//     same turn is run once more, on another harness, from the digests. Never twice: a retry refused again, or no
+//     model with room at all, is said plainly in the conversation, and the owner alerted.
+//   - One Inbox FYI per agent per switch (and one when it's back), a "Model: on Codex" reading on the agent's card
+//     (fallbacks.json), "on Codex" on a Comms reply (its channel line), and the switch in the run's trace.
+//
 // Loops (t-1763, loops.mjs): no cap on how many bodies a conversation starts, or how fast. Each run (a body started or
 // resumed) is kept on its conversation (`runLog`: for whom, what it sent, how its turn ended), and a conversation whose
 // runs look like a crash loop (a failure streak, the same output again and again, relay ping-pong, start-stop churn)
@@ -60,7 +77,7 @@ import { accountsFrom } from './accounts.mjs';
 import { endBody, readBody, resumeBody, startBody } from './bodies.mjs';
 import { CoreError, coreFrom } from './core.mjs';
 import { HouseRunner, sweepTransfers } from './houserunner.mjs';
-import { venueKind as kindOf } from './models.mjs';
+import { venueKind as kindOf, resolveFor } from './models.mjs';
 import { setting } from './piece.mjs';
 import { dropSession, packSession, restoreFiles } from './sessions.mjs';
 import { ageSealer } from './sealed.mjs';
@@ -138,6 +155,8 @@ const dataDir = (env) => env.LOOM_BOX_DATA || join(env.HOME || homedir(), '.loca
 export const deliveryDir = (env) => join(dataDir(env), 'delivery');
 const convDir = (env) => join(deliveryDir(env), 'conversations');
 const slotFile = (env, cv) => { if (!CV.test(cv ?? '')) fail('not a conversation id', 500); return join(deliveryDir(env), 'slots', `${cv}.age`); };
+/** The slot a conversation switched away from, kept to go back to (its `home`, t-1907). */
+const homeFile = (env, cv) => { if (!CV.test(cv ?? '')) fail('not a conversation id', 500); return join(deliveryDir(env), 'slots', `${cv}.home.age`); };
 const seenFile = (env, key) => join(deliveryDir(env), 'seen', `${key}.json`);
 
 function writeJson(path, v) {
@@ -255,6 +274,105 @@ async function giveUp(env, c, reason, tries, d) {
   d.warn(`gave up on ${c.conversation}: ${said}`);
   d.alert(env, { source: 'runtime-start', severity: 'warn', place: c.place, summary: `${c.agent}'s ${c.venue} ${c.place} couldn't start a body after ${tries} tries`,
     facts: { agent: c.agent, conversation: c.conversation, venue: c.venue, place: c.place, reason } });
+}
+
+// ─── Out of quota (t-1907) ──────────────────────────────────────────────────
+
+/** A harness in words, for the owner and the thread. */
+export const HARNESS_WORDS = { claude: 'Claude', codex: 'Codex' };
+const harnessWords = (h) => HARNESS_WORDS[h] ?? cap(h);
+/** Each agent answering on another harness than its preferred one: {agent: {from, to, since, until?, account?, why}}. */
+const fallbacksFile = (env) => join(deliveryDir(env), 'fallbacks.json');
+export function readFallbacks(env) {
+  const f = readJson(fallbacksFile(env));
+  return f && typeof f === 'object' && !Array.isArray(f) ? f : {};
+}
+
+/** A time, as the owner reads it: in the household's tz (LOOM_RUNTIME_TZ, else TZ), else UTC. */
+export function whenWords(sec, env = {}, nowMs = Date.now()) {
+  if (!Number.isFinite(sec)) return '';
+  const tz = setting(env, 'TZ') || env.TZ || 'UTC';
+  const o = { hour: 'numeric', minute: '2-digit', timeZoneName: 'short' };
+  // Within a day: the time; further: the day too.
+  if (sec * 1000 - nowMs > 20 * 3600_000) Object.assign(o, { weekday: 'short', month: 'short', day: 'numeric' });
+  try { return new Intl.DateTimeFormat('en-US', { ...o, timeZone: tz }).format(new Date(sec * 1000)); } catch { return new Intl.DateTimeFormat('en-US', { ...o, timeZone: 'UTC' }).format(new Date(sec * 1000)); }
+}
+
+/** An account out, in words: "Claude Max (jonathan's) is out until 3:05 PM UTC". */
+const outWords = (o, env, nowMs) => `${o.account ?? `${harnessWords(o.harness)}'s account`} is out${o.until ? ` until ${whenWords(o.until, env, nowMs)}` : ''}`;
+
+/**
+ * A body started (or resumed): whether its agent is now answering on another harness than its preferred one, and the
+ * owner's FYI when that changes (one per switch, one when it's back), never one per message.
+ */
+function noteHarness(env, agent, r, d) {
+  const now = d.now();
+  locked(env, () => {
+    const all = readFallbacks(env);
+    const fb = all[agent];
+    let text = null;
+    if (r.switched) {
+      if (fb?.to === r.harness && fb?.from === r.switched.from) return;
+      all[agent] = { from: r.switched.from, to: r.harness, since: now.toISOString(), ...(r.switched.until ? { until: r.switched.until } : {}), ...(r.switched.account ? { account: r.switched.account } : {}), why: r.switched.why ?? '' };
+      text = `${cap(agent)} is answering on ${harnessWords(r.harness)}: ${outWords({ harness: r.switched.from, account: r.switched.account, until: r.switched.until }, env, now.getTime())}`;
+    } else if (fb && r.harness === fb.from) {
+      delete all[agent];
+      text = `${cap(agent)} is back on ${harnessWords(r.harness)}${fb.account ? `: ${fb.account} has room again` : ''}`;
+    } else return;
+    writeJson(fallbacksFile(env), all);
+    addNotice(env, { text: text.slice(0, 300), meta: `${r.model} · since ${now.toISOString().slice(0, 16).replace('T', ' ')} UTC`, at: now.toISOString(), agent, tone: r.switched ? 'warn' : 'ok', page: '' }, now.getTime());
+  });
+}
+
+/** Whether a harness has a model with room for this conversation's agent now (the resolver's hard limits). */
+async function roomOn(env, c, harness, d) {
+  try {
+    await resolveFor(env, { agent: c.agent, venue: c.venue, venueKind: c.kind, harness, accounts: d.accounts, now: d.now(), fetchImpl: d.fetchImpl });
+    return true;
+  } catch (e) {
+    if (e instanceof StateError && e.status === 409) return false;
+    throw e;
+  }
+}
+
+/** The account a body ran on, by its record's label and harness: every account of the agent's with that label. */
+function accountsOfBody(d, rec) {
+  let l = null;
+  try { l = d.accounts.kind === 'none' ? null : d.accounts.list(); } catch { l = null; }
+  return (l?.accounts ?? []).filter((a) => a.harness === rec.harness && (a.label ?? a.name) === rec.account && (a.agents ?? []).includes(rec.agent));
+}
+
+/**
+ * Said plainly in the conversation, as its agent (the venue's own send), and to the owner: no model the agent may use
+ * has room, or a refused turn's one retry was refused too. Once per run of it: `c.allOut` says it was said.
+ */
+async function sayOut(env, cv, { out = [], retried = false, run, alert = true }, d) {
+  const now = d.now();
+  const c = loadConv(env, cv);
+  if (!c) return;
+  const accts = out.filter((o) => o.account);
+  const list = accts.length ? accts.map((o) => outWords(o, env, now.getTime())).join('; ') : 'none of my model accounts has room';
+  const soon = accts.map((o) => o.until).filter(Number.isFinite);
+  const back = soon.length ? ` Ask me again after ${whenWords(Math.min(...soon), env, now.getTime())}.` : ' Ask me again later.';
+  const text = retried
+    ? `I couldn't finish answering this: my model accounts ran out of quota partway through (${list}).${back}`
+    : `I can't answer right now: every model account I may use is out of quota (${list}).${back}`;
+  const v = await venueOf(d, c.venue);
+  if (posts(v)) {
+    try { await post(env, cv, `out-${randomBytes(6).toString('hex')}`, text, { run: run ?? newRun() }, { ...d, core: d.core }); } catch (e) { d.warn(`${cv}: couldn't say it's out of quota: ${e.message}`); }
+  } else {
+    // A venue that posts nothing (a wake): a note on the conversation, its reason as the audit text.
+    try {
+      const { seq } = await d.core.turn({ agent: c.agent, venue: c.venue, place: c.place, at: now.toISOString(), from: { kind: 'agent', id: c.agent }, kind: 'note', run: newRun(), outcome: 'failed', ...(c.label !== undefined ? { label: c.label } : {}) });
+      try { await d.core.audit({ conversation: cv, seq, text }); } catch { /* the note stands */ }
+    } catch (e) { d.warn(`${cv}: couldn't record that it's out of quota: ${e.message}`); }
+  }
+  const where = `${cap(c.agent)}'s ${c.venue} ${c.label ?? c.place}`;
+  if (!alert) return;
+  locked(env, () => addNotice(env, { text: `${where} got no answer: ${retried ? 'its retry ran out of quota too' : 'every model account it may use is out of quota'}`.slice(0, 300), meta: `${list} · ${cv}`.slice(0, 300), at: now.toISOString(), agent: c.agent, tone: 'warn', page: '' }, now.getTime()));
+  d.alert(env, { source: 'runtime-quota', severity: 'bad', place: c.place, summary: `${where} got no answer: ${retried ? 'a refused turn\'s retry ran out of quota too' : 'every model account it may use is out of quota'}`,
+    facts: { agent: c.agent, conversation: cv, venue: c.venue, place: c.place, out: list } });
+  d.warn(`${cv}: out of quota everywhere (${list})`);
 }
 
 export function windowMs(env, venue, kind) {
@@ -417,9 +535,9 @@ async function callAdapter(d, v, c, args) {
 }
 
 /** A post through core's adapter route: sendOnce's answer shape. A refusal core gave is answered; no answer isn't. */
-async function coreSend(d, c, text, run) {
+async function coreSend(d, c, text, run, on) {
   let a;
-  try { a = await d.core.comms({ op: 'post', place: c.place, agent: c.agent, text, ...(run ? { run } : {}) }); } catch (e) { return { ok: false, answered: false, reason: e.message }; }
+  try { a = await d.core.comms({ op: 'post', place: c.place, agent: c.agent, text, ...(run ? { run } : {}), ...(on ? { on } : {}) }); } catch (e) { return { ok: false, answered: false, reason: e.message }; }
   if (a?.ok === true) return { ok: true, ...(typeof a.id === 'string' && a.id.length <= 200 ? { id: a.id } : {}) };
   return { ok: false, answered: true, reason: typeof a?.reason === 'string' ? a.reason.slice(0, 300) : 'core said no', ...(a?.permanent === true ? { permanent: true } : {}) };
 }
@@ -785,6 +903,9 @@ function plan(env, cv, d, mem) {
   }
   // Its last run's turn is over: how it went goes on its record, for the loop check (loops.mjs).
   if (st !== 'none') closeRun(env, c, d, now);
+  // Refused for a usage limit (t-1907): held, retired and run once more elsewhere, before anything else here.
+  const refused = refusedRun(c);
+  if (refused) return begin({ type: 'quota', body: c.body, run: refused.run });
   if (st === 'ended' || st === 'unknown') {
     // Gone on its own: what it leaves is saved, then this conversation is planned again.
     return begin({ type: 'retire', body: c.body });
@@ -957,13 +1078,16 @@ function logRun(c, r) { c.runLog = [...(Array.isArray(c.runLog) ? c.runLog : [])
 function openRun(c, run, msgs, now, body) {
   for (const r of c.runLog ?? []) if (!Number.isFinite(r.end)) r.end = now;
   // Which body ran it, and how it came (a fresh start or a resumed session): for its trace (trace.mjs, t-1895).
-  logRun(c, { run, at: now, ...causeOf(msgs), sent: 0, posts: [], ...(body ? { body: body.ref, how: body.how } : {}) });
+  logRun(c, { run, at: now, ...causeOf(msgs), sent: 0, posts: [], ...(body ? { body: body.ref, how: body.how } : {}),
+    // A harness switch (t-1907): from which, and why; a return to the home session; a refused turn's one retry.
+    ...(body?.switched ? { switched: body.switched } : {}), ...(body?.home ? { home: true } : {}), ...(body?.retryOf ? { retryOf: body.retryOf } : {}) });
 }
 
 /** How a harness says a turn went (runners.mjs, turn): {failed, worked, error?}, checked; null when it can't say. */
 export function cleanTurn(t) {
   if (!t || typeof t !== 'object') return null;
-  return { failed: t.failed === true, worked: typeof t.worked === 'boolean' ? t.worked : null, ...(t.failed === true && typeof t.error === 'string' && t.error ? { error: t.error.slice(0, 200) } : {}) };
+  return { failed: t.failed === true, worked: typeof t.worked === 'boolean' ? t.worked : null, ...(t.failed === true && typeof t.error === 'string' && t.error ? { error: t.error.slice(0, 200) } : {}),
+    ...(t.limited === true ? { limited: true, ...(Number.isFinite(t.resets) && t.resets > 0 ? { resets: Math.floor(t.resets) } : {}) } : {}) };
 }
 
 /** The conversation's current run is over (its body idle, ended or gone): when, and how its harness says it went. */
@@ -978,6 +1102,9 @@ function closeRun(env, c, d, now) {
   } catch { /* its harness can't say: never a failure for that */ }
   return true;
 }
+
+/** The conversation's current run, over and refused for a usage limit, not yet handled (quotaOp): or null. */
+const refusedRun = (c) => (c.body ? (c.runLog ?? []).findLast((x) => x.run === c.run && Number.isFinite(x.end) && x.turn?.limited && !x.quotaDone) ?? null : null);
 
 /** Its runs since the owner last resumed it, as a loop or null. */
 function loopOf(env, c, now) {
@@ -1106,10 +1233,12 @@ async function execute(env, op, d, mem) {
     });
     return;
   }
+  if (op.type === 'quota') return quotaOp(env, op, d);
   const c0 = loadConv(env, op.cv);
   const run = newRun();
   const keys = op.msgs.map((x) => x.key);
   let restored = [];
+  let way = null;
   const pending = [];
   let r;
   let rules;
@@ -1146,17 +1275,23 @@ async function execute(env, op, d, mem) {
     if (lb?.path) bodyEnv.PATH = lb.path;
     const bodyDeps = { runner: (h) => d.runner(h, local), accounts: d.accounts, now: d.now, fetchImpl: d.fetchImpl, bodyEnv };
     const base = { agent: c0.agent, venue: c0.venue, venueKind: c0.kind, cwd: local ? lb.cwd : d.cwd, deny: rules.deny, guest: rules.guest, ...(local ? { local: true } : {}) };
-    if (op.type === 'start') {
-      r = await startBody(env, { ...base, place: c0.place, brief: startBrief(c0, msgs, run, sends, rules) }, bodyDeps);
+    // Out of quota (t-1907): which session this run continues, on which harness. Its home slot, when the harness it
+    // switched away from has room again; its own slot, when that one's harness has room; else a fresh body elsewhere.
+    way = await routeOf(env, c0, op, rules, d);
+    const notes = quotaNotes(c0, way);
+    if (way.how === 'start') {
+      r = await startBody(env, { ...base, place: c0.place, avoid: way.avoid, brief: startBrief(c0, [...notes, ...msgs], run, sends, rules) }, bodyDeps);
     } else {
-      const pack = JSON.parse(d.sealer.open(readFileSync(slotFile(env, op.cv))).toString('utf-8'));
+      const pack = JSON.parse(d.sealer.open(readFileSync(way.file)).toString('utf-8'));
       if (pack?.v !== 1 || !Array.isArray(pack.files)) throw new DeliveryError('its slot isn\'t one this runtime wrote');
       const runner = d.runner(pack.harness, local);
       const slot = { harness: pack.harness, session: pack.session };
       // A house's body gets its files with the resume (its host puts them back); a local one, here.
       if (!runner.remote) restored = restoreFiles(runner, pack.files);
-      r = await resumeBody(env, { ...base, slot, brief: resumeBrief(c0, msgs, run), ...(runner.remote ? { files: pack.files } : {}) }, bodyDeps);
-      rmSync(slotFile(env, op.cv), { force: true });
+      r = await resumeBody(env, { ...base, slot, brief: resumeBrief(c0, [...notes, ...msgs], run), ...(runner.remote ? { files: pack.files } : {}) }, bodyDeps);
+      rmSync(way.file, { force: true });
+      // Back home: the fallback's own session isn't kept (what it said is in the digests).
+      if (way.home) rmSync(slotFile(env, op.cv), { force: true });
     }
     const keep = locked(env, () => {
       const c = loadConv(env, op.cv);
@@ -1177,8 +1312,19 @@ async function execute(env, op, d, mem) {
       delete c.retryAt; delete c.startFails; delete c.retryReason;
       c.sendKey = keyHash(runKey).toString('hex');
       c.runs = (c.runs ?? 0) + 1;
-      openRun(c, run, op.msgs, now(), { ref: r.body, how: op.type === 'start' ? 'started' : 'resumed' });
-      if (op.type === 'resume') delete c.slot;
+      openRun(c, run, op.msgs, now(), { ref: r.body, how: way.how === 'start' ? 'started' : 'resumed', ...(r.switched ? { switched: { from: r.switched.from, why: r.switched.why } } : {}), ...(way.home ? { home: true } : {}), ...(c.quota ? { retryOf: c.quota.run } : {}) });
+      // What this run was given, sealed, for the one retry a refused turn gets (t-1907); the follow-ups it's fed join.
+      c.runMsgs = op.msgs.filter((x) => x.sealed && !isNote(x));
+      delete c.quota;
+      if (way.how === 'resume' && !way.home) delete c.slot;
+      // Back home (its home slot resumed): the fallback's own slot is gone too, and the conversation's switch is over.
+      if (way.home) { delete c.slot; delete c.home; }
+      // A switch away: the slot it left is its home (routeOf parked it), the switch kept for going back.
+      if (r.switched) {
+        const same = c.fallback?.from === r.switched.from && c.fallback?.to === r.harness;
+        c.fallback = { from: r.switched.from, to: r.harness, since: same ? c.fallback.since : new Date(now()).toISOString(), ...(r.switched.until ?? (same ? c.fallback.until : undefined) ? { until: r.switched.until ?? c.fallback.until } : {}) };
+      } else delete c.fallback;
+      delete c.allOut;
       delete c.starting;
       c.idleSince = undefined;
       c.fed = [];
@@ -1188,17 +1334,38 @@ async function execute(env, op, d, mem) {
       return true;
     });
     if (!keep) endAndForget(env, r.body, d);
+    else noteHarness(env, c0.agent, r, d);
   } catch (e) {
+    // No model the agent may use has room (t-1907): said plainly, once, and its messages aren't tried again on the
+    // tick (a wait of minutes can't help a window that resets in hours); a slot it would have resumed stays.
+    if (e instanceof StateError && e.status === 409 && Array.isArray(e.out) && e.out.some((x) => x.account)) {
+      for (const p of restored) rmSync(p, { recursive: true, force: true });
+      const told = locked(env, () => {
+        const c = loadConv(env, op.cv);
+        if (!c) return true;
+        if (ours(c, op)) delete c.starting;
+        outcome(c, keys, { body: 'failed', reason: `every model account ${c.agent} may use is out of quota` }, now());
+        const was = !!c.allOut;
+        c.allOut = { at: now() };
+        delete c.quota;
+        saveConv(env, c);
+        return was;
+      });
+      // Each delivery it fails is answered; the owner hears of it once, until a body runs again.
+      await sayOut(env, op.cv, { out: e.out, retried: !!c0.quota, alert: !told }, d);
+      return;
+    }
     for (const p of restored) rmSync(p, { recursive: true, force: true });
     let gaveUp = null;
     locked(env, () => {
       const c = loadConv(env, op.cv);
       if (!c) return;
       if (ours(c, op)) delete c.starting;
-      if (op.type === 'resume') {
+      if ((way?.how ?? op.type) === 'resume') {
         // A slot that won't resume is no slot: cleared, and the messages go back for a fresh body, in this same drain.
-        rmSync(slotFile(env, op.cv), { force: true });
-        delete c.slot;
+        // A home slot that won't is no home either.
+        rmSync(way?.file ?? slotFile(env, op.cv), { force: true });
+        if (way?.home) delete c.home; else delete c.slot;
         requeue(c, op.msgs);
       } else {
         // A body that fails to start: the turn stands, and the runtime tries again on its tick, after a wait that
@@ -1230,6 +1397,100 @@ async function execute(env, op, d, mem) {
       saveConv(env, c);
     });
     if (gaveUp) await giveUp(env, gaveUp.c, gaveUp.reason, gaveUp.tries, d);
+  }
+}
+
+/**
+ * Which session a run continues (t-1907): {how: 'resume', file, home?} or {how: 'start', avoid, parked?}.
+ *   - its home slot (the harness it switched away from), once that harness has room again and the reset the switch
+ *     waited on has passed, under the same rules it began with;
+ *   - its own slot, when that slot's harness has room;
+ *   - else a fresh body, avoiding that harness (and the one a refused turn ran on): the slot is parked as its home,
+ *     unless it already has one on another harness (then it's dropped: the digests carry it).
+ */
+async function routeOf(env, c0, op, rules, d) {
+  const now = d.now().getTime();
+  const avoid = c0.quota?.from ? [c0.quota.from] : [];
+  const home = c0.home && Date.parse(c0.home.until) > now && existsSync(homeFile(env, op.cv)) ? c0.home : null;
+  if (home && (home.rules?.guest ?? false) === rules.guest && !avoid.includes(home.harness)
+    && !(Number.isFinite(c0.fallback?.until) && now < c0.fallback.until * 1000) && await roomOn(env, c0, home.harness, d)) {
+    return { how: 'resume', file: homeFile(env, op.cv), home: true };
+  }
+  if (op.type !== 'resume') return { how: 'start', avoid };
+  const h = op.slot?.harness;
+  if (h && !avoid.includes(h) && await roomOn(env, c0, h, d)) return { how: 'resume', file: slotFile(env, op.cv) };
+  // Its harness has no room: the slot is kept as its home (to go back to), and a fresh body starts elsewhere.
+  locked(env, () => {
+    const c = loadConv(env, op.cv);
+    if (!c) return;
+    if (!c.home || c.home.harness === h || !existsSync(homeFile(env, op.cv))) {
+      try { renameSync(slotFile(env, op.cv), homeFile(env, op.cv)); c.home = { ...op.slot }; } catch { delete c.home; }
+    } else rmSync(slotFile(env, op.cv), { force: true });
+    delete c.slot;
+    saveConv(env, c);
+  });
+  return { how: 'start', avoid: [...new Set([...avoid, ...(h ? [h] : [])])], parked: true };
+}
+
+/** What a run is told of a switch, a return home, or a refused turn's retry: runtime notes, ahead of its messages. */
+function quotaNotes(c0, way) {
+  const out = [];
+  const note = (text) => out.push({ key: `quota-${randomBytes(6).toString('hex')}`, note: true, kind: 'message', text });
+  if (way.home && c0.fallback) {
+    note(`(The runtime: this conversation went on without this session for a while: since ${c0.fallback.since}, it was answered on ${harnessWords(c0.fallback.to)}, because this harness's account was out of quota. Read conversation({id: "${c0.conversation}"}) (its digests) for what was said meanwhile before you answer.)`);
+  } else if (way.how === 'start' && (way.parked || c0.home || way.avoid?.length)) {
+    const from = c0.quota?.from ?? c0.home?.harness ?? way.avoid?.[0];
+    note(`(The runtime: this conversation's session ran on ${harnessWords(from)}, whose account is out of quota for now, so you're answering on another harness. Its digests carry what was said: read them first.)`);
+  }
+  if (c0.quota) {
+    note(`(The runtime: your last run here, ${c0.quota.run}, was cut off partway through: its provider refused it for a usage limit. ${c0.quota.sent ? `It had already sent ${c0.quota.sent} message${c0.quota.sent === 1 ? '' : 's'} in this conversation; don't repeat ${c0.quota.sent === 1 ? 'it' : 'them'}. ` : 'It had sent nothing yet. '}Pick up where it stopped. The messages it was answering follow.)`);
+  }
+  return out;
+}
+
+/**
+ * A run its provider refused for a usage limit (runners.mjs, turn().limited): its account is held until the reset,
+ * its body is retired (its session into the slot, which routeOf parks), and the turn is run once more elsewhere: the
+ * messages it was given, and those fed to it, back on the queue ahead of what waits. A run that was itself that one
+ * retry isn't run again: it's said plainly in the conversation, and the owner alerted.
+ */
+async function quotaOp(env, op, d) {
+  let rec = null;
+  try { rec = readBody(env, op.body); } catch { rec = null; }
+  const turn = (() => { const c = loadConv(env, op.cv); return (c?.runLog ?? []).findLast((x) => x.run === op.run)?.turn ?? null; })();
+  if (rec) {
+    for (const a of accountsOfBody(d, rec)) {
+      try { d.accounts.hold?.({ name: a.name, until: turn?.resets, why: `${rec.harness} refused a turn of ${rec.agent}'s for a usage limit` }); } catch (e) { d.warn(`couldn't hold ${a.label ?? a.name}: ${e.message}`); }
+    }
+  }
+  let saved = { slot: null, pending: [] };
+  try { saved = await retire(env, op.cv, op.body, d, true); } catch (e) { d.warn(`ending ${op.body}: ${e.message}`); }
+  const r0 = locked(env, () => {
+    const c = loadConv(env, op.cv);
+    if (!c) return null;
+    if (ours(c, op)) delete c.starting;
+    const r = (c.runLog ?? []).findLast((x) => x.run === op.run);
+    if (r) r.quotaDone = true;
+    if (c.body === op.body) {
+      c.body = undefined;
+      c.idleSince = undefined;
+      if (saved.slot) c.slot = { ...saved.slot, rules: c.bodyRules ?? { guest: false } }; else delete c.slot;
+    }
+    const retried = !!r?.retryOf;
+    // The run's own messages and its follow-ups (the runtime's sealed copies), then what its inbox never took.
+    const again = retried ? [] : [...(c.runMsgs ?? []), ...(c.fed ?? [])];
+    requeue(c, [...again, ...saved.pending]);
+    if (!retried && rec) c.quota = { run: op.run, from: rec.harness, sent: r?.sent ?? 0, at: d.now().getTime() };
+    delete c.runMsgs;
+    c.fed = [];
+    saveConv(env, c);
+    return { retried, c: { ...c } };
+  });
+  d.warn(`${op.cv}: ${op.body}'s turn was refused for a usage limit${r0?.retried ? ', and it was the retry: not run again' : ': run once more elsewhere'}`);
+  if (r0?.retried) {
+    let out = [];
+    try { await resolveFor(env, { agent: r0.c.agent, venue: r0.c.venue, venueKind: r0.c.kind, accounts: d.accounts, now: d.now(), fetchImpl: d.fetchImpl }); } catch (e) { out = e.out ?? []; }
+    await sayOut(env, op.cv, { out, retried: true }, d);
   }
 }
 
@@ -1321,8 +1582,8 @@ async function retire(env, cv, ref, d, stop) {
 }
 
 /** A slot past its window: deleted, with the harness's own local transcript files for that session, where they're here. */
-function expireSlot(env, c, d) {
-  rmSync(slotFile(env, c.conversation), { force: true });
+function expireSlot(env, c, d, file = slotFile(env, c.conversation)) {
+  rmSync(file, { force: true });
   try {
     const runner = d.runner(c.slot.harness, c.local);
     if (!runner.remote) dropSession(runner, c.slot);
@@ -1449,6 +1710,15 @@ export async function tick(env, o = {}, only, mem = new Map()) {
           continue;
         }
         if (st === 'working' && c.idleSince) { c.idleSince = undefined; dirty = true; }
+        // Its turn over, refused for a usage limit (t-1907): held, retired, and run once more elsewhere.
+        if (st !== 'working' && closeRun(env, c, d, now)) dirty = true;
+        const refused = st !== 'working' ? refusedRun(c) : null;
+        if (refused) {
+          c.starting = mark(now);
+          ops.push({ cv: c.conversation, mark: c.starting.op, type: 'quota', body: c.body, run: refused.run });
+          saveConv(env, c);
+          continue;
+        }
         if (st === 'idle') {
           if (!c.idleSince) { c.idleSince = now; dirty = true; }
           if (now - c.idleSince >= warm && !c.queue?.length) { c.starting = mark(now); ops.push({ cv: c.conversation, mark: c.starting.op, type: 'evict', body: c.body }); dirty = true; }
@@ -1459,9 +1729,11 @@ export async function tick(env, o = {}, only, mem = new Map()) {
       // The hourly backstop's (t-1760, gone with t-1763): nothing reads it now.
       if ('bodyStarts' in c || 'capNoticeAt' in c) { delete c.bodyStarts; delete c.capNoticeAt; dirty = true; }
       if (c.slot && !c.body && Date.parse(c.slot.until) <= now) { expireSlot(env, c, d); delete c.slot; dirty = true; }
+      // A home slot past its window (t-1907): gone the same way; the conversation stays where it is.
+      if (c.home && Date.parse(c.home.until) <= now) { expireSlot(env, { ...c, slot: c.home }, d, homeFile(env, c.conversation)); delete c.home; delete c.fallback; dirty = true; }
       for (const [k, v] of Object.entries(c.outcomes ?? {})) if (now - v.at > OUTCOME_MS) { delete c.outcomes[k]; dirty = true; }
       // Nothing left of it here (no body, no slot, nothing waiting) for 14 days: the record is core's, this was mechanism.
-      if (!c.body && !c.slot && !c.queue?.length && !c.starting && now - Date.parse(c.last) > MAX_CONTINUITY_DAYS * DAY_MS) {
+      if (!c.body && !c.slot && !c.home && !c.queue?.length && !c.starting && now - Date.parse(c.last) > MAX_CONTINUITY_DAYS * DAY_MS) {
         rmSync(join(convDir(env), `${c.conversation}.json`), { force: true });
         continue;
       }
@@ -1682,7 +1954,10 @@ export async function post(env, conversation, ref, text, { body, run, to } = {},
   const at = dm ? { agent: c.agent, venue: dm.venue, place: dm.place, label: dm.label } : c;
   const v = await venueOf(d, at.venue);
   // A scheduled venue with no send (a wake) posts nowhere: its message is only recorded.
-  const once = () => (coreAdapted(v) && !dm ? coreSend(d, at, text, run ?? c.run) : sendOnce(d, pieceArgv(env, v.send), at, text));
+  // A switched body's reply in a Comms thread says which harness it's on (its channel line's "ON CODEX", t-1907).
+  let onWord;
+  try { const b = body ? readBody(env, body) : null; if (b?.switched) onWord = harnessWords(b.harness); } catch { onWord = undefined; }
+  const once = () => (coreAdapted(v) && !dm ? coreSend(d, at, text, run ?? c.run, onWord) : sendOnce(d, pieceArgv(env, v.send), at, text));
   let r = (v?.send || (coreAdapted(v) && !dm)) ? await once() : !dm && recordsOnly(v) ? { ok: true, recorded: true } : { ok: false, answered: true, reason: `venue ${at.venue} declares no send` };
   // Said no for now: once more. Said no for good (permanent): never again.
   if (!r.ok && r.answered && !r.permanent && (v?.send || (coreAdapted(v) && !dm))) r = await once();

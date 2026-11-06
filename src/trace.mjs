@@ -60,6 +60,8 @@ function whereOf(env, ref) {
 function runOf(env, r) {
   return {
     run: r.run, cause: r.cause, ...(r.by ? { by: r.by } : {}), started: iso(r.at), ...(r.body ? { body: r.body, how: r.how, ...whereOf(env, r.body) } : {}),
+    // A harness switch, a return to the home session, a refused turn's retry (delivery.mjs, t-1907).
+    ...(r.switched ? { switched: r.switched } : {}), ...(r.home ? { home: true } : {}), ...(r.retryOf ? { retryOf: r.retryOf } : {}),
     ended: iso(r.end), ...(r.turn ? { turn: r.turn } : {}), ...(r.fail ? { fail: r.fail } : {}),
     sent: r.sent ?? 0, ...(r.refused ? { refused: r.refused, refusal: r.refusal } : {}),
     posts: (r.posts ?? []).map((p) => ({ ok: !!p.ok, ...(p.reason ? { reason: p.reason } : {}) })),
@@ -82,8 +84,12 @@ export function stepsOf(c, run, thread, next = null) {
   if (run.fail && run.run.startsWith('start-')) { steps.push({ step: 'started', at: run.started, ok: false, words: `${who}'s body couldn't start: ${run.fail}` }); return steps; }
   const where = run.house ? `in house ${run.house}` : run.local ? 'on loom\'s machine' : '';
   steps.push({ step: 'started', at: run.started, ok: true, words: `${who}'s body ${run.how ?? 'started'}${run.harness ? ` on ${run.harness}` : ''}${where ? ` ${where}` : ''} (${run.run}).` });
+  if (run.switched) steps.push({ step: 'switched', at: run.started, ok: true, words: `It switched from ${run.switched.from} to ${run.harness ?? 'another harness'}: ${run.switched.why || `${run.switched.from}'s account was out of quota`}.` });
+  if (run.home) steps.push({ step: 'switched', at: run.started, ok: true, words: `It went back to its ${run.harness ?? 'home'} session: that account has room again.` });
+  if (run.retryOf) steps.push({ step: 'switched', at: run.started, ok: true, words: `It's the one retry of ${run.retryOf}, which its provider refused for a usage limit.` });
   if (!run.ended) steps.push({ step: 'ended', ok: null, words: 'Its turn is still going.' });
   else if (run.fail) steps.push({ step: 'ended', at: run.ended, ok: false, words: `Its turn was stopped: ${run.fail}` });
+  else if (run.turn?.limited) steps.push({ step: 'ended', at: run.ended, ok: false, words: `Its provider refused its turn for a usage limit${run.turn.resets ? ` (room again ${iso(run.turn.resets * 1000)})` : ''}: the account is held, and ${run.retryOf ? 'as this was the retry, it isn\'t run again' : 'the turn is run once more on another harness'}.` });
   else if (run.turn?.failed) steps.push({ step: 'ended', at: run.ended, ok: false, words: `Its turn failed${run.turn.error ? `: ${run.turn.error}` : ''}.` });
   else steps.push({ step: 'ended', at: run.ended, ok: true, words: `Its turn ended${run.turn?.worked === false ? ', with no tool work' : ''}.` });
   if (run.refused) steps.push({ step: 'posted', ok: false, words: `${run.refused} send${run.refused === 1 ? ' was' : 's were'} refused before posting: ${run.refusal}` });

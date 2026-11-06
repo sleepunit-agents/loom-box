@@ -139,8 +139,8 @@ test('Codex: a body is one exec process, brief on stdin, keyed for its inbox; fe
   r.end(again);
   await until(() => r.status(again) !== 'working');
   assert.ok(existsSync(join(h.inbox, again.id, 'closed')));
-  // Codex can't deny tools by name: a body that would keep them isn't started.
-  assert.throws(() => r.start({ brief: 'x', model: 'm', cwd: h.D, env: h.env, deny: ['send'] }), /can't deny tools/);
+  // Codex can't deny a built-in tool by name: a body that would keep it isn't started (an MCP server's can: quota.test.mjs).
+  assert.throws(() => r.start({ brief: 'x', model: 'm', cwd: h.D, env: h.env, deny: ['send'] }), /can't deny send/);
 });
 
 test('runnerFor builds each from the runtime\'s settings; an unknown harness is refused', () => {

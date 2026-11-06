@@ -71,6 +71,8 @@ export function judge(r) {
   const bad = (r.posts ?? []).filter((p) => !p.ok);
   let failed = null;
   if (r.fail) failed = r.fail;
+  // Refused for a usage limit (t-1907): the runtime's to answer (a hold, one retry elsewhere), never a crash loop's.
+  else if (r.turn?.limited) failed = null;
   else if (r.turn?.failed) failed = `its harness failed the turn${r.turn.error ? `: ${r.turn.error}` : ''}`;
   else if (bad.length && !ok.length) failed = `its post was refused: ${bad.at(-1).reason ?? 'no reason given'}`;
   else if (!said(r) && r.turn && r.turn.worked === false) failed = 'it ended with no reply and no tool work';
