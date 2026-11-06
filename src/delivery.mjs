@@ -1529,6 +1529,25 @@ function sessionOf(d, ref) {
   } catch { return null; }
 }
 
+/**
+ * A send refused in the conversation's current run, on its run record (`refused`, and the last `refusal`): so what a
+ * body tried and why it didn't post is on the record, not only in the body's own output (t-1898: a Codex body's every
+ * send was refused, and its run read as one that never tried). Only after the caller is the conversation's own agent.
+ */
+function refusedSend(env, c, reason) {
+  try {
+    locked(env, () => {
+      const x = loadConv(env, c.conversation);
+      const r = (x?.runLog ?? []).findLast((y) => y.run === x.run);
+      if (!r) return;
+      r.refused = (r.refused ?? 0) + 1;
+      r.refusal = String(reason).slice(0, 200);
+      saveConv(env, x);
+    });
+  } catch { /* the refusal stands either way */ }
+  return { ok: false, reason };
+}
+
 export async function send(env, { conversation, text, key, session, person, via }, o = {}) {
   const d = depsOf(env, o);
   const c = loadConv(env, conversation);
@@ -1536,15 +1555,15 @@ export async function send(env, { conversation, text, key, session, person, via 
   if (o.caller && (o.caller.kind !== 'agent' || o.caller.agent !== c.agent)) return { ok: false, reason: `only ${c.agent}'s own body speaks in ${conversation}` };
   const want = typeof c.sendKey === 'string' && /^[0-9a-f]{64}$/.test(c.sendKey) ? Buffer.from(c.sendKey, 'hex') : null;
   if (!want || !c.body || typeof key !== 'string' || !key || !timingSafeEqual(keyHash(key), want)) {
-    return { ok: false, reason: `only the body holding ${conversation} speaks in it (its run's ${BODY_KEY} doesn't match)` };
+    return refusedSend(env, c, `only the body holding ${conversation} speaks in it (its run's ${BODY_KEY} doesn't match)`);
   }
   // Its harness session too, where the runner knows the body's: a sibling body holding this conversation's key (its
   // house's file) is another session. A sender that names no session is refused once the body's is known.
   const own = sessionOf({ ...d, env }, c.body);
   if (own && session !== own) {
-    return { ok: false, reason: `only the body holding ${conversation} speaks in it (${session ? 'another session is' : 'no session is named'}: ${conversation} is a session of its own)` };
+    return refusedSend(env, c, `only the body holding ${conversation} speaks in it (${session ? 'another session is' : 'no session is named'}: ${conversation} is a session of its own)`);
   }
-  if (!str(text, MAX_TEXT)) return { ok: false, reason: `a message is 1-${MAX_TEXT} characters` };
+  if (!str(text, MAX_TEXT)) return refusedSend(env, c, `a message is 1-${MAX_TEXT} characters`);
   // To a person (a DM), not the conversation's own place: the relay to a person, through that venue's adapter.
   let to;
   if (person !== undefined || via !== undefined) {

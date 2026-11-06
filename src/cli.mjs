@@ -435,9 +435,11 @@ async function main(argv, env) {
       // From a body in its house: through the piece API, as its own agent (its house's token), with its run's key.
       // The key for that conversation as its house keeps it (bodyhost.mjs), else this body's environment's.
       const conversation = flag(rest, '--conversation');
-      // And its harness's own session id (Claude Code sets it per session, under a shared daemon too): the runtime
-      // checks it's the session holding the conversation.
-      const session = env.CLAUDE_CODE_SESSION_ID || undefined;
+      // And its harness's own session id: the runtime checks it's the session holding the conversation. Claude Code
+      // sets CLAUDE_CODE_SESSION_ID per session (under a shared daemon too); Codex gives each command it runs
+      // CODEX_THREAD_ID, the thread its `thread.started` named, which is a Codex body's slot (runners.mjs). Without
+      // it every send from a Codex body was refused as naming no session (t-1898, Mark's Comms reply of 2026-11-06).
+      const session = env.CLAUDE_CODE_SESSION_ID || env.CODEX_THREAD_ID || undefined;
       // --person <slug> --via <venue>: one DM to that person instead, through that venue's adapter (delivery.mjs).
       const person = flag(rest, '--person');
       const via = flag(rest, '--via');

@@ -171,6 +171,73 @@ test('a delivered body is a session in its agent\'s own house: placed, woken by 
   }
 });
 
+test('a Codex body in its house answers with `loom runtime send`, naming its Codex thread as its session (t-1898)', { skip: !hasAge && 'age isn\'t installed' }, async () => {
+  const { setModels } = await import('../src/models.mjs');
+  const D = scratch('rt-houses-codex-');
+  const env = {
+    PATH: process.env.PATH, HOME: join(D, 'loom'), LOOM_HOME: join(D, 'loom', '.config', 'loom'), LOOM_BOX_LOCAL_NAME: 'one', LOOM_BOX_HOME: join(D, 'state'), LOOM_BOX_DATA: join(D, 'data'),
+    LOOM_RUNTIME_TOKEN_FILE: join(D, 'runtime-token'), LOOM_RUNTIME_ACCOUNTS: 'none', LOOM_RUNTIME_SCORECARDS: 'off',
+  };
+  mkdirSync(env.LOOM_HOME, { recursive: true });
+  env.LOOM_BIN = fakeLoomBin(D);
+  writeFileSync(env.LOOM_RUNTIME_TOKEN_FILE, `${TOKENS.runtime}\n`);
+  const loom = await loomServer(env);
+  env.LOOM_RUNTIME_LOOM_URL = loom.url;
+  const S = scratch('rt-houses-codex-send-');
+  process.env.FAKE_SEND = S;
+  env.FAKE_SEND = S;
+  // Mark's case (2026-11-06, th:kehvhuwzdm): the agent runs on Codex, its box logged in to Codex only.
+  setAgent(env, { now: () => new Date() }, { agent: 'art', repo: 'https://example.com/art.git' });
+  setModels(env, { list: [{ id: 'gpt-5.5', harness: 'codex', family: 'openai' }] });
+  update(env, (s) => { const k = Object.keys(s.boxes).find((x) => s.boxes[x].local); s.boxes[k].harnesses = { codex: { loggedIn: true } }; });
+  try {
+    const msg = JSON.stringify({ source: 'slack', id: '2.1', agent: 'art', venue: 'slack', place: 'dm:U2', label: 'Loren (DM)', from: { kind: 'person', slug: 'loren' }, kind: 'message', at: new Date().toISOString(), text: 'still on for Friday?' });
+    const a = JSON.parse((await run(['deliver'], msg, env)).stdout);
+    await until(() => load(env).houses['h-1']);
+    const H = join(D, 'house');
+    mkdirSync(join(H, 'work'), { recursive: true });
+    writeFileSync(join(H, 'token'), `${TOKENS.art}\n`);
+    const houseEnv = { PATH: process.env.PATH, HOME: H, LOOM_URL: loom.url, LOOM_TOKEN_FILE: join(H, 'token'), HOUSE_ID: 'h-1', HOUSE_AGENT: 'art',
+      LOOM_LOGIN_CODEX: join(H, 'login-codex'),
+      FAKE_HARNESS: H, LOOM_RUNTIME_CODEX: join(here, 'fake-codex.mjs'), LOOM_RUNTIME_CODEX_RUNS: join(H, 'codex-runs'), LOOM_RUNTIME_ACCOUNTS: 'none' };
+    const host = spawn(process.execPath, [cli, 'body-host', '--piece', 'box', '--host-key', bootOf(env, 'h-1'), '--beats', '60'], { env: houseEnv, cwd: join(H, 'work'), stdio: 'ignore' });
+    try {
+      await until(() => loadConv(env, a.conversation)?.body);
+      const c = loadConv(env, a.conversation);
+      assert.match(c.body, /^codex:h-1-[0-9a-z]+$/);
+      const raw = c.body.split(':')[1].replace(/^h-1-/, '');
+      // Its host reports the thread Codex started as the body's session: the one the runtime checks a send against.
+      await until(() => hostOf(env, 'art').report?.bodies?.[raw]?.session);
+      const thread = hostOf(env, 'art').report.bodies[raw].session;
+      // The body answers as a real Codex one does: a command Codex runs carries CODEX_THREAD_ID (codex-cli 0.162.1,
+      // 0.164.0), and no Claude session id (CodexRunner scrubs CLAUDE_CODE_*).
+      // Its run's key, as its house keeps it by conversation (bodyhost.mjs keepKey).
+      const bodyKey = readFileSync(join(H, '.local', 'state', 'loom-runtime', 'keys', `${a.conversation}.key`), 'utf-8').trim();
+      const bodyCli = { PATH: process.env.PATH, HOME: H, LOOM_URL: loom.url, LOOM_TOKEN_FILE: join(H, 'token'), LOOM_BODY_KEY: bodyKey, CODEX_THREAD_ID: thread };
+      const ok = await run(['send', '--conversation', a.conversation, '--piece', 'box', '--text', 'Yes, Friday at 3.'], '', bodyCli, H);
+      assert.equal(ok.status, 0, ok.stdout + ok.stderr);
+      assert.equal(JSON.parse(ok.stdout).accepted, true, 'accepted: its Codex thread is the session holding the conversation');
+      await until(() => loom.seen.some((x) => x.path === '/api/loom/conversations/turn' && x.body.kind === 'reply'));
+      assert.deepEqual(lines(join(S, 'calls.log')).map((x) => x.text), ['Yes, Friday at 3.']);
+      // Another Codex thread in the same house, holding the same key file, is still another session.
+      const sibling = await run(['send', '--conversation', a.conversation, '--piece', 'box', '--text', 'not mine'], '', { ...bodyCli, CODEX_THREAD_ID: 'th-another-thread' }, H);
+      assert.equal(sibling.status, 1);
+      assert.match(JSON.parse(sibling.stdout).reason, /another session/);
+      // A send that names no session (what every Codex send was before t-1898) is refused, and its run says so.
+      const { CODEX_THREAD_ID: _t, ...unnamedCli } = bodyCli;
+      const unnamed = await run(['send', '--conversation', a.conversation, '--piece', 'box', '--text', 'whose?'], '', unnamedCli, H);
+      assert.equal(unnamed.status, 1);
+      const r = loadConv(env, a.conversation).runLog.at(-1);
+      assert.deepEqual([r.sent, r.refused], [1, 2]);
+      assert.match(r.refusal, /no session is named/);
+      assert.equal(lines(join(S, 'calls.log')).length, 1);
+    } finally { host.kill(); }
+  } finally {
+    delete process.env.FAKE_SEND;
+    await loom.close();
+  }
+});
+
 test('a house\'s body leaves its slot: its host packs the session in parts and sends it back; a resume puts it back first', { skip: !hasAge && 'age isn\'t installed' }, async () => {
   const { HouseRunner } = await import('../src/houserunner.mjs');
   const { runBodyHost } = await import('../src/bodyhost.mjs');
