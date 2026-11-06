@@ -1433,6 +1433,15 @@ export function api(env, effects, { caller, path, body }) {
         .then((r) => ({ status: r.accepted ? 200 : 409, body: r }), apiError);
     }
     // The now board's inbox (nowboard.mjs): a bridge's snapshot and events, as its agent (or the owner).
+    // A reply's trace (trace.mjs, t-1895): an agent's house reads its own agent's; never another's.
+    if (path === 'trace') {
+      if (caller.kind !== 'agent') fail('trace through the piece API is an agent\'s own; the owner reads it on the runtime\'s page', 403);
+      return import('./trace.mjs').then(async (m) => {
+        const q = {};
+        for (const k of ['thread', 'run', 'conversation']) if (typeof b[k] === 'string') q[k] = b[k];
+        try { return { status: 200, body: await m.trace(env, { agent: caller.agent }, q) }; } catch (e) { if (e instanceof m.TraceError) return { status: 200, body: { ok: false, reason: e.message } }; throw e; }
+      }).catch(apiError);
+    }
     if (path === 'now/snapshot' || path === 'now/event') {
       return import('./nowboard.mjs').then((m) => ({ status: 200, body: m.inbox(env, caller, path, b) }))
         .catch((e) => (e?.constructor?.name === 'NowError' ? { status: e.status, body: { error: e.message } } : apiError(e)));

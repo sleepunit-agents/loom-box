@@ -954,9 +954,10 @@ const newRun = () => `run-${randomBytes(6).toString('hex')}`;
 function logRun(c, r) { c.runLog = [...(Array.isArray(c.runLog) ? c.runLog : []), r].slice(-RUNS_KEPT); }
 
 /** A body started (or resumed) for these messages: its run begins (the one before it, over, if it wasn't yet). */
-function openRun(c, run, msgs, now) {
+function openRun(c, run, msgs, now, body) {
   for (const r of c.runLog ?? []) if (!Number.isFinite(r.end)) r.end = now;
-  logRun(c, { run, at: now, ...causeOf(msgs), sent: 0, posts: [] });
+  // Which body ran it, and how it came (a fresh start or a resumed session): for its trace (trace.mjs, t-1895).
+  logRun(c, { run, at: now, ...causeOf(msgs), sent: 0, posts: [], ...(body ? { body: body.ref, how: body.how } : {}) });
 }
 
 /** How a harness says a turn went (runners.mjs, turn): {failed, worked, error?}, checked; null when it can't say. */
@@ -1176,7 +1177,7 @@ async function execute(env, op, d, mem) {
       delete c.retryAt; delete c.startFails; delete c.retryReason;
       c.sendKey = keyHash(runKey).toString('hex');
       c.runs = (c.runs ?? 0) + 1;
-      openRun(c, run, op.msgs, now());
+      openRun(c, run, op.msgs, now(), { ref: r.body, how: op.type === 'start' ? 'started' : 'resumed' });
       if (op.type === 'resume') delete c.slot;
       delete c.starting;
       c.idleSince = undefined;

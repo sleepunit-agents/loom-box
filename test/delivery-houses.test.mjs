@@ -231,6 +231,15 @@ test('a Codex body in its house answers with `loom runtime send`, naming its Cod
       assert.deepEqual([r.sent, r.refused], [1, 2]);
       assert.match(r.refusal, /no session is named/);
       assert.equal(lines(join(S, 'calls.log')).length, 1);
+      // And the body can see that from its own house: its trace, through the piece API, as its own agent (t-1895).
+      const tr = await run(['trace', '--conversation', a.conversation, '--piece', 'box', '--json'], '', unnamedCli, H);
+      assert.equal(tr.status, 0, tr.stdout + tr.stderr);
+      const t = JSON.parse(tr.stdout);
+      assert.equal(t.runs.at(-1).house, 'h-1');
+      assert.deepEqual([t.runs.at(-1).sent, t.runs.at(-1).refused], [1, 2]);
+      writeFileSync(join(H, 'mark-token'), `${TOKENS.mark}\n`);
+      const theirs = await run(['trace', '--conversation', a.conversation, '--piece', 'box'], '', { ...unnamedCli, LOOM_TOKEN_FILE: join(H, 'mark-token') }, H);
+      assert.equal(theirs.status, 1);
     } finally { host.kill(); }
   } finally {
     delete process.env.FAKE_SEND;

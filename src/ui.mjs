@@ -1144,6 +1144,8 @@ export function page(env, { path, caller: c }, nowMs = Date.now()) {
   if (typeof path === 'string' && (path.startsWith('login/') || path.startsWith('box/')) && (scope || Array.isArray(caller.agents))) {
     return { status: 403, title: 'Not allowed', sections: [{ id: 'no', blocks: [{ type: 'text', tone: 'muted', text: path.startsWith('box/') ? 'A box\'s page is the household owner\'s.' : 'A box\'s login is the household owner\'s.' }] }] };
   }
+  // A reply's trace (trace.mjs, t-1895): the owner's, for an agent they own (an agent tab's, that agent only).
+  if (typeof path === 'string' && /^trace\/cv-[0-9a-f]{12}$/.test(path)) return tracePage(env, path.slice(6), caller, scope);
   if (scope && (path === '' || path === undefined)) return agentTabPage(env, scope, caller, nowMs);
   if (Array.isArray(caller.agents)) return path === '' || path === undefined ? agentOwnerPage(env, caller, nowMs) : { title: 'Not found', sections: [] };
   if (path === '' || path === undefined) return boxesPage(env, nowMs);
@@ -1166,6 +1168,35 @@ export function page(env, { path, caller: c }, nowMs = Date.now()) {
     return loginPage(env, path.slice(6), nowMs);
   }
   return { title: 'Not found', sections: [] };
+}
+
+/** A conversation's reply trace as a page: its steps, then each run. Not found for one the caller doesn't own. */
+async function tracePage(env, cv, caller, scope) {
+  const { trace, TraceError } = await import('./trace.mjs');
+  const agents = Array.isArray(caller.agents) ? caller.agents : '*';
+  const who = { agents: scope ? (agents === '*' || agents.includes(scope) ? [scope] : []) : agents };
+  let t;
+  try { t = await trace(env, who, { conversation: cv }); } catch (e) {
+    if (e instanceof TraceError) return { title: 'Not found', sections: [{ id: 'no', blocks: [{ type: 'text', tone: 'muted', text: 'No conversation of yours here by that name.' }] }] };
+    throw e;
+  }
+  const tone = (ok) => (ok === false ? 'warn' : 'muted');
+  const steps = t.steps.map((x) => ({ text: x.words, meta: `${x.step}${x.at ? ` · ${x.at.slice(0, 19).replace('T', ' ')}` : ''}`, ...(x.ok === false ? { tone: 'warn' } : {}) }));
+  const runs = [...t.runs].reverse().slice(0, 5).map((r) => ({ type: 'kv', items: [
+    { label: 'Run', value: r.run }, { label: 'Started', value: `${r.started ?? '—'}${r.how ? ` (${r.how})` : ''}` },
+    { label: 'Body', value: r.body ? `${r.body}${r.house ? ` in ${r.house}` : r.local ? ' on loom\'s machine' : ''}` : '—' },
+    { label: 'Ended', value: r.ended ? `${r.ended}${r.turn ? (r.turn.failed ? `, failed${r.turn.error ? `: ${r.turn.error}` : ''}` : r.turn.worked === false ? ', no tool work' : '') : ''}` : 'still going' },
+    { label: 'Sent', value: `${r.sent}${r.refused ? `, ${r.refused} refused: ${r.refusal}` : ''}` },
+    ...(r.fail ? [{ label: 'Failed', value: r.fail }] : []),
+  ] }));
+  return {
+    title: `What happened: ${t.label ?? t.place}`,
+    sections: [
+      { id: 'steps', title: `${t.agent[0].toUpperCase()}${t.agent.slice(1)}'s newest run${t.run ? `, ${t.run}` : ''}`, blocks: [{ type: 'list', items: steps }, ...(t.note ? [{ type: 'text', tone: tone(false), text: t.note }] : [])] },
+      ...(runs.length ? [{ id: 'runs', title: 'Runs', blocks: runs }] : []),
+      { id: 'about', blocks: [{ type: 'text', tone: 'muted', text: `${t.venue} ${t.place} · ${t.conversation}. No words here: only what happened.` }] },
+    ],
+  };
 }
 
 /** An unexpected failure, kept beside the runtime's state (errors.log): its trace, never a value. */

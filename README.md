@@ -314,6 +314,14 @@ the same agent within the hour are refused, an answer is a relay back with `repl
 day is a heads-up on loom's Inbox (`LOOM_RUNTIME_RELAY_HEADS_UP`). From a house, `loom runtime relay --to <b> --say
 <text>` and `loom runtime relays` do the same over the piece API.
 
+
+**A reply's trace** (loom comms.md, "Tracing a reply"; `src/trace.mjs`, t-1895): what happened to one message, from in
+to shown, in one read: delivered to the body, the run's body (its house, its harness, started or resumed), how its turn
+ended, what it sent and what was refused (`refused` and the last `refusal` on the run), whether the venue took it, and
+for a Comms thread whether core shows the reply (core's adapter op `trace`: facts, never words). An agent reads its own
+agent's: the `comms_trace` MCP tool (`mcp_tools`, run as the session's agent) or `loom runtime trace --thread th:… |
+--run run-… | --conversation cv-…` in its house. The owner reads the agents they own: the `trace/<cv>` page (Comms'
+"What happened" links there) or `loom runtime trace` at loom's machine. Never across agents.
 **The now board** (agent-runtime.md, "The sources"; `src/nowboard.mjs`): live state, the runtime's own. A bridge in a
 house writes its board through loom's piece API as its agent (shuttle's nowlog with `SHUTTLE_NOW_REMOTE=runtime/now`):
 `now/snapshot` `{bridge, snap}` and `now/event` `{record}`, into `<LOOM_RUNTIME_NOW_DIR>/<agent>-now` (the layout
