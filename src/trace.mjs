@@ -70,15 +70,16 @@ function runOf(env, r) {
  * The steps of one run, in words: delivered, started, ended, posted, accepted, shown. `thread` is core's half for a
  * Comms conversation (its trace op), or null when there's none or core couldn't say.
  */
-export function stepsOf(c, run, thread) {
+export function stepsOf(c, run, thread, next = null) {
   const who = cap(c.agent);
   const steps = [];
-  const outcomes = Object.values(c.outcomes ?? {}).filter((o) => o && Number.isFinite(o.at));
+  const outcomes = Object.values(c.outcomes ?? {}).filter((o) => o && Number.isFinite(o.at)).sort((a, b) => a.at - b.at);
   const near = run ? outcomes.filter((o) => Math.abs(o.at - Date.parse(run.started ?? '')) < 5 * 60_000) : outcomes;
   for (const o of (near.length ? near : outcomes).slice(-3)) steps.push({ step: 'delivered', at: iso(o.at), ok: o.body !== 'failed', words: o.body === 'failed' ? `Not delivered to ${who}: ${o.reason ?? 'no reason given'}.` : `Delivered to ${who} (${o.body}).` });
   if (c.queue?.length) steps.push({ step: 'delivered', ok: null, words: `${c.queue.length} message${c.queue.length === 1 ? '' : 's'} waiting for ${who}'s body.` });
   if (!run) { steps.push({ step: 'started', ok: false, words: `No run of ${who}'s is on the record here.` }); return steps; }
-  if (run.fail && !run.body) { steps.push({ step: 'started', at: run.started, ok: false, words: `${who}'s body couldn't start: ${run.fail}` }); return steps; }
+  // A start that failed is a run of its own (delivery.mjs: `start-…`, no body); a run stopped later keeps its run id.
+  if (run.fail && run.run.startsWith('start-')) { steps.push({ step: 'started', at: run.started, ok: false, words: `${who}'s body couldn't start: ${run.fail}` }); return steps; }
   const where = run.house ? `in house ${run.house}` : run.local ? 'on loom\'s machine' : '';
   steps.push({ step: 'started', at: run.started, ok: true, words: `${who}'s body ${run.how ?? 'started'}${run.harness ? ` on ${run.harness}` : ''}${where ? ` ${where}` : ''} (${run.run}).` });
   if (!run.ended) steps.push({ step: 'ended', ok: null, words: 'Its turn is still going.' });
@@ -91,7 +92,10 @@ export function stepsOf(c, run, thread) {
   for (const p of run.posts) steps.push({ step: 'accepted', ok: p.ok, words: p.ok ? 'The venue took a post.' : `The venue refused a post: ${p.reason ?? 'no reason given'}` });
   if (thread) {
     const shown = thread.messages.filter((m) => m.kind === 'reply' && m.run === run.run);
-    const errors = thread.messages.filter((m) => m.kind === 'error' && Date.parse(m.at) >= Date.parse(run.started ?? '') - 60_000);
+    // Its error cards: from just before it started until the next run started (a later run's are that run's).
+    const from = Date.parse(run.started ?? '') - 60_000;
+    const until = Number.isFinite(Date.parse(next?.started ?? '')) ? Date.parse(next.started) : Infinity;
+    const errors = thread.messages.filter((m) => m.kind === 'error' && Date.parse(m.at) >= from && Date.parse(m.at) < until);
     if (shown.length) steps.push({ step: 'shown', at: shown.at(-1).at, ok: true, words: `The thread shows ${shown.length} repl${shown.length === 1 ? 'y' : 'ies'} from this run (seq ${shown.map((m) => m.seq).join(', ')}).` });
     else steps.push({ step: 'shown', ok: false, words: 'The thread shows no reply from this run.' });
     for (const e of errors) steps.push({ step: 'shown', at: e.at, ok: false, words: `The thread shows an error card: ${e.error?.words ?? e.error?.code}` });
@@ -120,7 +124,7 @@ export async function trace(env, who, q = {}, o = {}) {
   return {
     conversation: c.conversation, agent: c.agent, venue: c.venue, place: c.place, ...(c.label ? { label: c.label } : {}),
     now: { body: c.body ?? null, ...(c.body ? whereOf(env, c.body) : {}), starting: !!c.starting, waiting: c.queue?.length ?? 0, ...(c.slot?.until ? { slotUntil: c.slot.until } : {}) },
-    runs, run: run?.run ?? null, steps: stepsOf(c, run, thread), ...(thread ? { thread } : {}), ...(note ? { note } : {}),
+    runs, run: run?.run ?? null, steps: stepsOf(c, run, thread, run ? runs[runs.indexOf(run) + 1] ?? null : null), ...(thread ? { thread } : {}), ...(note ? { note } : {}),
   };
 }
 

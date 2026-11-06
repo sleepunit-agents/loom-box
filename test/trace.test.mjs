@@ -95,3 +95,18 @@ test('the owner\'s trace page: the steps in the page vocabulary; not found for a
   const not = await page(w.env, { path: `trace/${cv}`, caller: { kind: 'owner', agents: ['mark'] } });
   assert.equal(not.title, 'Not found');
 });
+
+test('steps belong to their run: a later run\'s error card isn\'t this one\'s; only a start-… run "couldn\'t start"', async () => {
+  const { stepsOf } = await import('../src/trace.mjs');
+  const c = { agent: 'art', outcomes: {}, queue: [] };
+  const r1 = { run: 'run-aaaaaaaaaaaa', how: 'started', started: '2026-11-06T04:00:00.000Z', ended: '2026-11-06T04:01:00.000Z', sent: 1, posts: [{ ok: true }] };
+  const r2 = { run: 'run-bbbbbbbbbbbb', started: '2026-11-06T05:00:00.000Z', ended: '2026-11-06T05:01:00.000Z', sent: 0, posts: [], fail: 'stopped: it waited 30 minutes on a permission prompt nobody can answer' };
+  const thread = { messages: [{ seq: 2, at: '2026-11-06T04:00:30.000Z', kind: 'reply', run: r1.run }, { seq: 4, at: '2026-11-06T05:00:30.000Z', kind: 'error', error: { code: 'post-failed', words: 'Art\'s reply couldn\'t be shown.' } }] };
+  assert.ok(!stepsOf(c, r1, thread, r2).some((s) => /error card/.test(s.words)), 'run 2\'s card isn\'t run 1\'s');
+  const two = stepsOf(c, r2, thread, null);
+  assert.ok(two.some((s) => /error card/.test(s.words)));
+  // A run from before runs carried their body, stopped later: stopped, never "couldn't start".
+  assert.ok(two.some((s) => s.step === 'ended' && /was stopped/.test(s.words)));
+  assert.ok(!two.some((s) => /couldn't start/.test(s.words)));
+  assert.match(stepsOf(c, { run: 'start-abcd1234', started: r1.started, ended: r1.started, fail: 'it couldn\'t start: no login', sent: 0, posts: [] }, null).at(-1).words, /couldn't start: it couldn't start: no login|couldn't start/);
+});

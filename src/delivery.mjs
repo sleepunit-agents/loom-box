@@ -1533,7 +1533,8 @@ function sessionOf(d, ref) {
 /**
  * A send refused in the conversation's current run, on its run record (`refused`, and the last `refusal`): so what a
  * body tried and why it didn't post is on the record, not only in the body's own output (t-1898: a Codex body's every
- * send was refused, and its run read as one that never tried). Only after the caller is the conversation's own agent.
+ * send was refused, and its run read as one that never tried). Only past the caller check (the piece API's caller is
+ * the conversation's own agent; at loom's machine there's none): the reasons are the runtime's fixed words, never a caller's.
  */
 function refusedSend(env, c, reason) {
   try {
