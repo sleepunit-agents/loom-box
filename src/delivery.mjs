@@ -529,11 +529,11 @@ export const coreAdapted = (v) => v?.adapter === 'core' && !v?.orphaned;
 export const posts = (v) => !!v?.send || coreAdapted(v);
 
 /** A venue adapter's call that posts nothing (`--describe`, `--status …`), through its argv or core's route. */
-async function callAdapter(d, v, c, args) {
+async function callAdapter(d, v, c, args, extra = {}) {
   if (!coreAdapted(v)) return d.adapter(v.send, c, args);
   const body = args[0] === '--describe'
     ? { op: 'describe' }
-    : { op: 'status', status: args[1], ...(args.includes('--message') ? { messages: args.filter((_, i) => args[i - 1] === '--message') } : {}) };
+    : { op: 'status', status: args[1], ...(args.includes('--message') ? { messages: args.filter((_, i) => args[i - 1] === '--message') } : {}), ...extra };
   const a = await d.core.comms({ ...body, place: c.place, agent: c.agent });
   if (a?.ok === true) return a;
   throw new Error(typeof a?.reason === 'string' ? a.reason.slice(0, 300) : 'core said no');
@@ -1020,7 +1020,7 @@ async function presencePass(env, c, d, now) {
   // DONE_TRIES times at most. Past that it's given up (a venue gone for good mustn't be called forever): core's own
   // venue stops showing working on its own once nothing says working (loom comms.ts WORKING_STALE_MS).
   let failed = false;
-  try { await callAdapter(d, v, c, ['--status', 'done']); } catch (e) { failed = true; d.warn(`${c.venue} couldn't clear ${c.conversation}'s presence: ${e.message}`); }
+  try { await callAdapter(d, v, c, ['--status', 'done'], silentRun(c)); } catch (e) { failed = true; d.warn(`${c.venue} couldn't clear ${c.conversation}'s presence: ${e.message}`); }
   locked(env, () => {
     const x = loadConv(env, c.conversation);
     if (!x?.presence) return;
@@ -1028,6 +1028,17 @@ async function presencePass(env, c, d, now) {
     if (failed && tries < DONE_TRIES) x.presence.doneTries = tries; else delete x.presence;
     saveConv(env, x);
   });
+}
+
+/**
+ * Core's own venue (Comms) is told when a turn ended with nothing sent (t-1900): its done carries `replied: false` and
+ * the run, and the thread says so (loom comms.md, the adapter's status). Only a run that's over, sent nothing through
+ * the runtime, and wasn't refused for a usage limit (that one runs again elsewhere, t-1907). Else nothing extra.
+ */
+export function silentRun(c) {
+  const r = (c.runLog ?? []).findLast((x) => x.run === c.run);
+  if (!r || !Number.isFinite(r.end) || (r.sent ?? 0) > 0 || r.turn?.limited) return {};
+  return { replied: false, run: r.run };
 }
 
 /** A person said the stop word where this body works: it's ended (a slot kept), and nothing that waited goes on. */

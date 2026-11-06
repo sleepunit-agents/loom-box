@@ -93,6 +93,43 @@ test('presence goes to core: working with the message ids, then done when the tu
   assert.deepEqual(w.adapterCalls, []);
 });
 
+test('a turn that ends with nothing sent says so to core: done carries replied false and its run, once; one that sent, or was refused for a usage limit, doesn\'t (t-1900)', async () => {
+  const w = world();
+  const cv = cvOf('art', 'loom', thread);
+  const dones = () => w.core.commsCalls.filter((x) => x.op === 'status' && x.status === 'done');
+  // Silent: the body's turn ends and it never sent.
+  await deliver(w.env, ownerMsg(w, 'anything?'), w.o);
+  await tick(w.env, w.o);
+  const c = loadConv(w.env, cv);
+  w.runner.finish(c.body, { failed: false, worked: true });
+  await tick(w.env, w.o);
+  const run = loadConv(w.env, cv).runLog.at(-1).run;
+  assert.deepEqual(dones().map(({ replied, run: r }) => ({ replied, run: r })), [{ replied: false, run }]);
+  await tick(w.env, w.o);
+  assert.equal(dones().length, 1, 'said once');
+  // A turn that sent: a plain done.
+  await deliver(w.env, ownerMsg(w, 'and now?', { id: `comms:${thread}:bbbbbbbbbbbbbbbb` }), w.o);
+  await tick(w.env, w.o);
+  const c2 = loadConv(w.env, cv);
+  const key = w.runner.envs[c2.body.split(':')[1]].LOOM_BODY_KEY;
+  let p; await w.send({ conversation: cv, text: 'here', key }, { ...w.o, onSend: (x) => { p = x; } }); await p;
+  w.runner.finish(c2.body, { failed: false, worked: true });
+  await tick(w.env, w.o);
+  assert.equal(dones().length, 2);
+  assert.deepEqual(Object.keys(dones().at(-1)).sort(), ['agent', 'op', 'place', 'status'], 'a turn that sent: no replied, no run');
+});
+
+test('silentRun: only a run that is over, sent nothing, and wasn\'t refused for a usage limit', async () => {
+  const { silentRun } = await import('../src/delivery.mjs');
+  const at = (r) => silentRun({ run: 'run-a', runLog: [{ run: 'run-a', at: 1, sent: 0, ...r }] });
+  assert.deepEqual(at({ end: 2 }), { replied: false, run: 'run-a' });
+  assert.deepEqual(at({}), {}, 'still going');
+  assert.deepEqual(at({ end: 2, sent: 1 }), {}, 'it sent');
+  assert.deepEqual(at({ end: 2, turn: { failed: true, worked: true, limited: true } }), {}, 'refused for a usage limit: run again elsewhere');
+  assert.deepEqual(silentRun({ run: 'run-b', runLog: [{ run: 'run-a', at: 1, end: 2, sent: 0 }] }), {}, 'not the current run');
+  assert.deepEqual(silentRun({}), {});
+});
+
 test('done reaches core even when its first try fails, or core couldn\'t list the venues at that tick (t-1881)', async () => {
   const w = world();
   await deliver(w.env, ownerMsg(w, 'work on it'), w.o);

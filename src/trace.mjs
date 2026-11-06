@@ -93,7 +93,7 @@ export function stepsOf(c, run, thread, next = null) {
   else if (run.turn?.failed) steps.push({ step: 'ended', at: run.ended, ok: false, words: `Its turn failed${run.turn.error ? `: ${run.turn.error}` : ''}.` });
   else steps.push({ step: 'ended', at: run.ended, ok: true, words: `Its turn ended${run.turn?.worked === false ? ', with no tool work' : ''}.` });
   if (run.refused) steps.push({ step: 'posted', ok: false, words: `${run.refused} send${run.refused === 1 ? ' was' : 's were'} refused before posting: ${run.refusal}` });
-  if (!run.sent && run.ended) steps.push({ step: 'posted', ok: false, words: run.refused ? 'Nothing it said was posted.' : `It never called \`loom runtime send\`: it said nothing to post.` });
+  if (!run.sent && run.ended) steps.push({ step: 'posted', ok: false, words: run.refused ? 'Nothing it said was posted.' : 'No send reached the runtime: nothing was posted.' });
   else if (run.sent) steps.push({ step: 'posted', ok: true, words: `It sent ${run.sent} message${run.sent === 1 ? '' : 's'}.` });
   for (const p of run.posts) steps.push({ step: 'accepted', ok: p.ok, words: p.ok ? 'The venue took a post.' : `The venue refused a post: ${p.reason ?? 'no reason given'}` });
   if (thread) {
