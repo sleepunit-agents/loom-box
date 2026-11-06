@@ -13,6 +13,17 @@
 // `agents` is which agents the account may do work for: the agents whose owner owns one of its boxes (owners.mjs).
 // Nothing here ever holds a credential.
 //
+// **One login, one quota** (t-1913). Boxes on one account are one entry, wherever it's listed (accounts, usage, the
+// resolver), keyed by what the box's CLI says the account is (logins.mjs, identify). Its usage is every copy's
+// readings, box- or house-taken, from any of its boxes, merged by one rule (mergeUsage):
+//   - per window, the newest reading (by `checked`) is the account's: usage only rises within a window, so a newer
+//     reading is the truth, whether it's higher or (after a reset) lower; a box's own reading doesn't outrank a newer
+//     house reading;
+//   - a copy that read nothing adds nothing: an unread box can't mask a known-full reading (it's one quota);
+//   - a full reading whose reset time has passed counts as reset (windowNow), with nothing newer to say otherwise;
+//   - only an account with no reading at all fails open (has room), as it did: its first turn reads it, and a refusal
+//     holds it at once.
+//
 // A **hold** (t-1907): an account its provider has just refused for a usage limit (a body's turn ended on one,
 // runners.mjs `turn().limited`) has no room until the refusal's reset, whatever the readings say. Readings come from
 // status lines and rollouts, after a turn, so they lag: a hold closes that gap the moment a refusal is seen.
@@ -37,7 +48,11 @@ export class AccountsError extends Error {}
 const cap = (t) => (t ? t[0].toUpperCase() + t.slice(1) : t);
 const windowOk = (k) => /^[0-9]+[hd](_[a-z0-9]+)?$/.test(k);
 
-/** Usage readings, newest per window, flattened to {"7d": 0.6, reset_7d: …, checked}. */
+/**
+ * Usage readings, newest per window, flattened to {"7d": 0.6, reset_7d: …, checked}: the rule above. On a tie in
+ * `checked`, the fuller reading (two copies read at the same second can't both be right; the fuller one can't
+ * overspend).
+ */
 function mergeUsage(readings) {
   const u = {};
   const at = {};
@@ -46,7 +61,7 @@ function mergeUsage(readings) {
     const t = typeof r.checked === 'number' ? r.checked : 0;
     for (const [w, v] of Object.entries(r.windows ?? {})) {
       if (!windowOk(w) || typeof v !== 'number') continue;
-      if (at[w] !== undefined && at[w] > t) continue;
+      if (at[w] !== undefined && (at[w] > t || (at[w] === t && u[w] >= v))) continue;
       at[w] = t; u[w] = v;
       delete u[`reset_${w}`];
       if (typeof r.resets?.[w] === 'number') u[`reset_${w}`] = r.resets[w];
@@ -54,6 +69,12 @@ function mergeUsage(readings) {
     if (t > (u.checked ?? 0)) u.checked = t;
   }
   return u;
+}
+
+const checkedOf = (r) => (r && typeof r.checked === 'number' ? r.checked : 0);
+function newestFrom(box, house) {
+  const b = Math.max(-1, ...box.map(checkedOf)), h = Math.max(-1, ...house.map(checkedOf));
+  return b < 0 && h < 0 ? null : b >= h ? 'box' : 'house';
 }
 
 /** The accounts, from the state's box reports and agents' secrets. Pure but for the clock. */
@@ -95,9 +116,10 @@ export function deriveAccounts(s, { members, nowMs = Date.now() } = {}) {
     label: `${LOGIN_HARNESSES[a.harness].label}${a.plan ? ` ${cap(a.plan)}` : ''} (${a.owner}'s)`,
     plan: a.plan, boxes: a.boxes.sort(), agents: [...a.agents].sort(),
     credentials: [{ kind: 'login', status: a.fresh ? 'valid' : 'unknown' }],
-    // The box's own readings when it has any (read from the harness's files on the box), else what houses reported.
-    usage: mergeUsage(a.boxReadings.length ? a.boxReadings : a.houseReadings),
-    usageFrom: a.boxReadings.length ? 'box' : a.houseReadings.length ? 'house' : null,
+    // Every copy's readings, box- or house-taken, on every box of the account: the newest per window (above).
+    usage: mergeUsage([...a.boxReadings, ...a.houseReadings]),
+    // Where the newest reading came from (a box's own, or a house's).
+    usageFrom: newestFrom(a.boxReadings, a.houseReadings),
   }));
   // Holds: an account its provider refused for a usage limit, until that limit resets (above).
   const nowS = Math.floor(nowMs / 1000);

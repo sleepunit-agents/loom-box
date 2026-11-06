@@ -129,7 +129,17 @@ export function credentialState(env, harness, { uid = process.getuid?.() } = {})
  * there to reach. The box process itself never opens a path in the shared dir: it lstats the credential file to say
  * whether the login is healthy, and cuts the dir down before a mount (pruneLoginDir). Config and home are the
  * container's own (a tmpfs, and its own overlay, gone with --rm). Status runs with no network; a login with the
- * network it needs to reach the provider. A box with no container runtime can't offer logins.
+ * network it needs to reach the provider, and so does an identity check (`identify`, below). A box with no container
+ * runtime can't offer logins.
+ *
+ * **Identity** (t-1913). Neither CLI's offline status names the account: Claude's `auth status` gives its org and
+ * email only from a profile in its config, which a fresh container's config doesn't have, and Codex's `login status`
+ * names nothing. So each box's login was an account of its own, and two boxes on one subscription showed twice, one
+ * copy unread (and so, to the resolver, roomy). `identify` asks the CLI itself, with the network: Claude fetches
+ * its profile on a proper start-up (`claude mcp list`, which spends no usage) and then says who it is; Codex's app
+ * server answers `account/read` (its account id and email). Only a hash of those leaves the box (accountKey). It's
+ * asked after a login and every IDENTIFY_MS, not every status check; an answer is kept while the login lasts, and
+ * a check that can't reach the provider keeps the last one.
  *
  * The image is one that has the CLIs: LOOM_RUNTIME_LOGIN_IMAGE if the box's owner set one, else the newest house
  * image built on this box for an agent the control plane says may use that login (its owner owns this box, and
@@ -141,6 +151,7 @@ const CONTAINER_SCRIPTS = {
     env: { CLAUDE_CONFIG_DIR: '/tmp/cli/.claude', CLAUDE_SECURESTORAGE_CONFIG_DIR: AT('claude') },
     status: 'command -v claude >/dev/null 2>&1 || exit 99; mkdir -p /tmp/cli/.claude; cd /tmp/cli; exec claude auth status --json',
     login: 'command -v claude >/dev/null 2>&1 || exit 99; mkdir -p /tmp/cli/.claude; cd /tmp/cli; stty cols 2000 rows 50 2>/dev/null; exec claude auth login --claudeai',
+    identify: 'command -v claude >/dev/null 2>&1 || exit 99; mkdir -p /tmp/cli/.claude; cd /tmp/cli; claude mcp list >/dev/null 2>&1 </dev/null; exec claude auth status --json',
   },
   codex: {
     env: { CODEX_HOME: '/tmp/cli/.codex' },
@@ -149,6 +160,11 @@ const CONTAINER_SCRIPTS = {
     // Login: in the container's own home, then its new auth file put in the shared dir by rename (inside the container).
     login: `command -v codex >/dev/null 2>&1 || exit 99; mkdir -p "$CODEX_HOME"; cd /tmp/cli; stty cols 2000 rows 50 2>/dev/null; codex login --device-auth || exit $?; `
       + `rm -f ${AT('codex')}/auth.json.loom-new && cp "$CODEX_HOME/auth.json" ${AT('codex')}/auth.json.loom-new && chmod 600 ${AT('codex')}/auth.json.loom-new && mv -f ${AT('codex')}/auth.json.loom-new ${AT('codex')}/auth.json`,
+    // Identity: its app server's `account/read`, over a fifo, waited for (at most 15 s), then the server stopped.
+    identify: `command -v codex >/dev/null 2>&1 || exit 99; mkdir -p "$CODEX_HOME"; ln -s ${AT('codex')}/auth.json "$CODEX_HOME/auth.json"; cd /tmp/cli; `
+      + ': >rpc-out; mkfifo rpc-in; codex app-server <rpc-in >rpc-out 2>/dev/null & p=$!; exec 3>rpc-in; '
+      + `printf '%s\\n' '${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { clientInfo: { name: 'loom', version: '0' } } })}' '${JSON.stringify({ jsonrpc: '2.0', method: 'initialized' })}' '${JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'account/read', params: {} })}' >&3; `
+      + 'i=0; while [ $i -lt 60 ] && ! grep -q \'"id":2\' rpc-out; do sleep 0.25; i=$((i+1)); done; exec 3>&-; kill $p 2>/dev/null; grep \'"id":2\' rpc-out',
   },
 };
 export const podmanBin = (env) => env.LOOM_BOX_PODMAN || 'podman';
@@ -179,11 +195,12 @@ export const loginContainer = (id) => `loom-login-${id}`;
 export function cliRunArgs(env, harness, what, image, { name } = {}) {
   const def = CONTAINER_SCRIPTS[harness];
   const login = what === 'login';
+  if (!def[what]) throw new LoginError(`no ${what} for ${harness}`);
   return ['run', '--rm', ...(login ? ['-i', '-t'] : []), '--label', `${CLI_LABEL}=${what}`, ...(name ? ['--name', name] : []), '--user', '0:0', '--cap-drop', 'all', '--security-opt', 'no-new-privileges',
-    ...(login ? [] : ['--network', 'none']), '--tmpfs', '/tmp:rw,nosuid,nodev,size=64m',
+    ...(what === 'status' ? ['--network', 'none'] : []), '--tmpfs', '/tmp:rw,nosuid,nodev,size=64m',
     ...Object.entries({ ...def.env, NO_COLOR: '1', BROWSER: '/bin/false' }).flatMap(([k, v]) => ['-e', `${k}=${v}`]),
     '-v', `${loginDir(env, harness)}:${AT(harness)}:rw,nosuid,nodev,noexec`,
-    '--entrypoint', 'sh', image, '-c', login ? def.login : def.status];
+    '--entrypoint', 'sh', image, '-c', def[what]];
 }
 
 const podEnv = (env) => ({ PATH: env.PATH, HOME: env.HOME, ...(env.XDG_RUNTIME_DIR ? { XDG_RUNTIME_DIR: env.XDG_RUNTIME_DIR } : {}) });
@@ -210,6 +227,40 @@ export function parseCodexStatus(stdout, status) {
   return { loggedIn: true, method: /chatgpt/i.test(m[1]) ? 'chatgpt' : /api key/i.test(m[1]) ? 'api-key' : m[1].slice(0, 40) };
 }
 
+/**
+ * Codex's app server's answer to `account/read` (codex-cli 0.162.1, checked 2026-11-06):
+ *   {"id":2,"result":{"account":{"type":"chatgpt","email":"…","planType":"pro"},"workspaceRouting":{"chatgptAccountId":"…"}}}
+ * → {account: a hash of the account id and email, plan}, or null (an API key's login, an error, or nothing said).
+ */
+export function parseCodexAccount(stdout) {
+  for (const line of String(stdout ?? '').split('\n')) {
+    if (!line.includes('"id":2')) continue;
+    let m;
+    try { m = JSON.parse(line); } catch { continue; }
+    const a = m?.id === 2 ? m.result?.account : null;
+    if (!a || a.type !== 'chatgpt') return null;
+    const id = typeof m.result.workspaceRouting?.chatgptAccountId === 'string' ? m.result.workspaceRouting.chatgptAccountId : '';
+    const email = typeof a.email === 'string' ? a.email : '';
+    if (!id && !email) return null;
+    return { account: accountKey('codex', id, email), ...(typeof a.planType === 'string' && a.planType ? { plan: a.planType.slice(0, 40) } : {}) };
+  }
+  return null;
+}
+
+/** Who a harness's login is ({account, plan?}), as its CLI says when it can reach the provider; null if it can't. */
+export function cliIdentify(env, h, image, run = spawnSync) {
+  const r = run(podmanBin(env), cliRunArgs(env, h, 'identify', image), { env: podEnv(env), encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000 });
+  if (r.error || r.status === 99) return null;
+  if (h === 'codex') return parseCodexAccount(r.stdout);
+  const st = parseClaudeStatus(r.stdout);
+  return st.loggedIn && st.account ? { account: st.account, ...(st.plan ? { plan: st.plan } : {}) } : null;
+}
+
+/** How often a box asks again who its logins are (a re-login asks at once). */
+export const IDENTIFY_MS = 6 * 3600_000;
+// What each login dir's CLI last said it is: {account, plan?, at}. Kept while it stays logged in.
+const IDENTITIES = new Map();
+
 /** One harness's status, as its CLI says it, run in a throwaway container. */
 export function cliStatus(env, h, image, run = spawnSync) {
   const r = run(podmanBin(env), cliRunArgs(env, h, 'status', image), { env: podEnv(env), encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 90_000 });
@@ -226,7 +277,7 @@ export function cliStatus(env, h, image, run = spawnSync) {
  * unhealthy, and the CLI isn't run on it. `agents` says, per harness, which agents may use the login here (the
  * control plane's answer), to pick the image. loom never opens the credential file.
  */
-export function harnessStatus(env = process.env, { run = spawnSync, agents = {} } = {}) {
+export function harnessStatus(env = process.env, { run = spawnSync, agents = {}, force = false, nowMs = Date.now() } = {}) {
   const out = {};
   for (const h of Object.keys(LOGIN_HARNESSES)) {
     const img = loginImage(env, agents[h] ?? [], { run });
@@ -234,6 +285,16 @@ export function harnessStatus(env = process.env, { run = spawnSync, agents = {} 
     const bad = credentialState(env, h);
     if (bad && bad !== 'absent') { out[h] = { installed: true, loggedIn: false, unhealthy: bad.slice(0, 120) }; continue; }
     out[h] = cliStatus(env, h, img.image, run);
+    // Who it is (identify, above): asked when not known yet, after a login (force), and every IDENTIFY_MS.
+    const key = loginDir(env, h);
+    if (!out[h].loggedIn || out[h].method === 'api-key') { IDENTITIES.delete(key); continue; }
+    if (out[h].account) continue;
+    let known = IDENTITIES.get(key);
+    if (force || !known || nowMs - known.at >= IDENTIFY_MS) {
+      const got = cliIdentify(env, h, img.image, run);
+      if (got) IDENTITIES.set(key, known = { ...got, at: nowMs });
+    }
+    if (known) out[h] = { ...out[h], account: known.account, ...(known.plan && !out[h].plan ? { plan: known.plan } : {}) };
   }
   return out;
 }

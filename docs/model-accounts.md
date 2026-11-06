@@ -62,9 +62,15 @@ to those binaries. It does not log in for them.
   box's owner and that hash, salted with a secret of the household's own, so
   one owner's box can't merge into another owner's account. Bodies and agent
   owners see only a label ("Claude Max (jonathan's)"), never the key.
-  (A status check runs in a fresh container, so Claude's org and account come
-  only from what the CLI can tell offline. Where it can't, a box's login is an
-  account of its own.)
+  A status check runs in a fresh container with no network, and neither CLI
+  can tell offline who the account is. So the box also asks each CLI who it
+  is, with the network, after a login and every 6 hours: Claude after a
+  start-up that fetches its profile (`claude mcp list`, which spends no
+  usage), Codex through its app server's `account/read`. Only a hash of the
+  org (or account id) and email is reported. A check that can't reach the
+  provider keeps the last answer; a login never named is an account of its
+  own (t-1913: box `one` and loom's machine, on one Claude Max and one Codex
+  Pro, showed as four accounts).
   A box knows a login exists only because the CLI's status says so. loom never
   opens a credential file.
 - **Houses use their box's login.** A house file that says
@@ -97,7 +103,11 @@ to those binaries. It does not log in for them.
   do: it's the owner's own agent, misreporting the owner's own account, which
   can make the resolver skip or overuse that one account. Values are clamped
   (utilization 0 to 1, a reset within 8 days). The model resolver skips an
-  account whose window is full.
+  account whose window is full. An account on several boxes has one quota:
+  per window, the newest reading from any of its boxes or houses; a box that
+  has read nothing adds nothing, so it can't make a full account look roomy;
+  a full window whose reset has passed counts as reset; only an account with
+  no reading at all counts as having room (`src/accounts.mjs`).
 
 **Which houses get a box's login.** Only a house whose agent's owner owns the
 box, and only the logins the owner granted that agent (`loom box agent <agent>
@@ -127,7 +137,7 @@ a `podman run --rm` container:
 
 - The shared login dir is the only mount, at the path houses use (`rw,nosuid,nodev,noexec`).
 - Config and home are the container's own: a tmpfs plus its own overlay, gone when it ends.
-- It runs with no capabilities and `no-new-privileges`. A status check gets no network; a login gets the network it needs to reach the provider.
+- It runs with no capabilities and `no-new-privileges`. A status check gets no network; a login, and the identity check, get the network they need to reach the provider (the identity check is the CLI's own start-up, with the same login a house of the same image gets with the network anyway).
 
 Any symlink therefore resolves inside the container, where nothing of the box's
 is. The box process itself never opens a path in the shared dir.

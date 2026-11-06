@@ -4,6 +4,11 @@
 // (CLAUDE_SECURESTORAGE_CONFIG_DIR, or CODEX_HOME) holds its credential file, which its login writes, the way a
 // real CLI does. Like Codex, it runs a `notify` command from its home's config.toml, so a test can tell whether
 // a config planted anywhere else ever runs. FAKE_LOGIN_AS says which CLI it is.
+//
+// Who the account is, as the real CLIs give it (checked 2026-11-06, Claude Code 2.1.309/2.1.319, codex-cli 0.162.1):
+// Claude's `auth status` names the org and email only once its config ($CLAUDE_CONFIG_DIR/.claude.json) holds the
+// profile, which a fresh config doesn't until a command that starts up properly (`claude mcp list`) fetches it.
+// Codex names it only through its app server's `account/read` (JSON-RPC over stdio), never `login status`.
 import { execSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -16,13 +21,38 @@ try {
   if (notify) execSync(notify);
 } catch { /* no config */ }
 const args = process.argv.slice(2).join(' ');
+const profile = join(process.env.CLAUDE_CONFIG_DIR || home, '.claude.json');
+const profiled = () => { try { return !!JSON.parse(readFileSync(profile, 'utf-8')).oauthAccount; } catch { return false; } };
 if (as === 'claude' && args === 'auth status --json') {
   process.stdout.write(JSON.stringify(existsSync(marker)
-    ? { loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty', email: 'owner@example.com', orgId: 'org-1', orgName: 'Owner', subscriptionType: 'max' }
+    ? { loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty', email: profiled() ? 'owner@example.com' : null, orgId: profiled() ? 'org-1' : null, orgName: null, subscriptionType: 'max' }
     : { loggedIn: false }));
   process.exit(0);
 }
-if (as === 'claude' && args === 'auth login --claudeai') {
+if (as === 'claude' && args === 'mcp list') {
+  if (existsSync(marker) && process.env.FAKE_LOGIN_OFFLINE !== '1') writeFileSync(profile, JSON.stringify({ oauthAccount: { emailAddress: 'owner@example.com', organizationUuid: 'org-1' } }));
+  process.stdout.write('No MCP servers configured.\n');
+  process.exit(0);
+}
+if (as === 'codex' && args === 'app-server') {
+  let buf = '';
+  process.stdin.on('data', (b) => {
+    buf += b.toString();
+    let i;
+    while ((i = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, i); buf = buf.slice(i + 1);
+      let m; try { m = JSON.parse(line); } catch { continue; }
+      if (m.method === 'initialize') process.stdout.write(`${JSON.stringify({ id: m.id, result: { userAgent: 'fake' } })}\n`);
+      if (m.method === 'account/read') {
+        const result = !existsSync(marker) ? { account: null, requiresOpenaiAuth: true }
+          : process.env.FAKE_LOGIN_OFFLINE === '1' ? null
+          : { account: { type: 'chatgpt', email: 'owner@example.com', planType: 'pro' }, requiresOpenaiAuth: true, workspaceRouting: { chatgptAccountId: 'acct-1' } };
+        process.stdout.write(`${JSON.stringify(result ? { id: m.id, result } : { id: m.id, error: { code: -32603, message: 'workspace routing discovery timed out' } })}\n`);
+      }
+    }
+  });
+  process.stdin.on('end', () => process.exit(0));
+} else if (as === 'claude' && args === 'auth login --claudeai') {
   process.stdout.write('Opening browser to sign in…\nhttps://claude.com/cai/oauth/authorize?code=true&client_id=fake&state=s1\nPaste code here if prompted > ');
   let got = '';
   process.stdin.on('data', (b) => {
