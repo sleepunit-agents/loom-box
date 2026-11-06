@@ -4,7 +4,7 @@
 // and starts it through the runner interface (test obligation 1's runtime side, with a fake runner).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -109,9 +109,45 @@ test('Claude Code: no inbox dir, no feeding; a launch that fails or claims nothi
   assert.throws(() => quiet.start({ brief: 'x', model: 'm', cwd: h.D, env: h.env }), /started nothing this runner could find/);
 });
 
+test('Codex: no body under a profile, which could turn a denied server back on (t-1916)', async () => {
+  const h = harness();
+  const home = join(h.D, 'codex');
+  mkdirSync(home, { recursive: true });
+  const mk = (o = {}) => new CodexRunner({ codex: join(here, 'fake-codex.mjs'), runsDir: join(h.D, 'runs'), sessionsDir: join(home, 'sessions'), ...o });
+  const start = (r, deny, env = h.env) => r.start({ brief: 'x', model: 'gpt-x', cwd: h.D, env, deny });
+  // LOOM_RUNTIME_CODEX_PROFILE set: refused, deny list or none, and nothing ran.
+  assert.throws(() => start(mk({ profile: 'work' }), []), /LOOM_RUNTIME_CODEX_PROFILE is set \(work\)/);
+  assert.throws(() => start(mk({ profile: 'work' }), ['mcp__loom']), RunnerError);
+  assert.deepEqual(h.argv(), []);
+  // A config Codex reads selects a profile, whose own mcp_servers turn the denied server on: a body with that deny
+  // list is refused; one with no deny list has nothing a profile could undo.
+  writeFileSync(join(home, 'config.toml'), 'model = "gpt-x"\nprofile = "work"\n\n[profiles.work.mcp_servers.loom]\ncommand = "loom"\nenabled = true\n');
+  assert.throws(() => start(mk(), ['mcp__loom']), /selects a Codex profile \(profile = "work"\)/);
+  assert.deepEqual(h.argv(), []);
+  start(mk(), []);
+  await until(() => h.argv().length === 1);
+  // The same in the body env's CODEX_HOME, or the project's .codex: each is read.
+  writeFileSync(join(home, 'config.toml'), '[profiles.work.mcp_servers.loom]\nenabled = true\n');
+  start(mk(), ['mcp__loom']);
+  await until(() => h.argv().length === 2);
+  assert.ok(h.argv()[1].args.includes('mcp_servers.loom={enabled=false, command="false"}'), 'a profile only defined, never selected, is never used: the deny goes on');
+  const other = join(h.D, 'other'); mkdirSync(other);
+  writeFileSync(join(other, 'config.toml'), "'profile' = 'work'\n");
+  assert.throws(() => start(mk(), ['mcp__loom'], { ...h.env, CODEX_HOME: other }), /selects a Codex profile/);
+  mkdirSync(join(h.D, '.codex'), { recursive: true });
+  writeFileSync(join(h.D, '.codex', 'config.toml'), 'profile="work"\n');
+  assert.throws(() => start(mk(), ['mcp__loom']), /selects a Codex profile/);
+  // One it can't read: refused, never guessed.
+  rmSync(join(h.D, '.codex', 'config.toml')); mkdirSync(join(h.D, '.codex', 'config.toml'));
+  assert.throws(() => start(mk(), ['mcp__loom']), /can't read .*config\.toml/);
+  assert.equal(mk().refusal(['mcp__loom'], h.D, h.env) !== null, true);
+  assert.equal(h.argv().length, 2);
+  writeFileSync(join(h.D, 'finish'), '');
+});
+
 test('Codex: a body is one exec process, brief on stdin, keyed for its inbox; fed while it works, resumed by thread', async () => {
   const h = harness();
-  const r = new CodexRunner({ codex: join(here, 'fake-codex.mjs'), profile: 'shuttle', runsDir: join(h.D, 'runs'), inboxDir: h.inbox });
+  const r = new CodexRunner({ codex: join(here, 'fake-codex.mjs'), runsDir: join(h.D, 'runs'), inboxDir: h.inbox });
   const b = r.start({ brief: BRIEF, model: 'gpt-x', cwd: h.D, env: { ...h.env, CLAUDE_CODE_OAUTH_TOKEN: 'nope' } });
   assert.equal(b.harness, 'codex');
   await until(() => r.slotOf(b));
@@ -119,7 +155,8 @@ test('Codex: a body is one exec process, brief on stdin, keyed for its inbox; fe
   assert.equal(first.body, b.id);
   assert.equal(first.inbox, h.inbox);
   assert.deepEqual(first.claude, [], 'a Codex body never sees Claude Code\'s session keys');
-  assert.deepEqual(first.args.slice(0, 9), ['exec', '--json', '--skip-git-repo-check', '--dangerously-bypass-hook-trust', '--dangerously-bypass-approvals-and-sandbox', '-p', 'shuttle', '-m', 'gpt-x']);
+  assert.deepEqual(first.args.slice(0, 7), ['exec', '--json', '--skip-git-repo-check', '--dangerously-bypass-hook-trust', '--dangerously-bypass-approvals-and-sandbox', '-m', 'gpt-x']);
+  assert.equal(first.args.includes('-p'), false, 'never under a profile');
   assert.equal(JSON.stringify(first.args).includes('SECRET-ISH'), false);
   assert.equal(lines(join(h.D, 'briefs.log'))[0], BRIEF);
   assert.equal(r.status(b), 'working');

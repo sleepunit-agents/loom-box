@@ -1309,6 +1309,8 @@ async function execute(env, op, d, mem) {
     // A deny list Codex can't keep (a tool within a server, a built-in: runners.mjs, codexDeny) keeps this body off
     // Codex: never an unrestricted body there, and said so if nothing else has room.
     cant = codexDeny(rules.deny).error ? ['codex'] : [];
+    // Or one this runtime's Codex won't run here (a profile that could undo the deny list: runners.mjs, refusal).
+    if (!cant.length) { try { if (d.runner('codex', local).refusal?.(rules.deny, base.cwd, bodyEnv)) cant = ['codex']; } catch { /* no codex runner: routing says so */ } }
     way = await routeOf(env, c0, op, rules, d, cant);
     const notes = quotaNotes(c0, way);
     if (way.how === 'start') {

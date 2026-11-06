@@ -295,7 +295,8 @@ const scrub = (env) => Object.fromEntries(Object.entries(env).filter(([k]) => !k
 /**
  * A body's deny list (Claude Code's tool names), as Codex can keep it (t-1907): whole MCP servers, by name.
  *   mcp__<server>   always `-c mcp_servers.<server>={enabled=false, …}`, whether or not any config Codex reads defines
- *                   it (its home's, the body env's CODEX_HOME, a profile, the project's): `-c` merges over all of them,
+ *                   it (its home's, the body env's CODEX_HOME, the project's): `-c` merges over all of them (a profile's
+ *                   own would win, so no body with a deny list runs under one: CodexRunner.refusal),
  *                   so the server is off wherever it's defined. The stub's transport is `command` unless `urls` (what a
  *                   scan of the configs found, a hint only) names it as a URL server; a wrong hint makes Codex refuse
  *                   to start (a stdio stub over a URL server, or the other way), which fails closed.
@@ -352,14 +353,15 @@ export class CodexRunner {
   }
 
   launch({ brief, model, cwd, env, deny = [], resume }) {
+    const why = this.refusal(deny, cwd, env);
+    if (why) throw new RunnerError(why);
     const off = codexDeny(deny, this.urlServers(cwd, env));
-    if (off.error) throw new RunnerError(off.error);
     const key = this.key();
     const dir = join(this.runsDir, key);
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     const e = { ...scrub(env ?? process.env), SHUTTLE_BODY: key, ...(this.inbox ? { SHUTTLE_INBOX_DIR: this.inbox.dir } : {}) };
     const argv = ['exec', '--json', '--skip-git-repo-check', '--dangerously-bypass-hook-trust', '--dangerously-bypass-approvals-and-sandbox',
-      ...(this.profile ? ['-p', this.profile] : []), ...(model ? ['-m', model] : []), ...off.args, '-C', cwd ?? process.cwd(), '-o', join(dir, 'last.txt'),
+      ...(model ? ['-m', model] : []), ...off.args, '-C', cwd ?? process.cwd(), '-o', join(dir, 'last.txt'),
       ...(resume ? ['resume', resume] : []), '-'];
     const out = openSync(join(dir, 'events.jsonl'), 'a', 0o600);
     const err = openSync(join(dir, 'stderr.txt'), 'a', 0o600);
@@ -377,13 +379,41 @@ export class CodexRunner {
   }
 
   /**
+   * Why this runner won't start a body here, or null (t-1916). A Codex profile's own `mcp_servers` win over the
+   * top-level `-c mcp_servers.<s>.enabled=false` that keeps a deny list, so a denied server could come back on under
+   * one: LOOM_RUNTIME_CODEX_PROFILE isn't supported (nobody set it; set, every body is refused, said so), and a body
+   * with a deny list isn't started where a config Codex reads selects a profile (a top-level `profile =`), or where
+   * one it reads can't be read. Plus a deny list Codex can't keep at all (codexDeny).
+   */
+  refusal(deny, cwd, env) {
+    if (this.profile) return `LOOM_RUNTIME_CODEX_PROFILE is set (${String(this.profile).slice(0, 64)}): a Codex profile can turn a denied tool server back on, so the codex runner runs no body under one; unset it`;
+    const off = codexDeny(deny);
+    if (off.error) return off.error;
+    if (!deny?.length) return null;
+    for (const f of this.configFiles(cwd, env)) {
+      let text;
+      try { text = readFileSync(f, 'utf-8'); } catch (e) { if (e.code === 'ENOENT') continue; return `the codex runner can't read ${f} to check it selects no profile: refusing a body with a deny list`; }
+      for (const line of text.split('\n')) {
+        if (/^\s*\[/.test(line)) break;
+        if (/^\s*["']?profile["']?\s*=/.test(line)) return `${f} selects a Codex profile (${line.trim().slice(0, 80)}), whose own tool servers could undo the deny list: refusing a body with one`;
+      }
+    }
+    return null;
+  }
+
+  /** The config.toml files Codex reads for a body here: its home's, the body env's CODEX_HOME, the project's. */
+  configFiles(cwd, env) {
+    const homes = [this.codexHome ?? dirname(this.roots.sessions), ...(env?.CODEX_HOME ? [env.CODEX_HOME] : [])];
+    return [...homes.map((h) => join(h, 'config.toml')), ...(cwd ? [join(cwd, '.codex', 'config.toml')] : [])];
+  }
+
+  /**
    * Which MCP servers the configs Codex reads define by URL (home's, the body env's CODEX_HOME, the project's): only
    * a hint for which stub codexDeny writes. Every denied server is turned off whatever this finds.
    */
   urlServers(cwd, env) {
-    const homes = [this.codexHome ?? dirname(this.roots.sessions), ...(env?.CODEX_HOME ? [env.CODEX_HOME] : [])];
     const urls = new Set();
-    for (const f of [...homes.map((h) => join(h, 'config.toml')), ...(cwd ? [join(cwd, '.codex', 'config.toml')] : [])]) {
+    for (const f of this.configFiles(cwd, env)) {
       let text = '';
       try { text = readFileSync(f, 'utf-8'); } catch { continue; }
       let cur = null;
