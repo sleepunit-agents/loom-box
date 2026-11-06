@@ -528,12 +528,15 @@ export const coreAdapted = (v) => v?.adapter === 'core' && !v?.orphaned;
 /** Whether a venue has somewhere to post: a declared send argv, or core as its adapter. */
 export const posts = (v) => !!v?.send || coreAdapted(v);
 
-/** A venue adapter's call that posts nothing (`--describe`, `--status …`), through its argv or core's route. */
-async function callAdapter(d, v, c, args) {
+/**
+ * A venue adapter's call that posts nothing (`--describe`, `--status …`), through its argv or core's route. `extra`
+ * (a done's `replied: false` and run, t-1900) goes to core's route only; an argv adapter's call is as it always was.
+ */
+async function callAdapter(d, v, c, args, extra = {}) {
   if (!coreAdapted(v)) return d.adapter(v.send, c, args);
   const body = args[0] === '--describe'
     ? { op: 'describe' }
-    : { op: 'status', status: args[1], ...(args.includes('--message') ? { messages: args.filter((_, i) => args[i - 1] === '--message') } : {}) };
+    : { op: 'status', status: args[1], ...(args.includes('--message') ? { messages: args.filter((_, i) => args[i - 1] === '--message') } : {}), ...extra };
   const a = await d.core.comms({ ...body, place: c.place, agent: c.agent });
   if (a?.ok === true) return a;
   throw new Error(typeof a?.reason === 'string' ? a.reason.slice(0, 300) : 'core said no');
@@ -1020,14 +1023,31 @@ async function presencePass(env, c, d, now) {
   // DONE_TRIES times at most. Past that it's given up (a venue gone for good mustn't be called forever): core's own
   // venue stops showing working on its own once nothing says working (loom comms.ts WORKING_STALE_MS).
   let failed = false;
-  try { await callAdapter(d, v, c, ['--status', 'done']); } catch (e) { failed = true; d.warn(`${c.venue} couldn't clear ${c.conversation}'s presence: ${e.message}`); }
+  const silent = coreAdapted(v) ? silentRun(c) : {};
+  try { await callAdapter(d, v, c, ['--status', 'done'], silent); } catch (e) { failed = true; d.warn(`${c.venue} couldn't clear ${c.conversation}'s presence: ${e.message}`); }
   locked(env, () => {
     const x = loadConv(env, c.conversation);
+    if (!failed && silent.run) { const r = (x?.runLog ?? []).find((y) => y.run === silent.run); if (r) { r.saidSilent = true; saveConv(env, x); } }
     if (!x?.presence) return;
     const tries = (x.presence.doneTries ?? 0) + 1;
     if (failed && tries < DONE_TRIES) x.presence.doneTries = tries; else delete x.presence;
     saveConv(env, x);
   });
+}
+
+/**
+ * Core's own venue (Comms) is told when a turn ended with nothing posted (t-1900): its done carries `replied: false`
+ * and the run, and the thread says so (loom comms.md, the adapter's status). The newest run that ended while the venue
+ * was shown it at work (since its presence began, so no run from before is ever said), sent nothing that was taken
+ * (`sent` counts only those; a refused one isn't), wasn't refused for a usage limit (that one runs again elsewhere,
+ * t-1907), wasn't stopped by the member, and hasn't been said. Not only the current run: a new one may have started
+ * while an earlier done was being retried. → the done's extra fields, or {}.
+ */
+export function silentRun(c) {
+  const since = c.presence?.since ?? Infinity;
+  const r = (c.runLog ?? []).findLast((x) => Number.isFinite(x.end));
+  if (!r || r.end < since || (r.sent ?? 0) > 0 || r.turn?.limited || r.stopped || r.saidSilent) return {};
+  return { replied: false, run: r.run };
 }
 
 /** A person said the stop word where this body works: it's ended (a slot kept), and nothing that waited goes on. */
@@ -1037,6 +1057,9 @@ async function stopBody(env, c, d, v) {
     const x = loadConv(env, c.conversation);
     if (!x?.body || x.starting) return null;
     outcome(x, (x.queue ?? []).map((q) => q.key), { body: 'failed', reason: 'stopped: a person said the stop word there' }, now);
+    // Stopped by the member: never said to have finished without replying (t-1900), whichever done lands.
+    const run = (x.runLog ?? []).findLast((y) => y.run === x.run);
+    if (run) run.stopped = true;
     x.queue = [];
     delete x.waiting;
     x.starting = mark(now);
