@@ -2,8 +2,8 @@
 // picks the model (models.mjs), starts the body on that model's harness (runners.mjs), and keeps a record of it on
 // this machine, so the body can be fed, resumed and ended by its id.
 //
-//   startBody   {agent, brief, venue, venueKind?, prefer?, cwd?, deny?, guest?} → the body's record, with why that model
-//               (a brief is text, or parts naming the agent's files: briefs.mjs)
+//   startBody   {agent, brief, venue, venueKind?, prefer?, avoid?, cwd?, deny?, guest?} → the body's record, with why
+//               that model (a brief is text, or parts naming the agent's files: briefs.mjs; avoid: harnesses not to use)
 //   feedBody    a message mid-turn, where the harness allows
 //   resumeBody  a body (or a slot) continued, on a model of the same harness
 //   endBody     stopped
@@ -11,7 +11,8 @@
 //
 // A body's id is <harness>:<the harness's own id> (claude:99553cf9, codex:5e0c1a2b). Records are this machine's own
 // (<LOOM_BOX_DATA>/bodies), 0600 in a 0700 dir, and hold no brief and no message: the agent, venue, model, harness
-// and slot only.
+// and slot only, and `switched` ({from, why, until?}) when the body is a harness switch: on another harness than the
+// agent's preferred one, because that one's account is out (models.mjs, fallback; t-1907).
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -63,11 +64,14 @@ function forRunner(runner, b, cwd) {
   try { return composeBrief(b, cwd); } catch (e) { fail(e.message, 422); }
 }
 
-export async function startBody(env, { agent, brief: b, venue, venueKind, prefer = [], cwd, deny = [], place, guest, local }, o = {}) {
+/** A pick's fallback (models.mjs), as a body's record keeps it. */
+const switchedOf = (pick) => (pick.fallback ? { switched: { from: pick.fallback.from, why: String(pick.fallback.why ?? '').slice(0, 300), ...(pick.fallback.account ? { account: pick.fallback.account } : {}), ...(pick.fallback.until ? { until: pick.fallback.until } : {}) } } : {});
+
+export async function startBody(env, { agent, brief: b, venue, venueKind, prefer = [], avoid = [], cwd, deny = [], place, guest, local }, o = {}) {
   const d = deps(env, o);
   const text = brief(b);
   if (typeof venue !== 'string' || !/^[a-z][a-z0-9-]{0,39}$/.test(venue)) fail('which venue (wake, relay, session, discord, slack, …)');
-  const pick = await resolveFor(env, { agent, venue, venueKind, prefer, accounts: d.accounts, now: d.now(), fetchImpl: d.fetchImpl });
+  const pick = await resolveFor(env, { agent, venue, venueKind, prefer, avoid, accounts: d.accounts, now: d.now(), fetchImpl: d.fetchImpl });
   const runner = d.runner(pick.harness, !!local);
   // A Comms thread's body (venue loom) has its tool steps read as activity cards (activity.mjs); no other venue's is.
   const body = await runner.start({ agent, brief: forRunner(runner, text, cwd), model: pick.model, cwd, env: o.bodyEnv, deny, ...(venue === COMMS_VENUE ? { activity: true } : {}) });
@@ -75,11 +79,11 @@ export async function startBody(env, { agent, brief: b, venue, venueKind, prefer
     body: `${body.harness}:${body.id}`, agent, venue, kind: pick.kind, ...(place ? { place: String(place).slice(0, 200) } : {}),
     // What it was started with of its rules (tool names, never the brief): for the owner's `loom runtime bodies`.
     ...(deny.length ? { deny: [...deny] } : {}), ...(guest ? { guest: true } : {}), ...(local ? { local: true } : {}),
-    harness: body.harness, model: pick.model, family: pick.family, ...(pick.account ? { account: pick.account } : {}),
+    harness: body.harness, model: pick.model, family: pick.family, ...(pick.account ? { account: pick.account } : {}), ...(pick.accountKey ? { accountKey: pick.accountKey } : {}), ...switchedOf(pick),
     started: d.now().toISOString(), ...(body.slot ? { slot: body.slot } : {}), ...(body.house ? { house: body.house } : {}),
   };
   save(env, rec);
-  return { ...rec, why: pick.why };
+  return { ...rec, why: pick.why, preferred: pick.preferred };
 }
 
 export function feedBody(env, ref, message, o = {}) {
@@ -108,11 +112,11 @@ export async function resumeBody(env, { body: ref, slot, agent, venue, venueKind
   const next = {
     body: `${body.harness}:${body.id}`, agent: who, venue: where, kind: pick.kind, ...(rec?.place ? { place: rec.place } : {}),
     ...(deny.length ? { deny: [...deny] } : {}), ...(guest ? { guest: true } : {}), ...(here ? { local: true } : {}),
-    harness: body.harness, model: pick.model, family: pick.family, ...(pick.account ? { account: pick.account } : {}),
+    harness: body.harness, model: pick.model, family: pick.family, ...(pick.account ? { account: pick.account } : {}), ...(pick.accountKey ? { accountKey: pick.accountKey } : {}), ...switchedOf(pick),
     started: d.now().toISOString(), slot: body.slot ?? slot, ...(ref ? { resumed: ref } : {}), ...(body.house ? { house: body.house } : {}),
   };
   save(env, next);
-  return { ...next, why: pick.why };
+  return { ...next, why: pick.why, preferred: pick.preferred };
 }
 
 export function endBody(env, ref, o = {}) {

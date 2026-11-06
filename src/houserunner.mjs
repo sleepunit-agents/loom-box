@@ -165,7 +165,9 @@ function cleanReport(r) {
       // A Comms thread's body's tool steps (activity.mjs), checked here as core will check them.
       ...(Array.isArray(b.cards) ? { cards: cleanCards(b.cards) } : {}),
       // How its turn went, once over (runners.mjs, turn): a host before t-1763 says nothing.
-      ...(b.turn && typeof b.turn === 'object' ? { turn: { failed: b.turn.failed === true, worked: typeof b.turn.worked === 'boolean' ? b.turn.worked : null, ...(typeof b.turn.error === 'string' && b.turn.error ? { error: b.turn.error.slice(0, 200) } : {}) } } : {}),
+      ...(b.turn && typeof b.turn === 'object' ? { turn: { failed: b.turn.failed === true, worked: typeof b.turn.worked === 'boolean' ? b.turn.worked : null, ...(typeof b.turn.error === 'string' && b.turn.error ? { error: b.turn.error.slice(0, 200) } : {}),
+        // Refused for a usage limit, and when its account has room again (t-1907).
+        ...(b.turn.limited === true ? { limited: true, ...(Number.isFinite(b.turn.resets) && b.turn.resets > 0 ? { resets: Math.floor(b.turn.resets) } : {}) } : {}) } } : {}),
     };
   }
   const done = {};

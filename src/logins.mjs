@@ -292,6 +292,81 @@ export function codexRateLimit(event) {
   return { windows, resets, ...(typeof rl.plan_type === 'string' ? { plan: rl.plan_type.slice(0, 40) } : {}), ...(rl.rate_limit_reached_type ? { limited: true } : {}) };
 }
 
+/**
+ * A usage-limit refusal, from a harness's own structured fields (t-1907): never its prose.
+ *
+ * Claude Code writes a refused API call into the session's transcript as a synthetic assistant entry,
+ *   {"type":"assistant","isApiErrorMessage":true,"error":"rate_limit", "message": {"model":"<synthetic>", …}}
+ * (`error` is Claude Code's SDKAssistantMessageError: rate_limit, billing_error, authentication_failed, …). In
+ * stream-json the same refusal is a `rate_limit_event` whose status is `rejected` (claudeRateLimit's `limited`), or a
+ * `result` with `is_error` and that `error`. `rate_limit` is a usage limit; `billing_error` is an API key's credit gone.
+ * → {code} or null.
+ */
+export const CLAUDE_LIMIT_ERRORS = ['rate_limit', 'billing_error'];
+export function claudeRefusal(entry) {
+  if (!entry || typeof entry !== 'object') return null;
+  if (entry.type === 'assistant' && entry.isApiErrorMessage === true && CLAUDE_LIMIT_ERRORS.includes(entry.error)) return { code: entry.error };
+  if (entry.type === 'result' && entry.is_error === true && CLAUDE_LIMIT_ERRORS.includes(entry.error)) return { code: entry.error };
+  if (entry.type === 'rate_limit_event' && entry.rate_limit_info?.status === 'rejected') return { code: 'rate_limit' };
+  return null;
+}
+
+/**
+ * Codex's (codex-cli 0.162): its rollout's `error` event carries `codex_error_info`, a serde enum written in snake case
+ * (`"usage_limit_exceeded"`, or `{"usage_limit_exceeded": …}` for a variant with data); a `token_count` whose
+ * rate_limits name `rate_limit_reached_type` says the same. `codex exec --json`'s own `turn.failed` carries only a
+ * message, so it isn't read. → {code} or null.
+ */
+export function codexRefusal(event) {
+  const p = event?.type === 'event_msg' ? event.payload : event;
+  if (!p || typeof p !== 'object') return null;
+  if (p.type === 'error') {
+    const info = p.codex_error_info;
+    const code = typeof info === 'string' ? info : info && typeof info === 'object' ? Object.keys(info)[0] : null;
+    if (code === 'usage_limit_exceeded') return { code };
+  }
+  if (p.type === 'token_count' && p.rate_limits && typeof p.rate_limits === 'object' && p.rate_limits.rate_limit_reached_type) return { code: 'usage_limit_exceeded' };
+  return null;
+}
+
+/**
+ * The refusal that ended a turn, from the end of its harness's own JSONL (a transcript or a rollout): the last
+ * refusal, if nothing but more refusals and bookkeeping came after it (a turn that went on to work isn't refused).
+ */
+export function lastRefusal(harness, text) {
+  const read = harness === 'claude' ? claudeRefusal : codexRefusal;
+  let last = null;
+  for (const line of String(text ?? '').split('\n')) {
+    if (!line) continue;
+    let v;
+    try { v = JSON.parse(line); } catch { continue; }
+    const got = read(v);
+    if (got) { last = got; continue; }
+    // Work after it (an assistant's real answer, a tool call), or a later turn's start (a prompt): that refusal didn't
+    // end the last turn. A session's file holds every turn it had, and one that dies with no output must not inherit
+    // an earlier turn's refusal.
+    if (harness === 'claude' && v?.type === 'assistant' && v.isApiErrorMessage !== true) last = null;
+    if (harness === 'claude' && v?.type === 'user' && !(Array.isArray(v.message?.content) && v.message.content.some((c) => c?.type === 'tool_result'))) last = null;
+    if (harness === 'codex' && (v?.type === 'response_item' || v?.type === 'turn_context' || (v?.type === 'event_msg' && ['user_message', 'task_started'].includes(v.payload?.type)))) last = null;
+  }
+  return last;
+}
+
+/**
+ * When a refused account has room again (seconds), from a reading: the latest reset among its full windows (FULL), else
+ * the soonest reset still ahead (the reading lags: which window refused isn't known, so the nearest is tried first; the
+ * next refusal holds it again). Undefined when the reading names none.
+ */
+export function refusedUntil(reading, nowS = Math.floor(Date.now() / 1000)) {
+  const w = reading?.windows ?? {};
+  const r = reading?.resets ?? {};
+  const ahead = (k) => typeof r[k] === 'number' && r[k] > nowS;
+  const full = Object.keys(w).filter((k) => w[k] >= 0.97 && ahead(k));
+  if (full.length) return Math.max(...full.map((k) => r[k]));
+  const next = Object.keys(r).filter(ahead);
+  return next.length ? Math.min(...next.map((k) => r[k])) : undefined;
+}
+
 /** The last reading in some lines of a harness's output (JSONL), or null. */
 export function lastRateLimit(harness, text) {
   const read = harness === 'claude' ? claudeRateLimit : codexRateLimit;

@@ -60,7 +60,8 @@
 // Models and accounts (the owner's, on loom's machine):
 //   loom runtime models [--json]                                         the model list and each agent's settings
 //   loom runtime models set --json < {list?, agent?, allow?, prefer?}    change them
-//   loom runtime models resolve --agent a --venue v [--venue-kind k] [--prefer m]...   which model, and why
+//   loom runtime models resolve --agent a --venue v [--venue-kind k] [--prefer m]... [--suppose-out claude|codex]...
+//                                                                        which model, and why (as if a harness were out)
 //   loom runtime accounts [--json] | accounts usage [--json]           the accounts the boxes report, and their usage
 //   loom runtime logins [--json]                                       each box's harnesses: installed, logged in
 //   loom runtime login <box> claude|codex                              log a box in (its CLI's own login; prints the link)
@@ -108,7 +109,7 @@ import { askToJoin, BoxError, joinLoom, loadConfig, packState, POLL_MS, remoteCl
 import { load as loadState, localBoxName, renameLocal, stateDir } from './state.mjs';
 import { exportPart, importPart } from './bundle.mjs';
 import { pieceName, setting } from './piece.mjs';
-import { accountsFrom } from './accounts.mjs';
+import { accountsFrom, supposeOut } from './accounts.mjs';
 import { codexUsageOnBox, lastRateLimit, secureLoomUrl } from './logins.mjs';
 import { join } from 'node:path';
 import { readModels, resolveFor, setModels } from './models.mjs';
@@ -695,7 +696,10 @@ async function models(rest, env, json) {
   }
   if (sub === 'set') return out(setModels(env, JSON.parse(await readStdin())));
   if (sub === 'resolve') {
-    const r = await resolveFor(env, { agent: flag(rest, '--agent') ?? defaultAgent(env), venue: flag(rest, '--venue'), venueKind: flag(rest, '--venue-kind'), prefer: flags(rest, '--prefer'), accounts: accountsFrom(env) });
+    // --suppose-out <harness>: what it would pick if that harness's accounts were out (nothing is spent or held).
+    const gone = flags(rest, '--suppose-out');
+    const accounts = gone.length ? supposeOut(accountsFrom(env), gone) : accountsFrom(env);
+    const r = await resolveFor(env, { agent: flag(rest, '--agent') ?? defaultAgent(env), venue: flag(rest, '--venue'), venueKind: flag(rest, '--venue-kind'), prefer: flags(rest, '--prefer'), accounts });
     if (json) return out(r);
     process.stdout.write(`${r.model} (${r.harness}, ${r.family})${r.account ? ` on ${r.account}` : ''}\n${r.why.map((w) => `  ${w}`).join('\n')}\n`);
     return;

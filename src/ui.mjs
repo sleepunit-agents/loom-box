@@ -12,7 +12,7 @@ import { addBox, assertBoxOwner, resolveBox, isBoxOwner, boxLabelOf, boxOfCall, 
 import { LOGIN_HARNESSES } from './logins.mjs';
 import { ownCommit, swapCommand } from './version.mjs';
 import { stateAccounts } from './accounts.mjs';
-import { answerLoop, deliveryNotices, loopAsks } from './delivery.mjs';
+import { HARNESS_WORDS, answerLoop, deliveryNotices, loopAsks, readFallbacks, whenWords } from './delivery.mjs';
 import { loomStore } from './store.mjs';
 import { asks as gateAsks, answer as gateAnswer, gatesPage, mergePeople, status as gatesStatus, proposals as gateProposals, PROPOSALS as PROPOSALS_COLLECTION } from './gates.mjs';
 import { GRANTS, KEY as GRANTS_KEY, GrantsError, grantsProblem, householdOf, setPiece, setRelay } from './grants.mjs';
@@ -106,6 +106,7 @@ export function manifest(env, nowMs = Date.now(), o = {}) {
   try { checkDark(env, s, nowMs, o.alert ? { alert: o.alert } : {}); } catch { /* next time */ }
   const reports = agentReports(s, Date.now(), { ...reportedBusy(s), ...sessionsBusy(join(stateDir(env), 'session-cpu.json')) });
   for (const [a, doing] of Object.entries(board.agents)) reports[a] = { readings: [], ...reports[a], doing: [...(reports[a]?.doing ?? []), ...doing].slice(0, 8) };
+  try { withFallbacks(reports, readFallbacks(env), env, nowMs); } catch { /* a card without its model line */ }
   const boxes = Object.values(s.boxes).filter((b) => !b.revoked);
   const live = Object.values(s.houses).filter((h) => LIVE.has(h.state));
   return {
@@ -400,6 +401,21 @@ function factRow(f) {
   const k = f.slice(0, i), v = f.slice(i + 1);
   const w = factWords(f);
   return { label: FACT_LABELS[k] ?? k, value: k === 'cpus' || w === f ? v : w };
+}
+
+/**
+ * An agent answering on another harness than its preferred one (delivery.mjs, fallbacks.json; t-1907): its card's
+ * first reading says so, "Model: on Codex", and why.
+ */
+export function withFallbacks(reports, fallbacks, env = {}, nowMs = Date.now()) {
+  for (const [a, f] of Object.entries(fallbacks ?? {})) {
+    if (!/^[a-z][a-z0-9-]{0,39}$/.test(a) || !f || typeof f.to !== 'string') continue;
+    const from = HARNESS_WORDS[f.from] ?? f.from;
+    const detail = `${f.account ?? `${from}'s account`} is out${Number.isFinite(f.until) ? ` until ${whenWords(f.until, env, nowMs)}` : ''}`;
+    const r = (reports[a] ??= { readings: [] });
+    r.readings = [{ label: 'Model', value: `on ${HARNESS_WORDS[f.to] ?? f.to}`, detail, tone: 'warn' }, ...(r.readings ?? [])].slice(0, 4);
+  }
+  return reports;
 }
 
 /**

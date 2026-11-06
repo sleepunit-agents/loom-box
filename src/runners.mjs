@@ -21,9 +21,12 @@
 //                                            from its transcript), else null. Only where the harness says so (Claude
 //                                            Code's `claude agents --json`); a body nobody can answer is stopped by the
 //                                            tick (delivery.mjs, t-1858).
-//   turn(body)                             → how its turn went, once it's over: {failed, worked, error?} (worked: it
-//                                            did any tool work; null when the harness doesn't say), or null. What
-//                                            the loop check reads (loops.mjs, t-1763).
+//   turn(body)                             → how its turn went, once it's over: {failed, worked, error?, limited?,
+//                                            resets?} (worked: it did any tool work; null when the harness doesn't
+//                                            say), or null. What the loop check reads (loops.mjs, t-1763). `limited`:
+//                                            its provider refused it for a usage limit (logins.mjs, lastRefusal: the
+//                                            harness's structured error, never its prose), and `resets` when that
+//                                            account has room again, from its last reading (t-1907).
 //
 // Two harnesses today, ported from the bridges piece's runners (shuttle/runner.py, shuttle/runners/codex.py):
 // Claude Code as `claude --bg`, and Codex as `codex exec --json`. Feeding goes through a body's inbox: the layout
@@ -37,7 +40,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { keptReading } from './statusline.mjs';
 import { claudeCards, codexCards } from './activity.mjs';
-import { lastRateLimit, tailOf } from './logins.mjs';
+import { lastRateLimit, lastRefusal, refusedUntil, tailOf } from './logins.mjs';
 import { lastToolUse } from './stuck.mjs';
 
 export class RunnerError extends Error {}
@@ -154,10 +157,7 @@ export class ClaudeRunner {
     }
     const a = seen.rows.find((x) => x && x.id === body.id);
     if (!a || !['waiting', undefined].includes(a.status) || !/permission/i.test(String(a.waitingFor ?? ''))) return null;
-    const session = a.sessionId ?? this.job(body.id)?.sessionId;
-    const found = typeof session === 'string' && SESSION.test(session)
-      ? dirs(this.roots.projects).map((p) => join(this.roots.projects, p, `${session}.jsonl`)).filter((f) => existsSync(f)).sort((x, y) => statSync(y).mtimeMs - statSync(x).mtimeMs)[0]
-      : null;
+    const found = this.transcriptOf({ ...body, slot: { harness: 'claude', session: a.sessionId ?? this.job(body.id)?.sessionId } });
     return found ? lastToolUse(found) : { tool: '', what: '' };
   }
 
@@ -232,7 +232,24 @@ export class ClaudeRunner {
     if (!job || !turnOver(job)) return null;
     const tl = lines(join(this.jobsDir, String(body.id).slice(0, 8), 'timeline.jsonl'));
     const worked = tl.length ? tl.some((l) => l.state === 'working' && typeof l.detail === 'string' && l.detail.trim() !== '') : null;
-    return { failed: job.state === 'failed', worked, ...(job.state === 'failed' && typeof job.detail === 'string' && job.detail ? { error: job.detail.slice(0, 200) } : {}) };
+    const out = { failed: job.state === 'failed', worked, ...(job.state === 'failed' && typeof job.detail === 'string' && job.detail ? { error: job.detail.slice(0, 200) } : {}) };
+    // Refused for a usage limit: its transcript's last entry is Claude Code's API error (t-1907).
+    const f = this.transcriptOf(body);
+    const reading = this.usage(body);
+    const refused = f ? lastRefusal('claude', tailOf(f)) : null;
+    if (refused) {
+      const until = refusedUntil(reading);
+      Object.assign(out, { failed: true, limited: true, error: out.error ?? `its provider refused it (${refused.code})`, ...(until ? { resets: until } : {}) });
+    }
+    return out;
+  }
+
+  /** Its session's transcript, the newest of that name under projects; null when there's none. */
+  transcriptOf(body) {
+    const session = this.slotOf(body)?.session;
+    if (typeof session !== 'string' || !SESSION.test(session)) return null;
+    return dirs(this.roots.projects).map((p) => join(this.roots.projects, p, `${session}.jsonl`)).filter((f) => existsSync(f))
+      .sort((x, y) => statSync(y).mtimeMs - statSync(x).mtimeMs)[0] ?? null;
   }
 
   slotOf(body) {
@@ -276,10 +293,36 @@ function turnOver(job) {
 const scrub = (env) => Object.fromEntries(Object.entries(env).filter(([k]) => !k.startsWith('CLAUDE_CODE_') && k !== 'CLAUDECODE' && k !== 'CLAUDE_JOB_DIR'));
 
 /**
+ * A body's deny list (Claude Code's tool names), as Codex can keep it (t-1907): whole MCP servers, by name.
+ *   mcp__<server>   always `-c mcp_servers.<server>={enabled=false, …}`, whether or not any config Codex reads defines
+ *                   it (its home's, the body env's CODEX_HOME, a profile, the project's): `-c` merges over all of them,
+ *                   so the server is off wherever it's defined. The stub's transport is `command` unless `urls` (what a
+ *                   scan of the configs found, a hint only) names it as a URL server; a wrong hint makes Codex refuse
+ *                   to start (a stdio stub over a URL server, or the other way), which fails closed.
+ * Anything else (one tool of a server, mcp__<server>__<tool>, or a built-in like Bash) Codex can't be trusted to keep:
+ * an error, and no body. Delivery avoids Codex for such a body and says so. → {args} | {error}.
+ */
+const SERVER_NAME = /^[A-Za-z0-9_-]{1,64}$/;
+export function codexDeny(deny, urls = new Set()) {
+  const off = new Set();
+  const bad = [];
+  for (const d of deny ?? []) {
+    const name = String(d).startsWith('mcp__') ? String(d).slice(5) : null;
+    // A server's name can hold single underscores (claude_ai_Gmail); a double one is a tool within it.
+    if (!name || name.includes('__') || !SERVER_NAME.test(name)) { bad.push(String(d)); continue; }
+    off.add(name);
+  }
+  if (bad.length) return { error: `the codex runner can't deny ${bad.join(', ')} (it turns off whole MCP servers, nothing else): refusing to start a body that would keep them` };
+  const args = [];
+  for (const s of [...off].sort()) args.push('-c', `mcp_servers.${s}={enabled=false, ${urls.has(s) ? 'url="http://127.0.0.1:9/denied"' : 'command="false"'}}`);
+  return { args };
+}
+
+/**
  * Codex, `codex exec --json`: a body is one process, started in its own session with the brief on stdin, its events
  * in <runs>/<key>/events.jsonl. Its id is a key picked at launch (so its env can carry it as SHUTTLE_BODY for the
  * inbox hook); the thread id Codex reports first is its slot (`codex exec resume <thread>`). Files, not pipes, so a
- * body outlives whatever started it. Codex can't deny tools by name, so a deny list is refused.
+ * body outlives whatever started it. A deny list is kept as Codex can (codexDeny): MCP servers and their tools only.
  */
 export class CodexRunner {
   harness = 'codex';
@@ -309,13 +352,14 @@ export class CodexRunner {
   }
 
   launch({ brief, model, cwd, env, deny = [], resume }) {
-    if (deny.length) throw new RunnerError(`the codex runner can't deny tools (${deny.join(', ')}): refusing to start a body that would keep them`);
+    const off = codexDeny(deny, this.urlServers(cwd, env));
+    if (off.error) throw new RunnerError(off.error);
     const key = this.key();
     const dir = join(this.runsDir, key);
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     const e = { ...scrub(env ?? process.env), SHUTTLE_BODY: key, ...(this.inbox ? { SHUTTLE_INBOX_DIR: this.inbox.dir } : {}) };
     const argv = ['exec', '--json', '--skip-git-repo-check', '--dangerously-bypass-hook-trust', '--dangerously-bypass-approvals-and-sandbox',
-      ...(this.profile ? ['-p', this.profile] : []), ...(model ? ['-m', model] : []), '-C', cwd ?? process.cwd(), '-o', join(dir, 'last.txt'),
+      ...(this.profile ? ['-p', this.profile] : []), ...(model ? ['-m', model] : []), ...off.args, '-C', cwd ?? process.cwd(), '-o', join(dir, 'last.txt'),
       ...(resume ? ['resume', resume] : []), '-'];
     const out = openSync(join(dir, 'events.jsonl'), 'a', 0o600);
     const err = openSync(join(dir, 'stderr.txt'), 'a', 0o600);
@@ -330,6 +374,27 @@ export class CodexRunner {
     child.unref();
     this.inbox?.open(key, { venue: 'runtime', chan: key, bridge: 'runtime' });
     return { id: key, harness: 'codex', model, ...(resume ? { slot: { harness: 'codex', session: resume } } : {}) };
+  }
+
+  /**
+   * Which MCP servers the configs Codex reads define by URL (home's, the body env's CODEX_HOME, the project's): only
+   * a hint for which stub codexDeny writes. Every denied server is turned off whatever this finds.
+   */
+  urlServers(cwd, env) {
+    const homes = [this.codexHome ?? dirname(this.roots.sessions), ...(env?.CODEX_HOME ? [env.CODEX_HOME] : [])];
+    const urls = new Set();
+    for (const f of [...homes.map((h) => join(h, 'config.toml')), ...(cwd ? [join(cwd, '.codex', 'config.toml')] : [])]) {
+      let text = '';
+      try { text = readFileSync(f, 'utf-8'); } catch { continue; }
+      let cur = null;
+      for (const line of text.split('\n')) {
+        const t = /^\s*\[\s*(?:profiles\.[^\]]*?\.)?mcp_servers\s*\.\s*(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9_-]+))\s*\]/.exec(line);
+        if (t) { cur = t[1] ?? t[2] ?? t[3]; continue; }
+        if (/^\s*\[/.test(line)) { cur = null; continue; }
+        if (cur && /^\s*url\s*=/.test(line)) urls.add(cur);
+      }
+    }
+    return urls;
   }
 
   start(o) { return this.launch(o); }
@@ -382,7 +447,16 @@ export class CodexRunner {
     if (!end) return null;
     const worked = ev.some((e) => e.type === 'item.completed' && ['command_execution', 'mcp_tool_call', 'file_change', 'web_search'].includes(e.item?.type));
     const err = end.type === 'turn.failed' ? String(end.error?.message ?? end.error ?? '').slice(0, 200) : '';
-    return { failed: end.type === 'turn.failed', worked, ...(err ? { error: err } : {}) };
+    const out = { failed: end.type === 'turn.failed', worked, ...(err ? { error: err } : {}) };
+    // Refused for a usage limit: its rollout's error event says so in codex_error_info (t-1907); exec's own events don't.
+    // (A token_count naming rate_limit_reached_type is one too: codexRefusal reads it.)
+    const reading = this.usage(body);
+    const refused = this.sessionFiles(this.slotOf(body)).keep.map((k) => lastRefusal('codex', tailOf(join(this.roots[k.root], k.rel)))).find(Boolean);
+    if (refused) {
+      const until = refusedUntil(reading);
+      Object.assign(out, { failed: true, limited: true, ...(out.error ? {} : { error: `its provider refused it (${refused.code})` }), ...(until ? { resets: until } : {}) });
+    }
+    return out;
   }
 
   slotOf(body) {
