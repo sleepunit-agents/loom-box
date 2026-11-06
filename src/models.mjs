@@ -139,7 +139,7 @@ function resolveRoom({ agent, m, accounts, now }) {
   const mine = accountsFor(accounts, agent, provider).filter((a) => !a.harness || a.harness === m.harness);
   const acct = mine.find((a) => hasRoom(a, m.window, now));
   // A body is told the account's label, never its key.
-  if (acct) return { ok: true, account: acct.label ?? acct.name };
+  if (acct) return { ok: true, account: acct.label ?? acct.name, accountKey: acct.name };
   // When the soonest of its accounts has room again, as far as its readings and holds say.
   const back = mine.map((a) => roomAt(a, m.window, now)).filter((t) => t !== null);
   const until = back.length && back.length === mine.length ? Math.min(...back) : undefined;
@@ -215,7 +215,8 @@ export function resolveModel({ agent, kind, models, all = models, settings = {},
     ? { from: preferred.harness, ...(gone.out?.account ? { account: gone.out.account } : {}), ...(gone.out?.until ? { until: gone.out.until } : {}), why: gone.reason }
     : null;
   if (fallback) why.push(`a fallback: ${preferred.id} (${preferred.harness}) is preferred, and ${gone.reason}`);
-  return { model: pick.id, harness: pick.harness, family: pick.family, kind, ...(r.account ? { account: r.account } : {}), why,
+  // accountKey: which account, for the runtime's own records (a hold); never told to a body.
+  return { model: pick.id, harness: pick.harness, family: pick.family, kind, ...(r.account ? { account: r.account } : {}), ...(r.accountKey ? { accountKey: r.accountKey } : {}), why,
     preferred: { model: preferred.id, harness: preferred.harness }, ...(fallback ? { fallback } : {}) };
 }
 

@@ -342,9 +342,12 @@ export function lastRefusal(harness, text) {
     try { v = JSON.parse(line); } catch { continue; }
     const got = read(v);
     if (got) { last = got; continue; }
-    // Work after it (an assistant's real answer, a tool call): that refusal didn't end the turn.
+    // Work after it (an assistant's real answer, a tool call), or a later turn's start (a prompt): that refusal didn't
+    // end the last turn. A session's file holds every turn it had, and one that dies with no output must not inherit
+    // an earlier turn's refusal.
     if (harness === 'claude' && v?.type === 'assistant' && v.isApiErrorMessage !== true) last = null;
-    if (harness === 'codex' && v?.type === 'response_item') last = null;
+    if (harness === 'claude' && v?.type === 'user' && !(Array.isArray(v.message?.content) && v.message.content.some((c) => c?.type === 'tool_result'))) last = null;
+    if (harness === 'codex' && (v?.type === 'response_item' || v?.type === 'turn_context' || (v?.type === 'event_msg' && ['user_message', 'task_started'].includes(v.payload?.type)))) last = null;
   }
   return last;
 }

@@ -79,7 +79,7 @@ export async function startBody(env, { agent, brief: b, venue, venueKind, prefer
     body: `${body.harness}:${body.id}`, agent, venue, kind: pick.kind, ...(place ? { place: String(place).slice(0, 200) } : {}),
     // What it was started with of its rules (tool names, never the brief): for the owner's `loom runtime bodies`.
     ...(deny.length ? { deny: [...deny] } : {}), ...(guest ? { guest: true } : {}), ...(local ? { local: true } : {}),
-    harness: body.harness, model: pick.model, family: pick.family, ...(pick.account ? { account: pick.account } : {}), ...switchedOf(pick),
+    harness: body.harness, model: pick.model, family: pick.family, ...(pick.account ? { account: pick.account } : {}), ...(pick.accountKey ? { accountKey: pick.accountKey } : {}), ...switchedOf(pick),
     started: d.now().toISOString(), ...(body.slot ? { slot: body.slot } : {}), ...(body.house ? { house: body.house } : {}),
   };
   save(env, rec);
@@ -112,7 +112,7 @@ export async function resumeBody(env, { body: ref, slot, agent, venue, venueKind
   const next = {
     body: `${body.harness}:${body.id}`, agent: who, venue: where, kind: pick.kind, ...(rec?.place ? { place: rec.place } : {}),
     ...(deny.length ? { deny: [...deny] } : {}), ...(guest ? { guest: true } : {}), ...(here ? { local: true } : {}),
-    harness: body.harness, model: pick.model, family: pick.family, ...(pick.account ? { account: pick.account } : {}), ...switchedOf(pick),
+    harness: body.harness, model: pick.model, family: pick.family, ...(pick.account ? { account: pick.account } : {}), ...(pick.accountKey ? { accountKey: pick.accountKey } : {}), ...switchedOf(pick),
     started: d.now().toISOString(), slot: body.slot ?? slot, ...(ref ? { resumed: ref } : {}), ...(body.house ? { house: body.house } : {}),
   };
   save(env, next);

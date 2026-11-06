@@ -73,7 +73,7 @@ import { existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync,
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { accountsFrom } from './accounts.mjs';
+import { accountsFrom, accountsOfRecord } from './accounts.mjs';
 import { endBody, readBody, resumeBody, startBody } from './bodies.mjs';
 import { CoreError, coreFrom } from './core.mjs';
 import { HouseRunner, sweepTransfers } from './houserunner.mjs';
@@ -316,6 +316,10 @@ function noteHarness(env, agent, r, d) {
       all[agent] = { from: r.switched.from, to: r.harness, since: now.toISOString(), ...(r.switched.until ? { until: r.switched.until } : {}), ...(r.switched.account ? { account: r.switched.account } : {}), why: r.switched.why ?? '' };
       text = `${cap(agent)} is answering on ${harnessWords(r.harness)}: ${outWords({ harness: r.switched.from, account: r.switched.account, until: r.switched.until }, env, now.getTime())}`;
     } else if (fb && r.harness === fb.from) {
+      // Back only once none of its conversations is still on the other harness (a recent one with a body or a home
+      // there): conversations switch one by one, and the owner hears of the agent's switch once, each way.
+      const still = listConvs(env).some((x) => x.agent === agent && x.fallback && (x.body || x.home) && now.getTime() - Date.parse(x.last ?? 0) < DAY_MS);
+      if (still) return;
       delete all[agent];
       text = `${cap(agent)} is back on ${harnessWords(r.harness)}${fb.account ? `: ${fb.account} has room again` : ''}`;
     } else return;
@@ -335,18 +339,18 @@ async function roomOn(env, c, harness, d) {
   }
 }
 
-/** The account a body ran on, by its record's label and harness: every account of the agent's with that label. */
+/** The accounts a body ran on (accounts.mjs, accountsOfRecord): by its record's key, else its label. */
 function accountsOfBody(d, rec) {
   let l = null;
   try { l = d.accounts.kind === 'none' ? null : d.accounts.list(); } catch { l = null; }
-  return (l?.accounts ?? []).filter((a) => a.harness === rec.harness && (a.label ?? a.name) === rec.account && (a.agents ?? []).includes(rec.agent));
+  return l ? accountsOfRecord(l, rec) : [];
 }
 
 /**
  * Said plainly in the conversation, as its agent (the venue's own send), and to the owner: no model the agent may use
  * has room, or a refused turn's one retry was refused too. Once per run of it: `c.allOut` says it was said.
  */
-async function sayOut(env, cv, { out = [], retried = false, run, alert = true, cant = [] }, d) {
+async function sayOut(env, cv, { out = [], retried = false, alert = true, cant = [] }, d) {
   const now = d.now();
   const c = loadConv(env, cv);
   if (!c) return;
@@ -360,7 +364,7 @@ async function sayOut(env, cv, { out = [], retried = false, run, alert = true, c
     : `I can't answer right now: every model account I may use is out of quota (${list}).${back}`;
   const v = await venueOf(d, c.venue);
   if (posts(v)) {
-    try { await post(env, cv, `out-${randomBytes(6).toString('hex')}`, text, { run: run ?? newRun() }, { ...d, core: d.core }); } catch (e) { d.warn(`${cv}: couldn't say it's out of quota: ${e.message}`); }
+    try { await post(env, cv, `out-${randomBytes(6).toString('hex')}`, text, { run: newRun() }, { ...d, core: d.core }); } catch (e) { d.warn(`${cv}: couldn't say it's out of quota: ${e.message}`); }
   } else {
     // A venue that posts nothing (a wake): a note on the conversation, its reason as the audit text.
     try {
@@ -1319,7 +1323,8 @@ async function execute(env, op, d, mem) {
       c.runs = (c.runs ?? 0) + 1;
       openRun(c, run, op.msgs, now(), { ref: r.body, how: way.how === 'start' ? 'started' : 'resumed', ...(r.switched ? { switched: { from: r.switched.from, why: r.switched.why } } : {}), ...(way.home ? { home: true } : {}), ...(c.quota ? { retryOf: c.quota.run } : {}) });
       // What this run was given, sealed, for the one retry a refused turn gets (t-1907); the follow-ups it's fed join.
-      c.runMsgs = op.msgs.filter((x) => x.sealed && !isNote(x));
+      // Tagged with its run (a retry only ever re-runs that run's), and what can't be kept (no age) by key alone.
+      c.runMsgs = { run, msgs: op.msgs.filter((x) => x.sealed && !isNote(x)), lost: op.msgs.filter((x) => !x.sealed && !isNote(x)).map((x) => x.key) };
       delete c.quota;
       if (way.how === 'resume' && !way.home) delete c.slot;
       // Back home (its home slot resumed): the fallback's own slot is gone too, and the conversation's switch is over.
@@ -1327,14 +1332,15 @@ async function execute(env, op, d, mem) {
       // A switch away: the slot it left is its home (routeOf parked it), the switch kept for going back.
       if (r.switched) {
         const same = c.fallback?.from === r.switched.from && c.fallback?.to === r.harness;
-        c.fallback = { from: r.switched.from, to: r.harness, since: same ? c.fallback.since : new Date(now()).toISOString(), ...(r.switched.until ?? (same ? c.fallback.until : undefined) ? { until: r.switched.until ?? c.fallback.until } : {}) };
-      } else delete c.fallback;
+        const until = r.switched.until ?? (same ? c.fallback.until : undefined);
+        c.fallback = { from: r.switched.from, to: r.harness, since: same ? c.fallback.since : new Date(now()).toISOString(), ...(until ? { until } : {}) };
+      } else if (!c.home) delete c.fallback;
       delete c.allOut;
       delete c.starting;
       c.idleSince = undefined;
       c.fed = [];
       c.last = new Date(now()).toISOString();
-      outcome(c, [...keys, ...pending.map((p) => p.key)], { body: op.type === 'start' ? 'started' : 'resumed' }, now());
+      outcome(c, [...keys, ...pending.map((p) => p.key)], { body: way.how === 'start' ? 'started' : 'resumed' }, now());
       saveConv(env, c);
       return true;
     });
@@ -1429,7 +1435,7 @@ async function routeOf(env, c0, op, rules, d, cant = []) {
     const c = loadConv(env, op.cv);
     if (!c) return;
     if (!c.home || c.home.harness === h || !existsSync(homeFile(env, op.cv))) {
-      try { renameSync(slotFile(env, op.cv), homeFile(env, op.cv)); c.home = { ...op.slot }; } catch { delete c.home; }
+      try { renameSync(slotFile(env, op.cv), homeFile(env, op.cv)); c.home = { ...op.slot }; } catch { rmSync(homeFile(env, op.cv), { force: true }); delete c.home; }
     } else rmSync(slotFile(env, op.cv), { force: true });
     delete c.slot;
     saveConv(env, c);
@@ -1441,8 +1447,8 @@ async function routeOf(env, c0, op, rules, d, cant = []) {
 function quotaNotes(c0, way) {
   const out = [];
   const note = (text) => out.push({ key: `quota-${randomBytes(6).toString('hex')}`, note: true, kind: 'message', text });
-  if (way.home && c0.fallback) {
-    note(`(The runtime: this conversation went on without this session for a while: since ${c0.fallback.since}, it was answered on ${harnessWords(c0.fallback.to)}, because this harness's account was out of quota. Read conversation({id: "${c0.conversation}"}) (its digests) for what was said meanwhile before you answer.)`);
+  if (way.home) {
+    note(`(The runtime: this conversation went on without this session for a while: since ${c0.fallback?.since ?? c0.home?.saved ?? 'then'}, it was answered on ${harnessWords(c0.fallback?.to ?? 'another harness')}, because this harness's account was out of quota. Read conversation({id: "${c0.conversation}"}) (its digests) for what was said meanwhile before you answer.)`);
   } else if (way.how === 'start' && (way.parked || c0.home || way.avoid?.length)) {
     const from = c0.quota?.from ?? c0.home?.harness ?? way.avoid?.[0];
     note(`(The runtime: this conversation's session ran on ${harnessWords(from)}, whose account is out of quota for now, so you're answering on another harness. Its digests carry what was said: read them first.)`);
@@ -1482,16 +1488,21 @@ async function quotaOp(env, op, d) {
       if (saved.slot) c.slot = { ...saved.slot, rules: c.bodyRules ?? { guest: false } }; else delete c.slot;
     }
     const retried = !!r?.retryOf;
-    // The run's own messages and its follow-ups (the runtime's sealed copies), then what its inbox never took.
-    const again = retried ? [] : [...(c.runMsgs ?? []), ...(c.fed ?? [])];
+    // The run's own messages and its follow-ups (the runtime's sealed copies), then what its inbox never took. Only
+    // this run's (a conversation that moved on to another run keeps its own); one the runtime couldn't seal is failed,
+    // said so, never silently gone.
+    const mine = c.runMsgs?.run === op.run ? c.runMsgs : { msgs: [], lost: [] };
+    const again = retried ? [] : [...(mine.msgs ?? []), ...(c.fed ?? [])];
+    if (!retried && mine.lost?.length) outcome(c, mine.lost, { body: 'failed', reason: 'its provider refused the turn for a usage limit, and the runtime can\'t keep its text to run it again (no age)' }, d.now().getTime());
     requeue(c, [...again, ...saved.pending]);
-    if (!retried && rec) c.quota = { run: op.run, from: rec.harness, sent: r?.sent ?? 0, at: d.now().getTime() };
+    if (!retried && rec && again.length) c.quota = { run: op.run, from: rec.harness, sent: r?.sent ?? 0, at: d.now().getTime() };
     delete c.runMsgs;
     c.fed = [];
     saveConv(env, c);
-    return { retried, c: { ...c } };
+    return { retried, lost: !retried && !again.length && (mine.lost?.length ?? 0) > 0, c: { ...c } };
   });
   d.warn(`${op.cv}: ${op.body}'s turn was refused for a usage limit${r0?.retried ? ', and it was the retry: not run again' : ': run once more elsewhere'}`);
+  if (r0?.lost) d.warn(`${op.cv}: the refused turn's messages weren't sealed (no age): failed, not run again`);
   if (r0?.retried) {
     let out = [];
     try { await resolveFor(env, { agent: r0.c.agent, venue: r0.c.venue, venueKind: r0.c.kind, accounts: d.accounts, now: d.now(), fetchImpl: d.fetchImpl }); } catch (e) { out = e.out ?? []; }
@@ -1728,7 +1739,6 @@ export async function tick(env, o = {}, only, mem = new Map()) {
           if (!c.idleSince) { c.idleSince = now; dirty = true; }
           if (now - c.idleSince >= warm && !c.queue?.length) { c.starting = mark(now); ops.push({ cv: c.conversation, mark: c.starting.op, type: 'evict', body: c.body }); dirty = true; }
         }
-        if (st !== 'working' && closeRun(env, c, d, now)) dirty = true;
         if (st === 'ended' || st === 'unknown') { c.starting = mark(now); ops.push({ cv: c.conversation, mark: c.starting.op, type: 'retire', body: c.body }); dirty = true; }
       }
       // The hourly backstop's (t-1760, gone with t-1763): nothing reads it now.
@@ -1960,14 +1970,13 @@ export async function post(env, conversation, ref, text, { body, run, to } = {},
   const v = await venueOf(d, at.venue);
   // A scheduled venue with no send (a wake) posts nowhere: its message is only recorded.
   // A switched body's reply in a Comms thread says which harness it's on (its channel line's "ON CODEX", t-1907).
-  let onWord;
-  try { const b = body ? readBody(env, body) : null; if (b?.switched) onWord = harnessWords(b.harness); } catch { onWord = undefined; }
+  let rec = null;
+  try { rec = body ? readBody(env, body) : null; } catch { /* its body is gone: the turn says no model */ }
+  const onWord = rec?.switched ? harnessWords(rec.harness) : undefined;
   const once = () => (coreAdapted(v) && !dm ? coreSend(d, at, text, run ?? c.run, onWord) : sendOnce(d, pieceArgv(env, v.send), at, text));
   let r = (v?.send || (coreAdapted(v) && !dm)) ? await once() : !dm && recordsOnly(v) ? { ok: true, recorded: true } : { ok: false, answered: true, reason: `venue ${at.venue} declares no send` };
   // Said no for now: once more. Said no for good (permanent): never again.
   if (!r.ok && r.answered && !r.permanent && (v?.send || (coreAdapted(v) && !dm))) r = await once();
-  let rec = null;
-  try { rec = body ? readBody(env, body) : null; } catch { /* its body is gone: the turn says no model */ }
   const turn = {
     agent: c.agent, venue: at.venue, place: at.place, ...(dm?.label ? { label: dm.label } : {}), at: d.now().toISOString(), from: { kind: 'agent', id: c.agent }, kind: 'reply',
     run: run ?? c.run ?? newRun(), ...(rec?.model ? { model: rec.model } : {}), ...(rec?.harness ? { harness: rec.harness } : {}), outcome: r.ok ? 'answered' : 'failed',

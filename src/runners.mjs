@@ -157,10 +157,7 @@ export class ClaudeRunner {
     }
     const a = seen.rows.find((x) => x && x.id === body.id);
     if (!a || !['waiting', undefined].includes(a.status) || !/permission/i.test(String(a.waitingFor ?? ''))) return null;
-    const session = a.sessionId ?? this.job(body.id)?.sessionId;
-    const found = typeof session === 'string' && SESSION.test(session)
-      ? dirs(this.roots.projects).map((p) => join(this.roots.projects, p, `${session}.jsonl`)).filter((f) => existsSync(f)).sort((x, y) => statSync(y).mtimeMs - statSync(x).mtimeMs)[0]
-      : null;
+    const found = this.transcriptOf({ ...body, slot: { harness: 'claude', session: a.sessionId ?? this.job(body.id)?.sessionId } });
     return found ? lastToolUse(found) : { tool: '', what: '' };
   }
 
@@ -239,8 +236,7 @@ export class ClaudeRunner {
     // Refused for a usage limit: its transcript's last entry is Claude Code's API error (t-1907).
     const f = this.transcriptOf(body);
     const reading = this.usage(body);
-    // Or a failed turn whose account reads full: the same, in its numbers.
-    const refused = (f ? lastRefusal('claude', tailOf(f)) : null) ?? (out.failed && readsFull(reading) ? { code: 'rate_limit' } : null);
+    const refused = f ? lastRefusal('claude', tailOf(f)) : null;
     if (refused) {
       const until = refusedUntil(reading);
       Object.assign(out, { failed: true, limited: true, error: out.error ?? `its provider refused it (${refused.code})`, ...(until ? { resets: until } : {}) });
@@ -453,10 +449,9 @@ export class CodexRunner {
     const err = end.type === 'turn.failed' ? String(end.error?.message ?? end.error ?? '').slice(0, 200) : '';
     const out = { failed: end.type === 'turn.failed', worked, ...(err ? { error: err } : {}) };
     // Refused for a usage limit: its rollout's error event says so in codex_error_info (t-1907); exec's own events don't.
-    // Or a failed turn whose last token_count reads full (or names the limit it reached): the same, in its numbers.
+    // (A token_count naming rate_limit_reached_type is one too: codexRefusal reads it.)
     const reading = this.usage(body);
-    const refused = this.sessionFiles(this.slotOf(body)).keep.map((k) => lastRefusal('codex', tailOf(join(this.roots[k.root], k.rel)))).find(Boolean)
-      ?? (out.failed && (reading?.limited || readsFull(reading)) ? { code: 'usage_limit_exceeded' } : null);
+    const refused = this.sessionFiles(this.slotOf(body)).keep.map((k) => lastRefusal('codex', tailOf(join(this.roots[k.root], k.rel)))).find(Boolean);
     if (refused) {
       const until = refusedUntil(reading);
       Object.assign(out, { failed: true, limited: true, ...(out.error ? {} : { error: `its provider refused it (${refused.code})` }), ...(until ? { resets: until } : {}) });
@@ -478,9 +473,6 @@ export class CodexRunner {
   /** Every run dir: for listing. */
   ids() { try { return readdirSync(this.runsDir).filter((d) => statSync(join(this.runsDir, d)).isDirectory()); } catch { return []; } }
 }
-
-/** A reading with a window at or past full (accounts.mjs, FULL). */
-const readsFull = (r) => !!r?.windows && Object.values(r.windows).some((v) => typeof v === 'number' && v >= 0.97);
 
 /** Where Claude bodies' status lines keep their readings (statusline.mjs): the runner's and `usage statusline`'s. */
 export const usageDirOf = (env = process.env) => env.LOOM_RUNTIME_USAGE_DIR || join(env.HOME || homedir(), '.local', 'state', 'loom-runtime', 'usage');

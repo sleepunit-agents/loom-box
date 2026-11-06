@@ -90,9 +90,17 @@ test('holds: written to the state by account name, capped, and applied to the ac
   holdAccount(env, { name: 'gone', until: S - 5 }, NOW - 7200_000);
   const s = load(env);
   assert.equal(s.quotaHolds['owner:claude-abc'].until, S + 8 * 86400, 'at most 8 days');
-  // A hold with no reset: 30 minutes; one past its time is dropped as the next is written.
+  // A hold with no reset: 30 minutes, doubled for each one in a day (a condition that doesn't lift isn't tried every
+  // half hour); one past its time is dropped a day after, as the next is written.
   holdAccount(env, { name: 'x' }, NOW);
   assert.equal(load(env).quotaHolds.x.until, S + 1800);
+  holdAccount(env, { name: 'x' }, NOW + 1801_000);
+  assert.equal(load(env).quotaHolds.x.until, S + 1801 + 3600);
+  holdAccount(env, { name: 'x' }, NOW + 5402_000);
+  assert.equal(load(env).quotaHolds.x.until, S + 5402 + 7200);
+  holdAccount(env, { name: 'x', until: S + 9000 }, NOW + 5402_000);
+  assert.equal(load(env).quotaHolds.x.blind, undefined, 'a refusal with a reset ends the streak');
+  holdAccount(env, { name: 'y' }, NOW + 86400_000 * 2);
   assert.equal(load(env).quotaHolds.gone, undefined);
   // deriveAccounts applies a hold to its account, until its time.
   const st = { accountSalt: 'salt', agents: { art: {} }, boxes: { b1: { local: true, harnesses: { claude: { loggedIn: true, account: 'a' } }, usage: { claude: { box: { windows: { '7d': 0.5 }, checked: S } } } } } };
@@ -124,6 +132,11 @@ test('refusals are read from structured fields: Claude Code\'s API error entry, 
   // The refusal that ended a turn: the last, with only bookkeeping after it; real work after it means it didn't.
   const l = (...xs) => xs.map((x) => JSON.stringify(x)).join('\n');
   assert.deepEqual(lastRefusal('claude', l({ type: 'user' }, claudeError('rate_limit'), { type: 'system' })), { code: 'rate_limit' });
+  // A later turn (a prompt) that died with no output doesn't inherit the earlier turn's refusal; a tool result isn't a prompt.
+  assert.equal(lastRefusal('claude', l(claudeError('rate_limit'), { type: 'user', message: { content: 'next message' } })), null);
+  assert.deepEqual(lastRefusal('claude', l(claudeError('rate_limit'), { type: 'user', message: { content: [{ type: 'tool_result' }] } })), { code: 'rate_limit' });
+  const ce = { type: 'event_msg', payload: { type: 'error', codex_error_info: 'usage_limit_exceeded' } };
+  assert.equal(lastRefusal('codex', l(ce, { type: 'event_msg', payload: { type: 'user_message' } })), null);
   assert.equal(lastRefusal('claude', l(claudeError('rate_limit'), { type: 'assistant', message: { content: [] } })), null);
   // When it has room again: the full window's reset, else the soonest ahead (which one refused isn't known).
   assert.equal(refusedUntil({ windows: { '5h': 0.4, '7d': 0.99 }, resets: { '5h': S + 100, '7d': S + 9000 } }, S), S + 9000);
@@ -350,9 +363,11 @@ test('a Comms reply from a switched body says it\'s on Codex (its channel line);
   await w.send({ conversation: cv2, text: 'hello from claude', session: session('claude', cv2), key: Object.values(w.runner.envs).at(-1).LOOM_BODY_KEY }, { ...w.o, caller: { kind: 'agent', agent: 'art' }, onSend: () => {} });
   await new Promise((res) => setTimeout(res, 50));
   assert.equal(w.core.commsCalls.filter((b) => b.op === 'post').at(-1).on, undefined);
-  // The agent is back on Claude (a fresh body on it): its FYI, after the one for the switch.
+  // A fresh body on Claude, while the first conversation is still on Codex: the agent isn't "back" yet (one FYI each
+  // way per switch, not one per conversation's run).
   assert.equal(w.fyis(/answering on Codex/).length, 1);
-  assert.equal(w.fyis(/back on Claude/).length, 1);
+  assert.equal(w.fyis(/back on Claude/).length, 0);
+  assert.equal(readFallbacks(w.env).art.to, 'codex');
 });
 
 test('when nothing is out, delivery runs as before: the preferred harness, no switch, no FYI', async () => {
@@ -383,4 +398,44 @@ test('a body whose deny list Codex can\'t keep never falls back to Codex; with C
   await deliver(w2.env, w2.msg('dm:U1', 'hi'), w2.o);
   assert.match(w2.conv().body, /^codex:/);
   assert.deepEqual(w2.codex.denies[w2.conv().body.split(':')[1]], ['mcp__handoff']);
+});
+
+test('a refusal holds only the account the body ran on, not another of the same label', async () => {
+  const w = twoHarnesses();
+  // A second Claude Max login of the same owner: the same label, another account.
+  const max2 = { ...acct('max', 'anthropic'), name: 'max-2' };
+  w.accounts.list().accounts.push(max2);
+  await deliver(w.env, w.msg('dm:U1', 'hi'), w.o);
+  const c = w.conv();
+  assert.equal(readBody(w.env, c.body).accountKey, 'max');
+  w.runner.finish(c.body, { failed: true, limited: true, resets: Math.floor(w.clock.now().getTime() / 1000) + 600 });
+  await tick(w.env, w.o);
+  assert.deepEqual(w.accounts.holds.map((h) => h.name), ['max']);
+  // The other login has room: the retry avoids Claude for that turn, the next turn may use it.
+  assert.equal(hasRoom(max2, undefined, w.clock.now().getTime()), true);
+});
+
+test('a refused turn whose messages weren\'t sealed (no age) is failed and said, never silently dropped', async () => {
+  const w = twoHarnesses();
+  w.o.sealer = { seal: () => { throw new Error('no age'); }, open: () => { throw new Error('no age'); } };
+  const a = await deliver(w.env, w.msg('dm:U1', 'hi'), w.o);
+  assert.equal(a.body, 'started');
+  const c = w.conv();
+  const key = Object.keys(c.outcomes)[0];
+  w.runner.finish(c.body, { failed: true, limited: true });
+  await tick(w.env, w.o);
+  assert.equal(w.starts().length, 1, 'nothing to run again');
+  assert.match(w.conv().outcomes[key].reason, /can't keep its text to run it again \(no age\)/);
+});
+
+test('`models resolve --json --suppose-out` prints JSON (the flag never shadows the printer)', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const D = scratch('rt-cli-');
+  const env = { ...process.env, HOME: D, LOOM_BOX_HOME: join(D, 'state'), LOOM_BOX_DATA: join(D, 'data'), LOOM_RUNTIME_SCORECARDS: 'off' };
+  const cli = join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'cli.mjs');
+  for (const extra of [[], ['--suppose-out', 'claude']]) {
+    const r = spawnSync(process.execPath, [cli, 'models', 'resolve', '--agent', 'art', '--venue', 'slack', '--json', ...extra], { env, encoding: 'utf-8' });
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(JSON.parse(r.stdout).model, r.stdout);
+  }
 });

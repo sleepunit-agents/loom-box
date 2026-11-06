@@ -136,8 +136,10 @@ export function hasRoom(account, window, nowMs = Date.now()) {
   const u = account.usage ?? {};
   const nowS = Math.floor(nowMs / 1000);
   if (typeof u.held === 'number' && u.held > nowS) return false;
-  const general = Object.keys(u).filter((k) => windowOk(k) && !k.includes('_')).every((k) => !(windowNow(u, k, nowS) >= FULL));
-  return general && (!window || u[window] === undefined || !(windowNow(u, window, nowS) >= FULL));
+  // A reading that isn't a number is no room (fail closed, as `v < FULL` was).
+  const full = (k) => { const v = windowNow(u, k, nowS); return typeof v !== 'number' || v >= FULL; };
+  const general = Object.keys(u).filter((k) => windowOk(k) && !k.includes('_')).every((k) => !full(k));
+  return general && (!window || u[window] === undefined || !full(window));
 }
 
 /**
@@ -151,7 +153,8 @@ export function roomAt(account, window, nowMs = Date.now()) {
   const times = [];
   if (typeof u.held === 'number' && u.held > nowS) times.push(u.held);
   for (const k of Object.keys(u).filter((x) => windowOk(x) && (!x.includes('_') || x === window))) {
-    if (!(windowNow(u, k, nowS) >= FULL)) continue;
+    const v = windowNow(u, k, nowS);
+    if (typeof v === 'number' && v < FULL) continue;
     const r = u[`reset_${k}`];
     if (typeof r !== 'number') return null;
     times.push(r);
@@ -165,16 +168,22 @@ export const HOLD_DEFAULT_S = 30 * 60;
 export const HOLD_MAX_S = 8 * 86400;
 
 /**
- * Hold an account (by name), until `until` (seconds; HOLD_DEFAULT_S from now when it isn't known): its provider
- * refused it for a usage limit. Kept in state.json; holds past their time are dropped as each one is written.
+ * Hold an account (by name), until `until` (seconds): its provider refused it for a usage limit. When the refusal names
+ * no reset (an API key's credit gone has none), HOLD_DEFAULT_S, doubled for each hold of it with no reset in the last
+ * day: a condition that doesn't lift isn't tried again every half hour (each try sends a conversation home and back).
+ * Kept in state.json; holds past their time are dropped as each one is written, a streak's after a day.
  */
 export function holdAccount(env, { name, until, why }, nowMs = Date.now()) {
   if (typeof name !== 'string' || !name || name.length > 120) throw new AccountsError('hold which account');
   const nowS = Math.floor(nowMs / 1000);
-  const end = Math.min(nowS + HOLD_MAX_S, Number.isFinite(until) && until > nowS ? Math.floor(until) : nowS + HOLD_DEFAULT_S);
+  const known = Number.isFinite(until) && until > nowS;
   return update(env, (s) => {
-    const holds = Object.fromEntries(Object.entries(s.quotaHolds ?? {}).filter(([, h]) => Number.isFinite(h?.until) && h.until > nowS));
-    holds[name] = { until: Math.max(end, holds[name]?.until ?? 0), at: nowS, ...(typeof why === 'string' && why ? { why: why.slice(0, 200) } : {}) };
+    // Kept while held, and a day after (for the no-reset streak).
+    const holds = Object.fromEntries(Object.entries(s.quotaHolds ?? {}).filter(([, h]) => Number.isFinite(h?.until) && h.until + 86400 > nowS));
+    const prev = holds[name];
+    const streak = known ? 0 : (prev?.blind ?? 0) + (prev && prev.at > nowS - 86400 ? 1 : 0);
+    const end = Math.min(nowS + HOLD_MAX_S, known ? Math.floor(until) : nowS + HOLD_DEFAULT_S * 2 ** Math.min(streak, 12));
+    holds[name] = { until: Math.max(end, prev?.until > nowS ? prev.until : 0), at: nowS, ...(known ? {} : { blind: streak }), ...(typeof why === 'string' && why ? { why: why.slice(0, 200) } : {}) };
     s.quotaHolds = holds;
     return { name, until: holds[name].until };
   });
@@ -192,6 +201,15 @@ export function usageOf({ accounts }, nowMs = Date.now()) {
     return { account: a.name, provider: a.provider, label: a.label, windows, resets, ...(a.usage.checked ? { checked: a.usage.checked } : {}),
       ...(a.usage.held ? { held: a.usage.held, ...(a.usage.heldWhy ? { heldWhy: a.usage.heldWhy } : {}) } : {}), room: hasRoom(a, undefined, nowMs), ...(at ? { roomAt: at } : {}) };
   });
+}
+
+/**
+ * The accounts a body ran on: by its record's account key (accountKey, the resolver's), else (a record from before)
+ * every one of the agent's on that harness with its label.
+ */
+export function accountsOfRecord({ accounts }, rec) {
+  if (rec?.accountKey) return accounts.filter((a) => a.name === rec.accountKey);
+  return accounts.filter((a) => a.harness === rec?.harness && (a.label ?? a.name) === rec?.account && (a.agents ?? []).includes(rec?.agent));
 }
 
 /** An agent's accounts for a provider: the ones that may do its work, logged-in boxes' first, then its API keys. */

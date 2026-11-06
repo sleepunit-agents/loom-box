@@ -697,8 +697,8 @@ async function models(rest, env, json) {
   if (sub === 'set') return out(setModels(env, JSON.parse(await readStdin())));
   if (sub === 'resolve') {
     // --suppose-out <harness>: what it would pick if that harness's accounts were out (nothing is spent or held).
-    const out = flags(rest, '--suppose-out');
-    const accounts = out.length ? supposeOut(accountsFrom(env), out) : accountsFrom(env);
+    const gone = flags(rest, '--suppose-out');
+    const accounts = gone.length ? supposeOut(accountsFrom(env), gone) : accountsFrom(env);
     const r = await resolveFor(env, { agent: flag(rest, '--agent') ?? defaultAgent(env), venue: flag(rest, '--venue'), venueKind: flag(rest, '--venue-kind'), prefer: flags(rest, '--prefer'), accounts });
     if (json) return out(r);
     process.stdout.write(`${r.model} (${r.harness}, ${r.family})${r.account ? ` on ${r.account}` : ''}\n${r.why.map((w) => `  ${w}`).join('\n')}\n`);
