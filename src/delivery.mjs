@@ -831,7 +831,7 @@ function startBrief(c, msgs, run, sends, rules = { sections: [] }) {
     `You are ${c.agent}, in a conversation on ${c.venue}: ${c.label ?? c.place}.`,
     `Its conversation is ${c.conversation} and this run is ${run}: call identity with {conversation: "${c.conversation}", run: "${run}"} first.`,
     ...(c.runs > 0 ? [`It has history this session doesn't: read it with conversation({id: "${c.conversation}"}) (its digests) before you answer.`] : []),
-    `To have a relay's answer come back to this session, send it from your shell with \`loom runtime relay --to <agent> --say <text>\` (it proves this conversation is yours), or with the relay tool and conversation: "${c.conversation}" (it comes back here only while no less trusted conversation of yours is at work; otherwise to the relay conversation).`,
+    ...(returnHow(c) ? [returnHow(c)] : []),
     ...(sends ? [how] : []),
     ...(sends === 'post' ? [relay] : []),
   ].join('\n');
@@ -842,8 +842,17 @@ function startBrief(c, msgs, run, sends, rules = { sections: [] }) {
   return namesFiles(parts) ? parts : parts.map((p) => p.text).join('');
 }
 
+/**
+ * How a body has a relay's answer come back to it (relay.mjs, originOf), only where that can happen: never on venue
+ * relay (never a return address); a house body proves its conversation from its shell; a local body (no house token)
+ * has only the relay tool's unproven claim.
+ */
+const returnHow = (c) => (c.venue === 'relay' ? '' : c.local
+  ? `To have a relay's answer come back here, give the relay tool conversation: "${c.conversation}" (it comes back here only while no other conversation of yours is at work; otherwise to the relay conversation).`
+  : `To have a relay's answer come back here, relay from your shell with \`loom runtime relay --to <agent> --say <text>\` (it proves this conversation is yours). The relay tool with conversation: "${c.conversation}" brings it back only while no other conversation of yours is at work.`);
+
 /** What a resumed body is given: the new messages, and its new run. */
-const resumeBrief = (c, msgs, run) => `(${c.venue}: ${c.label ?? c.place}. This run is ${run}: call identity with {conversation: "${c.conversation}", run: "${run}"} again. A relay's answer comes back here when sent with \`loom runtime relay\` from your shell, or the relay tool with conversation: "${c.conversation}".)\n\n${render(msgs)}`;
+const resumeBrief = (c, msgs, run) => `(${c.venue}: ${c.label ?? c.place}. This run is ${run}: call identity with {conversation: "${c.conversation}", run: "${run}"} again.${returnHow(c) ? ` ${returnHow(c)}` : ''})\n\n${render(msgs)}`;
 
 function open(d, x, mem) {
   if (x.sealed) return d.sealer.open(Buffer.from(x.sealed, 'base64')).toString('utf-8');

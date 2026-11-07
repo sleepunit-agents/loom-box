@@ -21,7 +21,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync, appendFileSync, mkdirSync } from 'node:fs';
 import { delimiter, dirname, join } from 'node:path';
 import { coreFrom } from './core.mjs';
-import { COMMS_VENUE, deliver, deliveryDir, holdsRun, listConvs, loadConv } from './delivery.mjs';
+import { deliver, deliveryDir, holdsRun, listConvs, loadConv } from './delivery.mjs';
 import { readBody } from './bodies.mjs';
 import { GRANTS, KEY, householdOf, paired } from './grants.mjs';
 import { setting } from './piece.mjs';
@@ -34,6 +34,8 @@ export const WHY_MAX = 300;
 export const REPEAT_MS = 3_600_000;
 export const KEEP_MS = 30 * 86_400_000;
 export const HEADS_UP_DEFAULT = 8;
+/** How long an answer may still return to the conversation that asked; later, it goes to the relay conversation. */
+export const RETURN_MS = 6 * 3_600_000;
 const DAY_MS = 86_400_000;
 const WHERE = /^(?:(discord|slack):[#a-z0-9:._-]{1,80}|(?:loom:|conversation:)?cv-[0-9a-f]{12})$/;
 /** A `from` that names a conversation (loom:cv-…, conversation:cv-… or cv-…), never a platform place ending in one. */
@@ -121,19 +123,12 @@ export function relayText(entry, owner, thread) {
 /** A conversation whose current run is still open on its record: where a body may be calling from right now. */
 const atWork = (c) => !!c.run && !(c.runLog ?? []).findLast((r) => r.run === c.run)?.end;
 /**
- * Whose work a conversation is, for a return address no run proved: 0 a guest venue's (people the owner lets in),
- * 1 any other place people or agents talk to it (a channel, a DM, the relay venue), 2 the owner's own (a Comms
- * thread, where core delivers only from the owner, and a scheduled wake).
- */
-const trustOf = (c) => (c.bodyRules?.guest ? 0 : c.venue === COMMS_VENUE || c.kind === 'scheduled' ? 2 : 1);
-
-/**
  * The return address for this relay's answer: only the sender's own conversation, and in a house only one a body of
  * that house holds. Core names the caller's agent and house, never its conversation, so a named conversation is a
  * claim. It stands when the caller proves it holds that conversation's current run (`proof`: its LOOM_BODY_KEY and
  * harness session, as `send` takes them; the house CLI sends them). Unproven, it stands only when that conversation is
- * at work now and no body of a less trusted conversation of this agent is at work too (trustOf): a guest venue's body,
- * or one working for someone else, can't make an answer land in the owner's own conversation (t-1943). Unnamed, only
+ * at work now and no other conversation of this agent is at work too: a guest venue's body, or one working for
+ * someone else, can't make an answer land in the owner's own conversation (t-1943), nor the reverse. Unnamed, only
  * the one conversation at work in the caller's house, alone. Otherwise null: the answer goes to the relay
  * conversation, as before. A conversation that isn't the caller's agent's (or house's) is refused outright.
  */
@@ -152,8 +147,10 @@ export function originOf(env, caller, id, proof = {}) {
     // agent there would be recorded under the wrong peer and dodge that pair's ping-pong check.
     if (c.venue === 'relay' || !atWork(c)) return null;
     if (proof.key && holdsRun(env, id, proof)) return c;
-    const t = trustOf(c);
-    return working().some((o) => o.conversation !== c.conversation && trustOf(o) < t) ? null : c;
+    // Unproven, it's the asker's only when no other conversation of this agent is at work: any such body could be the
+    // one claiming it (a guest venue's into the owner's thread, or the owner's thread's into a guest venue, where the
+    // answer would be read by guests; a sibling thread; a DM with someone else).
+    return working().some((o) => o.conversation !== c.conversation) ? null : c;
   }
   if (!caller.house) return null;
   const candidates = working();
@@ -165,7 +162,7 @@ export function originOf(env, caller, id, proof = {}) {
  * approval spent only once the rest checked). `d`: {core, store, household, approvals: {installed(), spend(aid, target)}, now,
  * append, returnDelivery?} (returnDelivery: how an answer reaches the asking conversation; delivery.mjs's deliver, detached).
  */
-export async function relay(env, caller, args, d = depsOf(env)) {
+export async function relay(env, caller, args, d = depsOf(env), proof = {}) {
   const from = caller?.agent;
   if (!AGENT_NAME.test(from ?? '')) no('relay: the caller is an agent');
   const a = args && typeof args === 'object' && !Array.isArray(args) ? args : {};
@@ -182,7 +179,9 @@ export async function relay(env, caller, args, d = depsOf(env)) {
   const replyTo = a.reply_to === undefined || a.reply_to === '' ? '' : String(a.reply_to);
   const approval = a.approval === undefined || a.approval === '' ? '' : String(a.approval);
   const originId = a.conversation ?? where.match(FROM_CV)?.[1];
-  const origin = originOf(env, caller, originId, { key: a.key, session: a.session });
+  // Proof only ever comes from the piece API's request body (gates-api.mjs), never the tool's arguments: a run key in
+  // an MCP tool call would sit in core's record of it.
+  const origin = originOf(env, caller, originId, proof);
   const now = d.now();
   const log = readRelays(env, now);
   let thread = [];
@@ -219,7 +218,8 @@ export async function relay(env, caller, args, d = depsOf(env)) {
     // A peer can answer only a recorded request. Its sender chose the return address;
     // the responder cannot supply or replace it. Old/missing origins use the relay venue.
     original = replyTo ? log.find((r) => r.id === replyTo) : null;
-    const back = original?.origin ? loadConv(env, original.origin) : null;
+    const fresh = original?.origin && now - original.at < RETURN_MS;
+    const back = fresh ? loadConv(env, original.origin) : null;
     returnTo = back?.agent === to ? back : null;
     const message = {
       id: entry.id, agent: to, venue: 'relay', place: from, label: `Relay from ${cap(from)}`,
@@ -235,7 +235,7 @@ export async function relay(env, caller, args, d = depsOf(env)) {
   const { say: _words, ...kept } = entry;
   d.append({ ...kept, conversation: out?.conversation ?? null });
   const body = out?.body === 'failed' ? `, but its body didn't start (${out.reason ?? 'no reason given'}); the runtime tries again` : out?.body === 'queued' ? ': it waits for a body of theirs' : '';
-  const routing = returnTo ? ` Returned to ${returnTo.conversation}.` : original?.origin ? ' Original conversation is no longer available; delivered to the relay conversation instead.' : origin ? ` Replies return to ${origin.conversation}.` : originId !== undefined || caller.house ? ` Replies will use the relay conversation: ${originId !== undefined ? `${originId} couldn't be confirmed as the one asking (prove it by relaying with \`loom runtime relay\` from that body's shell)` : 'no single conversation of yours is at work (name yours with conversation)'}.` : '';
+  const routing = returnTo ? ` Returned to ${out?.conversation ?? returnTo.conversation}.` : original?.origin ? ` ${original.origin} ${now - original.at < RETURN_MS ? 'is no longer kept' : 'asked over 6 hours ago'}; delivered to the relay conversation instead.` : origin ? ` Replies return to ${origin.conversation}.` : originId !== undefined || caller.house ? ` Replies will use the relay conversation: ${originId !== undefined ? `${originId} couldn't be confirmed as the one asking (another conversation of yours is at work, or it isn't; from a house body's shell, \`loom runtime relay\` proves its own)` : 'no single conversation of yours is at work (name yours with conversation)'}.` : '';
   return { text: `${entry.id}: ${to} has it${body}.${routing}` };
 }
 

@@ -10,7 +10,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { deliver, deliveryDir, holdsRun, loadConv, tick } from '../src/delivery.mjs';
 import { GRANTS, KEY, setRelay } from '../src/grants.mjs';
-import { approvalsInstalled, appendRelay, readRelays, relay, relayNotices, relayText, relayTool, relaysOf, TOOL } from '../src/relay.mjs';
+import { approvalsInstalled, appendRelay, readRelays, relay, relayNotices, relayText, relayTool, relaysOf, RETURN_MS, TOOL } from '../src/relay.mjs';
 import { originOf } from '../src/relay.mjs';
 import { runFor } from '../src/gates-api.mjs';
 import { memStore } from '../src/store.mjs';
@@ -292,7 +292,8 @@ test('implicit origin requires exactly one active conversation hosted in the cal
   assert.equal(originOf(w.env, caller).conversation, first.conversation);
   const second = await deliver(w.env, w.msg('dm:second', 'second'), w.o); host(second.conversation);
   assert.equal(originOf(w.env, caller), null, 'never chooses the newest conversation');
-  assert.equal(originOf(w.env, caller, first.conversation).conversation, first.conversation);
+  // Named but unproven, with a sibling as trusted at work, it isn't taken either (round 2 of the cold review).
+  assert.equal(originOf(w.env, caller, first.conversation), null);
 });
 
 test('returning replies to Comms still pauses a near-identical relay ping-pong loop', async () => {
@@ -307,7 +308,7 @@ test('returning replies to Comms still pauses a near-identical relay ping-pong l
     // Each side relays from its thread's body, proving it (the house CLI's key and session).
     const c = loadConv(w.env, origins[from]);
     const proof = c.body ? { key: w.runner.envs[c.body.split(':')[1]].LOOM_BODY_KEY, session: w.sessionFor(origins[from]) } : {};
-    const result = await relay(w.env, { agent: from }, { to, say: `Thanks, got it! (${i})`, conversation: origins[from], ...proof, ...(last ? { reply_to: last } : {}) }, d);
+    const result = await relay(w.env, { agent: from }, { to, say: `Thanks, got it! (${i})`, conversation: origins[from], ...(last ? { reply_to: last } : {}) }, d, proof);
     last = result.text.slice(0, 10);
     // The sender's turn ends after it relays (it was at work when it asked); the answer then resumes it.
     const sent = loadConv(w.env, origins[from]);
@@ -351,7 +352,7 @@ describe('the return address is the asker\'s, proved or unambiguous', () => {
     assert.equal(originOf(w.env, { agent: 'art' }, owner, { key: keyOf(w, guest), session: w.sessionFor(owner) }), null, 'another conversation\'s key proves nothing');
     assert.equal(originOf(w.env, { agent: 'art' }, owner, { key: keyOf(w, owner), session: 'someone-else' }), null, 'nor the right key from another session');
     assert.equal(originOf(w.env, { agent: 'art' }, owner, { key: keyOf(w, owner), session: w.sessionFor(owner) })?.conversation, owner);
-    const q = await relay(w.env, { agent: 'art' }, { to: 'mark', say: 'review this', conversation: owner, key: keyOf(w, owner), session: w.sessionFor(owner) }, d);
+    const q = await relay(w.env, { agent: 'art' }, { to: 'mark', say: 'review this', conversation: owner }, d, { key: keyOf(w, owner), session: w.sessionFor(owner) });
     assert.match(q.text, new RegExp(`Replies return to ${owner}`));
     assert.equal(JSON.stringify(readRelays(w.env, w.clock.now().getTime())).includes(keyOf(w, owner)), false, 'the key is never kept');
     await relay(w.env, { agent: 'mark' }, { to: 'art', say: 'reviewed', reply_to: q.text.slice(0, 10) }, d);
@@ -361,10 +362,11 @@ describe('the return address is the asker\'s, proved or unambiguous', () => {
     assert.equal(loadConv(w.env, owner).queue.at(-1).owner, undefined);
   });
 
-  test('a guest venue\'s own conversation is a fine return address for its own asks; a finished one is not', async () => {
+  test('a guest venue\'s own conversation is a return address once proved; a finished one never', async () => {
     const { w } = relayWorld();
     const { owner, guest } = await twoAtWork(w);
-    assert.equal(originOf(w.env, { agent: 'art' }, guest)?.conversation, guest);
+    assert.equal(originOf(w.env, { agent: 'art' }, guest), null, 'two at work: neither, unproven');
+    assert.equal(originOf(w.env, { agent: 'art' }, guest, { key: keyOf(w, guest), session: w.sessionFor(guest) })?.conversation, guest);
     const c = JSON.parse(readFileSync(convFile(w, owner))); c.runLog.at(-1).end = Date.now(); writeFileSync(convFile(w, owner), JSON.stringify(c));
     asGuest(w, owner);
     assert.equal(originOf(w.env, { agent: 'art' }, owner), null, 'no body is at work there to have asked');
@@ -405,7 +407,8 @@ describe('round 1 of the cold review: what the answer\'s sender can\'t choose', 
     const asked = (await deliver(w.env, w.msg('th:asked', 'ask mark', { venue: 'loom', source: 'loom' }), w.o)).conversation;
     const other = (await deliver(w.env, w.msg('th:other', 'something else', { venue: 'loom', source: 'loom' }), w.o)).conversation;
     const marks = (await deliver(w.env, w.msg('th:marks', 'hi', { agent: 'mark', venue: 'loom', source: 'loom' }), w.o)).conversation;
-    const q = await relay(w.env, { agent: 'art' }, { to: 'mark', say: 'question', conversation: asked }, d);
+    const proof = { key: w.runner.envs[loadConv(w.env, asked).body.split(':')[1]].LOOM_BODY_KEY, session: w.sessionFor(asked) };
+    const q = await relay(w.env, { agent: 'art' }, { to: 'mark', say: 'question', conversation: asked }, d, proof);
     const id = q.text.slice(0, 10);
     for (const steer of [{ conversation: other }, { from: `loom:${other}` }, { from: other }]) {
       await assert.rejects(relay(w.env, { agent: 'mark' }, { to: 'art', say: `answer ${JSON.stringify(steer)}`, reply_to: id, ...steer }, d), /return conversation must be your own/);
@@ -467,5 +470,71 @@ describe('round 1 of the cold review: what the answer\'s sender can\'t choose', 
     });
     assert.equal(out.status, 2);
     assert.match(out.stderr, /this body's own/);
+  });
+});
+
+describe('round 2 of the cold review', () => {
+  const convFile = (w, cv) => join(deliveryDir(w.env), 'conversations', `${cv}.json`);
+  const edit = (w, cv, f) => { const c = JSON.parse(readFileSync(convFile(w, cv))); f(c); writeFileSync(convFile(w, cv), JSON.stringify(c)); };
+  const keyOf = (w, cv) => w.runner.envs[loadConv(w.env, cv).body.split(':')[1]].LOOM_BODY_KEY;
+
+  test('a guest venue\'s body can\'t claim an ordinary conversation either (a DM with a person)', async () => {
+    const { w } = relayWorld();
+    const dm = (await deliver(w.env, w.msg('dm:robin', 'hi'), w.o)).conversation;
+    const guest = (await deliver(w.env, w.msg('channel:guests', 'hi'), w.o)).conversation;
+    edit(w, guest, (c) => { c.bodyRules = { guest: true }; });
+    assert.equal(originOf(w.env, { agent: 'art' }, dm), null);
+    assert.equal(originOf(w.env, { agent: 'art' }, guest), null, 'nor the reverse: the DM\'s body can\'t send an answer to the guests');
+  });
+
+  test('two conversations as trusted at work: neither can be claimed unproven', async () => {
+    const { w } = relayWorld();
+    const a = (await deliver(w.env, w.msg('th:a', 'one', { venue: 'loom', source: 'loom' }), w.o)).conversation;
+    await deliver(w.env, w.msg('th:b', 'two', { venue: 'loom', source: 'loom' }), w.o);
+    assert.equal(originOf(w.env, { agent: 'art' }, a), null);
+    assert.equal(originOf(w.env, { agent: 'art' }, a, { key: keyOf(w, a), session: w.sessionFor(a) })?.conversation, a, 'proved, it stands');
+  });
+
+  test('a key with no session the runner can name proves nothing (fail closed)', async () => {
+    const { w } = relayWorld();
+    const a = (await deliver(w.env, w.msg('th:a', 'one', { venue: 'loom', source: 'loom' }), w.o)).conversation;
+    await deliver(w.env, w.msg('th:b', 'two', { venue: 'loom', source: 'loom' }), w.o);
+    const key = keyOf(w, a);
+    const slotOf = w.runner.slotOf;
+    w.runner.slotOf = () => null;
+    try { assert.equal(holdsRun(w.env, a, { key, session: 'anything-1' }), false); assert.equal(holdsRun(w.env, a, { key }), false); } finally { w.runner.slotOf = slotOf; }
+  });
+
+  test('the MCP tool never takes proof from its arguments', async () => {
+    const { w, d } = relayWorld();
+    const a = (await deliver(w.env, w.msg('th:a', 'one', { venue: 'loom', source: 'loom' }), w.o)).conversation;
+    await deliver(w.env, w.msg('th:b', 'two', { venue: 'loom', source: 'loom' }), w.o);
+    const r = await relayTool(w.env, ['--agent', 'art'], JSON.stringify({ to: 'mark', say: 'hi', conversation: a, key: keyOf(w, a), session: w.sessionFor(a) }), d);
+    assert.match(r.answer.text, /couldn't be confirmed/);
+  });
+
+  test('an answer more than 6 hours after the ask goes to the relay conversation, and says why', async () => {
+    const { w, d, delivered } = relayWorld();
+    const a = (await deliver(w.env, w.msg('th:a', 'ask', { venue: 'loom', source: 'loom' }), w.o)).conversation;
+    const q = await relay(w.env, { agent: 'art' }, { to: 'mark', say: 'q', conversation: a }, d);
+    w.clock.advance(RETURN_MS + 1000);
+    const r = await relay(w.env, { agent: 'mark' }, { to: 'art', say: 'late answer', reply_to: q.text.slice(0, 10) }, d);
+    assert.match(r.text, /asked over 6 hours ago/);
+    assert.equal(delivered.at(-1).venue, 'relay');
+  });
+
+  test('an answer still needs the pairing, or an approval', async () => {
+    const { w, d } = relayWorld({ pairs: { art: ['mark'] }, approvals: false });
+    const q = await relay(w.env, { agent: 'art' }, { to: 'mark', say: 'q' }, d);
+    await assert.rejects(relay(w.env, { agent: 'mark' }, { to: 'art', say: 'a', reply_to: q.text.slice(0, 10) }, d), /doesn't pair mark with art/);
+  });
+
+  test('briefs offer the return only where it can happen', async () => {
+    const { w, d } = relayWorld();
+    await deliver(w.env, w.msg('th:a', 'ask', { venue: 'loom', source: 'loom' }), w.o);
+    assert.match(plain(w.log.find((l) => l[0] === 'start')[2] ?? ''), /loom runtime relay --to/);
+    await relay(w.env, { agent: 'fez' }, { to: 'art', say: 'hello' }, d).catch(() => {});
+    const relayStart = w.log.filter((l) => l[0] === 'start').map((l) => plain(l[2] ?? '')).find((t) => /on relay/.test(t));
+    if (relayStart) assert.doesNotMatch(relayStart, /come back here/);
   });
 });

@@ -318,14 +318,16 @@ Include your current `conversation` in a request. The runtime checks it belongs 
 caller, is held by a body in that house; it records the conversation and current run, never the message text.
 Core names a caller's agent and house, never its conversation, so a named conversation is a claim: it stands when the
 caller proves it holds that conversation's current run (its `LOOM_BODY_KEY` and harness session, as `send` takes
-them, and only while that run is at work and its session is known; `loom runtime relay` from a body's shell names
-`LOOM_BODY_CONVERSATION`, refuses any other, and sends both in the call's body, never argv), or, unproven (the MCP tool), only while that conversation is at work and no less trusted conversation of
-the agent is (a guest venue's below any other place, the owner's Comms threads and scheduled wakes above). So a guest
-venue's body, or one working for someone else, can't make an answer land in the owner's own thread (t-1943);
+them, and only while that run is at work and its session is known; `loom runtime relay` from a house body's shell, where
+`LOOM_BODY_CONVERSATION` is set, names it, refuses any other, and sends both in the call's body, never argv; the MCP
+tool never takes proof), or, unproven (the MCP tool), only while that conversation is at work and no other conversation of the
+agent is (any such body could be the one claiming it). So a guest
+venue's body, or one working for someone else, can't make an answer land in the owner's own thread (t-1943), nor
+the owner's thread's body one in a guest venue;
 otherwise the answer goes to the relay conversation, and the relay's answer says why. A relay conversation is never
 a return address. The origin's run is recorded for the trace, not checked: an answer that arrives after that run ended
-still goes to the conversation (it waits, `untilIdle`, until no turn is under way, then resumes it); only a
-conversation the runtime no longer keeps falls back. A peer ping-pong into a thread pauses that thread, the owner's
+still goes to the conversation (it waits, `untilIdle`, until no turn is under way, then resumes its session), within
+6 hours of the ask (`RETURN_MS`); later, or when the runtime no longer keeps the conversation, it falls back. A peer ping-pong into a thread pauses that thread, the owner's
 own messages there included, until the owner resumes it.
 A reply with `reply_to` goes back to that recorded conversation through normal delivery: a working body finishes its
 current turn before the answer is delivered, or its saved session resumes. The peer cannot replace this destination. When no conversation is specified, only
