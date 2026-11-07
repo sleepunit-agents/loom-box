@@ -376,6 +376,40 @@ decides whether the agent may have it (`loom secrets may <agent> <name>`), and h
 runtime's own process. No environment flag unlocks reading. `loom runtime secrets-map --json | loom secrets policy
 houses-import` moves the old map's answers into the secrets policy.
 
+### On whose behalf (t-1943)
+
+The owner's standing rules and his yes cover work done for him; work an agent does for anyone else needs a grant he
+set for that person, or it asks (the approvals piece). Who a body acts for is the runtime's word, since it hears every
+message a body does (`src/principal.mjs`):
+
+- Each conversation keeps `actsFor` as messages join its queue: whether its owner spoke (a member who owns the agent,
+  `owners.mjs`), the other people who did, and whether anything it can't place steered it (a relay from another agent,
+  an unnamed sender, a wake with no word from the clock, or history from before this was kept, in any venue). It only
+  grows.
+- Its principal: one other person, theirs; several, or anything unplaced, unknown; only the owner, the owner's;
+  nothing heard, unknown. **Never the owner by default.**
+- `loom runtime principal [--conversation cv]`, from a body: proven as `send` is (its run's key and session, as its own
+  agent), it answers `{for, owner, people, statement}`. The statement is signed with a key only the runtime holds
+  (`delivery/principal.key`) and lasts 5 minutes; the run's key never goes to a piece. A house's `piece-call` adds it,
+  to every approvals and clock call from a body in a conversation, when the runtime answers, after taking off any the
+  caller typed; with none, the piece treats the body as acting for someone it can't name. The runtime's own daily
+  review wake is the owner's schedule. The runtime's own relay spends a relay approval with `--as` and
+  no principal (it has no conversation to ask about): approvals then checks everything but whom it was for.
+- `loom runtime principal --verify` (stdin) checks one, on loom's machine: what approvals and the clock run.
+- `loom runtime principal --wake --agent a --place p --id <delivery id> --for owner|<slug>|-`: the clock's word on whom
+  that firing wake is for, given just before it delivers it, and taken as that delivery's message is queued (a word for
+  a wake that never arrives is never another's). A wake set by a body working for Loren stays Loren's.
+- `--verify` answers `{ok, agent, conversation, for, owner, people, exp}` (`owner` is true or false; `for` is a slug or
+  null), and refuses a statement whose conversation has heard someone new since. The piece that reads it binds it to
+  its caller: `agent` must be the calling agent.
+- **Unknown is for good.** A conversation that ran before this was kept (in any venue: its body resumes that session or
+  its digests), or heard a relay or a sender no one names, asks from then on; messages already waiting in its queue
+  count as heard. The owner can vouch for one on loom's machine: `loom runtime principal --reset --conversation cv`
+  sets aside what it heard before (his Comms threads and lanes from before this change, say).
+- **The limit**, as for `send` (Threat model): an agent's bodies share its house, so one that sets out to pose as a
+  sibling can read the sibling's run key and session and get its statement. On loom's machine, the signing key is the
+  runtime's account's, which a local body shares.
+
 ## Model choice
 
 ```bash
@@ -514,6 +548,7 @@ A box never reads loom's stores, and loom never reaches into a box. The box poll
 | `up`, `down`, `list` | owner, agent | ask for, stop and see houses (an agent only its own) |
 | `body-sync` | an agent's house | its body host's report in; bodies to start, stop and feed out (its own agent's, its own house's only) |
 | `send` | an agent | a body's message out, in its own agent's conversation, with its run's `LOOM_BODY_KEY` |
+| `principal` | an agent | on whose behalf the body holding a conversation acts, proven as `send` is: a signed statement for approvals and the clock (t-1943) |
 | `add-box`, `revoke-box`, `may-host`, `set-primary`, `set-agent` | owner | enrollment and config |
 | `login-report` | a box | how an owner's login on it is going: the CLI's link and device code, then done or failed |
 | `login-start`, `login-code`, `login-cancel` | owner | log a box in with the CLI's own login; the pasted code goes to the box once |
@@ -530,7 +565,7 @@ A box never reads loom's stores, and loom never reaches into a box. The box poll
 - **A body host's boot key is shown to nobody.** A house's task carries it (`--host-key`), and only the box that claims the house gets it whole: `list`, `down` and the page show `--host-key …`. It's good for one use anyway, traded on the host's first sync.
 - **A body can't fetch secrets.** A house's token is an ordinary `agent:<name>` token. It reaches MCP and the CLI as that agent, and the secrets piece won't hand a value to a body. Only the box fetched them, for the house.
 - **A box only runs containers.** The agent's code runs inside its container, which is rootless podman with no host home, no box env and only its own dirs and secrets. The agent's Containerfile builds under podman too. So a house can't read the box's credential, the box's files, or (on loom's own machine) the household. Nested containers widen what the container may do inside its own user namespace, which is why the owner has to allow them per agent.
-- **Inside one house, a body's run key and session only keep an agent's own bodies apart, not walled off.** A house's bodies are one agent, one uid, in one container. Each conversation's key is a 0600 file only that uid can read, and a body names its harness session when it sends. The runtime refuses a send whose session isn't the one holding the conversation, so a body's mistake (naming a sibling's conversation) is refused even though it can read that key file. But a body that sets out to pose as a sibling can: it can read the sibling's key file and the sibling's session id (the harness's job files), and set `CLAUDE_CODE_SESSION_ID` itself, as it could already read any process's environment in its house. This is the same agent's own conversations, never another agent's: a send is checked against the house's agent token first. A harness whose runner reports no session (Codex today: each body is its own process, with its own `LOOM_BODY_KEY`) is checked by its key alone.
+- **Inside one house, a body's run key and session only keep an agent's own bodies apart, not walled off.** A house's bodies are one agent, one uid, in one container. Each conversation's key is a 0600 file only that uid can read, and a body names its harness session when it sends. The runtime refuses a send whose session isn't the one holding the conversation, so a body's mistake (naming a sibling's conversation) is refused even though it can read that key file. But a body that sets out to pose as a sibling can: it can read the sibling's key file and the sibling's session id (the harness's job files), and set `CLAUDE_CODE_SESSION_ID` itself, as it could already read any process's environment in its house. This is the same agent's own conversations, never another agent's: a send is checked against the house's agent token first. The same holds for `principal`: such a body can get a sibling conversation's statement, and with it act as that conversation's principal (the owner's, if the sibling is his) toward approvals and the clock; isolating bodies within a house is its own work. A harness whose runner reports no session (Codex today: each body is its own process, with its own `LOOM_BODY_KEY`) is checked by its key alone.
 - **Revocation doesn't fail open.** A revoke that fails (loom's token file busy) is queued and retried on every box poll until it goes, and a revoked box's name can't be reused until its old credential is gone.
 - State on the control plane: `~/.config/loom-box/state.json` (0600, in a 0700 dir; `LOOM_BOX_HOME` moves it), and each service's saved state as its own gzipped tarball in `blobs/` beside it (up to 48 MB, moved in parts; only its size and hash are in state.json). On a box: `box.json` and `credential` (0600) in the same dir, and repo mirrors and house dirs under `~/.local/share/loom-box` (`LOOM_BOX_DATA`).
 

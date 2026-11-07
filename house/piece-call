@@ -16,12 +16,21 @@ alone, like the local command).
 The one copy every house runs (loom-box house/). sleepunit-agents/art keeps
 bin/piece-call, the same program, for loom's own machine.
 
+For approvals and clock, a body in a conversation (LOOM_BODY_CONVERSATION) also
+sends `--principal <statement>` (any it typed is taken off first): on whose behalf it acts, signed by the runtime
+(`loom-runtime principal`, t-1943; PIECE_CALL_RUNTIME names another program,
+for tests). Without one the piece treats the body as acting for someone it
+can't name, never the owner.
+
 Exit 1 with loom's words when the call itself fails (refused, unreachable).
 """
 import base64
 import gzip
 import json
 import os
+import re
+import shutil
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -45,10 +54,56 @@ def inline_file(piece, argv):
     return argv[:i] + argv[i + 2:] + [text.rstrip("\n")]
 
 
+# The pieces that decide by on whose behalf a body acts (t-1943): approvals (whose standing rules and grants apply)
+# and the clock (whose a wake is). They get a signed statement of this body's principal, from the runtime.
+PRINCIPAL_PIECES = {"approvals", "clock"}
+
+
+def principal_statement():
+    """This body's principal, as the runtime signs it (`loom-runtime principal`: its conversation, proven with its run's
+    key and session): the statement, or None. The run's key stays with the runtime; the piece checks the statement on
+    loom's machine. Anything that fails gives None, and the piece then treats the body as acting for someone it can't
+    name (never the owner)."""
+    cv = os.environ.get("LOOM_BODY_CONVERSATION", "")
+    if not re.fullmatch(r"cv-[0-9a-f]{12}", cv):
+        return None
+    exe = os.environ.get("PIECE_CALL_RUNTIME") or shutil.which("loom-runtime")
+    if not exe:
+        return None
+    try:
+        r = subprocess.run([exe, "principal", "--conversation", cv], capture_output=True, text=True, timeout=30,
+                           stdin=subprocess.DEVNULL)
+        out = json.loads(r.stdout or "{}")
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    st = out.get("statement") if isinstance(out, dict) and out.get("ok") is True else None
+    return st if isinstance(st, str) and 0 < len(st) <= 8000 and not re.search(r"\s", st) else None
+
+
+def with_principal(piece, argv):
+    """argv with the runtime's `--principal <statement>` appended, for a piece that decides by it. Any the caller typed
+    (`--principal X`, `--principal=X`) is taken off first: the piece sees the runtime's, or none (someone it can't name)."""
+    if piece not in PRINCIPAL_PIECES:
+        return argv
+    clean, i = [], 0
+    while i < len(argv):
+        if argv[i] == "--principal":
+            i += 2
+            continue
+        if argv[i].startswith("--principal="):
+            i += 1
+            continue
+        clean.append(argv[i])
+        i += 1
+    st = principal_statement()
+    return clean + ["--principal", st] if st else clean
+
+
 def main():
     if len(sys.argv) < 2:
         sys.exit(__doc__.strip().splitlines()[0] + "\nusage: piece-call <piece> <args...>")
     piece, argv = sys.argv[1], inline_file(sys.argv[1], sys.argv[2:])
+    argv = with_principal(piece, argv) if argv else argv
     url, tokfile = os.environ.get("LOOM_URL"), os.environ.get("LOOM_TOKEN_FILE")
     if not tokfile and os.environ.get("HOUSE_ID") and os.path.exists("/run/secrets/loom-token"):
         tokfile = "/run/secrets/loom-token"  # a house's own token, where loom-box put it

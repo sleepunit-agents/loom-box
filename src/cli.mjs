@@ -54,6 +54,11 @@
 //   loom runtime send --conversation <cv> --text <text|->              a body's message out, in its venue: {accepted, ref}
 //        [--person <slug> --via <venue>]                               … or one DM to a person there, through its adapter
 //                                                                        at once; a failed post comes back through its inbox
+//   loom runtime principal [--conversation <cv>]                       on whose behalf this body acts (t-1943): {for, owner,
+//                                                                        people, statement}; the statement is what a piece checks
+//   loom runtime principal --verify < statement                        loom's machine: a statement checked (and still true), {ok, agent, for, owner, …}
+//   loom runtime principal --reset --conversation <cv>                 loom's machine, the owner's: what it heard before is set aside
+//   loom runtime principal --wake --agent a --place p --id <delivery id> --for owner|<slug>|-   loom's machine (the clock): who that firing wake is for
 //   loom runtime deliver tick [--conversation <cv>] | deliver run [--every <ms>] | deliver list [--json]
 //   loom runtime deliver resume|dismiss <cv>   a conversation paused as a loop (loops.mjs): start what waited, or drop it
 //   loom runtime body-host [--piece <name>] --host-key <boot key>   in an agent's house, as its task: the bodies delivery asks for
@@ -481,6 +486,47 @@ async function main(argv, env) {
       }, { conversation, ref: r.ref, text: msg.text, person, via }) : r;
       out(answer);
       if (!answer.ok) process.exitCode = 1;
+      return;
+    }
+    case 'principal': {
+      // On whose behalf a body acts (principal.mjs, t-1943). --verify and --wake read and write this machine's runtime
+      // state only, never through the piece API: a house has no signing key (so nothing verifies there) and can't
+      // hand over a wake's principal (only the clock, here, does).
+      const { bodyPrincipal, handOverWake, verifyStatement, resetPrincipal } = await import('./delivery.mjs');
+      const { AGENT_NAME } = await import('./state.mjs');
+      if (rest.includes('--verify')) {
+        const r = verifyStatement(env, (await readStdin()).trim());
+        out(r);
+        if (!r.ok) process.exitCode = 1;
+        return;
+      }
+      if (rest.includes('--reset')) {
+        // The owner's, on loom's machine: this conversation is his from here (it ran before the runtime kept who
+        // steered it, or heard someone he vouches for). Never through the piece API.
+        if (env.LOOM_URL && env.LOOM_TOKEN_FILE && env.HOUSE_ID) throw new Fail('principal --reset is the owner\'s, on loom\'s machine');
+        const r = resetPrincipal(env, flag(rest, '--conversation'));
+        out(r);
+        if (!r.ok) process.exitCode = 1;
+        return;
+      }
+      if (rest.includes('--wake')) {
+        const agent = flag(rest, '--agent');
+        const place = flag(rest, '--place');
+        const who = flag(rest, '--for');
+        const id = flag(rest, '--id');
+        if (!AGENT_NAME.test(agent ?? '') || typeof place !== 'string' || !place || place.length > 200) throw new Fail('principal --wake --agent <agent> --place <place> --id <delivery id> --for owner|<slug>|-');
+        try { handOverWake(env, { agent, place, id, for: who }); } catch (e) { throw new Fail(e.message); }
+        out({ ok: true });
+        return;
+      }
+      // A body asking: in a house through the piece API (its house's token), else here; with its run's key and session.
+      const conversation = flag(rest, '--conversation') || env.LOOM_BODY_CONVERSATION;
+      const session = env.CLAUDE_CODE_SESSION_ID || env.CODEX_THREAD_ID || undefined;
+      const q = { conversation, key: bodyKeyFor(env, conversation), ...(session ? { session } : {}) };
+      const remote = env.LOOM_URL && env.LOOM_TOKEN_FILE;
+      const r = remote ? await pieceCall(env, flag(rest, '--piece'))('principal', q) : bodyPrincipal(env, q);
+      out(r);
+      if (!r.ok) process.exitCode = 1;
       return;
     }
     case 'body-host': {

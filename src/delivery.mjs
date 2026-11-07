@@ -83,7 +83,7 @@ import { endBody, readBody, resumeBody, startBody } from './bodies.mjs';
 import { CoreError, coreFrom } from './core.mjs';
 import { HouseRunner, sweepTransfers } from './houserunner.mjs';
 import { venueKind as kindOf, resolveFor } from './models.mjs';
-import { setting } from './piece.mjs';
+import { pieceName, setting } from './piece.mjs';
 import { dropSession, packSession, restoreFiles } from './sessions.mjs';
 import { ageSealer } from './sealed.mjs';
 import { RulesError, policyOf, rulesFor, tierOf } from './policy.mjs';
@@ -98,6 +98,7 @@ import { raiseAlert } from './alerthook.mjs';
 import { changed as changedCards } from './activity.mjs';
 import { keepKey } from './bodyhost.mjs';
 import { readRelays } from './relay.mjs';
+import { mint, noteSender, principalOf, putWakeFor, resetActsFor, takeWakeFor, verify } from './principal.mjs';
 
 const DAY_MS = 86_400_000;
 export const MAX_TEXT = 40_000;
@@ -183,6 +184,8 @@ export function listConvs(env) {
 
 /** Every change to delivery's state, under one lock: never while a harness starts (that's outside it). */
 const locked = (env, f) => withLock(deliveryDir(env), 'lock', f, 'delivery', num(env.LOOM_RUNTIME_LOCK_WAIT_MS, 10_000));
+/** The clock's hand-over of a wake's principal (cli.mjs, principal --wake), under delivery's own lock and wait. */
+export const handOverWake = (env, w) => locked(env, () => putWakeFor(deliveryDir(env), w));
 
 // ─── Settings and what it's made of ─────────────────────────────────────────
 
@@ -725,8 +728,17 @@ async function deliverOnce(env, raw, o) {
       // stops here (its turn stands, no body hears it).
       if (m.kind === 'wake' && !!c.local !== local) return mismatch(m.place, c.local);
       if (m.label !== undefined) c.label = m.label;
-      // A retry after a crash may find its message already queued (or already answered): never twice.
-      if (!c.queue.some((x) => x.key === key) && !c.outcomes?.[key]) c.queue.push({ key, id: m.id, at: m.at, from: m.from, kind: m.kind, ...(local ? { local: true } : {}), ...(o.deferPeer === true && m.from.kind === 'agent' ? { untilIdle: true } : {}), ...(tier ? { tier } : {}), ...(owner ? { owner: true } : {}), ...(tierUnread ? { tierUnread: true } : {}), ...(sealed ? { sealed } : { mem: true }) });
+      // A retry after a crash may find its message already queued (or already answered): never twice. Who steered it
+      // (principal.mjs, t-1943) is noted as it joins, before any body hears it: a wake takes what the clock handed over
+      // for exactly it (on venue wake, from a schedule, only the clock delivers).
+      if (!c.queue.some((x) => x.key === key) && !c.outcomes?.[key]) {
+        const wake = m.venue === 'wake' && m.from.kind === 'schedule';
+        // The runtime's own daily review (review.mjs, source: this piece, which core sets) is the owner's schedule.
+        const own = wake && m.source === pieceName(env) && m.place === 'review';
+        const wakeFor = own ? 'owner' : wake ? takeWakeFor(deliveryDir(env), m.agent, m.place, m.id, d.now().getTime()) : undefined;
+        noteSender(env, c, m, { wakeFor });
+        c.queue.push({ key, id: m.id, at: m.at, from: m.from, kind: m.kind, ...(local ? { local: true } : {}), ...(o.deferPeer === true && m.from.kind === 'agent' ? { untilIdle: true } : {}), ...(tier ? { tier } : {}), ...(owner ? { owner: true } : {}), ...(tierUnread ? { tierUnread: true } : {}), ...(sealed ? { sealed } : { mem: true }) });
+      }
       c.last = d.now().toISOString();
       saveConv(env, c);
       return null;
@@ -2018,16 +2030,8 @@ export async function send(env, { conversation, text, key, session, person, via 
   const c = loadConv(env, conversation);
   if (!c) return { ok: false, reason: `no conversation ${conversation} here` };
   if (o.caller && (o.caller.kind !== 'agent' || o.caller.agent !== c.agent)) return { ok: false, reason: `only ${c.agent}'s own body speaks in ${conversation}` };
-  const want = typeof c.sendKey === 'string' && /^[0-9a-f]{64}$/.test(c.sendKey) ? Buffer.from(c.sendKey, 'hex') : null;
-  if (!want || !c.body || typeof key !== 'string' || !key || !timingSafeEqual(keyHash(key), want)) {
-    return refusedSend(env, c, `only the body holding ${conversation} speaks in it (its run's ${BODY_KEY} doesn't match)`);
-  }
-  // Its harness session too, where the runner knows the body's: a sibling body holding this conversation's key (its
-  // house's file) is another session. A sender that names no session is refused once the body's is known.
-  const own = sessionOf({ ...d, env }, c.body);
-  if (own && session !== own) {
-    return refusedSend(env, c, `only the body holding ${conversation} speaks in it (${session ? 'another session is' : 'no session is named'}: ${conversation} is a session of its own)`);
-  }
+  const notHolder = holderProblem(env, d, c, { key, session });
+  if (notHolder) return refusedSend(env, c, notHolder);
   if (!str(text, MAX_TEXT)) return refusedSend(env, c, `a message is 1-${MAX_TEXT} characters`);
   // To a person (a DM), not the conversation's own place: the relay to a person, through that venue's adapter.
   let to;
@@ -2062,6 +2066,69 @@ export async function send(env, { conversation, text, key, session, person, via 
   if (o.detach) (o.spawnSender ?? ((...a) => spawnSender(env, ...a)))(conversation, ref, text, out);
   else { const p = post(env, conversation, ref, text, out, o).catch((e) => d.warn(`posting ${ref}: ${e.message}`)); o.onSend?.(p); }
   return { accepted: true, ref, conversation: c.conversation };
+}
+
+/**
+ * Why the caller isn't the body holding conversation `c` in its current run, or null when it is: its run's key
+ * (LOOM_BODY_KEY) matches, and so does its harness session, where the runner knows the body's (a sibling body holding
+ * this conversation's key, its house's file, is another session; one that names no session is refused once the
+ * body's is known). What `send` takes, and what a principal statement takes (bodyPrincipal).
+ */
+function holderProblem(env, d, c, { key, session }, does = 'speaks in it') {
+  const want = typeof c.sendKey === 'string' && /^[0-9a-f]{64}$/.test(c.sendKey) ? Buffer.from(c.sendKey, 'hex') : null;
+  if (!want || !c.body || typeof key !== 'string' || !key || !timingSafeEqual(keyHash(key), want)) {
+    return `only the body holding ${c.conversation} ${does} (its run's ${BODY_KEY} doesn't match)`;
+  }
+  const own = sessionOf({ ...d, env }, c.body);
+  if (own && session !== own) {
+    return `only the body holding ${c.conversation} ${does} (${session ? 'another session is' : 'no session is named'}: ${c.conversation} is a session of its own)`;
+  }
+  return null;
+}
+
+/**
+ * On whose behalf the body holding a conversation acts (principal.mjs, t-1943): {ok, for, owner, people, statement},
+ * or {ok: false, reason}. Proven as `send` is (holderProblem), by its own agent: the statement, signed with the
+ * runtime's key, is what a piece checks (`loom runtime principal --verify`); the run's key never leaves here.
+ */
+export function bodyPrincipal(env, { conversation, key, session }, o = {}) {
+  const d = depsOf(env, o);
+  const c = loadConv(env, conversation);
+  if (!c) return { ok: false, reason: `no conversation ${conversation} here` };
+  if (o.caller && (o.caller.kind !== 'agent' || o.caller.agent !== c.agent)) return { ok: false, reason: `only ${c.agent}'s own body asks about ${conversation}` };
+  const notHolder = holderProblem(env, d, c, { key, session }, 'asks on whose behalf it acts');
+  if (notHolder) return { ok: false, reason: notHolder };
+  const p = principalOf(env, c);
+  return { ok: true, agent: c.agent, conversation: c.conversation, ...p, statement: mint(deliveryDir(env), { agent: c.agent, conversation: c.conversation, principal: p }, d.now().getTime()) };
+}
+
+/** The owner's reset of a conversation's principal (principal.mjs, resetActsFor): {ok, conversation} or {ok: false, reason}. */
+export function resetPrincipal(env, conversation) {
+  if (!CV.test(conversation ?? '')) return { ok: false, reason: '--conversation is a conversation id' };
+  return locked(env, () => {
+    const c = loadConv(env, conversation);
+    if (!c) return { ok: false, reason: `no conversation ${conversation} here` };
+    resetActsFor(env, c, new Date().toISOString());
+    saveConv(env, c);
+    return { ok: true, conversation };
+  });
+}
+
+/**
+ * A statement checked, on loom's machine (`loom runtime principal --verify`): signed by this runtime, unexpired, and
+ * still true. It answers {ok, agent, conversation, for, owner, people, exp}: the piece that reads it binds it to its
+ * own caller (`agent` must be the calling agent; a statement is a bearer's for its 5 minutes). Its conversation's principal now must be the one it states: a statement minted before someone else spoke
+ * there is stale, and refused.
+ */
+export function verifyStatement(env, statement, nowMs = Date.now()) {
+  const v = verify(deliveryDir(env), statement, nowMs);
+  if (!v.ok) return v;
+  const c = loadConv(env, v.conversation);
+  if (!c || c.agent !== v.agent) return { ok: false, reason: 'this runtime has no record of its conversation' };
+  const now = principalOf(env, c);
+  if (now.for !== v.for || now.owner !== v.owner) return { ok: false, reason: 'its conversation has heard from someone since: ask for a new one' };
+  // Who it names is who the conversation has heard now (several people can grow while `for` stays null).
+  return { ...v, people: now.people, ...(now.unknown ? { unknown: true } : {}) };
 }
 
 /** A platform id from a gate entry's ids for a venue: a list, one id, or (Slack) {team: [ids]}; the first. */
