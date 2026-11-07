@@ -599,8 +599,19 @@ describe('a body the record lost track of still counts', () => {
     const b = await conv('th:b');
     lose(b);
     assert.equal(originOf(w.env, { agent: 'art' }, b), null);
-    await assert.rejects(Promise.resolve().then(() => originOf(w.env, caller, b)), /must be your own/);
+    assert.equal(originOf(w.env, caller, b), null, 'no return address, and the ask itself isn\'t refused');
     assert.equal(originOf(w.env, caller), null);
+  });
+
+  test('a body at work in another house doesn\'t block a house caller; one whose house can\'t be read does', async () => {
+    const { w, conv } = await setup();
+    const a = await conv('th:a');
+    const other = (await deliver(w.env, w.msg('th:other', 'x', { venue: 'loom', source: 'loom' }), w.o)).conversation;
+    const path = join(w.env.LOOM_BOX_DATA, 'bodies', `${loadConv(w.env, other).body.replace(':', '-')}.json`);
+    const rec = JSON.parse(readFileSync(path)); rec.house = 'h-elsewhere'; writeFileSync(path, JSON.stringify(rec));
+    assert.equal(originOf(w.env, caller, a)?.conversation, a);
+    rmSync(path);
+    assert.equal(originOf(w.env, caller, a), null);
   });
 
   test('alone and held, a house caller\'s conversation is still inferred', async () => {
