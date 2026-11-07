@@ -17,7 +17,7 @@ const ROOT = join(here, '..');
 function household(env) {
   const dir = join(env.HOME, '.config', 'loom');
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, 'household.json'), JSON.stringify({ members: [{ person: 'jonathan', agents: '*' }, { person: 'mark', agents: ['pip'] }] }));
+  writeFileSync(join(dir, 'household.json'), JSON.stringify({ members: [{ person: 'jonathan', agents: '*' }, { person: 'mark', agents: ['pip'] }, { person: 'dana', agents: ['pip'] }] }));
   return env;
 }
 
@@ -35,6 +35,11 @@ test('a conversation\'s principal: the owner only when every voice was his; one 
   assert.deepEqual(run([person('loren')], [person('daniel')]), { for: null, owner: false, people: ['loren', 'daniel'] });
   // A member who owns some other agent isn't this agent's owner.
   assert.equal(run([person('mark')]).owner, false);
+  // An agent with two owners: the statement names the one who spoke.
+  const pip = (slug) => ({ ...person(slug), agent: 'pip' });
+  const c2 = { agent: 'pip' };
+  noteSender(env, c2, pip('dana'));
+  assert.deepEqual(principalOf(env, c2), { for: 'dana', owner: true, people: [] });
   // A relay from another agent, or a sender no one names: it can't say.
   assert.deepEqual(run([person('jonathan')], [{ agent: 'art', at, from: { kind: 'agent', id: 'pip' } }]), { for: null, owner: false, people: [], unknown: true });
   assert.equal(run([{ agent: 'art', at, from: { kind: 'unknown' } }]).owner, false);
@@ -153,8 +158,16 @@ test('a body asks on whose behalf it acts, proven as send is: its conversation\'
   assert.equal(ask({ kind: 'agent', agent: 'mark' }, { key, session }).ok, false, 'another agent, even with the key');
   assert.equal(ask({ kind: 'agent', agent: 'art' }, { session }).ok, false, 'no key');
   assert.match(ask({ kind: 'agent', agent: 'art' }, { key, session: 'someone-else' }).reason, /another session/);
-  // Through the piece API: only an agent's body.
-  assert.equal((await api(w.env, { now: () => new Date() }, { caller: { kind: 'owner' }, path: 'principal', body: {} })).status, 403);
+  // Through the piece API, as a house's call arrives: the agent's own body answered, another agent refused.
+  const fx = { now: () => new Date() };
+  const viaApi = await api(w.env, fx, { caller: { kind: 'agent', agent: 'art', house: 'h-1' }, path: 'principal', body: { conversation: c.conversation, key, session } });
+  assert.equal(viaApi.status, 200, JSON.stringify(viaApi.body));
+  // (Daniel spoke there too by now: several people.)
+  assert.deepEqual([viaApi.body.ok, viaApi.body.for, viaApi.body.people, verifyStatement(w.env, viaApi.body.statement).ok], [true, null, ['loren', 'daniel'], true]);
+  const other = await api(w.env, fx, { caller: { kind: 'agent', agent: 'mark', house: 'h-2' }, path: 'principal', body: { conversation: c.conversation, key, session } });
+  assert.equal(other.status, 409);
+  assert.equal((await api(w.env, fx, { caller: { kind: 'agent', agent: 'art' }, path: 'principal', body: { conversation: c.conversation, session } })).status, 409, 'no key');
+  assert.equal((await api(w.env, fx, { caller: { kind: 'owner' }, path: 'principal', body: {} })).status, 403);
 });
 
 test('the owner in a Comms thread is the owner\'s; a wake is what the clock handed over before it fired, else unknown', async () => {
@@ -212,6 +225,24 @@ test('the CLI: --verify checks a statement on this machine; --wake takes the clo
   assert.equal(r.status, 0, r.stderr);
   assert.deepEqual(JSON.parse(readFileSync(join(dir, 'conversations', 'cv-000000000003.json'), 'utf-8')).actsFor.unknown, false);
   assert.notEqual(cli(env, ['principal', '--reset', '--conversation', 'cv-00000000000f']).status, 0, 'no such conversation');
+});
+
+test('in a house the CLI asks the runtime\'s piece API, with its conversation, its run\'s key and its session', async () => {
+  const { createServer } = await import('node:http');
+  const seen = [];
+  const server = createServer((req, res) => { let b = ''; req.on('data', (x) => { b += x; }); req.on('end', () => { seen.push({ url: req.url, auth: req.headers.authorization, body: JSON.parse(b) }); res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ ok: true, for: 'loren', owner: false, people: ['loren'], statement: 'a.b' })); }); });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const H = mkdtempSync(join(tmpdir(), 'rt-pcli-house-'));
+  writeFileSync(join(H, 'tok'), 'housetoken\n');
+  try {
+    const r = await new Promise((ok) => execFile(process.execPath, [join(ROOT, 'src/cli.mjs'), 'principal'], {
+      env: { PATH: process.env.PATH, HOME: H, LOOM_URL: `http://127.0.0.1:${server.address().port}/mcp`, LOOM_TOKEN_FILE: join(H, 'tok'), LOOM_RUNTIME_PIECE: 'runtime',
+        LOOM_BODY_CONVERSATION: 'cv-0123456789ab', LOOM_BODY_KEY: 'runkey', CLAUDE_CODE_SESSION_ID: 'sess-1234' } },
+    (err, stdout, stderr) => ok({ code: err ? err.code : 0, stdout, stderr })));
+    assert.equal(r.code, 0, r.stderr);
+    assert.deepEqual(seen, [{ url: '/api/runtime/principal', auth: 'Bearer housetoken', body: { conversation: 'cv-0123456789ab', key: 'runkey', session: 'sess-1234' } }]);
+    assert.equal(JSON.parse(r.stdout).statement, 'a.b');
+  } finally { server.close(); }
 });
 
 function pieceCall(env, args) {

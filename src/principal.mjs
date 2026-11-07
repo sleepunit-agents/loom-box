@@ -63,7 +63,12 @@ export function resetActsFor(env, c, at) {
 function noteOne(env, a, m, wakeFor) {
   const owners = ownersFor(env, m.agent);
   const person = (slug) => {
-    if (owners.includes(slug)) a.owner = true;
+    if (owners.includes(slug)) {
+      // Which owner spoke too, when an agent has more than one: the statement names them.
+      a.owner = true;
+      if (!Array.isArray(a.owners)) a.owners = [];
+      if (!a.owners.includes(slug) && a.owners.length < MAX_PEOPLE) a.owners.push(slug);
+    }
     else if (!a.people.includes(slug)) {
       if (a.people.length >= MAX_PEOPLE) a.unknown = true;
       else a.people.push(slug);
@@ -89,7 +94,11 @@ export function principalOf(env, c) {
   if (!a || a.unknown) return { for: null, owner: false, people, ...(a?.unknown ? { unknown: true } : {}) };
   if (people.length === 1) return { for: people[0], owner: false, people };
   if (people.length > 1) return { for: null, owner: false, people };
-  if (a.owner) return { for: ownersFor(env, c.agent)[0] ?? null, owner: true, people: [] };
+  if (a.owner) {
+    // The owner who spoke (one of several, the first); a wake the clock called the owner's names the first owner.
+    const spoke = Array.isArray(a.owners) ? a.owners.filter((p) => PERSON.test(p)) : [];
+    return { for: spoke.length === 1 ? spoke[0] : spoke[0] ?? ownersFor(env, c.agent)[0] ?? null, owner: true, people: [] };
+  }
   return { for: null, owner: false, people: [] };
 }
 
