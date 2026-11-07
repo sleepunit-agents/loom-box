@@ -115,7 +115,8 @@ import { join } from 'node:path';
 import { readModels, resolveFor, setModels } from './models.mjs';
 import { endBody, feedBody, listBodies, resumeBody, startBody } from './bodies.mjs';
 import { PART_RAW, joinParts, partsOf } from './blobs.mjs';
-import { answerLoop, deliver, listConvs, post, send, sendOutcome, sendStatus, tick } from './delivery.mjs';
+import { answerLoop, deliver, listConvs, post, send, sendOutcome, sendStatus, tick, workingConversations, workingPrint } from './delivery.mjs';
+import { coreFrom } from './core.mjs';
 import { watchBridges } from './nowboard.mjs';
 import { reviewStatus, reviewTick, runReview } from './review.mjs';
 import { bodyKeyFor, runBodyHost } from './bodyhost.mjs';
@@ -141,6 +142,26 @@ export function keepsHousesOnExit(env, read = {}) {
 
 /** How often the delivery service notes the bridges' outages (nowboard.mjs, watchBridges). */
 const WATCH_EVERY_MS = 30_000;
+
+/**
+ * What the agents' cards show at work (ui.mjs agentReports), as one string: each delivered body mid-turn (a Comms
+ * thread, a bridge's chat, a wake) and each task house up. When it moves, core hears at once (POST
+ * /api/loom/pieces/changed) and asks this manifest again, so a card goes working, and back to quiet, within a tick
+ * of the body (t-1945), not at loom's next look at the pieces.
+ */
+let atWork;
+export async function tellAtWork(env, o = {}) {
+  let print;
+  try {
+    const s = loadState(env);
+    const houses = Object.entries(s.houses ?? {}).filter(([, h]) => h.agent && !h.service && (h.state === 'running' || h.state === 'starting')).map(([k]) => k).sort().join(',');
+    print = `${workingPrint(o.deps ? workingConversations(env, o.deps) : workingConversations(env))}|${houses}`;
+  } catch { return false; }
+  if (print === atWork) return false;
+  atWork = print;
+  try { await (o.core ?? coreFrom(env, { timeoutMs: 2000 })).changed(); } catch (e) { process.stderr.write(`loom-runtime deliver: couldn't tell core what's at work: ${e.message}\n`); }
+  return true;
+}
 const USAGE = readFileSync(fileURLToPath(import.meta.url), 'utf-8').split('\n').slice(1).filter((l) => l.startsWith('//')).map((l) => l.slice(3)).join('\n') + '\n';
 
 class Fail extends Error { constructor(m, code = 1) { super(m); this.code = code; } }
@@ -637,6 +658,7 @@ async function delivery(rest, env, json) {
     let watched = 0;
     for (;;) {
       try { await tick(env); } catch (err) { process.stderr.write(`loom-runtime deliver: tick: ${err.message}\n`); }
+      await tellAtWork(env);
       // The bridges' outages, noted even while nothing reads the manifest (loom down for a deploy): each half minute.
       if (Date.now() - watched >= WATCH_EVERY_MS) { watched = Date.now(); try { watchBridges(env); } catch (err) { process.stderr.write(`loom-runtime deliver: bridge watch: ${err.message}\n`); } }
       // The day's review, once it's due (review.mjs): started detached, so the tick never waits on it.
