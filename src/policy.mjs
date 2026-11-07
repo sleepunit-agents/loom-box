@@ -46,7 +46,7 @@ export const POLICY = 'policy';
 const TOOL = /^[A-Za-z0-9_.*:() -]{1,120}$/;
 const VENUE = /^[a-z][a-z0-9-]{0,31}$/;
 const NOTE = /^[A-Za-z0-9_.-]{1,64}$/;
-const TOOLS_MAX = 64, READERS_MAX = 12, PLACES_MAX = 64;
+const TOOLS_MAX = 64, READERS_MAX = 12, MEMBERS_MAX = 12, PLACES_MAX = 64;
 const KEYS = ['deny', 'guest_deny', 'briefs', 'guest_places'];
 const BRIEF_KEYS = ['venues', 'guest', 'peer', 'notes', 'tiers'];
 
@@ -145,7 +145,7 @@ function guestsOf(gates, venue) {
   return Object.entries(gates.people).filter(([s, e]) => SLUG.test(s) && isObj(e) && e.tier === 1 && Array.isArray(e.venues) && e.venues.map(String).includes(venue)).map(([s]) => s);
 }
 
-/** What an adapter's description of a place may say (anything else is left out). */
+/** What an adapter's description of a place may say (anything else is left out); `members` as given, checked whole by rulesFor. */
 export function cleanAbout(a) {
   if (!isObj(a)) return {};
   return {
@@ -167,7 +167,7 @@ export function cleanAbout(a) {
 }
 
 /** A body's rules' key: what makes two bodies the same as far as placement goes. */
-const keyOf = (guest, deny, members = [], grantFor = null) => createHash('sha256').update(JSON.stringify(personal({ members, grantFor }) ? [guest, [...deny].sort(), [...members].sort(), grantFor] : [guest, [...deny].sort()])).digest('hex').slice(0, 16);
+const keyOf = (guest, deny, members, grantFor) => createHash('sha256').update(JSON.stringify(personal({ members, grantFor }) ? [guest, [...deny].sort(), [...members].sort(), grantFor] : [guest, [...deny].sort()])).digest('hex').slice(0, 16);
 
 /**
  * Whether a body's rules were made for particular people (a place's members, or a person's standing authority): such
@@ -175,12 +175,18 @@ const keyOf = (guest, deny, members = [], grantFor = null) => createHash('sha256
  */
 export const personal = (r) => !!(r?.members?.length || r?.grantFor);
 
+/**
+ * Whether a session kept under rules `was` (a slot's, a parked home's) may resume under `rules`: the same `guest`, and,
+ * where either names people, the same key. Every resume path asks this (delivery.mjs), never a copy of it.
+ */
+export const sameRules = (was, rules) => (was?.guest ?? false) === rules.guest && (!(personal(was) || personal(rules)) || was?.key === rules.key);
+
 /** Why a place's roster (an adapter's `members`) can't be taken whole, or null. */
 function rosterProblem(m) {
   if (m === undefined) return null;
   if (!Array.isArray(m)) return 'its members aren\'t a list';
   if (!m.length) return 'it names no one: who reads there is unknown';
-  if (m.length > READERS_MAX) return `it has ${m.length} members, more than the ${READERS_MAX} a body's rules carry`;
+  if (m.length > MEMBERS_MAX) return `it has ${m.length} members, more than the ${MEMBERS_MAX} a body's rules carry`;
   if (!m.every((s) => typeof s === 'string' && SLUG.test(s))) return 'a member isn\'t a person\'s slug';
   if (new Set(m).size !== m.length) return 'a member is listed twice';
   return null;
@@ -254,6 +260,7 @@ export async function rulesFor(c, msgs, d, { platform, core = false, principal =
   }
   // Who's here (t-1745, the old Slack bridge's group roster): everyone reads every reply, and the least trusted of them
   // sets the room's rules.
+  if (members.length === 1) text(`Here with you: ${nameOf(members[0].slug, members[0].e)}, tier ${members[0].tier}.\n`);
   if (members.length > 1) {
     text(`The people here, who all read every reply: ${members.map((m) => `${nameOf(m.slug, m.e)}, tier ${m.tier}`).join('; ')}. The lowest tier present governs the room: tier ${lowest}. What you know about one of them from elsewhere (their own DMs, cards, memories) isn't said here unless it already has been.\n`);
   }

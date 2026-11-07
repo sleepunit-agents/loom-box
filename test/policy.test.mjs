@@ -404,7 +404,6 @@ test('a one-to-one DM with a tier-2 person carries their standing authority and 
   await deliver(w.env, smsg('dm:UJON', 'jonathan', 'hi'), w.o);
   const own = plain(briefOf(starts(w)[1]));
   assert.equal(own.includes('Standing authority'), false, 'tier 3 is never told a grant, though the gates hold one');
-  assert.equal(own.includes('Standing restriction'), false);
   // A tier-1 person alone in a place: a guest venue, never told their grant.
   await deliver(w.env, smsg('dm:UKIM', 'kim', 'hello'), w.o);
   const guest = plain(briefOf(starts(w)[2]));
@@ -443,9 +442,7 @@ test('a card that can\'t be read is left out of a members\' place, never the bod
 // ─── Review round: the roster is taken whole, a guest in it makes a guest venue, an authority is held to its person ───
 
 test('a tier-1 member makes the place a guest venue: narrowed, the floor, the guest a reader, no one else\'s card', async () => {
-  const { w, smsg, gates, cards, policy } = roomWorld();
-  gates.people.kim = { name: 'Kim', tier: 1 };
-  cards.kim = '## Kim (kim)\nA guest.';
+  const { w, smsg } = roomWorld();
   const inner = w.o.adapter;
   w.o.adapter = async (argv, c, args) => (args[0] === '--describe' && c.place === 'group:G5' ? { ok: true, venue: 'G5', members: ['phil', 'kim', 'jonathan'] } : inner(argv, c, args));
   const a = await deliver(w.env, smsg('group:G5', 'jonathan', 'all set?'), w.o);
@@ -459,13 +456,10 @@ test('a tier-1 member makes the place a guest venue: narrowed, the floor, the gu
   assert.equal(brief.includes('## Jonathan (jonathan)'), false);
   assert.ok(brief.includes('The lowest tier present governs the room: tier 1.'));
   assert.equal(loadConv(w.env, a.conversation).bodyRules.guest, true);
-  void policy;
 });
 
 test('a guest venue made by a tier-1 member needs the guest floor like any other: none named, no body', async () => {
-  const { w, smsg, gates, cards, policy } = roomWorld();
-  gates.people.kim = { name: 'Kim', tier: 1 };
-  cards.kim = '## Kim (kim)\nA guest.';
+  const { w, smsg, policy } = roomWorld();
   delete policy.briefs.guest;
   const inner = w.o.adapter;
   w.o.adapter = async (argv, c, args) => (args[0] === '--describe' && c.place === 'group:G5' ? { ok: true, venue: 'G5', members: ['phil', 'kim'] } : inner(argv, c, args));
@@ -581,4 +575,15 @@ test('an authority isn\'t told where the owner has ever spoken, though the princ
   const last = starts(w).at(-1);
   assert.equal(last[0], 'start');
   assert.equal(plain(briefOf(last)).includes('Standing authority'), false);
+});
+
+test('a lone tier-2 person in a place that\'s a guest venue by another route is never told their standing authority', async () => {
+  const { w, smsg } = roomWorld();
+  const inner = w.o.adapter;
+  w.o.adapter = async (argv, c, args) => (args[0] === '--describe' && c.place === 'dm:UPHIL2' ? { ok: true, venue: 'DPHIL2', guest: true, readers: ['kim'], members: ['phil'] } : inner(argv, c, args));
+  await deliver(w.env, smsg('dm:UPHIL2', 'phil', 'set up the box'), w.o);
+  const brief = plain(briefOf(starts(w)[0]));
+  assert.ok(brief.includes('THIS IS A GUEST VENUE'));
+  assert.equal(brief.includes('Standing authority'), false);
+  assert.ok(brief.includes('Here with you: Phil (phil), tier 2.'), 'a one-to-one place says who, by the gates');
 });

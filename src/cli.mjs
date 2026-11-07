@@ -562,7 +562,7 @@ async function main(argv, env) {
       // house, through the piece API; on loom's machine (a local body), here.
       const mine = ownConversation(env);
       if (!mine) throw new Fail('loom runtime place: this isn\'t a body holding a conversation (no LOOM_BODY_CONVERSATION)', 2);
-      if (env.LOOM_URL && env.LOOM_TOKEN_FILE) return runAnswer(await pieceCall(env)('run', { argv: ['place', '--conversation', mine], ...bodyProof(env, mine) }));
+      if (env.LOOM_URL && env.LOOM_TOKEN_FILE) return runAnswer(await pieceCall(env, flag(rest, '--piece'))('run', { argv: ['place', '--conversation', mine], ...bodyProof(env, mine) }));
       const { placeOf } = await import('./gates-api.mjs');
       const r = await placeOf(env, mine, bodyProof(env, mine));
       if (!r.ok) throw new Fail(r.reason);

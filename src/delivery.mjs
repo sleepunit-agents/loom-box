@@ -86,7 +86,7 @@ import { venueKind as kindOf, resolveFor } from './models.mjs';
 import { pieceName, setting } from './piece.mjs';
 import { dropSession, packSession, restoreFiles } from './sessions.mjs';
 import { ageSealer } from './sealed.mjs';
-import { RulesError, personal, policyOf, rulesFor, tierOf } from './policy.mjs';
+import { RulesError, policyOf, rulesFor, sameRules, tierOf } from './policy.mjs';
 import { gatesOf } from './gates.mjs';
 import { loomStore } from './store.mjs';
 import { namesFiles } from './briefs.mjs';
@@ -1391,7 +1391,7 @@ async function execute(env, op, d, mem) {
     // Its rules (policy.mjs): what it's told and what it may use. Any that can't be had is no body (fail closed).
     rules = await rulesFor(c0, msgs.filter((x) => !isNote(x)), rulesDeps(d, v0, c0), { platform: posts(v0), core: coreAdapted(v0), principal: principalOf(env, c0), ownerSpoke: c0.actsFor?.owner === true });
     const was = op.slot?.rules ?? {};
-    if (op.type === 'resume' && ((was.guest ?? false) !== rules.guest || ((personal(was) || personal(rules)) && was.key !== rules.key))) {
+    if (op.type === 'resume' && !sameRules(was, rules)) {
       // A session is resumed only under the rules it began with: a guest venue's never as anyone else's, nor the other
       // way; nor one that heard a place's people, or a person's standing authority, under any others (t-1745). Its
       // slot goes, and its messages go back for a fresh body, in this same drain.
@@ -1598,7 +1598,7 @@ async function routeOf(env, c0, op, rules, d, cant = []) {
   const now = d.now().getTime();
   const avoid = [...new Set([...(c0.quota?.from ? [c0.quota.from] : []), ...cant])];
   const home = c0.home && Date.parse(c0.home.until) > now && existsSync(homeFile(env, op.cv)) ? c0.home : null;
-  if (home && (home.rules?.guest ?? false) === rules.guest && !avoid.includes(home.harness)
+  if (home && sameRules(home.rules ?? {}, rules) && !avoid.includes(home.harness)
     && !(Number.isFinite(c0.fallback?.until) && now < c0.fallback.until * 1000) && await roomOn(env, c0, home.harness, d)) {
     return { how: 'resume', file: homeFile(env, op.cv), home: true };
   }
