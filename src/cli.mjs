@@ -57,7 +57,7 @@
 //   loom runtime principal [--conversation <cv>]                       on whose behalf this body acts (t-1943): {for, owner,
 //                                                                        people, statement}; the statement is what a piece checks
 //   loom runtime principal --verify < statement                        loom's machine: a statement checked (and still true), {ok, agent, for, owner, …}
-//   loom runtime principal --wake --agent a --place p --for owner|<slug>|-   loom's machine (the clock): who a firing wake is for
+//   loom runtime principal --wake --agent a --place p --id <delivery id> --for owner|<slug>|-   loom's machine (the clock): who that firing wake is for
 //   loom runtime deliver tick [--conversation <cv>] | deliver run [--every <ms>] | deliver list [--json]
 //   loom runtime deliver resume|dismiss <cv>   a conversation paused as a loop (loops.mjs): start what waited, or drop it
 //   loom runtime body-host [--piece <name>] --host-key <boot key>   in an agent's house, as its task: the bodies delivery asks for
@@ -504,8 +504,9 @@ async function main(argv, env) {
         const agent = flag(rest, '--agent');
         const place = flag(rest, '--place');
         const who = flag(rest, '--for');
-        if (!AGENT_NAME.test(agent ?? '') || typeof place !== 'string' || !place || place.length > 200) throw new Fail('principal --wake --agent <agent> --place <place> --for owner|<slug>|-');
-        try { withLock(deliveryDir(env), 'lock', () => putWakeFor(deliveryDir(env), { agent, place, for: who }), 'delivery'); } catch (e) { throw new Fail(e.message); }
+        const id = flag(rest, '--id');
+        if (!AGENT_NAME.test(agent ?? '') || typeof place !== 'string' || !place || place.length > 200) throw new Fail('principal --wake --agent <agent> --place <place> --id <delivery id> --for owner|<slug>|-');
+        try { withLock(deliveryDir(env), 'lock', () => putWakeFor(deliveryDir(env), { agent, place, id, for: who }), 'delivery'); } catch (e) { throw new Fail(e.message); }
         out({ ok: true });
         return;
       }

@@ -83,6 +83,8 @@ test('a statement verifies as minted, for its agent and conversation; a changed 
   const other = mkdtempSync(join(tmpdir(), 'rt-stmt-'));
   const theirs = mint(other, { agent: 'art', conversation: 'cv-000000000001', principal: { for: 'jonathan', owner: true } }, t);
   assert.equal(verify(dir, theirs, t).ok, false);
+  assert.equal(STATEMENT_TTL_S, 300, 'five minutes');
+  assert.equal(verify(dir, s, t + 299_000).ok, true);
   assert.deepEqual(verify(dir, s, t + STATEMENT_TTL_S * 1000), { ok: false, reason: 'it expired' });
   // A runtime that never minted has nothing to verify with, and makes no key by verifying.
   const none = mkdtempSync(join(tmpdir(), 'rt-stmt-'));
@@ -93,14 +95,17 @@ test('a statement verifies as minted, for its agent and conversation; a changed 
 test('the clock\'s word for a wake is taken once, and only for that agent and place; a stale one is dropped', () => {
   const dir = mkdtempSync(join(tmpdir(), 'rt-wakefor-'));
   const t = Date.parse(at);
-  assert.throws(() => putWakeFor(dir, { agent: 'art', place: 'wake:w-1', for: 'Not A Slug' }, t), /owner, a person's slug, or -/);
-  putWakeFor(dir, { agent: 'art', place: 'wake:w-1', for: 'loren' }, t);
-  assert.equal(takeWakeFor(dir, 'pip', 'wake:w-1', t), undefined);
-  assert.equal(takeWakeFor(dir, 'art', 'wake:w-2', t), undefined);
-  assert.equal(takeWakeFor(dir, 'art', 'wake:w-1', t), 'loren');
-  assert.equal(takeWakeFor(dir, 'art', 'wake:w-1', t), undefined, 'once');
-  putWakeFor(dir, { agent: 'art', place: 'lane:x', for: 'owner' }, t);
-  assert.equal(takeWakeFor(dir, 'art', 'lane:x', t + 25 * 3600_000), undefined);
+  assert.throws(() => putWakeFor(dir, { agent: 'art', place: 'wake:w-1', id: 'w-1', for: 'Not A Slug' }, t), /owner, a person's slug, or -/);
+  assert.throws(() => putWakeFor(dir, { agent: 'art', place: 'wake:w-1', for: 'loren' }, t), /--id/);
+  putWakeFor(dir, { agent: 'art', place: 'wake:w-1', id: 'w-1', for: 'loren' }, t);
+  assert.equal(takeWakeFor(dir, 'pip', 'wake:w-1', 'w-1', t), undefined);
+  assert.equal(takeWakeFor(dir, 'art', 'wake:w-2', 'w-1', t), undefined);
+  assert.equal(takeWakeFor(dir, 'art', 'wake:w-1', 'w-1', t), 'loren');
+  assert.equal(takeWakeFor(dir, 'art', 'wake:w-1', 'w-1', t), undefined, 'once');
+  // A lane's place recurs: the owner's word for a firing that never arrived isn't the next firing's.
+  putWakeFor(dir, { agent: 'art', place: 'lane:x', id: 'w-a', for: 'owner' }, t);
+  assert.equal(takeWakeFor(dir, 'art', 'lane:x', 'w-b', t), undefined);
+  assert.equal(takeWakeFor(dir, 'art', 'lane:x', 'w-a', t + 25 * 3600_000), undefined, 'stale');
 });
 
 test('a body asks on whose behalf it acts, proven as send is: its conversation\'s own agent, its run\'s key, its session', async () => {
@@ -145,11 +150,14 @@ test('the owner in a Comms thread is the owner\'s; a wake is what the clock hand
   };
   await deliver(w.env, { source: 'loom', id: 'c-1', agent: 'art', venue: 'loom', place: 'thread:1', from: { kind: 'person', slug: 'jonathan' }, kind: 'message', at: w.clock.now().toISOString(), text: 'merge it' }, o);
   assert.deepEqual([of(cvOf('art', 'loom', 'thread:1')).for, of(cvOf('art', 'loom', 'thread:1')).owner], ['jonathan', true]);
+  // A member who owns some other agent, in this agent's Comms thread: not this agent's owner.
+  await deliver(w.env, { source: 'loom', id: 'c-2', agent: 'art', venue: 'loom', place: 'thread:2', from: { kind: 'person', slug: 'mark' }, kind: 'message', at: w.clock.now().toISOString(), text: 'merge it' }, o);
+  assert.deepEqual([of(cvOf('art', 'loom', 'thread:2')).for, of(cvOf('art', 'loom', 'thread:2')).owner], ['mark', false]);
   const wake = (id, place) => ({ source: 'clock', id, agent: 'art', venue: 'wake', place, label: id, from: { kind: 'schedule' }, kind: 'wake', at: w.clock.now().toISOString(), text: 'Your wake.' });
-  putWakeFor(deliveryDir(w.env), { agent: 'art', place: 'wake:w-111111', for: 'loren' });
+  putWakeFor(deliveryDir(w.env), { agent: 'art', place: 'wake:w-111111', id: 'w-111111', for: 'loren' });
   await deliver(w.env, wake('w-111111', 'wake:w-111111'), o);
   assert.deepEqual([of(cvOf('art', 'wake', 'wake:w-111111')).for, of(cvOf('art', 'wake', 'wake:w-111111')).owner], ['loren', false]);
-  putWakeFor(deliveryDir(w.env), { agent: 'art', place: 'wake:w-222222', for: 'owner' });
+  putWakeFor(deliveryDir(w.env), { agent: 'art', place: 'wake:w-222222', id: 'w-222222', for: 'owner' });
   await deliver(w.env, wake('w-222222', 'wake:w-222222'), o);
   assert.equal(of(cvOf('art', 'wake', 'wake:w-222222')).owner, true);
   await deliver(w.env, wake('w-333333', 'wake:w-333333'), o);
@@ -174,10 +182,11 @@ test('the CLI: --verify checks a statement on this machine; --wake takes the clo
   const bad = cli(env, ['principal', '--verify'], `${s.slice(0, -2)}AA`);
   assert.equal(bad.status, 1);
   assert.equal(JSON.parse(bad.stdout).ok, false);
-  const put = cli(env, ['principal', '--wake', '--agent', 'art', '--place', 'wake:w-9', '--for', 'loren']);
+  const put = cli(env, ['principal', '--wake', '--agent', 'art', '--place', 'wake:w-9', '--id', 'w-9', '--for', 'loren']);
   assert.equal(put.status, 0, put.stderr);
-  assert.equal(takeWakeFor(dir, 'art', 'wake:w-9'), 'loren');
-  assert.notEqual(cli(env, ['principal', '--wake', '--agent', 'art', '--place', 'wake:w-9', '--for', 'NOPE']).status, 0);
+  assert.equal(takeWakeFor(dir, 'art', 'wake:w-9', 'w-9'), 'loren');
+  assert.notEqual(cli(env, ['principal', '--wake', '--agent', 'art', '--place', 'wake:w-9', '--id', 'w-9', '--for', 'NOPE']).status, 0);
+  assert.notEqual(cli(env, ['principal', '--wake', '--agent', 'art', '--place', 'wake:w-9', '--for', 'loren']).status, 0, 'no id');
 });
 
 function pieceCall(env, args) {
@@ -186,7 +195,7 @@ function pieceCall(env, args) {
   });
 }
 
-test('piece-call sends approvals and the clock the runtime\'s statement, never a typed one; other pieces get none', async () => {
+test('piece-call sends approvals and the clock the runtime\'s statement, last (the piece takes the last and verifies it); other pieces get none', async () => {
   const { createServer } = await import('node:http');
   const seen = [];
   const server = createServer((req, res) => { let b = ''; req.on('data', (c) => { b += c; }); req.on('end', () => { seen.push({ url: req.url, argv: JSON.parse(b).argv }); res.end(JSON.stringify({ exit: 0, stdout: '' })); }); });
@@ -203,7 +212,7 @@ test('piece-call sends approvals and the clock the runtime\'s statement, never a
     await pieceCall(env, ['tasks', 'ready']);
     await pieceCall({ ...env, LOOM_BODY_CONVERSATION: '' }, ['approvals', 'check', 'a-12345678']);
     assert.deepEqual(seen.map((s) => s.argv), [
-      ['rule', 'merge', 'github:a/b#1@' + '0'.repeat(40), '--principal', 'eyJ2IjoxfQ.c2ln'],
+      ['rule', 'merge', 'github:a/b#1@' + '0'.repeat(40), '--principal', 'typed.owner', '--principal', 'eyJ2IjoxfQ.c2ln'],
       ['in', '4h', '--principal', 'eyJ2IjoxfQ.c2ln'],
       ['ready'],
       ['check', 'a-12345678'],

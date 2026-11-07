@@ -367,12 +367,22 @@ message a body does (`src/principal.mjs`):
   nothing heard, unknown. **Never the owner by default.**
 - `loom runtime principal [--conversation cv]`, from a body: proven as `send` is (its run's key and session, as its own
   agent), it answers `{for, owner, people, statement}`. The statement is signed with a key only the runtime holds
-  (`delivery/principal.key`) and lasts 5 minutes; the run's key never goes to a piece. A house's `piece-call` adds it to
-  every approvals and clock call as `--principal`.
+  (`delivery/principal.key`) and lasts 5 minutes; the run's key never goes to a piece. A house's `piece-call` adds it,
+  last, to every approvals and clock call from a body in a conversation, when the runtime answers; with none, the piece
+  treats the body as acting for someone it can't name. The runtime's own relay spends a relay approval with `--as` and
+  no principal (it has no conversation to ask about): approvals then checks everything but whom it was for.
 - `loom runtime principal --verify` (stdin) checks one, on loom's machine: what approvals and the clock run.
-- `loom runtime principal --wake --agent a --place p --for owner|<slug>|-`: the clock's word on whom a firing wake is
-  for, given just before it delivers it, and taken as the wake's message is queued. A wake set by a body working for
-  Loren stays Loren's.
+- `loom runtime principal --wake --agent a --place p --id <delivery id> --for owner|<slug>|-`: the clock's word on whom
+  that firing wake is for, given just before it delivers it, and taken as that delivery's message is queued (a word for
+  a wake that never arrives is never another's). A wake set by a body working for Loren stays Loren's.
+- `--verify` answers `{ok, agent, conversation, for, owner, people, exp}` (`owner` is true or false; `for` is a slug or
+  null), and refuses a statement whose conversation has heard someone new since. The piece that reads it binds it to
+  its caller: `agent` must be the calling agent.
+- **Unknown is for good.** A conversation that ran before this was kept (outside Comms and wakes), or heard a relay or
+  a sender no one names, asks from then on.
+- **The limit**, as for `send` (Threat model): an agent's bodies share its house, so one that sets out to pose as a
+  sibling can read the sibling's run key and session and get its statement. On loom's machine, the signing key is the
+  runtime's account's, which a local body shares.
 
 ## Model choice
 
@@ -512,6 +522,7 @@ A box never reads loom's stores, and loom never reaches into a box. The box poll
 | `up`, `down`, `list` | owner, agent | ask for, stop and see houses (an agent only its own) |
 | `body-sync` | an agent's house | its body host's report in; bodies to start, stop and feed out (its own agent's, its own house's only) |
 | `send` | an agent | a body's message out, in its own agent's conversation, with its run's `LOOM_BODY_KEY` |
+| `principal` | an agent | on whose behalf the body holding a conversation acts, proven as `send` is: a signed statement for approvals and the clock (t-1943) |
 | `add-box`, `revoke-box`, `may-host`, `set-primary`, `set-agent` | owner | enrollment and config |
 | `login-report` | a box | how an owner's login on it is going: the CLI's link and device code, then done or failed |
 | `login-start`, `login-code`, `login-cancel` | owner | log a box in with the CLI's own login; the pasted code goes to the box once |

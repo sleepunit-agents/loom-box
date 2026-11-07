@@ -8,7 +8,11 @@
 //
 //   1. Each conversation keeps `actsFor`: whether its owner spoke, the non-owner people who did, and whether anything
 //      it can't place steered it (a relay from another agent, a sender it can't name, a wake with no record, or
-//      history from before this was kept). It only grows: a body's context remembers what it heard.
+//      history from before this was kept). It only grows, for good: a body's context remembers what it heard, so a
+//      conversation once unknown asks from then on (fails closed).
+//
+// The limit (as `send`'s, README "Threat model"): one agent's bodies share its house, so a body that sets out to pose
+// as a sibling can read that sibling's run key and session and get its statement. Isolating them is the house's job.
 //   2. Its principal: unknown if anything unplaced steered it; the one non-owner person if exactly one spoke; unknown
 //      (several people) if more did; the owner if only the owner did; unknown if nothing did. Never the owner by default.
 //   3. A statement: the principal, signed (HMAC-SHA256) with a key only the runtime holds, for one agent and
@@ -22,7 +26,7 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { membersOf, ownersOf } from './owners.mjs';
 
-export const STATEMENT_TTL_S = 5 * 60;
+export const STATEMENT_TTL_S = 5 * 60;   // README: 5 minutes
 const PERSON = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 const MAX_PEOPLE = 20;
 /** A wake's hand-over waits this long for its message, then it's dropped. */
@@ -119,7 +123,7 @@ export function verify(dir, statement, nowMs = Date.now()) {
 // ─── A wake's hand-over (the clock, on loom's machine) ──────────────────────
 
 const wakeFile = (dir) => join(dir, 'wake-for.json');
-const wakeKey = (agent, place) => `${agent}\u0000${place}`;
+const wakeKey = (agent, place, id) => `${agent}\u0000${place}\u0000${id}`;
 const readMap = (dir) => { try { const d = JSON.parse(readFileSync(wakeFile(dir), 'utf-8')); return d && typeof d === 'object' && !Array.isArray(d) ? d : {}; } catch { return {}; } };
 function writeMap(dir, d) {
   mkdirSync(dirname(wakeFile(dir)), { recursive: true, mode: 0o700 });
@@ -128,18 +132,23 @@ function writeMap(dir, d) {
   renameSync(tmp, wakeFile(dir));
 }
 
-/** The clock's word on who a firing wake is for: 'owner', a person's slug, or '-' (unknown). The caller holds the lock. */
-export function putWakeFor(dir, { agent, place, for: who }, nowMs = Date.now()) {
+/**
+ * The clock's word on who a firing wake is for: 'owner', a person's slug, or '-' (unknown), for exactly that wake
+ * (agent, place and the delivery's id): a word for a wake that never arrives is never another wake's. The caller
+ * holds the lock.
+ */
+export function putWakeFor(dir, { agent, place, id, for: who }, nowMs = Date.now()) {
   if (!(who === 'owner' || who === '-' || PERSON.test(who ?? ''))) throw new Error('--for is owner, a person\'s slug, or - (unknown)');
+  if (typeof id !== 'string' || !id || id.length > 200) throw new Error('--id is the wake delivery\'s id');
   const d = Object.fromEntries(Object.entries(readMap(dir)).filter(([, v]) => nowMs - (v?.at ?? 0) < WAKE_FOR_MS));
-  d[wakeKey(agent, place)] = { for: who, at: nowMs };
+  d[wakeKey(agent, place, id)] = { for: who, at: nowMs };
   writeMap(dir, d);
 }
 
-/** Take (and drop) the clock's word for this wake: what it said, or undefined. The caller holds the lock. */
-export function takeWakeFor(dir, agent, place, nowMs = Date.now()) {
+/** Take (and drop) the clock's word for this wake (agent, place, id): what it said, or undefined. The caller holds the lock. */
+export function takeWakeFor(dir, agent, place, id, nowMs = Date.now()) {
   const d = readMap(dir);
-  const k = wakeKey(agent, place);
+  const k = wakeKey(agent, place, id);
   const v = d[k];
   if (v === undefined) return undefined;
   delete d[k];

@@ -76,23 +76,16 @@ def principal_statement():
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
     st = out.get("statement") if isinstance(out, dict) and out.get("ok") is True else None
-    return st if isinstance(st, str) and re.fullmatch(r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+", st) else None
+    return st if isinstance(st, str) and 0 < len(st) <= 8000 and not re.search(r"\s", st) else None
 
 
 def with_principal(piece, argv):
-    """argv with `--principal <statement>` appended, for a piece that decides by it. A caller's own --principal is
-    dropped first: the statement is the runtime's, never typed."""
+    """argv with `--principal <statement>` appended last, for a piece that decides by it. The piece takes the last one
+    and verifies it with the runtime: a typed one is worth only what the runtime says of it, so nothing is stripped."""
     if piece not in PRINCIPAL_PIECES:
         return argv
-    clean, i = [], 0
-    while i < len(argv):
-        if argv[i] == "--principal":
-            i += 2
-            continue
-        clean.append(argv[i])
-        i += 1
     st = principal_statement()
-    return clean + ["--principal", st] if st else clean
+    return argv + ["--principal", st] if st else argv
 
 
 def main():
