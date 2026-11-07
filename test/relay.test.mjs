@@ -292,3 +292,24 @@ test('implicit origin requires exactly one active conversation hosted in the cal
   assert.equal(originOf(w.env, caller), null, 'never chooses the newest conversation');
   assert.equal(originOf(w.env, caller, first.conversation).conversation, first.conversation);
 });
+
+test('returning replies to Comms still pauses a near-identical relay ping-pong loop', async () => {
+  const { w, d } = relayWorld();
+  const origins = {};
+  for (const agent of ['art', 'mark']) {
+    origins[agent] = (await deliver(w.env, w.msg(`th:${agent}`, 'review work', { agent, venue: 'loom', source: 'loom' }), w.o)).conversation;
+  }
+  let last;
+  for (let i = 1; i <= 12; i++) {
+    const [from, to] = i % 2 ? ['art', 'mark'] : ['mark', 'art'];
+    const result = await relay(w.env, { agent: from }, { to, say: `Thanks, got it! (${i})`, conversation: origins[from], ...(last ? { reply_to: last } : {}) }, d);
+    last = result.text.slice(0, 10);
+    for (const cv of Object.values(origins)) {
+      const c = loadConv(w.env, cv);
+      if (c.body) w.runner.finish(c.body, { failed: false, worked: true });
+    }
+    await tick(w.env, w.o);
+    w.clock.advance(60_000);
+  }
+  assert.ok(Object.values(origins).some((cv) => loadConv(w.env, cv).paused?.pattern === 'ping-pong'));
+});
