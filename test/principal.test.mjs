@@ -42,6 +42,9 @@ test('a conversation\'s principal: the owner only when every voice was his; one 
   assert.deepEqual(principalOf(env, c2), { for: 'dana', owner: true, people: [] });
   noteSender(env, c2, pip('mark'));
   assert.deepEqual(principalOf(env, c2), { for: null, owner: true, people: [] }, 'both owners spoke: neither named');
+  // Ownership is read now: dana stops owning pip, and what she steered is hers, a person's, not the owner's.
+  writeFileSync(join(env.HOME, '.config', 'loom', 'household.json'), JSON.stringify({ members: [{ person: 'jonathan', agents: '*' }, { person: 'mark', agents: ['pip'] }, { person: 'dana', agents: [] }] }));
+  assert.deepEqual(principalOf(env, c2), { for: 'dana', owner: false, people: ['dana'] });
   // A relay from another agent, or a sender no one names: it can't say.
   assert.deepEqual(run([person('jonathan')], [{ agent: 'art', at, from: { kind: 'agent', id: 'pip' } }]), { for: null, owner: false, people: [], unknown: true });
   assert.equal(run([{ agent: 'art', at, from: { kind: 'unknown' } }]).owner, false);
@@ -170,6 +173,12 @@ test('a body asks on whose behalf it acts, proven as send is: its conversation\'
   assert.equal(other.status, 409);
   assert.equal((await api(w.env, fx, { caller: { kind: 'agent', agent: 'art' }, path: 'principal', body: { conversation: c.conversation, session } })).status, 409, 'no key');
   assert.equal((await api(w.env, fx, { caller: { kind: 'owner' }, path: 'principal', body: {} })).status, 403);
+  // Nothing on the piece API sets a principal: no reset, no wake hand-over, under any name a body might try.
+  for (const path of ['reset', 'principal/reset', 'principal-reset', 'wake-for', 'principal/wake']) {
+    const r = await Promise.resolve().then(() => api(w.env, fx, { caller: { kind: 'agent', agent: 'art' }, path, body: { conversation: c.conversation } })).catch((e) => ({ status: e.status ?? 500 }));
+    assert.notEqual(r.status, 200, path);
+  }
+  assert.equal(loadConv(w.env, c.conversation).actsFor.people.includes('loren'), true, 'untouched');
 });
 
 test('the owner in a Comms thread is the owner\'s; a wake is what the clock handed over before it fired, else unknown', async () => {
@@ -227,6 +236,10 @@ test('the CLI: --verify checks a statement on this machine; --wake takes the clo
   assert.equal(r.status, 0, r.stderr);
   assert.deepEqual(JSON.parse(readFileSync(join(dir, 'conversations', 'cv-000000000003.json'), 'utf-8')).actsFor.unknown, false);
   assert.notEqual(cli(env, ['principal', '--reset', '--conversation', 'cv-00000000000f']).status, 0, 'no such conversation');
+  // In a house, --reset is refused (and would only touch the house's own copy).
+  const inHouse = cli({ ...env, LOOM_URL: 'http://127.0.0.1:1/mcp', LOOM_TOKEN_FILE: join(HOME, 'tok'), HOUSE_ID: 'h-1' }, ['principal', '--reset', '--conversation', 'cv-000000000003']);
+  assert.notEqual(inHouse.status, 0);
+  assert.match(inHouse.stderr + inHouse.stdout, /owner's, on loom's machine/);
 });
 
 test('in a house the CLI asks the runtime\'s piece API, with its conversation, its run\'s key and its session', async () => {

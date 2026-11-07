@@ -90,7 +90,10 @@ function noteOne(env, a, m, wakeFor) {
  */
 export function principalOf(env, c) {
   const a = c?.actsFor;
-  const people = Array.isArray(a?.people) ? a.people.filter((p) => PERSON.test(p)).slice(0, MAX_PEOPLE) : [];
+  // Who owns the agent is read now, not when they spoke: a member who no longer owns it is a person like any other.
+  const owners = ownersFor(env, c?.agent);
+  const former = Array.isArray(a?.owners) ? a.owners.filter((p) => PERSON.test(p) && !owners.includes(p)) : [];
+  const people = [...new Set([...(Array.isArray(a?.people) ? a.people.filter((p) => PERSON.test(p)) : []), ...former])].slice(0, MAX_PEOPLE);
   if (!a || a.unknown) return { for: null, owner: false, people, ...(a?.unknown ? { unknown: true } : {}) };
   if (people.length === 1) return { for: people[0], owner: false, people };
   if (people.length > 1) return { for: null, owner: false, people };
@@ -98,7 +101,6 @@ export function principalOf(env, c) {
     // The owner who spoke (one of several, the first); a wake the clock called the owner's names the first owner.
     // Named only when one owner (still an owner now) spoke; several, or a wake the clock called the owner's, name the
     // agent's sole owner if it has one, else no one. `owner` is what approvals reads; `for` is for the card.
-    const owners = ownersFor(env, c.agent);
     const spoke = Array.isArray(a.owners) ? [...new Set(a.owners.filter((p) => PERSON.test(p) && owners.includes(p)))] : [];
     return { for: spoke.length === 1 ? spoke[0] : spoke.length === 0 && owners.length === 1 ? owners[0] : null, owner: true, people: [] };
   }
