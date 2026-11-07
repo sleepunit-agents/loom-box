@@ -27,6 +27,9 @@
 // <data>/delivery: conversations/<cv>.json (which body, which run, what waits: each message's text sealed), slots/,
 // seen/ (each delivery's turn and answer for 24 h: the same (source, id) answers the same and writes nothing).
 //
+// A relay's answer returned to the conversation that asked (relay.mjs, originOf; `o.deferPeer`) waits on the queue
+// marked `untilIdle`: never fed into a body mid-turn, it goes with the next start or resume, once that turn is over.
+//
 // Who may do what (t-1756; policy.mjs): each message's sender tier is read from the runtime's gates when it's
 // delivered; a body's rules (tier, guest venue or not, its readers' cards, the owner, peers, the agent's own brief
 // files, the deny list its harness starts with) are resolved when it starts. A guest's message is never fed to a body
@@ -700,7 +703,7 @@ async function deliverOnce(env, raw, o) {
       if (m.kind === 'wake' && !!c.local !== local) return mismatch(m.place, c.local);
       if (m.label !== undefined) c.label = m.label;
       // A retry after a crash may find its message already queued (or already answered): never twice.
-      if (!c.queue.some((x) => x.key === key) && !c.outcomes?.[key]) c.queue.push({ key, id: m.id, at: m.at, from: m.from, kind: m.kind, ...(local ? { local: true } : {}), ...(o.deferPeer === true && m.from.kind === 'agent' ? { afterTurn: true } : {}), ...(tier ? { tier } : {}), ...(owner ? { owner: true } : {}), ...(tierUnread ? { tierUnread: true } : {}), ...(sealed ? { sealed } : { mem: true }) });
+      if (!c.queue.some((x) => x.key === key) && !c.outcomes?.[key]) c.queue.push({ key, id: m.id, at: m.at, from: m.from, kind: m.kind, ...(local ? { local: true } : {}), ...(o.deferPeer === true && m.from.kind === 'agent' ? { untilIdle: true } : {}), ...(tier ? { tier } : {}), ...(owner ? { owner: true } : {}), ...(tierUnread ? { tierUnread: true } : {}), ...(sealed ? { sealed } : { mem: true }) });
       c.last = d.now().toISOString();
       saveConv(env, c);
       return null;
@@ -917,7 +920,7 @@ function plan(env, cv, d, mem) {
     const runner = d.runner(rec.harness, rec.local);
     const left = [];
     for (const x of c.queue) {
-      if (x.afterTurn) { left.push({ x, reason: 'relay replies wait for the requesting turn to finish' }); continue; }
+      if (x.untilIdle) { left.push({ x, reason: 'relay replies wait for the requesting turn to finish' }); continue; }
       if (x.tierUnread && !c.bodyRules?.guest) { left.push({ x, reason: 'its sender\'s tier couldn\'t be read' }); continue; }
       const text = open(d, x, mem);
       const r = text === null ? { fed: false, reason: 'its text is gone' } : runner.feed(bodyOf(c.body, rec), { id: x.key, text: render([{ ...x, text }]) });
@@ -1164,7 +1167,7 @@ function loopOf(env, c, now) {
   // The relay log: for ping-pong (a relay conversation), and for what any run said by relaying.
   let relays = [];
   try { relays = readRelays(env, now).filter((x) => x.at >= since && (x.from === c.agent || x.to === c.agent)); } catch { relays = []; }
-  const peers = new Set(relay ? [c.place] : (c.queue ?? []).filter((m) => m.from?.kind === 'agent').map((m) => m.from.id));
+  const peers = new Set([...(relay ? [c.place] : []), ...(c.queue ?? []).filter((m) => m.from?.kind === 'agent').map((m) => m.from.id)]);
   for (const peer of peers) {
     const loop = detectLoop({ runs, relays, agent: c.agent, peer, now });
     if (loop) return loop;
@@ -1917,8 +1920,9 @@ export function holdsRun(env, cv, { key, session } = {}) {
   const c = loadConv(env, cv);
   const want = typeof c?.sendKey === 'string' && /^[0-9a-f]{64}$/.test(c.sendKey) ? Buffer.from(c.sendKey, 'hex') : null;
   if (!want || !c.body || typeof key !== 'string' || !key || !timingSafeEqual(keyHash(key), want)) return false;
+  // Fail closed (unlike send's, kept as it was): a body whose session the runner can't name proves nothing yet.
   const own = sessionOf({ ...depsOf(env), env }, c.body);
-  return !own || session === own;
+  return !!own && session === own;
 }
 
 /**

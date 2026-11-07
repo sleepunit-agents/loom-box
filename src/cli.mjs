@@ -491,15 +491,18 @@ async function main(argv, env) {
     case 'relays':
     case 'relay': {
       if (cmd === 'relays' || rest[0] !== 'tool') {
-        if (!env.LOOM_URL || !env.LOOM_TOKEN_FILE) throw new Fail('relay and relays need a house token (LOOM_URL and LOOM_TOKEN_FILE)', 2);
+        if (!env.LOOM_URL || !env.LOOM_TOKEN_FILE) throw new Fail('loom runtime relay and relays are a body\'s, from its house (its token: LOOM_URL and LOOM_TOKEN_FILE): loom runtime relay --to <agent> --say <text>; the tool core runs is `relay tool`', 2);
         // A relay from a body names its own conversation (LOOM_BODY_CONVERSATION, unless it names one) and proves it
         // holds it, as `send` does: its run's key and harness session, in the body of the call, never in argv.
         let argv = [cmd, ...rest];
         let proof = {};
         if (cmd === 'relay') {
-          if (!argv.includes('--conversation') && /^cv-[0-9a-f]{12}$/.test(env.LOOM_BODY_CONVERSATION ?? '')) argv = [...argv, '--conversation', env.LOOM_BODY_CONVERSATION];
-          const cv = argv[argv.indexOf('--conversation') + 1];
-          const key = argv.includes('--conversation') ? bodyKeyFor(env, cv) : undefined;
+          const mine = /^cv-[0-9a-f]{12}$/.test(env.LOOM_BODY_CONVERSATION ?? '') ? env.LOOM_BODY_CONVERSATION : undefined;
+          const named = argv.includes('--conversation') ? argv[argv.indexOf('--conversation') + 1] : undefined;
+          // Only this body's own conversation: naming another is refused here, and proved nowhere (the runtime checks too).
+          if (mine && named !== undefined && named !== mine) throw new Fail(`relay: --conversation is this body's own (${mine}); a relay's answer comes back only to the conversation that asked`, 2);
+          if (mine && named === undefined) argv = [...argv, '--conversation', mine];
+          const key = mine ? bodyKeyFor(env, mine) : undefined;
           const session = env.CLAUDE_CODE_SESSION_ID || env.CODEX_THREAD_ID || undefined;
           proof = { ...(key ? { key } : {}), ...(key && session ? { session } : {}) };
         }

@@ -40,5 +40,5 @@ export async function runFor(env, caller, argv, store = loomStore(env), core = c
     if (r.ok) await annotate(store, core, caller.agent, r.pid);
     return r.ok ? ok(`${r.message}\n`) : no(`propose-person: ${r.message}`);
   }
-  return no('the runtime answers a body: relay --to A --say T [--why W] [--reply-to r-…] [--from discord:#x] [--approval a-…] | relays [--thread r-…] | gates people | gates propose --slug S --entry JSON [--why W] [--then-relay-say T --then-relay-via slack]', 2);
+  return no('the runtime answers a body: relay --to A --say T [--why W] [--reply-to r-…] [--from discord:#x] [--approval a-…] [--conversation cv-…] | relays [--thread r-…] | gates people | gates propose --slug S --entry JSON [--why W] [--then-relay-say T --then-relay-via slack]', 2);
 }

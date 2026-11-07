@@ -36,6 +36,8 @@ export const KEEP_MS = 30 * 86_400_000;
 export const HEADS_UP_DEFAULT = 8;
 const DAY_MS = 86_400_000;
 const WHERE = /^(?:(discord|slack):[#a-z0-9:._-]{1,80}|(?:loom:|conversation:)?cv-[0-9a-f]{12})$/;
+/** A `from` that names a conversation (loom:cv-…, conversation:cv-… or cv-…), never a platform place ending in one. */
+const FROM_CV = /^(?:loom:|conversation:)?(cv-[0-9a-f]{12})$/;
 const CV = /^cv-[0-9a-f]{12}$/;
 const RELAY_ID = /^r-[0-9a-f]{8}$/;
 const APPROVAL_ID = /^a-[0-9a-f]{8}$/;
@@ -146,19 +148,22 @@ export function originOf(env, caller, id, proof = {}) {
     if (!CV.test(id)) no('relay: conversation is your current conversation id (cv-…)');
     const c = loadConv(env, id);
     if (!c || !eligible(c)) no('relay: the return conversation must be your own, held by a body in your house');
+    // A relay conversation is never a return address: its place is the peer it's with, and an answer from another
+    // agent there would be recorded under the wrong peer and dodge that pair's ping-pong check.
+    if (c.venue === 'relay' || !atWork(c)) return null;
     if (proof.key && holdsRun(env, id, proof)) return c;
-    if (!atWork(c)) return null;
     const t = trustOf(c);
     return working().some((o) => o.conversation !== c.conversation && trustOf(o) < t) ? null : c;
   }
   if (!caller.house) return null;
   const candidates = working();
-  return candidates.length === 1 ? candidates[0] : null;
+  return candidates.length === 1 && candidates[0].venue !== 'relay' ? candidates[0] : null;
 }
 
 /**
  * One relay from `caller.agent`: {text} when delivered, or a RelayError saying why not (nothing delivered, and an
- * approval spent only once the rest checked). `d`: {core, store, household, approvals: {installed(), spend(aid, target)}, now}.
+ * approval spent only once the rest checked). `d`: {core, store, household, approvals: {installed(), spend(aid, target)}, now,
+ * append, returnDelivery?} (returnDelivery: how an answer reaches the asking conversation; delivery.mjs's deliver, detached).
  */
 export async function relay(env, caller, args, d = depsOf(env)) {
   const from = caller?.agent;
@@ -176,7 +181,7 @@ export async function relay(env, caller, args, d = depsOf(env)) {
   if (where && !WHERE.test(where)) no('relay: from is where it was asked, like discord:#general, slack:dm:someone or loom:cv-…');
   const replyTo = a.reply_to === undefined || a.reply_to === '' ? '' : String(a.reply_to);
   const approval = a.approval === undefined || a.approval === '' ? '' : String(a.approval);
-  const originId = a.conversation ?? (where.match(/cv-[0-9a-f]{12}$/)?.[0]);
+  const originId = a.conversation ?? where.match(FROM_CV)?.[1];
   const origin = originOf(env, caller, originId, { key: a.key, session: a.session });
   const now = d.now();
   const log = readRelays(env, now);
@@ -214,8 +219,8 @@ export async function relay(env, caller, args, d = depsOf(env)) {
     // A peer can answer only a recorded request. Its sender chose the return address;
     // the responder cannot supply or replace it. Old/missing origins use the relay venue.
     original = replyTo ? log.find((r) => r.id === replyTo) : null;
-    const target = original?.origin ? loadConv(env, original.origin) : null;
-    returnTo = target?.agent === to ? target : null;
+    const back = original?.origin ? loadConv(env, original.origin) : null;
+    returnTo = back?.agent === to ? back : null;
     const message = {
       id: entry.id, agent: to, venue: 'relay', place: from, label: `Relay from ${cap(from)}`,
       from: { kind: 'agent', id: from }, kind: 'message', at: new Date(now).toISOString(), text: relayText(entry, owner, thread),
@@ -278,7 +283,7 @@ export function relaysOf(env, agent, thread) {
   let rows = readRelays(env).filter((r) => r.from === agent || r.to === agent);
   if (thread) rows = rows.filter((r) => (r.thread ?? r.id) === thread);
   if (!rows.length) return `${agent} has no relays\n`;
-  return rows.slice(-50).map((r) => `${r.id} ${new Date(r.at).toISOString().slice(5, 16).replace('T', ' ')} ${r.from} -> ${r.to}${r.reply_to ? ` re ${r.reply_to}` : ''}${r.why ? `: ${r.why}` : ''}${r.origin ? ` [from ${r.origin}${r.origin_run ? ` ${r.origin_run}` : ''}]` : ''}${r.reply_to && r.conversation ? ` [to ${r.conversation}]` : ''}\n`).join('');
+  return rows.slice(-50).map((r) => `${r.id} ${new Date(r.at).toISOString().slice(5, 16).replace('T', ' ')} ${r.from} -> ${r.to}${r.reply_to ? ` re ${r.reply_to}` : ''}${r.why ? `: ${r.why}` : ''}${r.origin && r.from === agent ? ` [from ${r.origin}${r.origin_run ? ` ${r.origin_run}` : ''}]` : ''}${r.reply_to && r.conversation && r.to === agent ? ` [to ${r.conversation}]` : ''}\n`).join('');
 }
 
 /**

@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { deliver, deliveryDir, loadConv, tick } from '../src/delivery.mjs';
+import { deliver, deliveryDir, holdsRun, loadConv, tick } from '../src/delivery.mjs';
 import { GRANTS, KEY, setRelay } from '../src/grants.mjs';
 import { approvalsInstalled, appendRelay, readRelays, relay, relayNotices, relayText, relayTool, relaysOf, TOOL } from '../src/relay.mjs';
 import { originOf } from '../src/relay.mjs';
@@ -306,13 +306,12 @@ test('returning replies to Comms still pauses a near-identical relay ping-pong l
     const [from, to] = i % 2 ? ['art', 'mark'] : ['mark', 'art'];
     // Each side relays from its thread's body, proving it (the house CLI's key and session).
     const c = loadConv(w.env, origins[from]);
-    const proof = { key: w.runner.envs[c.body.split(':')[1]].LOOM_BODY_KEY, session: w.sessionFor(origins[from]) };
+    const proof = c.body ? { key: w.runner.envs[c.body.split(':')[1]].LOOM_BODY_KEY, session: w.sessionFor(origins[from]) } : {};
     const result = await relay(w.env, { agent: from }, { to, say: `Thanks, got it! (${i})`, conversation: origins[from], ...proof, ...(last ? { reply_to: last } : {}) }, d);
     last = result.text.slice(0, 10);
-    for (const cv of Object.values(origins)) {
-      const c = loadConv(w.env, cv);
-      if (c.body) w.runner.finish(c.body, { failed: false, worked: true });
-    }
+    // The sender's turn ends after it relays (it was at work when it asked); the answer then resumes it.
+    const sent = loadConv(w.env, origins[from]);
+    if (sent.body) w.runner.finish(sent.body, { failed: false, worked: true });
     await tick(w.env, w.o);
     w.clock.advance(60_000);
   }
@@ -397,5 +396,76 @@ describe('the return address is the asker\'s, proved or unambiguous', () => {
     const { w } = relayWorld();
     const r = await runFor(w.env, { kind: 'agent', agent: 'art' }, ['relay', '--to', 'mark', '--say', 'x', '--key', 'k'], memStore());
     assert.equal(r.exit, 2, '--key is not a flag: proof never rides in argv');
+  });
+});
+
+describe('round 1 of the cold review: what the answer\'s sender can\'t choose', () => {
+  test('the answering peer can\'t supply or replace the return address', async () => {
+    const { w, d } = relayWorld();
+    const asked = (await deliver(w.env, w.msg('th:asked', 'ask mark', { venue: 'loom', source: 'loom' }), w.o)).conversation;
+    const other = (await deliver(w.env, w.msg('th:other', 'something else', { venue: 'loom', source: 'loom' }), w.o)).conversation;
+    const marks = (await deliver(w.env, w.msg('th:marks', 'hi', { agent: 'mark', venue: 'loom', source: 'loom' }), w.o)).conversation;
+    const q = await relay(w.env, { agent: 'art' }, { to: 'mark', say: 'question', conversation: asked }, d);
+    const id = q.text.slice(0, 10);
+    for (const steer of [{ conversation: other }, { from: `loom:${other}` }, { from: other }]) {
+      await assert.rejects(relay(w.env, { agent: 'mark' }, { to: 'art', say: `answer ${JSON.stringify(steer)}`, reply_to: id, ...steer }, d), /return conversation must be your own/);
+    }
+    // Naming its own conversation is fine, and changes where *its* answers go, never where this one does.
+    await relay(w.env, { agent: 'mark' }, { to: 'art', say: 'the answer', reply_to: id, conversation: marks }, d);
+    const turn = w.core.turns.at(-1);
+    assert.equal(turn.conversation, asked);
+    assert.ok(!w.core.turns.some((t) => t.conversation === other && t.from?.kind === 'agent'));
+  });
+
+  test('a relay conversation is never a return address; a platform place ending in a cv id is only a place', async () => {
+    const { w, d, delivered } = relayWorld({ pairs: { art: ['mark', 'fez'], mark: ['art'], fez: ['art'] } });
+    await relay(w.env, { agent: 'fez' }, { to: 'art', say: 'hello art' }, d);
+    const relayCv = readRelays(w.env, w.clock.now().getTime()).at(-1).conversation;
+    assert.equal(loadConv(w.env, relayCv).venue, 'relay');
+    assert.equal(originOf(w.env, { agent: 'art' }, relayCv), null);
+    const r = await relay(w.env, { agent: 'art' }, { to: 'mark', say: 'from a channel', from: 'discord:#cv-0123456789ab' }, d);
+    assert.match(r.text, /mark has it/);
+    assert.equal(delivered.at(-1).venue, 'relay');
+  });
+
+  test('proof fails closed: no session named, or a run no longer at work, proves nothing', async () => {
+    const { w } = relayWorld();
+    const cv = (await deliver(w.env, w.msg('th:p', 'hi', { venue: 'loom', source: 'loom' }), w.o)).conversation;
+    const key = w.runner.envs[loadConv(w.env, cv).body.split(':')[1]].LOOM_BODY_KEY;
+    assert.equal(holdsRun(w.env, cv, { key }), false);
+    assert.equal(holdsRun(w.env, cv, { key, session: w.sessionFor(cv) }), true);
+    w.runner.finish(loadConv(w.env, cv).body);
+    await tick(w.env, w.o);
+    assert.equal(originOf(w.env, { agent: 'art' }, cv, { key, session: w.sessionFor(cv) }), null);
+  });
+
+  test('the detached return path: the answer waits on disk, marked untilIdle, for a worker that knows nothing of it', async () => {
+    const { w, d } = relayWorld();
+    const spawned = [];
+    d.returnDelivery = (b, o) => deliver(w.env, b, { ...w.o, ...o, detach: true, spawnWorker: (cv) => spawned.push(cv) });
+    const cv = (await deliver(w.env, w.msg('th:det', 'ask mark', { venue: 'loom', source: 'loom' }), w.o)).conversation;
+    const body = loadConv(w.env, cv).body;
+    const q = await relay(w.env, { agent: 'art' }, { to: 'mark', say: 'check', conversation: cv }, d);
+    await relay(w.env, { agent: 'mark' }, { to: 'art', say: 'checked', reply_to: q.text.slice(0, 10) }, d);
+    assert.deepEqual(spawned, [cv]);
+    assert.equal(loadConv(w.env, cv).queue.at(-1).untilIdle, true);
+    await tick(w.env, w.o);
+    assert.equal(w.log.filter((l) => l[0] === 'feed').length, 0, 'never fed mid-turn by the worker\'s plain tick');
+    w.runner.finish(body);
+    await tick(w.env, w.o);
+    assert.match(plain(w.log.findLast((l) => l[0] === 'resume')[4]), /checked/);
+  });
+
+  test('the house CLI refuses to name a conversation other than its own', async () => {
+    const dir = scratch('relay-other-');
+    writeFileSync(join(dir, 'token'), 't');
+    const env = { ...process.env, HOME: dir, LOOM_RUNTIME_PIECE: 'runtime', LOOM_URL: 'http://127.0.0.1:9/mcp', LOOM_TOKEN_FILE: join(dir, 'token'), LOOM_BODY_CONVERSATION: 'cv-0123456789ab', LOOM_BODY_KEY: 'k' };
+    const out = await new Promise((resolve) => {
+      const child = spawn(process.execPath, [join(import.meta.dirname, '..', 'src', 'cli.mjs'), 'relay', '--to', 'mark', '--say', 'hi', '--conversation', 'cv-ba9876543210'], { env });
+      let stderr = ''; child.stderr.on('data', (x) => { stderr += x; });
+      child.on('close', (status) => resolve({ status, stderr }));
+    });
+    assert.equal(out.status, 2);
+    assert.match(out.stderr, /this body's own/);
   });
 });
