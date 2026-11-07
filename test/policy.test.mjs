@@ -405,8 +405,8 @@ test('a one-to-one DM with a tier-2 person carries their standing authority and 
 
 test('a one-to-one\'s standing authority never rides on someone else\'s message there, and a restriction follows its person anywhere', async () => {
   const { w, smsg, dmsg } = roomWorld();
-  // Someone else's message in phil's DM (a place whose member is phil): not phil asking, so no authority line.
-  await deliver(w.env, smsg('dm:UPHIL', 'loren', 'phil said to do it'), w.o);
+  // A relay into phil's DM (a place whose member is phil): not phil asking, so no authority line.
+  await deliver(w.env, w.msg('dm:UPHIL', 'phil said to do it', { venue: 'slack', label: 'dm:UPHIL', from: { kind: 'agent', id: 'mark' } }), w.o);
   const brief = plain(briefOf(starts(w)[0]));
   assert.equal(brief.includes('Standing authority'), false);
   assert.ok(brief.includes('Standing restriction from your owner for phil'));
@@ -429,4 +429,108 @@ test('a card that can\'t be read is left out of a members\' place, never the bod
   const a = await deliver(w.env, smsg('dm:UPHIL', 'phil', 'hi'), w.o);
   assert.equal(a.body, 'started');
   assert.equal(plain(briefOf(starts(w)[0])).includes('person cards of who\'s here'), false);
+});
+
+// ─── Review round: the roster is taken whole, a guest in it makes a guest venue, an authority is held to its person ───
+
+test('a tier-1 member makes the place a guest venue: narrowed, the floor, the guest a reader, no one else\'s card', async () => {
+  const { w, smsg, gates, cards, policy } = roomWorld();
+  gates.people.kim = { name: 'Kim', tier: 1 };
+  cards.kim = '## Kim (kim)\nA guest.';
+  const inner = w.o.adapter;
+  w.o.adapter = async (argv, c, args) => (args[0] === '--describe' && c.place === 'group:G5' ? { ok: true, venue: 'G5', members: ['phil', 'kim', 'jonathan'] } : inner(argv, c, args));
+  const a = await deliver(w.env, smsg('group:G5', 'jonathan', 'all set?'), w.o);
+  assert.equal(a.body, 'started');
+  const [[, id, raw]] = starts(w);
+  const brief = plain(raw);
+  assert.deepEqual(w.runner.denies[id], ['mcp__handoff', ...GUEST_DENY], 'narrowed though the guest didn\'t write');
+  assert.ok(brief.includes('THIS IS A GUEST VENUE. Its readers (kim)'));
+  assert.ok(brief.includes('## Kim (kim)'), 'the guest reader\'s card');
+  assert.equal(brief.includes('## Phil (phil)'), false, 'no other member\'s card while a guest reads');
+  assert.equal(brief.includes('## Jonathan (jonathan)'), false);
+  assert.ok(brief.includes('The lowest tier present governs the room: tier 1.'));
+  assert.equal(loadConv(w.env, a.conversation).bodyRules.guest, true);
+  // No guest floor in the policy: no body at all.
+  delete policy.briefs.guest;
+  const b = await deliver(w.env, smsg('group:G5', 'phil', 'and?'), w.o);
+  assert.notEqual(b.body, 'started');
+});
+
+test('fail closed: a roster that can\'t be taken whole (too many, a bad slug, a repeat, not a list) means no body', async () => {
+  for (const [what, members] of [['13 members', Array.from({ length: 13 }, (_, i) => `p${i}`)], ['a bad slug', ['phil', 'Bad Slug']],
+    ['a repeat', ['phil', 'phil']], ['not a list', 'phil'], ['a number', ['phil', 7]]]) {
+    const { w, smsg } = roomWorld();
+    const inner = w.o.adapter;
+    w.o.adapter = async (argv, c, args) => (args[0] === '--describe' ? { ok: true, venue: 'G9', members } : inner(argv, c, args));
+    const a = await deliver(w.env, smsg('group:G9', 'phil', 'hi'), w.o);
+    assert.equal(a.body, 'queued', what);
+    assert.match(a.reason, /roster can't be taken whole/, what);
+    assert.equal(starts(w).length, 0, what);
+  }
+});
+
+test('a body told a person\'s standing authority is reseated when anyone else writes, and the fresh one isn\'t told it', async () => {
+  const { w, smsg } = roomWorld();
+  const a = await deliver(w.env, smsg('dm:UPHIL', 'phil', 'set up the new box'), w.o);
+  const first = loadConv(w.env, a.conversation).body;
+  assert.equal(loadConv(w.env, a.conversation).bodyRules.grantFor, 'phil');
+  // Phil again, mid-turn: fed to the same body.
+  assert.equal((await deliver(w.env, smsg('dm:UPHIL', 'phil', 'the one at Boyle'), w.o)).body, 'fed');
+  // Someone else in the same place, mid-turn: never fed to the body holding Phil's authority.
+  // A relay from another agent into Phil's DM, mid-turn: not Phil asking, so never fed to the body holding his
+  // authority; it's reseated, and the fresh body's rules aren't made from his authority.
+  const b = await deliver(w.env, w.msg('dm:UPHIL', 'do this for me', { venue: 'slack', label: 'dm:UPHIL', from: { kind: 'agent', id: 'mark' } }), w.o);
+  assert.equal(b.body, 'started');
+  assert.ok(w.log.some((l) => l[0] === 'end' && l[1] === first.split(':')[1]), 'the body holding the authority was ended');
+  assert.equal(w.log.some((l) => l[0] === 'feed' && String(l[2]).includes('do this for me')), false);
+  const c = loadConv(w.env, a.conversation);
+  assert.notEqual(c.body, first);
+  assert.equal(c.bodyRules.grantFor, undefined);
+  assert.equal(plain(briefOf(starts(w).at(-1))).includes('Standing authority'), false);
+  // Someone else writing there: the roster is wrong, no body.
+  const n = await deliver(w.env, smsg('dm:UPHIL', 'loren', 'do mine too'), w.o);
+  assert.notEqual(n.body, 'fed');
+  assert.equal(w.log.some((l) => l[0] === 'feed' && String(l[2]).includes('do mine too')), false);
+});
+
+test('an authority isn\'t told once the conversation has heard anyone else, even when its person writes alone later', async () => {
+  const { w, smsg } = roomWorld();
+  const a = await deliver(w.env, w.msg('dm:UPHIL', 'phil asked me to ask', { venue: 'slack', label: 'dm:UPHIL', from: { kind: 'agent', id: 'mark' } }), w.o);
+  w.runner.finish(loadConv(w.env, a.conversation).body);
+  await tick(w.env, w.o);
+  await deliver(w.env, smsg('dm:UPHIL', 'phil', 'set up the box'), w.o);
+  assert.equal(starts(w).length, 2, 'phil\'s message reached a body');
+  assert.ok(plain(briefOf(starts(w)[1])).includes('set up the box'));
+  for (const s of starts(w)) assert.equal(plain(briefOf(s)).includes('Standing authority'), false);
+});
+
+test('a group body hears no person outside the members its rules were made for: reseated', async () => {
+  const { w, smsg } = roomWorld();
+  const a = await deliver(w.env, smsg('group:G1', 'phil', 'hi all'), w.o);
+  const first = loadConv(w.env, a.conversation).body;
+  assert.equal((await deliver(w.env, smsg('group:G1', 'anton', 'hi'), w.o)).body, 'fed', 'a member: fed');
+  const b = await deliver(w.env, smsg('group:G1', 'loren', 'me too'), w.o);
+  assert.ok(w.log.some((l) => l[0] === 'end' && l[1] === first.split(':')[1]), 'never fed: the body was ended');
+  assert.equal(w.log.some((l) => l[0] === 'feed' && String(l[2]).includes('me too')), false);
+  // And no body starts for a person the roster doesn't have: who reads there is unknown.
+  assert.equal(b.body, 'queued');
+  assert.match(b.reason, /loren wrote there and isn't in the slack adapter's roster/);
+});
+
+test('a session that heard a person\'s standing authority is never resumed under other rules: a fresh body starts', async () => {
+  const { w, smsg } = roomWorld();
+  const a = await deliver(w.env, smsg('dm:UPHIL', 'phil', 'set up the new box'), w.o);
+  w.runner.finish(loadConv(w.env, a.conversation).body);
+  await tick(w.env, w.o);
+  await deliver(w.env, w.msg('dm:UPHIL', 'a relay for phil', { venue: 'slack', label: 'dm:UPHIL', from: { kind: 'agent', id: 'mark' } }), w.o);
+  const last = starts(w).at(-1);
+  assert.equal(last[0], 'start', 'not a resume of the session that held phil\'s authority');
+  assert.equal(plain(briefOf(last)).includes('Standing authority'), false);
+  // Phil alone again, his own session resumed under the same rules: allowed (same key).
+  const { w: w2, smsg: s2 } = roomWorld();
+  const b = await deliver(w2.env, s2('dm:UPHIL', 'phil', 'one'), w2.o);
+  w2.runner.finish(loadConv(w2.env, b.conversation).body);
+  await tick(w2.env, w2.o);
+  await deliver(w2.env, s2('dm:UPHIL', 'phil', 'two'), w2.o);
+  assert.equal(starts(w2).at(-1)[0], 'resume');
 });

@@ -631,7 +631,7 @@ describe('place: a body asks where it is (t-1745)', () => {
     const session = w.sessionFor(cv);
     const r = await runFor(w.env, { kind: 'agent', agent: 'art' }, ['place', '--conversation', cv], memStore(), undefined, undefined, { key, session });
     assert.equal(r.exit, 0, JSON.stringify(r));
-    assert.deepEqual(JSON.parse(r.stdout), { conversation: cv, agent: 'art', venue: 'slack', place: 'dm:U1', label: 'DM with Phil', members: [] });
+    assert.deepEqual(JSON.parse(r.stdout), { conversation: cv, agent: 'art', venue: 'slack', place: 'dm:U1', label: 'DM with Phil', members: [], principal: { for: 'phil', owner: false } });
     const no = async (caller, proof, argv = ['place', '--conversation', cv]) => (await runFor(w.env, caller, argv, memStore(), undefined, undefined, proof)).exit;
     assert.equal(await no({ kind: 'agent', agent: 'art' }, { key }), 1, 'no session: proves nothing');
     assert.equal(await no({ kind: 'agent', agent: 'art' }, { key, session: 'someone-else' }), 1, 'another session');

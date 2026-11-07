@@ -41,7 +41,12 @@ export async function runFor(env, caller, argv, store = loomStore(env), core = c
     const d = await import('./delivery.mjs');
     const c = d.loadConv(env, args[1]);
     if (!c || c.agent !== caller.agent || !d.holdsRun(env, args[1], proof)) return no(`place: only the body holding ${args[1]} in its current run asks where it is`);
-    return ok(`${JSON.stringify({ conversation: c.conversation, agent: c.agent, venue: c.venue, place: c.place, ...(c.label !== undefined ? { label: c.label } : {}), members: c.bodyRules?.members ?? [] })}\n`);
+    // `members` is who was in the place when this body's rules were made (`membersAt`): a body is reseated if a person
+    // outside them writes (delivery.mjs, needsReseat), so it holds for this body's run. `principal` is whom it works
+    // for now (principal.mjs): a tool scoped by a person checks both name the same one.
+    const { principalOf } = await import('./principal.mjs');
+    const p = principalOf(env, c);
+    return ok(`${JSON.stringify({ conversation: c.conversation, agent: c.agent, venue: c.venue, place: c.place, ...(c.label !== undefined ? { label: c.label } : {}), members: c.bodyRules?.members ?? [], ...(c.bodyRules?.membersAt ? { membersAt: c.bodyRules.membersAt } : {}), principal: { for: p.for, owner: p.owner, ...(p.unknown ? { unknown: true } : {}) } })}\n`);
   }
   const tail = a === 'propose-person' ? [b, ...rest].filter((x) => x !== undefined) : a === 'gates' && b === 'propose' ? rest : null;
   if (tail) {

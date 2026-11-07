@@ -147,7 +147,9 @@ export function cleanAbout(a) {
     readers: Array.isArray(a.readers) ? a.readers.filter((s) => typeof s === 'string' && SLUG.test(s)).slice(0, READERS_MAX) : [],
     // The people in a place where each of them reads every reply, by their slugs (a DM: the one person; a group DM:
     // everyone in it). Who they are and their tiers are the runtime's own gates', never the adapter's word.
-    members: Array.isArray(a.members) ? uniq(a.members.filter((s) => typeof s === 'string' && SLUG.test(s))).slice(0, READERS_MAX) : [],
+    // Kept as the adapter gave it, never filtered or cut short here: rulesFor refuses a roster it can't take whole
+    // (one dropped member could be the guest who makes it a guest venue).
+    ...(a.members !== undefined ? { members: a.members } : {}),
     notes: Array.isArray(a.notes) ? a.notes.filter((s) => typeof s === 'string' && NOTE.test(s)).slice(0, 8) : [],
     ...(typeof a.pair === 'string' && a.pair.length <= 40 ? { pair: a.pair } : {}),
     // Lines of words for the body's brief about the place (core's Comms threads: loom docs/specs/comms.md): at most
@@ -157,7 +159,17 @@ export function cleanAbout(a) {
 }
 
 /** A body's rules' key: what makes two bodies the same as far as placement goes. */
-const keyOf = (guest, deny) => createHash('sha256').update(JSON.stringify([guest, [...deny].sort()])).digest('hex').slice(0, 16);
+const keyOf = (guest, deny, members = [], grantFor = null) => createHash('sha256').update(JSON.stringify(members.length || grantFor ? [guest, [...deny].sort(), [...members].sort(), grantFor] : [guest, [...deny].sort()])).digest('hex').slice(0, 16);
+
+/** Why a place's roster (an adapter's `members`) can't be taken whole, or null. */
+function rosterProblem(m) {
+  if (m === undefined) return null;
+  if (!Array.isArray(m)) return 'its members aren\'t a list';
+  if (m.length > READERS_MAX) return `it has ${m.length} members, more than the ${READERS_MAX} a body's rules carry`;
+  if (!m.every((s) => typeof s === 'string' && SLUG.test(s))) return 'a member isn\'t a person\'s slug';
+  if (new Set(m).size !== m.length) return 'a member is listed twice';
+  return null;
+}
 
 /**
  * The rules for a body in conversation `c` ({agent, venue, place}), for messages `msgs` ({from, tier?}):
@@ -166,7 +178,7 @@ const keyOf = (guest, deny) => createHash('sha256').update(JSON.stringify([guest
  * `d`: policy(agent) → doc|null; gates(agent) → doc (throws when unreadable); describe() → the adapter's answer for
  * the place (throws when it can't); card(slug) → its text or null. `platform`: the venue has a send (an adapter).
  */
-export async function rulesFor(c, msgs, d, { platform, core = false }) {
+export async function rulesFor(c, msgs, d, { platform, core = false, principal = null }) {
   let pol;
   try { pol = d.policy(c.agent); } catch (e) { throw new RulesError(`${c.agent}'s policy can't be read (${e.message})`); }
   if (pol && policyProblem(pol)) throw new RulesError(`${c.agent}'s policy isn't one: ${policyProblem(pol)}`);
@@ -186,19 +198,27 @@ export async function rulesFor(c, msgs, d, { platform, core = false }) {
     about = cleanAbout(a);
   }
   const senders = msgs.map((x) => ({ x, tier: x.owner === true ? 3 : tierOf(gates, x.from) ?? (Number.isInteger(x.tier) ? x.tier : null) }));
-  const guestSenders = senders.filter((s) => s.tier === 1).map((s) => s.x.from.slug);
-  const owned = pol.guest_places?.[c.venue]?.[c.place];
-  const venueGuests = guestsOf(gates, about.venue);
-  const guest = about.guest || Array.isArray(owned) || guestSenders.length > 0 || venueGuests.length > 0;
-  const readers = guest ? uniq([...about.readers, ...(owned ?? []), ...venueGuests, ...guestSenders]).slice(0, READERS_MAX) : [];
-  const briefs = pol.briefs ?? {};
-  const deny = uniq([...(pol.deny ?? []), ...(guest ? pol.guest_deny ?? [] : [])]);
-  // The place's members, by the gates: each must be a person the gates give a tier, or no body starts (the adapter
-  // routes only people its gates admit, so one the runtime's gates don't place is a disagreement, not a guest).
-  const members = about.members.map((s) => ({ slug: s, e: gates?.people?.[s], tier: tierOf(gates, { kind: 'person', slug: s }) }));
+  // The place's members, first: who reads every reply decides whether it's a guest venue. Taken whole or not at all
+  // (a roster it can't take is no body), and each by the runtime's own gates: one they give no tier is no body (the
+  // adapter routes only people its gates admit, so that's a disagreement); a tier-1 member makes it a guest venue.
+  const bad = rosterProblem(about.members);
+  if (bad) throw new RulesError(`${c.place}: the ${c.venue} adapter's roster can't be taken whole (${bad}): no body starts there`);
+  const members = (about.members ?? []).map((s) => ({ slug: s, e: gates?.people?.[s], tier: tierOf(gates, { kind: 'person', slug: s }) }));
   const unplaced = members.find((m) => m.tier === null);
   if (unplaced) throw new RulesError(`${c.place}: ${unplaced.slug} is in it and ${c.agent}'s gates give them no tier: no body starts there`);
   const lowest = members.length ? Math.min(...members.map((m) => m.tier)) : null;
+  // A person writing in a place whose roster doesn't have them: the roster is wrong, so who reads is unknown.
+  const outside = members.length ? senders.find((s) => s.x.from?.kind === 'person' && !members.some((m) => m.slug === s.x.from.slug)) : null;
+  if (outside) throw new RulesError(`${c.place}: ${outside.x.from.slug} wrote there and isn't in the ${c.venue} adapter's roster of it: no body starts there`);
+  const memberGuests = members.filter((m) => m.tier === 1).map((m) => m.slug);
+  const guestSenders = senders.filter((s) => s.tier === 1).map((s) => s.x.from.slug);
+  const owned = pol.guest_places?.[c.venue]?.[c.place];
+  const venueGuests = guestsOf(gates, about.venue);
+  const guest = about.guest || Array.isArray(owned) || guestSenders.length > 0 || venueGuests.length > 0 || memberGuests.length > 0;
+  const readers = guest ? uniq([...memberGuests, ...about.readers, ...(owned ?? []), ...venueGuests, ...guestSenders]).slice(0, READERS_MAX) : [];
+  if (memberGuests.some((s) => !readers.includes(s))) throw new RulesError(`${c.place} is a guest venue with more readers than a body's rules carry: no body starts there`);
+  const briefs = pol.briefs ?? {};
+  const deny = uniq([...(pol.deny ?? []), ...(guest ? pol.guest_deny ?? [] : [])]);
   const sections = [];
   const text = (t) => sections.push({ text: t });
   const file = (f, what) => { sections.push({ file: f, what }); text('\n'); };
@@ -229,10 +249,19 @@ export async function rulesFor(c, msgs, d, { platform, core = false }) {
     const r = gates?.people?.[s]?.restrict;
     if (typeof r === 'string' && r.trim()) text(`Standing restriction from your owner for ${s} (your gates): ${r.trim().slice(0, 1000)}\n`);
   }
+  // An authority is that person's, for what they ask (t-1943): only in a one-to-one place with them, tier 2, when
+  // every message this body hears is theirs (any other sender, a relay, the schedule, someone unnamed: none), and
+  // when the conversation has only ever heard them (principal.mjs: its principal is them, the owner never spoke there,
+  // nothing unplaced steered it). The body is held to it: a later message from anyone else reseats it (delivery.mjs).
   const one = members.length === 1 ? members[0] : null;
-  if (one && one.tier === 2 && persons.length === 1 && persons[0] === one.slug) {
+  let grantFor = null;
+  if (one && one.tier === 2 && !guest && msgs.length && msgs.every((x) => x.from?.kind === 'person' && x.from.slug === one.slug)
+    && principal?.for === one.slug && principal.owner !== true && principal.unknown !== true) {
     const g = one.e?.grant;
-    if (typeof g === 'string' && g.trim()) text(`Standing authority from your owner for ${one.slug} (your gates), here with them alone, for what they ask: ${g.trim().slice(0, 1000)}\n`);
+    if (typeof g === 'string' && g.trim()) {
+      grantFor = one.slug;
+      text(`Standing authority from your owner for ${one.slug} (your gates), here with them alone, for what they ask: ${g.trim().slice(0, 1000)}\n`);
+    }
   }
   if (guest) {
     if (!deny.length || !(pol.guest_deny ?? []).length) throw new RulesError(`${c.place} is a guest venue and ${c.agent}'s policy has no guest_deny: no body starts there without its tools narrowed`);
@@ -270,7 +299,8 @@ export async function rulesFor(c, msgs, d, { platform, core = false }) {
   if (briefs.venues?.[c.venue]) { text('\n'); file(briefs.venues[c.venue], `your conduct on ${c.venue}`); }
   for (const n of about.notes) if (briefs.notes?.[n]) file(briefs.notes[n], `${n}'s notes`);
   for (const t of uniq([...senders.map((s) => s.tier), lowest].filter((t) => t !== null)).sort()) if (briefs.tiers?.[String(t)]) file(briefs.tiers[String(t)], `tier ${t}'s notes`);
-  return { guest, deny, readers, members: members.map((m) => m.slug), key: keyOf(guest, deny), sections };
+  const slugs = members.map((m) => m.slug);
+  return { guest, deny, readers, members: slugs, grantFor, key: keyOf(guest, deny, slugs, grantFor), sections };
 }
 
 export { GATES, gatesOf };
