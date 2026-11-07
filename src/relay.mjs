@@ -8,6 +8,11 @@
 //                         ──► core's deliver route, as the runtime: {venue: relay, place: <sender>, from: {kind: agent, id}}
 //                         ──► the other agent's body for that conversation (delivery.mjs), as any delivery
 //
+// An answer (`reply_to`) to a relay that recorded its asker's conversation (`origin`, originOf: proved, or the only
+// conversation of the asker's at work) skips core's deliver route: the runtime delivers it itself (delivery.mjs's
+// deliver, detached, source runtime) to that conversation's venue and place, `untilIdle`, so it waits out the asking
+// turn and then resumes its session. Within RETURN_MS of the ask; otherwise, or with no origin, the relay venue.
+//
 // Who may relay to whom is the runtime's grants document (`relay`: {sender: [agents]}), set on its Permissions page;
 // never household.json any more. An unpaired relay goes only with an allowed approval from the approvals piece, and
 // is refused when no approvals piece is installed. The answer is a relay back with `reply_to`, so an exchange is one
@@ -15,7 +20,7 @@
 // heads-up for the owner on loom's Inbox, never a stop.
 //
 // What's kept here is mechanism: <data>/delivery/relays.jsonl, one line a relay ({id, from, to, at, digest, shape,
-// reply_to?, thread?, where?, conversation, why}), never the words (they're the turn's, in core's audit), kept 30 days.
+// reply_to?, thread?, where?, origin?, origin_run?, conversation, why}), never the words (they're the turn's, in core's audit), kept 30 days.
 import { spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync, appendFileSync, mkdirSync } from 'node:fs';
@@ -178,7 +183,10 @@ export async function relay(env, caller, args, d = depsOf(env), proof = {}) {
   if (where && !WHERE.test(where)) no('relay: from is where it was asked, like discord:#general, slack:dm:someone or loom:cv-…');
   const replyTo = a.reply_to === undefined || a.reply_to === '' ? '' : String(a.reply_to);
   const approval = a.approval === undefined || a.approval === '' ? '' : String(a.approval);
-  const originId = a.conversation ?? where.match(FROM_CV)?.[1];
+  // A conversation named in `from` is its origin, not a place: never offered back as somewhere to post (relayText).
+  const fromCv = where.match(FROM_CV)?.[1];
+  const originId = a.conversation ?? fromCv;
+  const place = fromCv ? '' : where;
   // Proof only ever comes from the piece API's request body (gates-api.mjs), never the tool's arguments: a run key in
   // an MCP tool call would sit in core's record of it.
   const origin = originOf(env, caller, originId, proof);
@@ -210,7 +218,7 @@ export async function relay(env, caller, args, d = depsOf(env), proof = {}) {
 
   // Its words' shape too (loops.mjs, shapeOf: a hash, never the words): near-identical relays back and forth are a
   // loop the runtime pauses (relay ping-pong, t-1763).
-  const entry = { id: `r-${randomBytes(4).toString('hex')}`, from, to, say, why: plain(a.why, WHY_MAX), where, ...(origin ? { origin: origin.conversation, origin_run: origin.run } : {}), at: now, digest, shape: shapeOf(say), ...(replyTo ? { reply_to: replyTo, thread: threadId } : {}) };
+  const entry = { id: `r-${randomBytes(4).toString('hex')}`, from, to, say, why: plain(a.why, WHY_MAX), where: place, ...(origin ? { origin: origin.conversation, origin_run: origin.run } : {}), at: now, digest, shape: shapeOf(say), ...(replyTo ? { reply_to: replyTo, thread: threadId } : {}) };
   let out;
   let returnTo = null;
   let original = null;

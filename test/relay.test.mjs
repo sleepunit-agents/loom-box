@@ -275,8 +275,11 @@ test('a missing origin falls back visibly to the legacy relay conversation', asy
   const first = await deliver(w.env, w.msg('th:gone', 'hello', { venue: 'loom', source: 'loom' }), w.o);
   const q = await relay(w.env, { agent: 'art' }, { to: 'mark', say: 'check it', from: `loom:${first.conversation}` }, d);
   rmSync(join(deliveryDir(w.env), 'conversations', `${first.conversation}.json`));
-  await relay(w.env, { agent: 'mark' }, { to: 'art', say: 'checked it', reply_to: q.text.slice(0, 10) }, d);
+  const a = await relay(w.env, { agent: 'mark' }, { to: 'art', say: 'checked it', reply_to: q.text.slice(0, 10) }, d);
   assert.equal(delivered.at(-1).venue, 'relay');
+  assert.match(a.text, new RegExp(`${first.conversation} is no longer kept; delivered to the relay conversation instead`));
+  // A conversation named in from is the origin, never a place offered back to post in.
+  assert.equal(readRelays(w.env, w.clock.now().getTime()).find((r) => r.id === q.text.slice(0, 10)).where, '');
 });
 
 test('implicit origin requires exactly one active conversation hosted in the calling house', async () => {
@@ -500,9 +503,17 @@ describe('round 2 of the cold review', () => {
     const a = (await deliver(w.env, w.msg('th:a', 'one', { venue: 'loom', source: 'loom' }), w.o)).conversation;
     await deliver(w.env, w.msg('th:b', 'two', { venue: 'loom', source: 'loom' }), w.o);
     const key = keyOf(w, a);
+    // A body whose host hasn't reported a session yet: neither the runner nor its record names one.
+    const ref = loadConv(w.env, a).body;
+    assert.equal(holdsRun(w.env, a, { key, session: w.sessionFor(a) }, w.o), true, 'named, it proves');
+    const path = join(w.env.LOOM_BOX_DATA, 'bodies', `${ref.replace(':', '-')}.json`);
+    const rec = JSON.parse(readFileSync(path)); delete rec.slot; writeFileSync(path, JSON.stringify(rec));
     const slotOf = w.runner.slotOf;
     w.runner.slotOf = () => null;
-    try { assert.equal(holdsRun(w.env, a, { key, session: 'anything-1' }), false); assert.equal(holdsRun(w.env, a, { key }), false); } finally { w.runner.slotOf = slotOf; }
+    try {
+      assert.equal(holdsRun(w.env, a, { key, session: 'anything-1' }, w.o), false);
+      assert.equal(holdsRun(w.env, a, { key }, w.o), false);
+    } finally { w.runner.slotOf = slotOf; }
   });
 
   test('the MCP tool never takes proof from its arguments', async () => {
@@ -536,5 +547,19 @@ describe('round 2 of the cold review', () => {
     await relay(w.env, { agent: 'fez' }, { to: 'art', say: 'hello' }, d).catch(() => {});
     const relayStart = w.log.filter((l) => l[0] === 'start').map((l) => plain(l[2] ?? '')).find((t) => /on relay/.test(t));
     if (relayStart) assert.doesNotMatch(relayStart, /come back here/);
+  });
+});
+
+describe('round 3 of the cold review', () => {
+  test('a returned relay\'s id never reaches the venue\'s adapter as a message to mark', async () => {
+    const { w, d } = relayWorld();
+    const cv = (await deliver(w.env, w.msg('th:ack', 'ask mark', { venue: 'loom', source: 'loom' }), w.o)).conversation;
+    const q = await relay(w.env, { agent: 'art' }, { to: 'mark', say: 'q', conversation: cv }, d);
+    await relay(w.env, { agent: 'mark' }, { to: 'art', say: 'a', reply_to: q.text.slice(0, 10) }, d);
+    w.runner.finish(loadConv(w.env, cv).body);
+    await tick(w.env, w.o);
+    assert.match(plain(w.log.findLast((l) => l[0] === 'resume')[4]), /\ba\b/);
+    const named = w.core.commsCalls.flatMap((b) => b.messages ?? []);
+    assert.ok(!named.some((m) => /^r-[0-9a-f]{8}$/.test(m)), JSON.stringify(named));
   });
 });

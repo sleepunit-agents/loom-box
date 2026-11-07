@@ -1005,7 +1005,8 @@ const rulesDeps = (d, v, c) => ({
 /** Messages that reached a body: the adapter is told, on the drain's way out (announce). */
 function ack(c, msgs) {
   // A post-failure note is the runtime's, not a message on the platform: nothing there to show 👀 on.
-  const ids = msgs.filter((x) => x.kind === 'message' && !isNote(x) && typeof x.id === 'string').map((x) => x.id);
+  // Nor is an agent's relay returned to the conversation that asked (relay.mjs): its id is the runtime's, not the venue's.
+  const ids = msgs.filter((x) => x.kind === 'message' && !isNote(x) && x.from?.kind !== 'agent' && typeof x.id === 'string').map((x) => x.id);
   if (ids.length) c.acks = [...new Set([...(c.acks ?? []), ...ids])].slice(-20);
 }
 
@@ -1925,12 +1926,12 @@ function sessionOf(d, ref) {
  * current run: the same proof `send` takes (LOOM_BODY_KEY, the harness session). The relay's return address uses it
  * (relay.mjs, originOf): a body that proves its conversation needs nothing else to name it.
  */
-export function holdsRun(env, cv, { key, session } = {}) {
+export function holdsRun(env, cv, { key, session } = {}, o = {}) {
   const c = loadConv(env, cv);
   const want = typeof c?.sendKey === 'string' && /^[0-9a-f]{64}$/.test(c.sendKey) ? Buffer.from(c.sendKey, 'hex') : null;
   if (!want || !c.body || typeof key !== 'string' || !key || !timingSafeEqual(keyHash(key), want)) return false;
   // Fail closed (unlike send's, kept as it was): a body whose session the runner can't name proves nothing yet.
-  const own = sessionOf({ ...depsOf(env), env }, c.body);
+  const own = sessionOf({ ...depsOf(env, o), env }, c.body);
   return !!own && session === own;
 }
 
