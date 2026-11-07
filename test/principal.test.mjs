@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { bodyPrincipal, deliver, deliveryDir, loadConv, verifyStatement } from '../src/delivery.mjs';
 import { api } from '../src/control.mjs';
-import { STATEMENT_TTL_S, mint, noteSender, principalOf, putWakeFor, takeWakeFor, verify } from '../src/principal.mjs';
+import { STATEMENT_TTL_S, mint, noteSender, principalOf, putWakeFor, resetActsFor, takeWakeFor, verify } from '../src/principal.mjs';
 import { cvOf, here, world } from './delivery-world.mjs';
 
 const ROOT = join(here, '..');
@@ -45,7 +45,7 @@ test('a conversation\'s principal: the owner only when every voice was his; one 
 test('a wake is whoever the clock said; with no word from it, unknown', () => {
   const env = envOf();
   const wake = { agent: 'art', venue: 'wake', at, from: { kind: 'schedule' } };
-  const run = (wakeFor) => { const c = { agent: 'art' }; noteSender(env, c, wake, { wakeFor, historyFree: true }); return principalOf(env, c); };
+  const run = (wakeFor) => { const c = { agent: 'art' }; noteSender(env, c, wake, { wakeFor }); return principalOf(env, c); };
   assert.equal(run('owner').owner, true);
   assert.deepEqual(run('loren'), { for: 'loren', owner: false, people: ['loren'] });
   assert.equal(run('jonathan').owner, true, 'the owner by name is the owner');
@@ -54,17 +54,31 @@ test('a wake is whoever the clock said; with no word from it, unknown', () => {
   assert.equal(run(undefined).unknown, true);
 });
 
-test('a conversation that ran before this was kept can\'t say who steered it, unless only the owner or the clock speak there', () => {
+test('a conversation that ran before this was kept can\'t say who steered it, in any venue, until the owner vouches for it', () => {
   const env = envOf();
   const old = { agent: 'art', runs: 4 };
   noteSender(env, old, person('jonathan'));
   assert.equal(principalOf(env, old).owner, false, 'its earlier runs heard people this never saw');
-  const comms = { agent: 'art', runs: 4 };
-  noteSender(env, comms, person('jonathan'), { historyFree: true });
-  assert.equal(principalOf(env, comms).owner, true);
-  // It only grows: the next owner message doesn't clear it.
+  const comms = { agent: 'art', venue: 'loom', runs: 4 };
+  noteSender(env, comms, { ...person('jonathan'), venue: 'loom' });
+  assert.equal(principalOf(env, comms).owner, false, 'a Comms thread too: it resumes its session or its digests');
+  // It only grows: the next owner message doesn't clear it. The owner's reset does.
   noteSender(env, old, person('jonathan'));
   assert.equal(principalOf(env, old).owner, false);
+  resetActsFor(old, at);
+  noteSender(env, old, person('jonathan'));
+  assert.equal(principalOf(env, old).owner, true);
+});
+
+test('what already waits in the queue counts as heard: the body will hear it', () => {
+  const env = envOf();
+  // From before this was kept: Loren's message queued, no body has run yet.
+  const c = { agent: 'art', runs: 0, queue: [{ key: 'k1', from: { kind: 'person', slug: 'loren' } }] };
+  noteSender(env, c, person('jonathan'));
+  assert.deepEqual(principalOf(env, c), { for: 'loren', owner: false, people: ['loren'] });
+  const w = { agent: 'art', runs: 0, queue: [{ key: 'k2', from: { kind: 'schedule' }, kind: 'wake' }] };
+  noteSender(env, w, person('jonathan'));
+  assert.equal(principalOf(env, w).owner, false, 'a queued wake no one handed over for');
 });
 
 test('a statement verifies as minted, for its agent and conversation; a changed byte, another key, or age refuses it', () => {
@@ -179,7 +193,8 @@ test('the CLI: --verify checks a statement on this machine; --wake takes the clo
   assert.deepEqual([JSON.parse(ok.stdout).for, JSON.parse(ok.stdout).owner], ['owner', true]);
   const gone = cli(env, ['principal', '--verify'], mint(dir, { agent: 'art', conversation: 'cv-000000000002', principal: { for: 'owner', owner: true, people: [] } }));
   assert.equal(gone.status, 1, 'a conversation this runtime has no record of');
-  const bad = cli(env, ['principal', '--verify'], `${s.slice(0, -2)}AA`);
+  assert.equal(JSON.parse(gone.stdout).reason, 'this runtime has no record of its conversation');
+  const bad = cli(env, ['principal', '--verify'], `${s.slice(0, -2)}${s.endsWith('AA') ? 'BA' : 'AA'}`);
   assert.equal(bad.status, 1);
   assert.equal(JSON.parse(bad.stdout).ok, false);
   const put = cli(env, ['principal', '--wake', '--agent', 'art', '--place', 'wake:w-9', '--id', 'w-9', '--for', 'loren']);
@@ -187,6 +202,12 @@ test('the CLI: --verify checks a statement on this machine; --wake takes the clo
   assert.equal(takeWakeFor(dir, 'art', 'wake:w-9', 'w-9'), 'loren');
   assert.notEqual(cli(env, ['principal', '--wake', '--agent', 'art', '--place', 'wake:w-9', '--id', 'w-9', '--for', 'NOPE']).status, 0);
   assert.notEqual(cli(env, ['principal', '--wake', '--agent', 'art', '--place', 'wake:w-9', '--for', 'loren']).status, 0, 'no id');
+  // --reset: the owner vouches for a conversation; its statement verifies again only once it's his.
+  writeFileSync(join(dir, 'conversations', 'cv-000000000003.json'), JSON.stringify({ conversation: 'cv-000000000003', agent: 'art', actsFor: { owner: true, people: [], unknown: true } }));
+  const r = cli(env, ['principal', '--reset', '--conversation', 'cv-000000000003']);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, 'conversations', 'cv-000000000003.json'), 'utf-8')).actsFor.unknown, false);
+  assert.notEqual(cli(env, ['principal', '--reset', '--conversation', 'cv-00000000000f']).status, 0, 'no such conversation');
 });
 
 function pieceCall(env, args) {

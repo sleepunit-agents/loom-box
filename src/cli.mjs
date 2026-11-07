@@ -57,6 +57,7 @@
 //   loom runtime principal [--conversation <cv>]                       on whose behalf this body acts (t-1943): {for, owner,
 //                                                                        people, statement}; the statement is what a piece checks
 //   loom runtime principal --verify < statement                        loom's machine: a statement checked (and still true), {ok, agent, for, owner, …}
+//   loom runtime principal --reset --conversation <cv>                 loom's machine, the owner's: what it heard before is set aside
 //   loom runtime principal --wake --agent a --place p --id <delivery id> --for owner|<slug>|-   loom's machine (the clock): who that firing wake is for
 //   loom runtime deliver tick [--conversation <cv>] | deliver run [--every <ms>] | deliver list [--json]
 //   loom runtime deliver resume|dismiss <cv>   a conversation paused as a loop (loops.mjs): start what waited, or drop it
@@ -492,10 +493,19 @@ async function main(argv, env) {
       // state only, never through the piece API: a house has no signing key (so nothing verifies there) and can't
       // hand over a wake's principal (only the clock, here, does).
       const { putWakeFor } = await import('./principal.mjs');
-      const { deliveryDir, bodyPrincipal, verifyStatement } = await import('./delivery.mjs');
+      const { deliveryDir, bodyPrincipal, verifyStatement, resetPrincipal } = await import('./delivery.mjs');
       const { withLock, AGENT_NAME } = await import('./state.mjs');
       if (rest.includes('--verify')) {
         const r = verifyStatement(env, (await readStdin()).trim());
+        out(r);
+        if (!r.ok) process.exitCode = 1;
+        return;
+      }
+      if (rest.includes('--reset')) {
+        // The owner's, on loom's machine: this conversation is his from here (it ran before the runtime kept who
+        // steered it, or heard someone he vouches for). Never through the piece API.
+        if (env.LOOM_URL && env.LOOM_TOKEN_FILE && env.HOUSE_ID) throw new Fail('principal --reset is the owner\'s, on loom\'s machine');
+        const r = resetPrincipal(env, flag(rest, '--conversation'));
         out(r);
         if (!r.ok) process.exitCode = 1;
         return;

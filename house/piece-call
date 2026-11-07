@@ -18,8 +18,9 @@ bin/piece-call, the same program, for loom's own machine.
 
 For approvals and clock, a body in a conversation (LOOM_BODY_CONVERSATION) also
 sends `--principal <statement>`: on whose behalf it acts, signed by the runtime
-(`loom-runtime principal`, t-1943). Without one the piece treats the body as
-acting for someone it can't name, never the owner.
+(`loom-runtime principal`, t-1943; PIECE_CALL_RUNTIME names another program,
+for tests). Without one the piece treats the body as acting for someone it
+can't name, never the owner.
 
 Exit 1 with loom's words when the call itself fails (refused, unreachable).
 """

@@ -9,10 +9,7 @@
 //   1. Each conversation keeps `actsFor`: whether its owner spoke, the non-owner people who did, and whether anything
 //      it can't place steered it (a relay from another agent, a sender it can't name, a wake with no record, or
 //      history from before this was kept). It only grows, for good: a body's context remembers what it heard, so a
-//      conversation once unknown asks from then on (fails closed).
-//
-// The limit (as `send`'s, README "Threat model"): one agent's bodies share its house, so a body that sets out to pose
-// as a sibling can read that sibling's run key and session and get its statement. Isolating them is the house's job.
+//      conversation once unknown asks from then on (fails closed), until the owner vouches for it (--reset).
 //   2. Its principal: unknown if anything unplaced steered it; the one non-owner person if exactly one spoke; unknown
 //      (several people) if more did; the owner if only the owner did; unknown if nothing did. Never the owner by default.
 //   3. A statement: the principal, signed (HMAC-SHA256) with a key only the runtime holds, for one agent and
@@ -21,6 +18,9 @@
 //   4. A wake: the clock records who a wake is for when it's set, and hands that to the runtime as it fires
 //      (`--wake`, loom's machine only). It's taken as the wake's message is queued, so a wake set by a body working
 //      for someone else stays theirs.
+//
+// The limit (as `send`'s, README "Threat model"): one agent's bodies share its house, so a body that sets out to pose
+// as a sibling can read that sibling's run key and session and get its statement. Isolating them is the house's job.
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -37,17 +37,26 @@ export const ownersFor = (env, agent) => ownersOf(membersOf(env), agent);
 
 /**
  * Note who steered a conversation, as a message joins its queue: `c.actsFor` grows (never shrinks). `wakeFor` is
- * what the clock handed over for a wake ('owner', a person's slug, '-' for unknown, or undefined: none). `comms` and
- * `wake` venues have no history this can't place (only the owner speaks in a Comms thread; only the clock delivers
- * on venue wake), so a conversation there that ran before this was kept starts clean; any other starts unknown.
+ * what the clock handed over for a wake ('owner', a person's slug, '-' for unknown, or undefined: none). A
+ * conversation that ran before this was kept, in any venue, starts unknown: its earlier runs heard people this never
+ * saw, and a body resumes their session or their digests. Messages already waiting in its queue are noted first (the
+ * body will hear them). Only the owner clears it (`loom runtime principal --reset`, resetActsFor).
  */
-export function noteSender(env, c, m, { wakeFor, historyFree = false } = {}) {
+export function noteSender(env, c, m, { wakeFor } = {}) {
   if (!c.actsFor) {
-    c.actsFor = { owner: false, people: [], unknown: false, since: m.at };
-    // Its earlier runs heard people this never saw: whoever they were, it can't say.
-    if ((c.runs ?? 0) > 0 && !historyFree) c.actsFor.unknown = true;
+    c.actsFor = { owner: false, people: [], unknown: (c.runs ?? 0) > 0 || (c.runLog ?? []).length > 0 };
+    for (const q of c.queue ?? []) noteOne(env, c.actsFor, { ...q, agent: c.agent }, undefined);
   }
-  const a = c.actsFor;
+  return noteOne(env, c.actsFor, m, wakeFor);
+}
+
+/** The owner's word that a conversation is his from here (loom's machine only): what it heard before is set aside. */
+export function resetActsFor(c, at) {
+  c.actsFor = { owner: false, people: [], unknown: false, reset: at };
+  return c.actsFor;
+}
+
+function noteOne(env, a, m, wakeFor) {
   const owners = ownersFor(env, m.agent);
   const person = (slug) => {
     if (owners.includes(slug)) a.owner = true;

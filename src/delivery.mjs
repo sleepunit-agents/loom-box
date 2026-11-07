@@ -95,7 +95,7 @@ import { raiseAlert } from './alerthook.mjs';
 import { changed as changedCards } from './activity.mjs';
 import { keepKey } from './bodyhost.mjs';
 import { readRelays } from './relay.mjs';
-import { mint, noteSender, principalOf, takeWakeFor, verify } from './principal.mjs';
+import { mint, noteSender, principalOf, resetActsFor, takeWakeFor, verify } from './principal.mjs';
 
 const DAY_MS = 86_400_000;
 export const MAX_TEXT = 40_000;
@@ -700,7 +700,6 @@ async function deliverOnce(env, raw, o) {
       // stops here (its turn stands, no body hears it).
       if (m.kind === 'wake' && !!c.local !== local) return mismatch(m.place, c.local);
       if (m.label !== undefined) c.label = m.label;
-      // A retry after a crash may find its message already queued (or already answered): never twice.
       // A retry after a crash may find its message already queued (or already answered): never twice. Who steered it
       // (principal.mjs, t-1943) is noted as it joins, before any body hears it: a wake takes what the clock handed over
       // for exactly it (on venue wake, from a schedule, only the clock delivers); a Comms thread from core's own source
@@ -708,7 +707,7 @@ async function deliverOnce(env, raw, o) {
       if (!c.queue.some((x) => x.key === key) && !c.outcomes?.[key]) {
         const wake = m.venue === 'wake' && m.from.kind === 'schedule';
         const wakeFor = wake ? takeWakeFor(deliveryDir(env), m.agent, m.place, m.id, d.now().getTime()) : undefined;
-        noteSender(env, c, m, { wakeFor, historyFree: owner || wake });
+        noteSender(env, c, m, { wakeFor });
         c.queue.push({ key, id: m.id, at: m.at, from: m.from, kind: m.kind, ...(local ? { local: true } : {}), ...(tier ? { tier } : {}), ...(owner ? { owner: true } : {}), ...(tierUnread ? { tierUnread: true } : {}), ...(sealed ? { sealed } : { mem: true }) });
       }
       c.last = d.now().toISOString();
@@ -2028,6 +2027,18 @@ export function bodyPrincipal(env, { conversation, key, session }, o = {}) {
   return { ok: true, agent: c.agent, conversation: c.conversation, ...p, statement: mint(deliveryDir(env), { agent: c.agent, conversation: c.conversation, principal: p }, d.now().getTime()) };
 }
 
+/** The owner's reset of a conversation's principal (principal.mjs, resetActsFor): {ok, conversation} or {ok: false, reason}. */
+export function resetPrincipal(env, conversation) {
+  if (!CV.test(conversation ?? '')) return { ok: false, reason: '--conversation is a conversation id' };
+  return locked(env, () => {
+    const c = loadConv(env, conversation);
+    if (!c) return { ok: false, reason: `no conversation ${conversation} here` };
+    resetActsFor(c, new Date().toISOString());
+    saveConv(env, c);
+    return { ok: true, conversation };
+  });
+}
+
 /**
  * A statement checked, on loom's machine (`loom runtime principal --verify`): signed by this runtime, unexpired, and
  * still true. It answers {ok, agent, conversation, for, owner, people, exp}: the piece that reads it binds it to its
@@ -2038,8 +2049,9 @@ export function verifyStatement(env, statement, nowMs = Date.now()) {
   const v = verify(deliveryDir(env), statement, nowMs);
   if (!v.ok) return v;
   const c = loadConv(env, v.conversation);
-  const now = c && c.agent === v.agent ? principalOf(env, c) : null;
-  if (!now || now.for !== v.for || now.owner !== v.owner) return { ok: false, reason: 'its conversation has heard from someone since: ask for a new one' };
+  if (!c || c.agent !== v.agent) return { ok: false, reason: 'this runtime has no record of its conversation' };
+  const now = principalOf(env, c);
+  if (now.for !== v.for || now.owner !== v.owner) return { ok: false, reason: 'its conversation has heard from someone since: ask for a new one' };
   // Who it names is who the conversation has heard now (several people can grow while `for` stays null).
   return { ...v, people: now.people, ...(now.unknown ? { unknown: true } : {}) };
 }
