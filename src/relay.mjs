@@ -125,13 +125,8 @@ export function relayText(entry, owner, thread) {
   return `${head}\n${quoted(entry.say)}${started}${tail}`;
 }
 
-/**
- * A conversation a body holds now, its current run still open on its record: where a body may be calling from. A run
- * is closed on the record only at the conversation's next plan, so one whose body has ended (no body) is never at
- * work, whatever its record still says: on loom's machine, 2026-11-07, 25 of Art's conversations had an open run and
- * no body, so no unproven return address could ever stand.
- */
-const atWork = (c) => !!c.body && !!c.run && !(c.runLog ?? []).findLast((r) => r.run === c.run)?.end;
+/** A conversation whose current run is still open on its record: where a body may be calling from right now. */
+const atWork = (c) => !!c.run && !(c.runLog ?? []).findLast((r) => r.run === c.run)?.end;
 /**
  * The return address for this relay's answer: only the sender's own conversation, and in a house only one a body of
  * that house holds. Core names the caller's agent and house, never its conversation, so a named conversation is a

@@ -564,13 +564,15 @@ describe('round 3 of the cold review', () => {
   });
 });
 
-test('a conversation whose body has ended isn\'t at work, whatever its run record says', async () => {
-  const { w } = relayWorld();
-  const a = (await deliver(w.env, w.msg('th:a', 'one', { venue: 'loom', source: 'loom' }), w.o)).conversation;
-  const b = (await deliver(w.env, w.msg('th:b', 'two', { venue: 'loom', source: 'loom' }), w.o)).conversation;
-  assert.equal(originOf(w.env, { agent: 'art' }, a), null, 'two at work');
-  // b's body ended (evicted, retired); its last run stays open on the record until its next plan.
-  const f = join(deliveryDir(w.env), 'conversations', `${b}.json`);
-  const c = JSON.parse(readFileSync(f)); delete c.body; writeFileSync(f, JSON.stringify(c));
-  assert.equal(originOf(w.env, { agent: 'art' }, a)?.conversation, a);
+describe('a body the record lost track of still counts', () => {
+  // A retire whose endBody threw clears c.body but leaves the run open, and the body may still be mid-turn: until the
+  // run is closed, that conversation could be the one claiming another's return address (security review of #99).
+  test('a failed retire leaves the conversation held: a second conversation can\'t be claimed unproven', async () => {
+    const { w } = relayWorld();
+    const a = (await deliver(w.env, w.msg('th:a', 'one', { venue: 'loom', source: 'loom' }), w.o)).conversation;
+    const b = (await deliver(w.env, w.msg('th:b', 'two', { venue: 'loom', source: 'loom' }), w.o)).conversation;
+    const f = join(deliveryDir(w.env), 'conversations', `${b}.json`);
+    const c = JSON.parse(readFileSync(f)); delete c.body; writeFileSync(f, JSON.stringify(c));
+    assert.equal(originOf(w.env, { agent: 'art' }, a), null);
+  });
 });
