@@ -56,7 +56,7 @@
 //                                                                        at once; a failed post comes back through its inbox
 //   loom runtime principal [--conversation <cv>]                       on whose behalf this body acts (t-1943): {for, owner,
 //                                                                        people, statement}; the statement is what a piece checks
-//   loom runtime principal --verify < statement                        loom's machine: a statement checked, {ok, agent, for, owner, …}
+//   loom runtime principal --verify < statement                        loom's machine: a statement checked (and still true), {ok, agent, for, owner, …}
 //   loom runtime principal --wake --agent a --place p --for owner|<slug>|-   loom's machine (the clock): who a firing wake is for
 //   loom runtime deliver tick [--conversation <cv>] | deliver run [--every <ms>] | deliver list [--json]
 //   loom runtime deliver resume|dismiss <cv>   a conversation paused as a loop (loops.mjs): start what waited, or drop it
@@ -491,11 +491,11 @@ async function main(argv, env) {
       // On whose behalf a body acts (principal.mjs, t-1943). --verify and --wake read and write this machine's runtime
       // state only, never through the piece API: a house has no signing key (so nothing verifies there) and can't
       // hand over a wake's principal (only the clock, here, does).
-      const { verify, putWakeFor } = await import('./principal.mjs');
-      const { deliveryDir, bodyPrincipal } = await import('./delivery.mjs');
+      const { putWakeFor } = await import('./principal.mjs');
+      const { deliveryDir, bodyPrincipal, verifyStatement } = await import('./delivery.mjs');
       const { withLock, AGENT_NAME } = await import('./state.mjs');
       if (rest.includes('--verify')) {
-        const r = verify(deliveryDir(env), (await readStdin()).trim());
+        const r = verifyStatement(env, (await readStdin()).trim());
         out(r);
         if (!r.ok) process.exitCode = 1;
         return;

@@ -95,7 +95,7 @@ import { raiseAlert } from './alerthook.mjs';
 import { changed as changedCards } from './activity.mjs';
 import { keepKey } from './bodyhost.mjs';
 import { readRelays } from './relay.mjs';
-import { mint, noteSender, principalOf, takeWakeFor } from './principal.mjs';
+import { mint, noteSender, principalOf, takeWakeFor, verify } from './principal.mjs';
 
 const DAY_MS = 86_400_000;
 export const MAX_TEXT = 40_000;
@@ -2024,6 +2024,20 @@ export function bodyPrincipal(env, { conversation, key, session }, o = {}) {
   if (notHolder) return { ok: false, reason: notHolder.replace('speaks in it', 'is asked about') };
   const p = principalOf(env, c);
   return { ok: true, agent: c.agent, conversation: c.conversation, ...p, statement: mint(deliveryDir(env), { agent: c.agent, conversation: c.conversation, principal: p }, d.now().getTime()) };
+}
+
+/**
+ * A statement checked, on loom's machine (`loom runtime principal --verify`): signed by this runtime, unexpired, and
+ * still true. Its conversation's principal now must be the one it states: a statement minted before someone else spoke
+ * there is stale, and refused.
+ */
+export function verifyStatement(env, statement, nowMs = Date.now()) {
+  const v = verify(deliveryDir(env), statement, nowMs);
+  if (!v.ok) return v;
+  const c = loadConv(env, v.conversation);
+  const now = c && c.agent === v.agent ? principalOf(env, c) : null;
+  if (!now || now.for !== v.for || now.owner !== v.owner) return { ok: false, reason: 'its conversation has heard from someone since: ask for a new one' };
+  return v;
 }
 
 /** A platform id from a gate entry's ids for a venue: a list, one id, or (Slack) {team: [ids]}; the first. */

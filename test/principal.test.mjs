@@ -6,7 +6,7 @@ import { execFile, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { bodyPrincipal, deliver, deliveryDir, loadConv } from '../src/delivery.mjs';
+import { bodyPrincipal, deliver, deliveryDir, loadConv, verifyStatement } from '../src/delivery.mjs';
 import { api } from '../src/control.mjs';
 import { STATEMENT_TTL_S, mint, noteSender, principalOf, putWakeFor, takeWakeFor, verify } from '../src/principal.mjs';
 import { cvOf, here, world } from './delivery-world.mjs';
@@ -116,6 +116,10 @@ test('a body asks on whose behalf it acts, proven as send is: its conversation\'
   assert.equal(JSON.stringify(r).includes(key), false, 'the run\'s key is never in the answer');
   const v = verify(deliveryDir(w.env), r.statement, w.clock.now().getTime());
   assert.deepEqual([v.ok, v.agent, v.conversation, v.for, v.owner], [true, 'art', c.conversation, 'loren', false]);
+  assert.equal(verifyStatement(w.env, r.statement, w.clock.now().getTime()).ok, true);
+  // Someone else speaks there after it was minted: the statement is stale.
+  await deliver(w.env, w.msg('dm:L', 'me too', { from: { kind: 'person', slug: 'daniel' } }), w.o);
+  assert.deepEqual(verifyStatement(w.env, r.statement, w.clock.now().getTime()), { ok: false, reason: 'its conversation has heard from someone since: ask for a new one' });
   assert.equal(ask({ kind: 'agent', agent: 'mark' }, { key, session }).ok, false, 'another agent, even with the key');
   assert.equal(ask({ kind: 'agent', agent: 'art' }, { session }).ok, false, 'no key');
   assert.match(ask({ kind: 'agent', agent: 'art' }, { key, session: 'someone-else' }).reason, /another session/);
@@ -151,10 +155,15 @@ test('the CLI: --verify checks a statement on this machine; --wake takes the clo
   const HOME = mkdtempSync(join(tmpdir(), 'rt-pcli-'));
   const env = { HOME, LOOM_BOX_DATA: join(HOME, 'data') };
   const dir = join(HOME, 'data', 'delivery');
-  const s = mint(dir, { agent: 'art', conversation: 'cv-000000000001', principal: { for: 'jonathan', owner: true, people: [] } });
+  // A conversation that heard only its owner (owners.mjs: no household file reads as one owner, "owner").
+  mkdirSync(join(dir, 'conversations'), { recursive: true });
+  writeFileSync(join(dir, 'conversations', 'cv-000000000001.json'), JSON.stringify({ conversation: 'cv-000000000001', agent: 'art', actsFor: { owner: true, people: [], unknown: false } }));
+  const s = mint(dir, { agent: 'art', conversation: 'cv-000000000001', principal: { for: 'owner', owner: true, people: [] } });
   const ok = cli(env, ['principal', '--verify'], s);
   assert.equal(ok.status, 0, ok.stderr);
-  assert.deepEqual([JSON.parse(ok.stdout).for, JSON.parse(ok.stdout).owner], ['jonathan', true]);
+  assert.deepEqual([JSON.parse(ok.stdout).for, JSON.parse(ok.stdout).owner], ['owner', true]);
+  const gone = cli(env, ['principal', '--verify'], mint(dir, { agent: 'art', conversation: 'cv-000000000002', principal: { for: 'owner', owner: true, people: [] } }));
+  assert.equal(gone.status, 1, 'a conversation this runtime has no record of');
   const bad = cli(env, ['principal', '--verify'], `${s.slice(0, -2)}AA`);
   assert.equal(bad.status, 1);
   assert.equal(JSON.parse(bad.stdout).ok, false);
