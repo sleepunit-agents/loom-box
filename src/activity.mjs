@@ -12,7 +12,7 @@
 // (`exit 1: 3 tests failed`). Never a tool's output, a file's contents, a whole command line or an environment value.
 // Text and thinking make no card.
 import { createHash } from 'node:crypto';
-import { commandLabel, cutTo, failWhy, fileName, GONE, part, redact, UNPRINTABLE, UNPRINTABLE_ONE } from './redact.mjs';
+import { commandLabel, cutTo, failWhy, fileName, GONE, part, PRIVATE_FILE, privateFile, redact, UNPRINTABLE, UNPRINTABLE_ONE } from './redact.mjs';
 
 export { UNPRINTABLE, UNPRINTABLE_ONE };
 
@@ -149,13 +149,15 @@ export function claudeSummary(name, input = {}) {
     case 'NotebookEdit': return finish(`Edited ${fileName(i.notebook_path)}`);
     case 'Grep': return finish(`Searched for "${txt(i.pattern, 60)}"${i.path ? ` in ${fileName(i.path)}` : ''}`);
     // A glob is a pattern of paths: only its last part, so no folder (a home, ~/.config) shows.
-    case 'Glob': return finish(`Looked for files: ${privateGlob(i.pattern) ? 'a private file' : lastPart(i.pattern)}`);
+    case 'Glob': return finish(`Looked for files: ${privateGlob(i.pattern) ? PRIVATE_FILE : lastPart(i.pattern)}`);
     case 'WebSearch': return finish(`Searched the web for "${txt(i.query, 60)}"`);
-    case 'WebFetch': { const h = hostOf(i.url); return h && part('host', h) !== GONE ? finish(`Read a page on ${part('host', h)}`) : 'Read a web page'; }
+    // A page's host, only when the whole URL passes redaction (no user, no password, no token in it anywhere).
+    case 'WebFetch': { const h = hostOf(i.url); return h && part('host', h) !== GONE && redact(String(i.url)) === String(i.url) ? finish(`Read a page on ${part('host', h)}`) : 'Read a web page'; }
     case 'Task': case 'Agent': return i.description ? finish(`Started a helper: ${txt(i.description, 80)}`) : 'Started a helper';
     case 'SendMessage': return messaged(i.to, i.message, 'a helper');
     case 'TodoWrite': return planLine((Array.isArray(i.todos) ? i.todos : []).map((t) => ({ text: t?.status === 'in_progress' ? (t.activeForm || t.content) : t?.content, done: t?.status === 'completed', now: t?.status === 'in_progress' })));
-    case 'Skill': { const k = part('word', i.skill); return k === GONE ? 'Used a skill' : finish(`Used the ${k} skill`); }
+    // A skill's name is lower case words, maybe a plugin's prefix (superpowers:brainstorming); anything else isn't shown.
+    case 'Skill': { const k = part('word', i.skill); return k === GONE || !/^[a-z0-9-]{1,40}(?::[a-z0-9-]{1,40})?$/.test(k) ? 'Used a skill' : finish(`Used the ${k} skill`); }
     case 'ToolSearch': return 'Loaded more tools';
     default: return name.startsWith('mcp__') ? mcpLabel(mcpName(name), i) : 'Used a tool';
   }
@@ -165,11 +167,12 @@ export function claudeSummary(name, input = {}) {
 function lastPart(g) {
   const s = String(g ?? '').slice(0, 2000);
   if (redact(s) !== s) return GONE;
-  return txt(s.split('/').filter(Boolean).pop() ?? '', 60);
+  return txt(s.split(/[\\/]/).filter(Boolean).pop() ?? '', 60);
 }
 
 /** Whether a glob points into a private place (redact.mjs privateFile on the glob as a path). */
-const privateGlob = (g) => /(?:^|\/)\.config(?:\/|$)|(?:^|\/)\.env|\.(?:token|key)\b/i.test(String(g ?? ''));
+// One check for every file tool (redact.mjs privateFile), on the whole glob and on each of its parts.
+const privateGlob = (g) => { const s = String(g ?? ''); return privateFile(s) || s.split(/[\\/]/).some((p) => p && privateFile(p)); };
 
 /** `label — why` within MAX_SUMMARY, the label cut so the why fits. */
 function withWhy(label, why) {
@@ -186,7 +189,10 @@ function resultText(c) {
 }
 
 const TOOL = /^[A-Za-z0-9_.:\-]{1,64}$/;
-const toolName = (n) => (TOOL.test(String(n)) ? String(n) : 'tool');
+/** A card's `tool`: the harness's name for it, when it's plain and nothing secret-shaped; else "tool". */
+const toolName = (n) => (TOOL.test(String(n)) && redact(String(n)) === String(n) ? String(n) : 'tool');
+/** A card's time: an ISO time as the transcript wrote it, else now. */
+export const cardTime = (t) => (typeof t === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/.test(t) ? t : new Date().toISOString());
 
 /** The cards in a Claude transcript's lines (parsed JSON objects), in order; `prefix` keeps ids unique per thread. */
 export function claudeCards(lines, prefix = '') {
@@ -198,7 +204,7 @@ export function claudeCards(lines, prefix = '') {
       for (const c of content) {
         if (c?.type !== 'tool_use' || typeof c.id !== 'string') continue;
         const id = `${prefix}${c.id}`.slice(0, 80);
-        if (!cards.has(id)) cards.set(id, { id, at: typeof l.timestamp === 'string' ? l.timestamp : new Date().toISOString(), tool: toolName(c.name), summary: claudeSummary(String(c.name ?? ''), c.input) || 'Used a tool', state: 'running' });
+        if (!cards.has(id)) cards.set(id, { id, at: cardTime(l.timestamp), tool: toolName(c.name), summary: claudeSummary(String(c.name ?? ''), c.input) || 'Used a tool', state: 'running' });
       }
     } else if (l.type === 'user') {
       for (const c of content) {

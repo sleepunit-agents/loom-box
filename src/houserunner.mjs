@@ -31,7 +31,8 @@ import { pieceName } from './piece.mjs';
 import { bodyBox } from './placement.mjs';
 import { isParts } from './briefs.mjs';
 import { RunnerError } from './runners.mjs';
-import { redact, UNPRINTABLE_ONE } from './redact.mjs';
+import { GONE, part, redact, UNPRINTABLE_ONE } from './redact.mjs';
+import { cardTime } from './activity.mjs';
 import { ageSealer } from './sealed.mjs';
 import { AGENT_NAME, StateError, load, update, withLock } from './state.mjs';
 
@@ -150,11 +151,13 @@ export function cleanCards(cards) {
     // A label never holds an unprintable character (redact.mjs UNPRINTABLE, the one list).
     if (typeof c.summary !== 'string' || !c.summary || c.summary.length > 120 || UNPRINTABLE_ONE.test(c.summary)) return [];
     if (!['running', 'done', 'failed'].includes(c.state)) return [];
-    // A house's word is data: its label is redacted here too, and its time is a time or now.
-    const summary = redact(c.summary);
-    if (!summary || summary.length > 120 || UNPRINTABLE_ONE.test(summary)) return [];
-    const at = typeof c.at === 'string' && /^[0-9TZ:.+-]{10,40}$/.test(c.at) ? c.at : new Date().toISOString();
-    return [{ id: c.id, at, tool: c.tool, summary, state: c.state }];
+    // A house's word is data: its label passes the same gate as one made here (redacted, a private path named
+    // "a private file", one printable line of 120 at most), its id and tool must be nothing secret-shaped, and its
+    // time is an ISO time or now.
+    if (redact(c.id) !== c.id || redact(c.tool) !== c.tool) return [];
+    const summary = part('text', c.summary, 120);
+    if (summary === GONE || summary.length > 120 || UNPRINTABLE_ONE.test(summary)) return [];
+    return [{ id: c.id, at: cardTime(c.at), tool: c.tool, summary, state: c.state }];
   });
 }
 

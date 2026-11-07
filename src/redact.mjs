@@ -43,7 +43,13 @@ const SHAPES = [
   /\bglpat-[A-Za-z0-9_-]{16,}/g,
   /\bnpm_[A-Za-z0-9]{30,}/g,
   /\bAGE-SECRET-KEY-1[0-9A-Z]{20,}/g,
-  /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]+)?/g,
+  /\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}(?:\.[A-Za-z0-9_-]+)?/g,
+  /\b(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{8,}/g, // Stripe
+  /\bSG\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, // SendGrid
+  /\bya29\.[A-Za-z0-9_-]{10,}/g, // Google OAuth
+  /\bpypi-[A-Za-z0-9_-]{16,}/g,
+  /\b(?:SK|AC)[0-9a-f]{32}\b/g, // Twilio
+  /\bhf_[A-Za-z0-9]{20,}/g, // Hugging Face
   /-----BEGIN [A-Z ]{0,40}PRIVATE KEY-----[\s\S]{0,4000}?(?:-----END [A-Z ]{0,40}PRIVATE KEY-----|$)/g,
 ];
 
@@ -54,11 +60,19 @@ const SECRET_NAME = `[A-Za-z0-9_.-]{0,40}(?:${SECRET_WORDS})[A-Za-z0-9_.-]{0,40}
 /** A long run of key-like characters with one long unbroken part and both letters and digits: likely a token. */
 function tokenLike(run) {
   if (run.length < 20 || !/[A-Za-z]/.test(run)) return false;
+  // Split by - _ . or /, a token's pieces are short; taken whole, it is 20 or more of letters and digits or both cases,
+  // and some of its pieces are no word (sG.WZ1SkSx3…, g2Vcw7F7-28JNCb7u-…, cikckuts1b4f_fbr5xw7…).
+  const pieces = run.split(/[-_./+=]+/).filter(Boolean);
+  const core = pieces.join('');
+  const odd = pieces.filter((p) => !plainPiece(p));
+  if (core.length >= 20 && odd.join('').length >= 8 && ((/[0-9]/.test(core) && /[A-Za-z]/.test(core)) || (/[a-z]/.test(core) && /[A-Z]/.test(core)))) return true;
   // A kebab or snake name (`t-1382-recorder-health-ledger`) or a UUID is many short parts; a token has a long one: 20
   // or more with letters and digits, or 32 or more in both cases, digits or not. Either is a token unless it reads as
   // words (wordsLike). When unsure it goes: a redacted label is better than a leaked key.
-  return run.split(/[-_.]/).some((p) => !wordsLike(p) && ((p.length >= 20 && /[A-Za-z]/.test(p) && /[0-9]/.test(p)) || mixedLong(p)));
+  return run.split(/[-_./+=]/).some((p) => !wordsLike(p) && ((p.length >= 20 && /[A-Za-z]/.test(p) && /[0-9]/.test(p)) || mixedLong(p)));
 }
+/** A piece of a name that reads as a word: lower, Capital or UPPER letters, a number, a CamelCase word, or 3 or less. */
+const plainPiece = (p) => p.length <= 3 || /^(?:[a-z]+|[A-Z][a-z]+|[A-Z]+|\d+)$/.test(p) || wordsLike(p);
 /** 32 or more characters with both capitals and small letters. */
 const mixedLong = (p) => p.length >= 32 && /[a-z]/.test(p) && /[A-Z]/.test(p);
 
@@ -92,7 +106,7 @@ function base64Like(run) {
  * runs. A label is made from words a body chose, so this runs on every one of them, last.
  */
 export function redact(s) {
-  let t = cutInput(s);
+  let t = cutInput(s).replace(INVISIBLE, '');
   for (const re of SHAPES) t = t.replace(re, GONE);
   // A URL's user and password: scheme://user:pass@host → scheme://…@host.
   t = t.replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@'"]+@/gi, `$1${GONE}@`);
@@ -101,12 +115,21 @@ export function redact(s) {
   t = t.replace(/\b(Bearer|Basic|Token)\s{1,500}[A-Za-z0-9._~+/=-]{8,500}/gi, `$1 ${GONE}`);
   // `password: hunter2`, `api_key: "x"`: a secret-named key and its value.
   // ... and `password = x`, `"token" => "x"`: the same with = or => and spaces.
-  t = t.replace(new RegExp(`\\b(${SECRET_NAME})(["']?\\s{0,500}(?:=>|=|:)\\s{0,500})(?:"[^"]{0,500}"|'[^']{0,500}'|[^\\s,;'"]{1,500})`, 'gi'), `$1$2${GONE}`);
+  t = t.replace(new RegExp(`\\b(${SECRET_NAME})(["']?\\s{0,500}(?::=|=>|=|:)\\s{0,500})(?:"[^"]{0,500}"|'[^']{0,500}'|[^\\s,;'"]{1,500})`, 'gi'), `$1$2${GONE}`);
   // A netrc line or prose: `password S3cret`, `token abc123` — the word after, when it has a digit or a sign in it, or
   // is 12 or longer (a plain word like "for" stays).
-  t = t.replace(/\b(password|passwd|passphrase|secret|token|apikey|api_key|pass)(\s{1,500})(?![:=])([^\s'"]{1,500})/gi, (m, k, sp, v) => (v === GONE || (!/[0-9\W_]/.test(v) && v.length < 12) ? m : `${k}${sp}${GONE}`));
+  // ... and any secret-named word (access_token, client_secret, PGPASSWORD, GITHUB_TOKEN, pw, passcode, PIN) then a
+  // joining word or sign (is, was, to, header, :=, ->), then a value: quoted, it goes; bare, it goes when it has a
+  // digit or a sign in it or is 12 or longer.
+  t = t.replace(new RegExp(`\\b(${SECRET_NAME}|pw|passcode|pin|otp)(\\s{0,50}(?:(?:is|was|to|header|of)\\s{1,50}|:=\\s{0,50}|:\\s{0,50}|->\\s{0,50}|→\\s{0,50}|\\s))(?![:=-])("[^"]{0,500}"|'[^']{0,500}'|[^\\s'"]{1,500})`, 'gi'), (m, k, sp, v) => (v === GONE || (!/^["']/.test(v) && !/[0-9\W_]/.test(v) && v.length < 12) ? m : `${k}${sp}${GONE}`));
   // A password given to -p: `mysql -pS3cret`, `sshpass -p S3cret`.
-  t = t.replace(/(\s-p)([^\s'"-][^\s'"]{2,500})/g, `$1${GONE}`);
+  t = t.replace(/(^|\s)(-[pPk])\s{0,5}("[^"]{0,500}"|'[^']{0,500}'|[^\s'"-][^\s'"]{1,500})/g, `$1$2 ${GONE}`);
+  t = t.replace(/(\s--(?:pat|cred[a-z-]{0,20}))(?:=|\s{1,50})\S{1,500}/gi, `$1 ${GONE}`);
+  t = t.replace(/(\s-u)(\S{1,200}:\S{1,500})/g, `$1${GONE}`);
+  t = t.replace(/(\s-U\s{1,50}\S{1,200}%)\S{1,500}/g, `$1${GONE}`);
+  t = t.replace(/(\bhtpasswd\s.{0,200}?-b\s{1,50}\S{1,200}\s{1,50}\S{1,200}\s{1,50})\S{1,500}/g, `$1${GONE}`);
+  // user:password@host with no scheme (//user:pw@host, user:pw@host:repo).
+  t = t.replace(/(^|[\s/'"(])[^\s/@:'"()]{1,200}:[^\s/@'"()]{1,500}@(?=[A-Za-z0-9.-])/g, `$1${GONE}@`);
   t = t.replace(/(\bsshpass(?:\s{1,50}-[A-Za-z]{1,5}){0,5}\s{1,50}-p)\s{1,50}\S{1,500}/g, `$1 ${GONE}`);
   // A UUID, and hex split by dashes: a Heroku-style key or a token in parts. When unsure, it goes.
   t = t.replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, GONE);
@@ -121,7 +144,7 @@ export function redact(s) {
   t = t.replace(/(\s(?:-u|--user))\s+(?:"[^"]*"|'[^']*'|\S+)/g, `$1 ${GONE}`);
   // Whatever's left that looks like a token: a long mixed run, or base64 (with `/` and `+`) in both cases and digits;
   // an AWS secret key, `wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY`, is runs of 13, 7 and 18 between its slashes.
-  t = t.replace(/[A-Za-z0-9_+=.-]{20,}/g, (run) => (tokenLike(run) ? GONE : run));
+  t = t.replace(/[A-Za-z0-9_+=./-]{20,}/g, (run) => (tokenLike(run) ? GONE : run));
   // A path in CamelCase is words between slashes; base64 is both cases inside its parts, and digits, or 40 long.
   t = t.replace(/[A-Za-z0-9+/=]{30,}/g, (run) => (base64Like(run) ? GONE : run));
   return t;
@@ -172,7 +195,8 @@ function dropHeredocs(s) {
     if (queue.length) { if (line.trim() === queue[0]) queue.shift(); continue; }
     out.push(line);
     // <<EOF, <<-EOF, <<'EOF', <<"EOF", <<\EOF, delimiters like EOF-1; every one on the line, a here-string (<<<) not.
-    for (const m of line.matchAll(/(<{2,})-?\s*(?:\\|(['"]))?([A-Za-z0-9_.-]+)\2?/g)) if (m[1].length === 2) queue.push(m[3]);
+    // <<$'EOF', <<"$D", <<~EOF too: the delimiter is what's inside the quotes, as the terminator line spells it.
+    for (const m of line.matchAll(/(<{2,})[-~]?\s*(?:\\|\$?(['"]))?([$A-Za-z0-9_.-]+)\2?/g)) if (m[1].length === 2) queue.push(m[3]);
   }
   return out.join('\n');
 }
@@ -230,9 +254,10 @@ export const PRIVATE_FILE = 'a private file';
  */
 export function privateFile(p) {
   const s = String(p ?? '').replace(/^["'`(<]+|["'`)>,;:]+$/g, '');
-  const b = base(s);
-  return /(?:^|\/)\.config(?:\/|$)/.test(s) || /^\.env/.test(b) || /\.env$/.test(b) || /\.(?:token|key|pem|p12|pfx|keystore|jks)$/i.test(b)
-    || /^id_(?:rsa|dsa|ecdsa|ed25519)/.test(b) || /^(?:\.netrc|\.pgpass|\.git-credentials|credentials(?:\.json)?|\.npmrc|\.pypirc)$/.test(b);
+  const b = String(s).split(/[\\/]/).filter(Boolean).pop() ?? s;
+  return /(?:^|[\\/])\.(?:config|docker|kube|aws|gnupg|ssh|codex|claude|azure|gcloud)(?:[\\/]|$)/i.test(s) || /^\.env/i.test(b) || /\.env$/i.test(b)
+    || /\.(?:token|key|pem|p12|pfx|keystore|jks|gpg|asc|kdbx)$/i.test(b) || /^id_(?:rsa|dsa|ecdsa|ed25519)/i.test(b)
+    || /^(?:\.?_?netrc|\.pgpass|\.git-credentials|\.?credentials.*|\.npmrc|\.pypirc|kubeconfig|\.vault-token|\.dockercfg|\.htpasswd|auth\.json|client_secret.*|secrets?\.(?:json|ya?ml|toml|txt)|(?:token|password|passwords)\.txt|.*application_default_credentials\.json)$/i.test(b);
 }
 
 /**
@@ -257,8 +282,11 @@ export function fileName(p) {
  * characters (U+206A–F, U+E0000–FF), variation selectors, the soft hyphen, the byte-order mark, specials (U+FFF0–B)
  * and a lone surrogate. `UNPRINTABLE_ONE` is the same, unflagged, for a test (`.test` on a /g regex keeps state between calls).
  */
-export const UNPRINTABLE = /(?:[\x00-\x1f\x7f-\x9f\xad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f\u2028-\u202e\u2060-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0\ufff0-\ufffb]|\udb40[\udc00-\udcff]|[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff])+/g;
-export const UNPRINTABLE_ONE = new RegExp(UNPRINTABLE.source);
+export const UNPRINTABLE = /(?:[\p{Cc}\p{Cf}\p{Co}\p{Cn}\p{Cs}\p{Zl}\p{Zp}\u034f\u115f\u1160\u17b4\u17b5\u180b-\u180f\u2800\u3164\ufe00-\ufe0f\uffa0]|\p{M}{3,})+/gu;
+export const UNPRINTABLE_ONE = new RegExp(UNPRINTABLE.source, 'u');
+/** The invisible ones (format, fillers, variation selectors): taken out with nothing in their place, so one can't split
+ * a token into pieces short enough to pass. */
+export const INVISIBLE = /[\p{Cf}\u034f\u115f\u1160\u17b4\u17b5\u180b-\u180f\u2800\u3164\ufe00-\ufe0f\uffa0]|\udb40[\udd00-\uddef]/gu;
 
 /** Each kind of part: its longest, and the characters it may hold. A `text` part is any printable words. */
 const KINDS = {
@@ -267,7 +295,7 @@ const KINDS = {
   id: [12, /^(?:#?\d{1,9}|t-\d{1,9})$/],
   count: [9, /^\d{1,9}$/],
   word: [48, /^[A-Za-z0-9][A-Za-z0-9._:+-]{0,47}$/], // a subcommand, a skill: no path in it
-  who: [40, /^[A-Za-z0-9_.@:-]+$/], // a message's recipient
+  who: [40, /^[A-Za-z0-9_.:-]+$/], // a message's recipient: a name, never an address
   text: [120, null], // a pattern, a query, a message's first line, a description, a plan's item
 };
 
@@ -284,7 +312,7 @@ export function cutTo(s, n) {
 }
 
 /** Any word of `s` that names a private file (privateFile) shows as PRIVATE_FILE: in a description, a pattern. */
-const privateWords = (s) => s.split(/(\s+)/).map((w) => (/[/.]/.test(w) && privateFile(w) ? PRIVATE_FILE : w)).join('');
+const privateWords = (s) => s.split(/(\s+)/).map((w) => (/[/.\\]/.test(w) && privateFile(w) ? PRIVATE_FILE : w)).join('');
 
 /**
  * The one gate (t-1944): a variable part of a label, as it may be shown, or GONE. It's redacted; on one printable line;
@@ -294,7 +322,7 @@ const privateWords = (s) => s.split(/(\s+)/).map((w) => (/[/.]/.test(w) && priva
  */
 export function part(kind, v, n) {
   const [max, re] = KINDS[kind] ?? KINDS.text;
-  const s = cutInput(v).replace(UNPRINTABLE, ' ').replace(/\s+/g, ' ').trim();
+  const s = cutInput(v).replace(INVISIBLE, '').replace(UNPRINTABLE, ' ').replace(/\s+/g, ' ').trim();
   if (!s) return GONE;
   const r = redact(s);
   if (!re) return cutTo(privateWords(r), Math.min(n ?? max, max));

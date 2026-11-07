@@ -184,7 +184,7 @@ test('security review 2: a flag\'s value far off, a heredoc after a here-string,
   assert.deepEqual(leaks(commandLabel(`grep x <<< "$v"; cat <<EOF\n${SECRETS.password}\nEOF`) ?? ''), []);
   const noDigits = j('qWeRtYuIoPaSdFgH', 'jKlZxCvBnMqWeRtY'); // 32, both cases, no digit
   assert.equal(redact(`key ${noDigits}`), 'key …');
-  assert.equal(redact(`a/${noDigits}/b`), 'a/…/b', 'inside a path too');
+  assert.ok(!redact(`a/${noDigits}/b`).includes(noDigits.slice(0, 8)), 'inside a path too');
   for (const ok of ['renderAgentChatProgressListItemComponent', 'useCommsThreadActivityWithAllTheThings']) assert.equal(redact(`Read ${ok}.tsx`), `Read ${ok}.tsx`);
 });
 
@@ -239,7 +239,8 @@ test('MCP tools: a private store\'s tool in fixed words, never its arguments; a 
   assert.equal(codex[0].summary, 'Saved a memory');
   assert.equal(claudeSummary('mcp__loom__relay', { to: 'mark', say: 'Can you review loom#612?\nMore words here.' }), 'Messaged mark: "Can you review loom#612?"');
   assert.deepEqual(leaks(claudeSummary('mcp__loom__relay', { to: 'mark', say: `the key is ${SECRETS.anthropic}` })), []);
-  assert.equal(claudeSummary('WebFetch', { url: `https://user:${SECRETS.password}@docs.example.com/a?token=x` }), 'Read a page on docs.example.com');
+  assert.equal(claudeSummary('WebFetch', { url: `https://user:${SECRETS.password}@docs.example.com/a?token=x` }), 'Read a web page', 'a host only when the whole URL passes');
+  assert.equal(claudeSummary('WebFetch', { url: 'https://docs.example.com/a' }), 'Read a page on docs.example.com');
 });
 
 test('a failed MCP call says why by phrase, never its error\'s words', () => {
@@ -436,4 +437,77 @@ test('the input cut drops a trailing partial word: it never leaves half a token'
   const long = `${'word '.repeat(399)}xx ${tok}`; // the token straddles the 2000-character cut
   assert.ok(!redact(long).includes('ghp_ABCD'));
   assert.ok(!part('text', long).includes('ghp_'));
+});
+
+// ─── The second independent read (2026-11-07): every input it reported, as found ──────────────────────────────────
+
+const READ2 = [
+  // Tokens split into short pieces, and provider shapes, each built from pieces so the file holds none whole.
+  j('S', 'G.WZ1SkSx3dESbhhmB-uc78c.', 'KwfiE_h5fLqjV7rFiCr-k2G6F08GxmPeWrVMkFk_PXq'), j('g2Vcw7F7-', '28JNCb7u-dsuqsWNx-m7OqmaZb'), j('6pYVVtA5i7.', 'PEF6NuEObn.tg82auNuTl'),
+  j('cPXysLcvta/', 'NBQhIOUiST/mufBvlXblU'), j('cikckuts1b4f_', 'fbr5xw7ocs50_4vlax6snlxes'), j('HfbHfFVPamN4L/', 'v/a318kmc7=='), j('eyJ', 'hbGci.eyJzdWIi.sig'),
+  j('sk_', 'live_', 'dfvRdkNPgkpqgpdBAWlhQCZY'), j('rk_', 'test_', 'dfvRdkNPgkpqgpdBAWlhQCZY'), j('pk_', 'live_', 'dfvRdkNPgkpqgpdBAWlhQCZY'),
+  j('ya', '29.', 'a0AfH6SMBx-kq3_xJ9'), j('py', 'pi-', 'AgEIcHlwaS5vcmcCJGFh'),
+];
+const MARKED = ['Zx9qWerty', 'Zx9q Werty', 'correct horse battery staple', 'S3cretPw', '482913'];
+
+test('read 2: split and provider-shaped tokens never show, in any free-text place or from a house', () => {
+  for (const x of READ2) {
+    const outs = [
+      claudeSummary('Bash', { command: 'x', description: `Rotate ${x} now` }), claudeSummary('mcp__loom__relay', { to: 'x', say: `key ${x}` }),
+      claudeSummary('Grep', { pattern: x }), claudeSummary('WebSearch', { query: x }), claudeSummary('Task', { description: x }),
+      claudeSummary('TodoWrite', { todos: [{ content: `Rotate ${x}`, status: 'in_progress', activeForm: `Rotating ${x}` }] }),
+      codexCards([{ type: 'item.completed', item: { id: 'p', type: 'todo_list', items: [{ text: `Rotate ${x}`, completed: false }] } }])[0].summary,
+      cleanCards([{ id: 'c', at: 'x', tool: 'Bash', summary: `Ran ${x}`.slice(0, 120), state: 'done' }])[0]?.summary ?? '',
+    ];
+    for (const out of outs) assert.ok(!out.includes(x.slice(4, 14)), `${x} → ${out}`);
+  }
+});
+
+test('read 2: a secret-named word, a joining word, then a value; quoted, flagged or scheme-less passwords', () => {
+  const phrasings = (v) => [`access_token ${v}`, `client_secret ${v}`, `clientSecret ${v}`, `PGPASSWORD ${v}`, `export AWS_SECRET_ACCESS_KEY ${v}`,
+    `Set GITHUB_TOKEN ${v}`, `password is ${v}`, `token was ${v}`, `token→${v}`, `TOKEN := ${v}`, `password "${v}"`, `password '${v}'`, `passphrase "${v}"`,
+    `pw: ${v}`, `passcode ${v}`, `PIN ${v}`, `authorization header ${v}`, `Set cookie to ${v}`, `mysql -u root -p'${v}'`, `mysql -u root -p"${v}"`,
+    `-p${v}`, `zip -P ${v} f`, `openssl enc -k ${v}`, `x --cred ${v}`, `x --pat ${v}`, `curl -uuser:${v} h`, `smbclient -U user%${v}`,
+    `htpasswd -b f user ${v}`, `use //user:${v}@host`, `user:${v}@host:repo`, `ftp user:${v}@host`];
+  // A value with a space in it, unquoted, has no end anyone can find: only quoted phrasings carry one.
+  const cases = MARKED.flatMap((v) => phrasings(v).filter((t) => !/\s/.test(v) || t.includes(`"${v}"`) || t.includes(`'${v}'`)).map((t) => [v, t]));
+  assert.ok(cases.length > 100);
+  for (const [v, t] of cases) {
+    for (const out of [redact(t), claudeSummary('Bash', { command: 'x', description: t }), claudeSummary('mcp__loom__relay', { to: 'x', say: t }), cleanCards([{ id: 'c', at: 'x', tool: 'B', summary: t.slice(0, 120), state: 'done' }])[0]?.summary ?? '']) {
+      assert.ok(!out.includes(v), `${t} → ${out}`);
+    }
+  }
+});
+
+test('read 2: heredocs with $\'EOF\', "$D" or ~ delimiters; the house boundary; Glob\'s private check; skills; addresses; invisibles', () => {
+  assert.equal(commandLabel("cat <<$'EOF' > f\ngh pr view 482913\nEOF"), 'Ran cat');
+  assert.equal(commandLabel('cat <<"$D" > f\ngit log 482913\n$D'), 'Ran cat');
+  assert.equal(commandLabel('cat <<~EOF\n  gh pr view 1\n  EOF\nls'), 'Ran cat, ls');
+  assert.ok(!commandLabel('cat <<~EOF\n  gh pr view 482913\n  EOF').includes('482913'));
+  // cleanCards: a private path named; a token-shaped id or tool dropped; a time that isn't one replaced.
+  assert.equal(cleanCards([{ id: 'c', at: 'x', tool: 'B', summary: 'Read /home/art/.config/gh/hosts.yml', state: 'done' }])[0].summary, 'Read a private file');
+  assert.deepEqual(cleanCards([{ id: j('gh', 'p_abcdefghijklmnopqrstuvwxyz0123'), at: 'x', tool: 'B', summary: 's', state: 'done' }]), []);
+  assert.deepEqual(cleanCards([{ id: 'c', at: 'x', tool: j('sk-', 'ant-api03-abcdefghijklmnopqrstuvwxyz'), summary: 's', state: 'done' }]), []);
+  assert.notEqual(cleanCards([{ id: 'c', at: '12345678901234567890', tool: 'B', summary: 's', state: 'done' }])[0].at, '12345678901234567890');
+  const cards = claudeCards([{ type: 'assistant', timestamp: j('gh', 'p_abcdefghijklmnopqrstuvwxyz0123'), message: { content: [{ type: 'tool_use', id: 'u', name: j('mcp__x__gh', 'p_abcdefghijklmnopqrstuvwxyz0123'), input: {} }] } }]);
+  assert.ok(!JSON.stringify(cards).includes('abcdefghijklmnop'), JSON.stringify(cards));
+  // Glob: the same private check as Read, on any part, with \\ too.
+  for (const g of ['C:\\Users\\art\\.config\\gh\\hosts.yml', '/x/credentials', '/x/id_rsa', '**/.kube/config', 'secrets.json']) assert.equal(claudeSummary('Glob', { pattern: g }), 'Looked for files: a private file', g);
+  for (const p of ['.credentials.json', '/x/.codex/auth.json', '~/.docker/config.json', '~/.kube/config', 'kubeconfig', '.vault-token', '.dockercfg', '_netrc', '.htpasswd', '.ENV', 'prod.ENV', 'ID_RSA', 'Credentials', 'credentials.yml', 'application_default_credentials.json', 'client_secret_123.json', 'secrets.json', 'token.txt', 'password.txt', 'secring.gpg']) assert.equal(claudeSummary('Read', { file_path: p }), 'Read a private file', p);
+  assert.equal(claudeSummary('Task', { description: 'Read ~/.kube/config and fix' }), 'Started a helper: Read a private file and fix');
+  assert.equal(claudeSummary('mcp__loom__relay', { to: 'jonathan@sleepunit.com', say: 'hi' }), 'Messaged another agent: "hi"');
+  assert.equal(claudeSummary('Skill', { skill: 'hunter2:S3cr3t' }), 'Used a skill');
+  assert.equal(claudeSummary('Skill', { skill: 'superpowers:brainstorming' }), 'Used the superpowers:brainstorming skill');
+  const split = j('ghp_abcdefghijkl', '\u200bmnopqrstuvwx\u200byz0123456789');
+  assert.ok(!claudeSummary('Bash', { command: 'x', description: `use ${split}` }).includes('abcdefghijkl'));
+  assert.equal(claudeSummary('WebFetch', { url: 'https://example.com/x?token=abc' }), 'Read a web page');
+});
+
+test('read 2: every invisible it found is gone from a label and refused at the house boundary', () => {
+  const found = ['\u0600', '\u0605', '\u06dd', '\u070f', '\u0890', '\u08e2', '\u{110BD}', '\u{110CD}', '\u{13430}', '\u{1BCA0}', '\u{1D173}', '\u{E0100}', '\u{E01EF}', '\u2800', '\uffff', '\ue000', 'e\u0301\u0302\u0303\u0304'];
+  for (const ch of found) {
+    const out = claudeSummary('Bash', { command: 'x', description: `a${ch}b` });
+    assert.ok(!UNPRINTABLE_ONE.test(out), `${JSON.stringify(ch)} → ${JSON.stringify(out)}`);
+    assert.deepEqual(cleanCards([{ id: 'c', at: 'x', tool: 'B', summary: `a${ch}b`, state: 'done' }]).filter((c) => UNPRINTABLE_ONE.test(c.summary)), [], JSON.stringify(ch));
+  }
 });
