@@ -21,7 +21,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync, appendFileSync, mkdirSync } from 'node:fs';
 import { delimiter, dirname, join } from 'node:path';
 import { coreFrom } from './core.mjs';
-import { deliver, deliveryDir, listConvs, loadConv } from './delivery.mjs';
+import { COMMS_VENUE, deliver, deliveryDir, holdsRun, listConvs, loadConv } from './delivery.mjs';
 import { readBody } from './bodies.mjs';
 import { GRANTS, KEY, householdOf, paired } from './grants.mjs';
 import { setting } from './piece.mjs';
@@ -116,22 +116,43 @@ export function relayText(entry, owner, thread) {
   return `${head}\n${quoted(entry.say)}${started}${tail}`;
 }
 
-/** Resolve only the sender's own conversation. A house must actually host its body.
- * Without an explicit id, infer only one active conversation in that house; never guess. */
-export function originOf(env, caller, id) {
+/** A conversation whose current run is still open on its record: where a body may be calling from right now. */
+const atWork = (c) => !!c.run && !(c.runLog ?? []).findLast((r) => r.run === c.run)?.end;
+/**
+ * Whose work a conversation is, for a return address no run proved: 0 a guest venue's (people the owner lets in),
+ * 1 any other place people or agents talk to it (a channel, a DM, the relay venue), 2 the owner's own (a Comms
+ * thread, where core delivers only from the owner, and a scheduled wake).
+ */
+const trustOf = (c) => (c.bodyRules?.guest ? 0 : c.venue === COMMS_VENUE || c.kind === 'scheduled' ? 2 : 1);
+
+/**
+ * The return address for this relay's answer: only the sender's own conversation, and in a house only one a body of
+ * that house holds. Core names the caller's agent and house, never its conversation, so a named conversation is a
+ * claim. It stands when the caller proves it holds that conversation's current run (`proof`: its LOOM_BODY_KEY and
+ * harness session, as `send` takes them; the house CLI sends them). Unproven, it stands only when that conversation is
+ * at work now and no body of a less trusted conversation of this agent is at work too (trustOf): a guest venue's body,
+ * or one working for someone else, can't make an answer land in the owner's own conversation (t-1943). Unnamed, only
+ * the one conversation at work in the caller's house, alone. Otherwise null: the answer goes to the relay
+ * conversation, as before. A conversation that isn't the caller's agent's (or house's) is refused outright.
+ */
+export function originOf(env, caller, id, proof = {}) {
   const eligible = (c) => {
     if (c.agent !== caller.agent) return false;
     if (!caller.house) return true;
     try { return readBody(env, c.body).house === caller.house; } catch { return false; }
   };
+  const working = () => listConvs(env).filter((c) => eligible(c) && atWork(c));
   if (id !== undefined) {
     if (!CV.test(id)) no('relay: conversation is your current conversation id (cv-…)');
     const c = loadConv(env, id);
     if (!c || !eligible(c)) no('relay: the return conversation must be your own, held by a body in your house');
-    return c;
+    if (proof.key && holdsRun(env, id, proof)) return c;
+    if (!atWork(c)) return null;
+    const t = trustOf(c);
+    return working().some((o) => o.conversation !== c.conversation && trustOf(o) < t) ? null : c;
   }
   if (!caller.house) return null;
-  const candidates = listConvs(env).filter((c) => eligible(c) && c.run && !(c.runLog ?? []).findLast((r) => r.run === c.run)?.end);
+  const candidates = working();
   return candidates.length === 1 ? candidates[0] : null;
 }
 
@@ -156,7 +177,7 @@ export async function relay(env, caller, args, d = depsOf(env)) {
   const replyTo = a.reply_to === undefined || a.reply_to === '' ? '' : String(a.reply_to);
   const approval = a.approval === undefined || a.approval === '' ? '' : String(a.approval);
   const originId = a.conversation ?? (where.match(/cv-[0-9a-f]{12}$/)?.[0]);
-  const origin = originOf(env, caller, originId);
+  const origin = originOf(env, caller, originId, { key: a.key, session: a.session });
   const now = d.now();
   const log = readRelays(env, now);
   let thread = [];
@@ -209,7 +230,7 @@ export async function relay(env, caller, args, d = depsOf(env)) {
   const { say: _words, ...kept } = entry;
   d.append({ ...kept, conversation: out?.conversation ?? null });
   const body = out?.body === 'failed' ? `, but its body didn't start (${out.reason ?? 'no reason given'}); the runtime tries again` : out?.body === 'queued' ? ': it waits for a body of theirs' : '';
-  const routing = returnTo ? ` Returned to ${returnTo.conversation}.` : original?.origin ? ' Original conversation is no longer available; delivered to the relay conversation instead.' : origin ? ` Replies return to ${origin.conversation}.` : caller.house ? ' No unambiguous origin session; replies will use the relay conversation (include conversation to choose your own session).' : '';
+  const routing = returnTo ? ` Returned to ${returnTo.conversation}.` : original?.origin ? ' Original conversation is no longer available; delivered to the relay conversation instead.' : origin ? ` Replies return to ${origin.conversation}.` : originId !== undefined || caller.house ? ` Replies will use the relay conversation: ${originId !== undefined ? `${originId} couldn't be confirmed as the one asking (prove it by relaying with \`loom runtime relay\` from that body's shell)` : 'no single conversation of yours is at work (name yours with conversation)'}.` : '';
   return { text: `${entry.id}: ${to} has it${body}.${routing}` };
 }
 

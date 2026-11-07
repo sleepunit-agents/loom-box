@@ -828,7 +828,7 @@ function startBrief(c, msgs, run, sends, rules = { sections: [] }) {
     `You are ${c.agent}, in a conversation on ${c.venue}: ${c.label ?? c.place}.`,
     `Its conversation is ${c.conversation} and this run is ${run}: call identity with {conversation: "${c.conversation}", run: "${run}"} first.`,
     ...(c.runs > 0 ? [`It has history this session doesn't: read it with conversation({id: "${c.conversation}"}) (its digests) before you answer.`] : []),
-    `When using the relay tool, include conversation: "${c.conversation}" so replies return to this session.`,
+    `To have a relay's answer come back to this session, send it from your shell with \`loom runtime relay --to <agent> --say <text>\` (it proves this conversation is yours), or with the relay tool and conversation: "${c.conversation}" (it comes back here only while no less trusted conversation of yours is at work; otherwise to the relay conversation).`,
     ...(sends ? [how] : []),
     ...(sends === 'post' ? [relay] : []),
   ].join('\n');
@@ -840,7 +840,7 @@ function startBrief(c, msgs, run, sends, rules = { sections: [] }) {
 }
 
 /** What a resumed body is given: the new messages, and its new run. */
-const resumeBrief = (c, msgs, run) => `(${c.venue}: ${c.label ?? c.place}. This run is ${run}: call identity with {conversation: "${c.conversation}", run: "${run}"} again. For relay requests, include conversation: "${c.conversation}" so replies return here.)\n\n${render(msgs)}`;
+const resumeBrief = (c, msgs, run) => `(${c.venue}: ${c.label ?? c.place}. This run is ${run}: call identity with {conversation: "${c.conversation}", run: "${run}"} again. A relay's answer comes back here when sent with \`loom runtime relay\` from your shell, or the relay tool with conversation: "${c.conversation}".)\n\n${render(msgs)}`;
 
 function open(d, x, mem) {
   if (x.sealed) return d.sealer.open(Buffer.from(x.sealed, 'base64')).toString('utf-8');
@@ -1906,6 +1906,19 @@ function sessionOf(d, ref) {
     const s = d.runner(rec.harness, rec.local).slotOf(bodyOf(ref, rec))?.session ?? rec.slot?.session;
     return typeof s === 'string' && SESSION_ID.test(s) ? s : null;
   } catch { return null; }
+}
+
+/**
+ * Whether `key` (and, where the runner knows the body's, `session`) prove the caller is the body holding `cv` in its
+ * current run: the same proof `send` takes (LOOM_BODY_KEY, the harness session). The relay's return address uses it
+ * (relay.mjs, originOf): a body that proves its conversation needs nothing else to name it.
+ */
+export function holdsRun(env, cv, { key, session } = {}) {
+  const c = loadConv(env, cv);
+  const want = typeof c?.sendKey === 'string' && /^[0-9a-f]{64}$/.test(c.sendKey) ? Buffer.from(c.sendKey, 'hex') : null;
+  if (!want || !c.body || typeof key !== 'string' || !key || !timingSafeEqual(keyHash(key), want)) return false;
+  const own = sessionOf({ ...depsOf(env), env }, c.body);
+  return !own || session === own;
 }
 
 /**

@@ -492,7 +492,18 @@ async function main(argv, env) {
     case 'relay': {
       if (cmd === 'relays' || rest[0] !== 'tool') {
         if (!env.LOOM_URL || !env.LOOM_TOKEN_FILE) throw new Fail('relay and relays need a house token (LOOM_URL and LOOM_TOKEN_FILE)', 2);
-        const r = await pieceCall(env)('run', { argv: [cmd, ...rest] });
+        // A relay from a body names its own conversation (LOOM_BODY_CONVERSATION, unless it names one) and proves it
+        // holds it, as `send` does: its run's key and harness session, in the body of the call, never in argv.
+        let argv = [cmd, ...rest];
+        let proof = {};
+        if (cmd === 'relay') {
+          if (!argv.includes('--conversation') && /^cv-[0-9a-f]{12}$/.test(env.LOOM_BODY_CONVERSATION ?? '')) argv = [...argv, '--conversation', env.LOOM_BODY_CONVERSATION];
+          const cv = argv[argv.indexOf('--conversation') + 1];
+          const key = argv.includes('--conversation') ? bodyKeyFor(env, cv) : undefined;
+          const session = env.CLAUDE_CODE_SESSION_ID || env.CODEX_THREAD_ID || undefined;
+          proof = { ...(key ? { key } : {}), ...(key && session ? { session } : {}) };
+        }
+        const r = await pieceCall(env)('run', { argv, ...proof });
         if (r.stdout) process.stdout.write(r.stdout);
         if (r.stderr) process.stderr.write(r.stderr);
         if (!Number.isInteger(r.exit) && r.ok !== false) throw new Fail('runtime did not return a command outcome');
