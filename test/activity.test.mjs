@@ -17,8 +17,8 @@ test('a Claude transcript: tool_use makes a running card, its result done or fai
   const cards = claudeCards(read('claude-transcript.jsonl'));
   assert.deepEqual(cards.map((c) => [c.tool, c.summary, c.state]), [
     ['Bash', 'Run the test suite', 'failed'],
-    ['Read', 'Read src/delivery.ts', 'done'],
-    ['Grep', 'Searched for deliverAsOwner', 'running'],
+    ['Read', 'Read delivery.ts', 'done'],
+    ['Grep', 'Searched for "deliverAsOwner" in src', 'running'],
   ]);
   const all = JSON.stringify(cards);
   for (const never of ['s3cr3t', 'npm test', 'OUTPUT-THAT-MUST-NOT-SHOW', 'secret plan', 'private reasoning', '/home/art']) assert.ok(!all.includes(never), never);
@@ -27,32 +27,34 @@ test('a Claude transcript: tool_use makes a running card, its result done or fai
 test('a Codex run: item.started makes a card, item.completed finishes it; failed stays failed; messages make none', () => {
   const cards = codexCards(read('codex-events.jsonl'), 'b1:');
   assert.deepEqual(cards.map((c) => [c.id, c.tool, c.summary, c.state]), [
-    ['b1:item_1', 'command_execution', 'Ran a command', 'done'],
-    ['b1:item_2', 'command_execution', 'Ran a command', 'failed'],
+    ['b1:item_1', 'command_execution', 'Ran a command', 'done'], // echo says nothing of what it's for
+    ['b1:item_2', 'command_execution', 'Ran ls — exit 2: no such file', 'failed'], // a raw command names no file
   ]);
-  assert.ok(!JSON.stringify(cards).includes('nonexistent-dir'), 'never the command line');
+  assert.ok(!JSON.stringify(cards).includes('cannot access'), 'never the output');
 });
 
 test('Codex\'s other tool items: an MCP call in words, a file change by its path, a search by its words; never a result, a diff or reasoning', () => {
   // Built to the shapes codex exec --json writes for these items (the recorded run above has commands only).
   const cards = codexCards(read('codex-tools.jsonl'), 'b2:');
   assert.deepEqual(cards.map((c) => [c.tool, c.summary, c.state]), [
-    ['mcp_tool_call', 'Recalled memories', 'done'],
+    ['mcp_tool_call', 'Searched memory', 'done'],
     ['file_change', 'Changed a.ts', 'done'],
-    ['web_search', 'Searched the web for how comm screens look', 'done'],
+    ['web_search', 'Searched the web for "how comm screens look"', 'done'],
   ]);
   const all = JSON.stringify(cards);
   for (const never of ['RESULT-THAT', 'DIFF-THAT', 'REASONING-THAT', 'secret plans', '/home/art']) assert.ok(!all.includes(never), never);
 });
 
-test('the fixed table: never a command line, a relative path, searches cut at 60, MCP tools in words', () => {
-  assert.equal(claudeSummary('Bash', { command: 'curl -H "Authorization: x" ...' }), 'Ran a command');
+test('the fixed table: a command\'s short form, a file\'s base name, searches cut at 60, MCP tools in words', () => {
+  assert.equal(claudeSummary('Bash', { command: 'curl -H "Authorization: x" ...' }), 'Ran curl');
+  assert.equal(claudeSummary('Bash', { command: 'echo hi' }), 'Ran a command');
   assert.equal(claudeSummary('Read', { file_path: '/etc/shadow' }, '/home/art/repo'), 'Read shadow');
   assert.ok(!claudeSummary('Read', { file_path: '/home/art/repo/a/b.ts' }, '/home/art/repo').includes('/home'));
-  assert.equal(shownPath('/home/art/repo/a/b.ts', '/home/art/repo'), 'a/b.ts');
-  assert.equal(claudeSummary('Grep', { pattern: 'x'.repeat(100) }).length, 'Searched for '.length + 60);
-  assert.equal(claudeSummary('mcp__loom__recall', {}), 'Recalled memories');
-  assert.equal(claudeSummary('mcp__other__do_thing', {}), 'Used do thing');
+  assert.equal(shownPath('/home/art/repo/a/b.ts', '/home/art/repo'), 'b.ts');
+  assert.equal(claudeSummary('Grep', { pattern: 'x'.repeat(100) }).length, 'Searched for ""'.length + 60);
+  assert.equal(claudeSummary('mcp__loom__recall', { query: 'what Jonathan said' }), 'Searched memory');
+  assert.equal(claudeSummary('Read', { file_path: '/home/art/repo/a.ts', offset: 40, limit: 20 }, '/home/art/repo'), 'Read a.ts (lines 40–59)');
+  assert.equal(claudeSummary('mcp__other__do_thing', { query: 'private words' }), 'Used a tool');
   assert.ok(claudeSummary('Bash', { description: 'two\nlines' }).indexOf('\n') === -1);
 });
 
@@ -64,6 +66,20 @@ test('changed: only new cards and moved states, at most 50', () => {
   assert.deepEqual(b.out.map((c) => c.id), Array.from({ length: 10 }, (_, i) => `c${i + 50}`));
   const c = changed([{ ...cards[0], state: 'done' }], b.next);
   assert.deepEqual(c.out.map((x) => [x.id, x.state]), [['c0', 'done']]);
+});
+
+test('changed: a label that moved (a plan, a failure\'s why) is sent again; the record keeps a hash, never the label', () => {
+  const a = changed([{ id: 'p', tool: 'todo_list', summary: 'Plan (0/2): Find it', state: 'done', at: 'x' }], {});
+  assert.equal(a.out.length, 1);
+  assert.ok(!JSON.stringify(a.next).includes('Find it'), 'no words in the record');
+  const b = changed([{ id: 'p', tool: 'todo_list', summary: 'Plan (1/2): Write it', state: 'done', at: 'x' }], a.next);
+  assert.deepEqual(b.out.map((c) => c.summary), ['Plan (1/2): Write it']);
+  assert.equal(changed([{ id: 'p', tool: 'todo_list', summary: 'Plan (1/2): Write it', state: 'done', at: 'x' }], b.next).out.length, 0);
+  // A record from before labels moved holds the bare state: a card whose state still matches isn't sent again.
+  const legacy = changed([{ id: 'old', tool: 'Bash', summary: 'Ran npm test', state: 'done', at: 'x' }], { old: 'done' });
+  assert.equal(legacy.out.length, 0);
+  assert.notEqual(legacy.next.old, 'done', 'the old record moves to the mark');
+  assert.equal(changed([{ id: 'old', tool: 'Bash', summary: 'Ran npm test — exit 1', state: 'done', at: 'x' }], legacy.next).out.length, 1, 'so a later label move is sent');
 });
 
 test('the runners read their own records: a Claude session\'s transcript, a Codex run\'s events', () => {
