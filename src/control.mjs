@@ -1432,6 +1432,12 @@ export function api(env, effects, { caller, path, body }) {
       return import('./delivery.mjs').then((m) => m.send(env, { conversation: b.conversation, text: b.text, key: b.key, session: typeof b.session === 'string' ? b.session : undefined, ...(b.person !== undefined ? { person: b.person } : {}), ...(b.via !== undefined ? { via: b.via } : {}) }, { caller, detach: true }))
         .then((r) => ({ status: r.accepted ? 200 : 409, body: r }), apiError);
     }
+    // On whose behalf a body acts (principal.mjs, t-1943): proven as send is, answered with a signed statement a piece
+    // checks on loom's machine. Never the owner by default.
+    if (path === 'principal') {
+      if (caller.kind !== 'agent') fail('principal is a body\'s, as its own agent', 403);
+      return import('./delivery.mjs').then((m) => { const r = m.bodyPrincipal(env, { conversation: b.conversation, key: b.key, session: typeof b.session === 'string' ? b.session : undefined }, { caller }); return { status: r.ok ? 200 : 409, body: r }; }, apiError);
+    }
     // What became of a body's post (delivery.mjs, sendStatus): its `loom runtime send` asks until it knows (t-1920).
     if (path === 'send-status') {
       if (caller.kind !== 'agent') fail('send-status is a body\'s, as its own agent', 403);

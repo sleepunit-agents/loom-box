@@ -353,6 +353,27 @@ decides whether the agent may have it (`loom secrets may <agent> <name>`), and h
 runtime's own process. No environment flag unlocks reading. `loom runtime secrets-map --json | loom secrets policy
 houses-import` moves the old map's answers into the secrets policy.
 
+### On whose behalf (t-1943)
+
+The owner's standing rules and his yes cover work done for him; work an agent does for anyone else needs a grant he
+set for that person, or it asks (the approvals piece). Who a body acts for is the runtime's word, since it hears every
+message a body does (`src/principal.mjs`):
+
+- Each conversation keeps `actsFor` as messages join its queue: whether its owner spoke (a member who owns the agent,
+  `owners.mjs`), the other people who did, and whether anything it can't place steered it (a relay from another agent,
+  an unnamed sender, a wake with no word from the clock, or history from before this was kept, outside Comms and
+  wakes). It only grows.
+- Its principal: one other person, theirs; several, or anything unplaced, unknown; only the owner, the owner's;
+  nothing heard, unknown. **Never the owner by default.**
+- `loom runtime principal [--conversation cv]`, from a body: proven as `send` is (its run's key and session, as its own
+  agent), it answers `{for, owner, people, statement}`. The statement is signed with a key only the runtime holds
+  (`delivery/principal.key`) and lasts 5 minutes; the run's key never goes to a piece. A house's `piece-call` adds it to
+  every approvals and clock call as `--principal`.
+- `loom runtime principal --verify` (stdin) checks one, on loom's machine: what approvals and the clock run.
+- `loom runtime principal --wake --agent a --place p --for owner|<slug>|-`: the clock's word on whom a firing wake is
+  for, given just before it delivers it, and taken as the wake's message is queued. A wake set by a body working for
+  Loren stays Loren's.
+
 ## Model choice
 
 ```bash

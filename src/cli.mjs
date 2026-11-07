@@ -54,6 +54,10 @@
 //   loom runtime send --conversation <cv> --text <text|->              a body's message out, in its venue: {accepted, ref}
 //        [--person <slug> --via <venue>]                               … or one DM to a person there, through its adapter
 //                                                                        at once; a failed post comes back through its inbox
+//   loom runtime principal [--conversation <cv>]                       on whose behalf this body acts (t-1943): {for, owner,
+//                                                                        people, statement}; the statement is what a piece checks
+//   loom runtime principal --verify < statement                        loom's machine: a statement checked, {ok, agent, for, owner, …}
+//   loom runtime principal --wake --agent a --place p --for owner|<slug>|-   loom's machine (the clock): who a firing wake is for
 //   loom runtime deliver tick [--conversation <cv>] | deliver run [--every <ms>] | deliver list [--json]
 //   loom runtime deliver resume|dismiss <cv>   a conversation paused as a loop (loops.mjs): start what waited, or drop it
 //   loom runtime body-host [--piece <name>] --host-key <boot key>   in an agent's house, as its task: the bodies delivery asks for
@@ -481,6 +485,38 @@ async function main(argv, env) {
       }, { conversation, ref: r.ref, text: msg.text, person, via }) : r;
       out(answer);
       if (!answer.ok) process.exitCode = 1;
+      return;
+    }
+    case 'principal': {
+      // On whose behalf a body acts (principal.mjs, t-1943). --verify and --wake read and write this machine's runtime
+      // state only, never through the piece API: a house has no signing key (so nothing verifies there) and can't
+      // hand over a wake's principal (only the clock, here, does).
+      const { verify, putWakeFor } = await import('./principal.mjs');
+      const { deliveryDir, bodyPrincipal } = await import('./delivery.mjs');
+      const { withLock, AGENT_NAME } = await import('./state.mjs');
+      if (rest.includes('--verify')) {
+        const r = verify(deliveryDir(env), (await readStdin()).trim());
+        out(r);
+        if (!r.ok) process.exitCode = 1;
+        return;
+      }
+      if (rest.includes('--wake')) {
+        const agent = flag(rest, '--agent');
+        const place = flag(rest, '--place');
+        const who = flag(rest, '--for');
+        if (!AGENT_NAME.test(agent ?? '') || typeof place !== 'string' || !place || place.length > 200) throw new Fail('principal --wake --agent <agent> --place <place> --for owner|<slug>|-');
+        try { withLock(deliveryDir(env), 'lock', () => putWakeFor(deliveryDir(env), { agent, place, for: who }), 'delivery'); } catch (e) { throw new Fail(e.message); }
+        out({ ok: true });
+        return;
+      }
+      // A body asking: in a house through the piece API (its house's token), else here; with its run's key and session.
+      const conversation = flag(rest, '--conversation') || env.LOOM_BODY_CONVERSATION;
+      const session = env.CLAUDE_CODE_SESSION_ID || env.CODEX_THREAD_ID || undefined;
+      const q = { conversation, key: bodyKeyFor(env, conversation), ...(session ? { session } : {}) };
+      const remote = env.LOOM_URL && env.LOOM_TOKEN_FILE;
+      const r = remote ? await pieceCall(env, flag(rest, '--piece'))('principal', q) : bodyPrincipal(env, q);
+      out(r);
+      if (!r.ok) process.exitCode = 1;
       return;
     }
     case 'body-host': {

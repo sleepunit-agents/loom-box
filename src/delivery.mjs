@@ -95,6 +95,7 @@ import { raiseAlert } from './alerthook.mjs';
 import { changed as changedCards } from './activity.mjs';
 import { keepKey } from './bodyhost.mjs';
 import { readRelays } from './relay.mjs';
+import { mint, noteSender, principalOf, takeWakeFor } from './principal.mjs';
 
 const DAY_MS = 86_400_000;
 export const MAX_TEXT = 40_000;
@@ -700,7 +701,14 @@ async function deliverOnce(env, raw, o) {
       if (m.kind === 'wake' && !!c.local !== local) return mismatch(m.place, c.local);
       if (m.label !== undefined) c.label = m.label;
       // A retry after a crash may find its message already queued (or already answered): never twice.
-      if (!c.queue.some((x) => x.key === key) && !c.outcomes?.[key]) c.queue.push({ key, id: m.id, at: m.at, from: m.from, kind: m.kind, ...(local ? { local: true } : {}), ...(tier ? { tier } : {}), ...(owner ? { owner: true } : {}), ...(tierUnread ? { tierUnread: true } : {}), ...(sealed ? { sealed } : { mem: true }) });
+      const fresh = !c.queue.some((x) => x.key === key) && !c.outcomes?.[key];
+      // Who steered it (principal.mjs, t-1943): noted as the message joins, before any body hears it. A wake takes
+      // what the clock handed over for it (on venue wake only the clock delivers).
+      if (fresh) {
+        const wakeFor = m.venue === 'wake' && m.from.kind === 'schedule' ? takeWakeFor(deliveryDir(env), m.agent, m.place, d.now().getTime()) : undefined;
+        noteSender(env, c, m, { wakeFor, historyFree: m.venue === COMMS_VENUE || m.venue === 'wake' });
+      }
+      if (fresh) c.queue.push({ key, id: m.id, at: m.at, from: m.from, kind: m.kind, ...(local ? { local: true } : {}), ...(tier ? { tier } : {}), ...(owner ? { owner: true } : {}), ...(tierUnread ? { tierUnread: true } : {}), ...(sealed ? { sealed } : { mem: true }) });
       c.last = d.now().toISOString();
       saveConv(env, c);
       return null;
@@ -1946,16 +1954,8 @@ export async function send(env, { conversation, text, key, session, person, via 
   const c = loadConv(env, conversation);
   if (!c) return { ok: false, reason: `no conversation ${conversation} here` };
   if (o.caller && (o.caller.kind !== 'agent' || o.caller.agent !== c.agent)) return { ok: false, reason: `only ${c.agent}'s own body speaks in ${conversation}` };
-  const want = typeof c.sendKey === 'string' && /^[0-9a-f]{64}$/.test(c.sendKey) ? Buffer.from(c.sendKey, 'hex') : null;
-  if (!want || !c.body || typeof key !== 'string' || !key || !timingSafeEqual(keyHash(key), want)) {
-    return refusedSend(env, c, `only the body holding ${conversation} speaks in it (its run's ${BODY_KEY} doesn't match)`);
-  }
-  // Its harness session too, where the runner knows the body's: a sibling body holding this conversation's key (its
-  // house's file) is another session. A sender that names no session is refused once the body's is known.
-  const own = sessionOf({ ...d, env }, c.body);
-  if (own && session !== own) {
-    return refusedSend(env, c, `only the body holding ${conversation} speaks in it (${session ? 'another session is' : 'no session is named'}: ${conversation} is a session of its own)`);
-  }
+  const notHolder = holderProblem(env, d, c, { key, session });
+  if (notHolder) return refusedSend(env, c, notHolder);
   if (!str(text, MAX_TEXT)) return refusedSend(env, c, `a message is 1-${MAX_TEXT} characters`);
   // To a person (a DM), not the conversation's own place: the relay to a person, through that venue's adapter.
   let to;
@@ -1990,6 +1990,40 @@ export async function send(env, { conversation, text, key, session, person, via 
   if (o.detach) (o.spawnSender ?? ((...a) => spawnSender(env, ...a)))(conversation, ref, text, out);
   else { const p = post(env, conversation, ref, text, out, o).catch((e) => d.warn(`posting ${ref}: ${e.message}`)); o.onSend?.(p); }
   return { accepted: true, ref, conversation: c.conversation };
+}
+
+/**
+ * Why the caller isn't the body holding conversation `c` in its current run, or null when it is: its run's key
+ * (LOOM_BODY_KEY) matches, and so does its harness session, where the runner knows the body's (a sibling body holding
+ * this conversation's key, its house's file, is another session; one that names no session is refused once the
+ * body's is known). What `send` takes, and what a principal statement takes (bodyPrincipal).
+ */
+function holderProblem(env, d, c, { key, session }) {
+  const want = typeof c.sendKey === 'string' && /^[0-9a-f]{64}$/.test(c.sendKey) ? Buffer.from(c.sendKey, 'hex') : null;
+  if (!want || !c.body || typeof key !== 'string' || !key || !timingSafeEqual(keyHash(key), want)) {
+    return `only the body holding ${c.conversation} speaks in it (its run's ${BODY_KEY} doesn't match)`;
+  }
+  const own = sessionOf({ ...d, env }, c.body);
+  if (own && session !== own) {
+    return `only the body holding ${c.conversation} speaks in it (${session ? 'another session is' : 'no session is named'}: ${c.conversation} is a session of its own)`;
+  }
+  return null;
+}
+
+/**
+ * On whose behalf the body holding a conversation acts (principal.mjs, t-1943): {ok, for, owner, people, statement},
+ * or {ok: false, reason}. Proven as `send` is (holderProblem), by its own agent: the statement, signed with the
+ * runtime's key, is what a piece checks (`loom runtime principal --verify`); the run's key never leaves here.
+ */
+export function bodyPrincipal(env, { conversation, key, session }, o = {}) {
+  const d = depsOf(env, o);
+  const c = loadConv(env, conversation);
+  if (!c) return { ok: false, reason: `no conversation ${conversation} here` };
+  if (o.caller && (o.caller.kind !== 'agent' || o.caller.agent !== c.agent)) return { ok: false, reason: `only ${c.agent}'s own body asks about ${conversation}` };
+  const notHolder = holderProblem(env, d, c, { key, session });
+  if (notHolder) return { ok: false, reason: notHolder.replace('speaks in it', 'is asked about') };
+  const p = principalOf(env, c);
+  return { ok: true, agent: c.agent, conversation: c.conversation, ...p, statement: mint(deliveryDir(env), { agent: c.agent, conversation: c.conversation, principal: p }, d.now().getTime()) };
 }
 
 /** A platform id from a gate entry's ids for a venue: a list, one id, or (Slack) {team: [ids]}; the first. */
