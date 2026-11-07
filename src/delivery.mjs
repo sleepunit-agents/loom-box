@@ -788,6 +788,27 @@ function census(env, agent, d, now) {
 }
 
 /**
+ * Every conversation whose body is at work right now (starting, or mid-turn), whatever its venue: a Comms thread, a
+ * bridge's chat, a wake. The one record of a delivered body running, read for the agent's card (ui.mjs, agentReports)
+ * and for the tick's word to core when the set moves (workingPrint). Read only: no lock, no harness started.
+ */
+export function workingConversations(env, d = depsOf(env), now = Date.now()) {
+  const out = [];
+  for (const c of listConvs(env)) {
+    let st;
+    try { st = isStarting(c, now) ? 'working' : statusOf(env, c, d); } catch { st = 'unknown'; }
+    if (st !== 'working') continue;
+    const run = (c.runLog ?? []).findLast((x) => x.run === c.run);
+    out.push({ agent: c.agent, conversation: c.conversation, venue: c.venue, kind: c.kind, place: c.place,
+      ...(c.label !== undefined ? { label: c.label } : {}), ...(Number.isFinite(run?.at) ? { since: run.at } : c.starting ? { since: c.starting.since } : {}) });
+  }
+  return out;
+}
+
+/** The working set as one string: it changes when a body starts or ends, nothing else (the tick's word to core). */
+export const workingPrint = (ws) => ws.map((w) => `${w.agent}:${w.conversation}`).sort().join(',');
+
+/**
  * Messages as a body reads them. Who wrote and their tier are the runtime's, out of band: each message is fenced by a
  * header line the runtime writes, with a delimiter drawn fresh for each rendering, and its text inside. A sender
  * can't write a header (they can't know the delimiter, and it's taken out of their text if they somehow do), so

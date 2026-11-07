@@ -73,6 +73,8 @@ export function coreFrom(env, { fetchImpl = fetch, timeoutMs = 5000 } = {}) {
     // The same 15 s an adapter's argv has (delivery.mjs SEND_MS, ADAPTER_MS): core is this venue's adapter.
     comms: (b) => call('POST', 'comms/adapter', b, 15_000),
     activity: (b) => call('POST', 'comms/activity', b, 15_000),
+    // What this piece's manifest says moved (a body at work, or done): core asks for it again now (t-1945).
+    changed: () => post('pieces/changed', {}),
     // The review job's: its settings, and a token for one run.
     reviewConfig: async () => reviewConfigOf(await call('GET', 'review/config')),
     async reviewToken() {
