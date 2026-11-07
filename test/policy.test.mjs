@@ -398,6 +398,7 @@ test('a one-to-one DM with a tier-2 person carries their standing authority and 
   const brief = plain(briefOf(starts(w)[0]));
   assert.ok(brief.includes('Standing authority from your owner for phil (your gates), here with them alone, for what they ask: May have fleet setup run on his ask.'));
   assert.ok(brief.includes('Standing restriction from your owner for phil (your gates): Never push to onterris for him.'));
+  assert.equal(brief.includes('Standing restriction from your owner for anton'), false, 'only the people here: never everyone in the gates');
   assert.ok(brief.includes('## Phil (phil)\nField PM.'), 'their card');
   assert.equal(brief.includes('The people here'), false, 'one person isn\'t a room');
   assert.ok(brief.includes('phil: tier 2, trusted'));
@@ -586,4 +587,14 @@ test('a lone tier-2 person in a place that\'s a guest venue by another route is 
   assert.ok(brief.includes('THIS IS A GUEST VENUE'));
   assert.equal(brief.includes('Standing authority'), false);
   assert.ok(brief.includes('Here with you: Phil (phil), tier 2.'), 'a one-to-one place says who, by the gates');
+});
+
+test('a grant or restriction written as a list or named items is told as words, never dropped', async () => {
+  const { w, smsg, gates } = roomWorld();
+  gates.people.phil.restrict = ['No onterris pushes.', 'No spending.'];
+  gates.people.phil.grant = { fleet: 'fleet setup on his ask', staff: '' };
+  await deliver(w.env, smsg('dm:UPHIL', 'phil', 'hi'), w.o);
+  const brief = plain(briefOf(starts(w)[0]));
+  assert.ok(brief.includes('Standing restriction from your owner for phil (your gates): No onterris pushes.; No spending.'));
+  assert.ok(brief.includes('here with them alone, for what they ask: fleet: fleet setup on his ask; staff'));
 });

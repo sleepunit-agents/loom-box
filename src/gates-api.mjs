@@ -57,8 +57,9 @@ export async function runFor(env, caller, argv, store = loomStore(env), core = c
  * A body's own place (t-1745): only for the body proving it holds `cv` in its current run (its run's key and harness
  * session, as `send` proves it; delivery.mjs holdsRun), and only its own agent's (`agent`, when a house asks).
  * {ok, place: {conversation, agent, venue, place, label?, members, membersAt?, principal}} or {ok: false, reason}.
- * `members` is who was in the place when the body's rules were made (`membersAt`); it holds for the body's run,
- * because a body is reseated when a person outside them writes (delivery.mjs, needsReseat). `principal` is whom it
+ * `members` is who was in the place when the body's rules were made (`membersAt`). An adapter names members only for
+ * places whose membership can't change under a body (policy.mjs), and a body is reseated when a person outside them
+ * writes (delivery.mjs, needsReseat), so it holds for the body's run. `principal` is whom it
  * works for now (principal.mjs): a tool scoped by a person checks both name that same one.
  */
 export async function placeOf(env, cv, proof = {}, agent = undefined) {

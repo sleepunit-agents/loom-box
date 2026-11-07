@@ -28,7 +28,8 @@
 //   }
 //
 // A place's people (t-1745): an adapter may name who's in a place (`members`, slugs: a Slack DM's one person, a group
-// DM's people). Each one's tier, standing restriction (`restrict`) and card are the gates', never the adapter's: the
+// DM's people), only where its membership can't change under a body (a Slack DM or group DM: adding someone makes a new
+// one); the roster is read when a body starts or resumes, never mid-run. Each one's tier, standing restriction (`restrict`) and card are the gates', never the adapter's: the
 // brief gets the roster and its lowest tier (which governs), every member's and sender's restriction, the members'
 // cards (none while a guest reads), and, in a one-to-one place with a tier-2 person whose conversation has only ever
 // heard them, their standing authority (`grant`). A tier-1 member makes it a guest venue. A body whose rules name
@@ -167,19 +168,28 @@ export function cleanAbout(a) {
 }
 
 /** A body's rules' key: what makes two bodies the same as far as placement goes. */
-const keyOf = (guest, deny, members, grantFor) => createHash('sha256').update(JSON.stringify(personal({ members, grantFor }) ? [guest, [...deny].sort(), [...members].sort(), grantFor] : [guest, [...deny].sort()])).digest('hex').slice(0, 16);
+const keyOf = (guest, deny, members, grantFor) => createHash('sha256').update(JSON.stringify(namesPeople({ members, grantFor }) ? [guest, [...deny].sort(), [...members].sort(), grantFor] : [guest, [...deny].sort()])).digest('hex').slice(0, 16);
 
 /**
  * Whether a body's rules were made for particular people (a place's members, or a person's standing authority): such
  * a session resumes only under rules with the same key (delivery.mjs); any other only under the same `guest`.
  */
-export const personal = (r) => !!(r?.members?.length || r?.grantFor);
+export const namesPeople = (r) => !!(r?.members?.length || r?.grantFor);
 
 /**
  * Whether a session kept under rules `was` (a slot's, a parked home's) may resume under `rules`: the same `guest`, and,
  * where either names people, the same key. Every resume path asks this (delivery.mjs), never a copy of it.
  */
-export const sameRules = (was, rules) => (was?.guest ?? false) === rules.guest && (!(personal(was) || personal(rules)) || was?.key === rules.key);
+export const sameRules = (was, rules) => (was?.guest ?? false) === rules.guest && (!(namesPeople(was) || namesPeople(rules)) || was?.key === rules.key);
+
+/**
+ * A gates entry's `grant` or `restrict` as words, however the owner wrote it (gates.mjs renders the same: a string, a
+ * list of them, or an object of named items), at most 1000 characters; '' for none.
+ */
+function wordsOf(v) {
+  const parts = typeof v === 'string' ? [v] : Array.isArray(v) ? v : isObj(v) ? Object.entries(v).map(([k, x]) => (typeof x === 'string' && x.trim() ? `${k}: ${x}` : k)) : [];
+  return parts.filter((x) => typeof x === 'string' && x.trim()).map((x) => x.trim()).join('; ').slice(0, 1000);
+}
 
 /** Why a place's roster (an adapter's `members`) can't be taken whole, or null. */
 function rosterProblem(m) {
@@ -269,8 +279,8 @@ export async function rulesFor(c, msgs, d, { platform, core = false, principal =
   // never in a room, and only from tier 2 (tier 3 is the owner's trust already).
   const persons = uniq([...members.map((m) => m.slug), ...senders.filter((s) => s.x.from?.kind === 'person').map((s) => s.x.from.slug)]);
   for (const s of persons) {
-    const r = gates?.people?.[s]?.restrict;
-    if (typeof r === 'string' && r.trim()) text(`Standing restriction from your owner for ${s} (your gates): ${r.trim().slice(0, 1000)}\n`);
+    const r = wordsOf(gates?.people?.[s]?.restrict);
+    if (r) text(`Standing restriction from your owner for ${s} (your gates): ${r}\n`);
   }
   // An authority is that person's, for what they ask (t-1943): only in a one-to-one place with them, tier 2, when
   // every message this body hears is theirs (any other sender, a relay, the schedule, someone unnamed: none), and
@@ -280,10 +290,10 @@ export async function rulesFor(c, msgs, d, { platform, core = false, principal =
   let grantFor = null;
   if (one && one.tier === 2 && !guest && msgs.length && msgs.every((x) => x.from?.kind === 'person' && x.from.slug === one.slug)
     && principal?.for === one.slug && principal.owner !== true && principal.unknown !== true && ownerSpoke !== true) {
-    const g = one.e?.grant;
-    if (typeof g === 'string' && g.trim()) {
+    const g = wordsOf(one.e?.grant);
+    if (g) {
       grantFor = one.slug;
-      text(`Standing authority from your owner for ${one.slug} (your gates), here with them alone, for what they ask: ${g.trim().slice(0, 1000)}\n`);
+      text(`Standing authority from your owner for ${one.slug} (your gates), here with them alone, for what they ask: ${g}\n`);
     }
   }
   if (guest) {
