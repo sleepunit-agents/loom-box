@@ -145,6 +145,8 @@ test('refusals are read from structured fields: Claude Code\'s API error entry, 
 });
 
 test('a runner\'s turn() says limited, and when: Claude Code from its transcript and status line; Codex from its rollout', () => {
+  // The runner reads its status line against the real clock, so this reading is from now, not NOW: a fixed reading went stale at 2026-11-07 12:00Z and its reset was dropped.
+  const T = Math.floor(Date.now() / 1000);
   const D = scratch('rt-limited-');
   // Claude: its job's turn is over, its transcript ends on the API error, its status line kept the reading.
   const jobs = join(D, 'jobs'), projects = join(D, 'projects'), usage = join(D, 'usage');
@@ -154,9 +156,9 @@ test('a runner\'s turn() says limited, and when: Claude Code from its transcript
   writeFileSync(join(jobs, 'abcd1234', 'state.json'), JSON.stringify({ state: 'done', tempo: 'idle', sessionId: 'sess-1234' }));
   const tx = join(projects, '-home-art-Art', 'sess-1234.jsonl');
   writeFileSync(tx, [{ type: 'user' }, { type: 'assistant', message: { content: [{ type: 'text', text: 'on it' }] } }, claudeError('rate_limit')].map((x) => JSON.stringify(x)).join('\n') + '\n');
-  writeFileSync(join(usage, 'sess-1234.json'), JSON.stringify({ at: S, reading: { windows: { '5h': 0.3, '7d': 1 }, resets: { '5h': S + 100, '7d': S + 86400 } } }));
+  writeFileSync(join(usage, 'sess-1234.json'), JSON.stringify({ at: T, reading: { windows: { '5h': 0.3, '7d': 1 }, resets: { '5h': T + 100, '7d': T + 86400 } } }));
   const cr = new ClaudeRunner({ jobsDir: jobs, projectsDir: projects, usageDir: usage });
-  assert.deepEqual(cr.turn({ id: 'abcd1234' }), { failed: true, worked: null, limited: true, error: 'its provider refused it (rate_limit)', resets: S + 86400 });
+  assert.deepEqual(cr.turn({ id: 'abcd1234' }), { failed: true, worked: null, limited: true, error: 'its provider refused it (rate_limit)', resets: T + 86400 });
   // The next turn worked: not limited.
   writeFileSync(tx, readFileSync(tx, 'utf-8') + JSON.stringify({ type: 'user' }) + '\n' + JSON.stringify({ type: 'assistant', message: { content: [] } }) + '\n');
   assert.equal(cr.turn({ id: 'abcd1234' }).limited, undefined);
