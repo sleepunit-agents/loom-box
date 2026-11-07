@@ -2033,7 +2033,7 @@ export function resetPrincipal(env, conversation) {
   return locked(env, () => {
     const c = loadConv(env, conversation);
     if (!c) return { ok: false, reason: `no conversation ${conversation} here` };
-    resetActsFor(c, new Date().toISOString());
+    resetActsFor(env, c, new Date().toISOString());
     saveConv(env, c);
     return { ok: true, conversation };
   });

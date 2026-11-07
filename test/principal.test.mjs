@@ -65,9 +65,13 @@ test('a conversation that ran before this was kept can\'t say who steered it, in
   // It only grows: the next owner message doesn't clear it. The owner's reset does.
   noteSender(env, old, person('jonathan'));
   assert.equal(principalOf(env, old).owner, false);
-  resetActsFor(old, at);
+  resetActsFor(env, old, at);
   noteSender(env, old, person('jonathan'));
   assert.equal(principalOf(env, old).owner, true);
+  // What still waits in the queue isn't set aside: the body hasn't heard it yet.
+  const waiting = { agent: 'art', runs: 4, queue: [{ key: 'k', from: { kind: 'person', slug: 'loren' } }] };
+  resetActsFor(env, waiting, at);
+  assert.deepEqual(principalOf(env, waiting), { for: 'loren', owner: false, people: ['loren'] });
 });
 
 test('what already waits in the queue counts as heard: the body will hear it', () => {

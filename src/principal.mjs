@@ -50,9 +50,13 @@ export function noteSender(env, c, m, { wakeFor } = {}) {
   return noteOne(env, c.actsFor, m, wakeFor);
 }
 
-/** The owner's word that a conversation is his from here (loom's machine only): what it heard before is set aside. */
-export function resetActsFor(c, at) {
+/**
+ * The owner's word that a conversation is his from here (loom's machine only): what it heard before is set aside.
+ * What still waits in its queue, the body hasn't heard yet: that's noted again, as at the first message.
+ */
+export function resetActsFor(env, c, at) {
   c.actsFor = { owner: false, people: [], unknown: false, reset: at };
+  for (const q of c.queue ?? []) noteOne(env, c.actsFor, { ...q, agent: c.agent }, undefined);
   return c.actsFor;
 }
 
