@@ -1432,6 +1432,11 @@ export function api(env, effects, { caller, path, body }) {
       return import('./delivery.mjs').then((m) => m.send(env, { conversation: b.conversation, text: b.text, key: b.key, session: typeof b.session === 'string' ? b.session : undefined, ...(b.person !== undefined ? { person: b.person } : {}), ...(b.via !== undefined ? { via: b.via } : {}) }, { caller, detach: true }))
         .then((r) => ({ status: r.accepted ? 200 : 409, body: r }), apiError);
     }
+    // What became of a body's post (delivery.mjs, sendStatus): its `loom runtime send` asks until it knows (t-1920).
+    if (path === 'send-status') {
+      if (caller.kind !== 'agent') fail('send-status is a body\'s, as its own agent', 403);
+      return import('./delivery.mjs').then((m) => { const r = m.sendStatus(env, { conversation: b.conversation, ref: b.ref }, { caller }); return { status: r.ok === false ? 409 : 200, body: r }; }, apiError);
+    }
     // The now board's inbox (nowboard.mjs): a bridge's snapshot and events, as its agent (or the owner).
     // A reply's trace (trace.mjs, t-1895): an agent's house reads its own agent's; never another's.
     if (path === 'trace') {

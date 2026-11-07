@@ -44,6 +44,8 @@
 // conversation's one pending note, which rides along with its next real message. A refusal the adapter says is for
 // good (`{ok: false, reason, permanent: true}`: shadow mode, no bot, a place it can't post in) isn't retried or
 // queued at all: it's kept on the conversation (`refused`) and the owner hears of it once a day.
+// The body's `loom runtime send` waits for that outcome (sendStatus, sendOutcome) and says posted only when it did
+// (t-1920). A DM refused only because its venue's adapter is in shadow goes to that venue's old bridge (LEGACY_SEND).
 //
 // Out of quota (t-1907): an agent keeps answering when its harness's account runs out.
 //   - A resume whose slot's harness has no room (by the readings, or a hold: a refusal just seen) parks that slot as
@@ -820,8 +822,8 @@ const render = (msgs) => {
 function startBrief(c, msgs, run, sends, rules = { sections: [] }) {
   const how = sends === 'record'
     ? `When you're done, pipe a short account of what you did to \`loom runtime send --conversation ${c.conversation}\`: on ${c.venue} nothing is posted; it's recorded as this run's reply.`
-    : `To say something there, pipe it to \`loom runtime send --conversation ${c.conversation}\`; it answers {ok, id?} and, when it couldn't post, why.`;
-  const relay = `To message one person directly instead (one DM, posted as you, in a venue that has DMs), add \`--person <their slug> --via <venue>\`${rules.guest ? ': from a guest venue, only to your owner' : ''}.`;
+    : `To say something there, pipe it to \`loom runtime send --conversation ${c.conversation}\`; it waits for the venue and answers {ok: true, posted: true, id?} once it's posted, or {ok: false, reason} when it couldn't post. Say a message went (in a reply, a digest or a summary) only when its send answered posted: true.`;
+  const relay = `To message one person directly instead (one DM, posted as you, in a venue that has DMs), add \`--person <their slug> --via <venue>\`${rules.guest ? ': from a guest venue, only to your owner' : ''}. Where that venue's old bridge still posts, it answers {ok: true, posted: false, relay}: handed to that bridge, which passes it on; say it's on its way, not that it was sent.`;
   const head = [
     `You are ${c.agent}, in a conversation on ${c.venue}: ${c.label ?? c.place}.`,
     `Its conversation is ${c.conversation} and this run is ${run}: call identity with {conversation: "${c.conversation}", run: "${run}"} first.`,
@@ -1838,6 +1840,18 @@ export async function tick(env, o = {}, only, mem = new Map()) {
 // ─── Outbound ───────────────────────────────────────────────────────────────
 
 /**
+ * A venue whose adapter may still be in shadow, and the old bridge that posts there meanwhile (t-1920): a DM a body
+ * sends there that the adapter refuses as shadow (`{ok: false, permanent: true, shadow: true}`) is handed back to the
+ * body's `loom runtime send` with this piece's relay to call, as the agent (shuttle relay.py: `relay --via slack`): the
+ * old Slack bridge's body in that person's DM passes it on. Whichever is live posts: the adapter once it's live (it
+ * never answers shadow then), the old bridge until it is. Remove a venue once its old bridge is gone.
+ */
+export const LEGACY_SEND = { slack: 'shuttle' };
+
+/** How long a post's outcome is kept for its sender to ask after (`sendStatus`). */
+const SENT_KEPT_MS = 3_600_000;
+
+/**
  * One run of a venue's send, with the full time it has (15 s): {ok, id?}; {ok: false, answered: true, reason,
  * permanent?} when the adapter said no (`permanent: true` when it says no post there will ever go: shadow mode, no bot
  * for the agent, a place it can't post in); {ok: false, answered: false, reason} when it didn't say (a timeout, a
@@ -1857,7 +1871,7 @@ function sendOnce(d, argv, c, text) {
       let a;
       try { a = JSON.parse(out.trim().split('\n').pop()); } catch { return finish({ ok: false, answered: false, reason: `its send answered no JSON (exit ${status})` }); }
       if (a?.ok === true) return finish({ ok: true, ...(typeof a.id === 'string' && a.id.length <= 200 ? { id: a.id } : {}) });
-      finish({ ok: false, answered: true, reason: typeof a?.reason === 'string' ? a.reason.slice(0, 300) : `its send said no (exit ${status})`, ...(a?.permanent === true ? { permanent: true } : {}) });
+      finish({ ok: false, answered: true, reason: typeof a?.reason === 'string' ? a.reason.slice(0, 300) : `its send said no (exit ${status})`, ...(a?.permanent === true ? { permanent: true } : {}), ...(a?.permanent === true && a?.shadow === true ? { shadow: true } : {}) });
     });
     child.stdin.on('error', () => {});
     child.stdin.end(text);
@@ -2055,19 +2069,85 @@ export async function post(env, conversation, ref, text, { body, run, to } = {},
     try { await d.core.audit({ conversation: t.conversation, seq: t.seq, text }); } catch (e) { d.warn(`the reply's turn stands without its audit text: ${e.message}`); }
   } catch (e) { d.warn(`${ref} went out but its turn wasn't recorded: ${e.message}`); }
   const where = dm ? `${dm.venue} ${dm.label ?? dm.place}` : c.venue;
-  if (!r.ok && r.permanent) refused(env, conversation, body, ref, where, r.reason, d);
+  // A DM refused only because its venue's adapter is still in shadow: the old bridge posts there meanwhile. The
+  // sender's `loom runtime send` hands it on (LEGACY_SEND); it isn't refused for good, and nobody's told it was.
+  const legacy = !r.ok && r.shadow && dm && LEGACY_SEND[dm.venue] ? { piece: LEGACY_SEND[dm.venue], via: dm.venue, from: `${c.venue}:${c.label ?? c.place}`.slice(0, 120) } : null;
+  if (legacy) d.warn(`${conversation}: ${ref} to ${where}: its adapter is in shadow; handed back for the old bridge (${legacy.piece} relay)`);
+  else if (!r.ok && r.permanent) refused(env, conversation, body, ref, where, r.reason, d);
   else if (!r.ok) tellBody(env, conversation, body, ref, where, r.reason, d);
   locked(env, () => {
     const x = loadConv(env, conversation);
     if (!x) return;
     x.last = d.now().toISOString();
     if (r.ok && !dm) delete x.refused;
+    // What became of it, for its sender to ask (sendStatus): a body is told it went only once it did (t-1920).
+    const at = d.now().getTime();
+    x.sends = Object.fromEntries(Object.entries(x.sends ?? {}).filter(([, v]) => at - v.at < SENT_KEPT_MS).slice(-49));
+    x.sends[ref] = { at, ok: !!r.ok, ...(r.id ? { id: r.id } : {}), ...(r.recorded ? { recorded: true } : {}), ...(!r.ok ? { reason: String(r.reason ?? '').slice(0, 300) } : {}), ...(!r.ok && r.permanent && !legacy ? { permanent: true } : {}), ...(legacy ? { legacy } : {}) };
     // How its run's post went, as a hash of its words (never the words), for the loop check (loops.mjs).
     const k = (x.runLog ?? []).findLast((y) => y.run === (run ?? x.run));
     if (k) k.posts = [...(k.posts ?? []), { ok: !!r.ok, h: textHash(text), ...(!r.ok ? { reason: String(r.reason ?? '').slice(0, 200) } : {}) }].slice(-5);
     saveConv(env, x);
   });
-  return { ...r, ref };
+  return { ...r, ref, ...(legacy ? { legacy } : {}) };
+}
+
+/**
+ * What became of a post a body sent (`loom runtime send` asks until it knows): {done: false} while it's being posted;
+ * else {done: true, ok, id?, reason?, permanent?, legacy?}. Only the conversation's own agent asks; no words.
+ */
+export function sendStatus(env, { conversation, ref }, o = {}) {
+  if (!CV.test(conversation ?? '') || !/^out-[0-9a-f]{12}$/.test(ref ?? '')) return { ok: false, reason: 'send-status takes {conversation, ref}' };
+  const c = loadConv(env, conversation);
+  if (!c) return { ok: false, reason: `no conversation ${conversation} here` };
+  if (o.caller && (o.caller.kind !== 'agent' || o.caller.agent !== c.agent)) return { ok: false, reason: `only ${c.agent} asks after its own posts` };
+  const s = c.sends?.[ref];
+  if (!s) return { done: false };
+  const { at: _at, ...rest } = s;
+  return { done: true, ...rest };
+}
+
+/** How long `loom runtime send` waits for a post's outcome: its send twice (one retry), and the turn written after. */
+export const SEND_WAIT_MS = 2 * SEND_MS + 15_000;
+
+/**
+ * A body's `loom runtime send`, after `send` accepted it: what it answers the body (t-1920). It asks after the post
+ * (`deps.status`, sendStatus or the piece API's send-status) until it's done, and answers:
+ *   {ok: true, posted: true, ref, id?}           the venue took it (a scheduled venue: recorded, posted nowhere)
+ *   {ok: true, posted: false, ref, relay, note}  a DM its venue's adapter (in shadow) didn't post, handed to the old
+ *                                                bridge's relay (LEGACY_SEND) as the agent: that bridge passes it on
+ *   {ok: false, ref, reason, permanent?}         it didn't post, and why; or the outcome didn't come in time
+ * Never "accepted" alone: that was read as sent, and a run's digest said a DM went that never did (cv-67406263d047).
+ */
+export async function sendOutcome(deps, { conversation, ref, text, person, via }, o = {}) {
+  const wait = o.waitMs ?? SEND_WAIT_MS;
+  const every = o.everyMs ?? 1000;
+  const until = Date.now() + wait;
+  let s = null;
+  for (;;) {
+    try { s = await deps.status({ conversation, ref }); } catch (e) { s = { ok: false, reason: e.message }; }
+    if (s?.done || s?.ok === false || Date.now() >= until) break;
+    await deps.sleep(every);
+  }
+  if (!s?.done) {
+    return { ok: false, ref, reason: s?.ok === false ? `couldn't learn whether ${ref} posted: ${s.reason ?? s.error ?? 'no answer'}` : `${ref} wasn't confirmed posted within ${Math.round(wait / 1000)}s: it may still post, but don't say it went`, unconfirmed: true };
+  }
+  if (s.ok) return { ok: true, posted: true, ref, ...(s.id ? { id: s.id } : {}), ...(s.recorded ? { recorded: true } : {}) };
+  if (s.legacy) {
+    const l = s.legacy;
+    if (!deps.relay || !person) return { ok: false, ref, reason: `${l.via}'s adapter is in shadow, and its old bridge's relay can't be reached from here: nothing posted. Ask the owner to pass it on.` };
+    let a;
+    try {
+      a = await deps.relay(l.piece, ['relay', '--via', l.via, '--person', person, '--say', text, '--why', 'a message for them from another conversation of mine', '--from', l.from]);
+    } catch (e) { a = { error: e.message }; }
+    const id = /\b(r-[0-9a-f]{8})\b/.exec(a?.stdout ?? '')?.[1];
+    if (a?.exit === 0 && id) {
+      return { ok: true, posted: false, ref, relay: id, note: `${l.via}'s new adapter is still in shadow: handed to the old ${l.via} bridge, whose body in ${person}'s DM passes it on. Say it's on its way, not that it was sent.` };
+    }
+    const why = String(a?.stderr || a?.error || a?.reason || 'no answer').trim().replace(/^relay: /, '').slice(0, 300);
+    return { ok: false, ref, reason: `${l.via}'s adapter is in shadow, and the old ${l.via} bridge's relay refused it: ${why}. Nothing posted.` };
+  }
+  return { ok: false, ref, reason: s.reason ?? 'its venue said no', ...(s.permanent ? { permanent: true } : {}) };
 }
 
 /** Whether a body is mid-turn, so a note fed to it is heard now and starts nothing. */

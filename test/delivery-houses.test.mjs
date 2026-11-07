@@ -142,7 +142,7 @@ test('a delivered body is a session in its agent\'s own house: placed, woken by 
       const bodyCli = { PATH: process.env.PATH, HOME: H, LOOM_URL: loom.url, LOOM_TOKEN_FILE: join(H, 'token'), LOOM_BODY_KEY: bodyEnv.key, CLAUDE_CODE_SESSION_ID: session };
       const ok = await run(['send', '--conversation', a.conversation, '--piece', 'box', '--text', 'Yes, Thursday at 3.'], '', bodyCli, H);
       assert.equal(ok.status, 0, ok.stdout + ok.stderr);
-      assert.equal(JSON.parse(ok.stdout).accepted, true, 'accepted at once; posted by the runtime');
+      assert.deepEqual([JSON.parse(ok.stdout).ok, JSON.parse(ok.stdout).posted], [true, true], 'posted by the runtime, and it waited to say so (t-1920)');
       await until(() => loom.seen.some((x) => x.path === '/api/loom/conversations/turn' && x.body.kind === 'reply'));
       assert.deepEqual(lines(join(S, 'calls.log')).map((x) => [x.argv, x.text]), [[['--place', 'dm:U1', '--agent', 'art'], 'Yes, Thursday at 3.']]);
       const reply = loom.seen.filter((x) => x.path === '/api/loom/conversations/turn').at(-1).body;
@@ -216,7 +216,7 @@ test('a Codex body in its house answers with `loom runtime send`, naming its Cod
       const bodyCli = { PATH: process.env.PATH, HOME: H, LOOM_URL: loom.url, LOOM_TOKEN_FILE: join(H, 'token'), LOOM_BODY_KEY: bodyKey, CODEX_THREAD_ID: thread };
       const ok = await run(['send', '--conversation', a.conversation, '--piece', 'box', '--text', 'Yes, Friday at 3.'], '', bodyCli, H);
       assert.equal(ok.status, 0, ok.stdout + ok.stderr);
-      assert.equal(JSON.parse(ok.stdout).accepted, true, 'accepted: its Codex thread is the session holding the conversation');
+      assert.equal(JSON.parse(ok.stdout).posted, true, 'posted: its Codex thread is the session holding the conversation');
       await until(() => loom.seen.some((x) => x.path === '/api/loom/conversations/turn' && x.body.kind === 'reply'));
       assert.deepEqual(lines(join(S, 'calls.log')).map((x) => x.text), ['Yes, Friday at 3.']);
       // Another Codex thread in the same house, holding the same key file, is still another session.
