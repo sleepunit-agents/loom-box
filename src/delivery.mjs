@@ -1459,7 +1459,7 @@ async function execute(env, op, d, mem) {
       // A local body speaks with its run's key as a house's body does: from the keys dir (bodyhost.mjs, keyFile), as
       // `claude --bg` gives every session its daemon's environment, not this launch's (t-1830).
       if (local) keepKey(env, op.cv, runKey);
-      c.bodyRules = { guest: rules.guest, key: rules.key };
+      c.bodyRules = { guest: rules.guest, key: rules.key, ...(rules.members?.length ? { members: rules.members } : {}) };
       ack(c, op.msgs);
       delete c.retryAt; delete c.startFails; delete c.retryReason; delete c.startStatus;
       c.sendKey = keyHash(runKey).toString('hex');

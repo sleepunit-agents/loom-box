@@ -32,6 +32,17 @@ export async function runFor(env, caller, argv, store = loomStore(env), core = c
     }
   }
   if (a === 'gates' && b === 'people' && rest.length === 0) return ok(`${JSON.stringify(gatesOf(store, caller.agent))}\n`);
+  // A body's own place (t-1745): the conversation it proves it holds (its run's key and harness session, as `send` and
+  // a relay prove it), and where that is: its venue, place and label, and the people in it as its rules took them
+  // (policy.mjs, members). A tool scoped by who a body works for (Art's pond-field) asks this, never the body's word.
+  if (a === 'place') {
+    const args = argv.slice(1);
+    if (args.length !== 2 || args[0] !== '--conversation' || !/^cv-[0-9a-f]{12}$/.test(args[1])) return no('place --conversation cv-… (this body\'s own)', 2);
+    const d = await import('./delivery.mjs');
+    const c = d.loadConv(env, args[1]);
+    if (!c || c.agent !== caller.agent || !d.holdsRun(env, args[1], proof)) return no(`place: only the body holding ${args[1]} in its current run asks where it is`);
+    return ok(`${JSON.stringify({ conversation: c.conversation, agent: c.agent, venue: c.venue, place: c.place, ...(c.label !== undefined ? { label: c.label } : {}), members: c.bodyRules?.members ?? [] })}\n`);
+  }
   const tail = a === 'propose-person' ? [b, ...rest].filter((x) => x !== undefined) : a === 'gates' && b === 'propose' ? rest : null;
   if (tail) {
     const flags = proposeFlags(tail);
@@ -41,5 +52,5 @@ export async function runFor(env, caller, argv, store = loomStore(env), core = c
     if (r.ok) await annotate(store, core, caller.agent, r.pid);
     return r.ok ? ok(`${r.message}\n`) : no(`propose-person: ${r.message}`);
   }
-  return no('the runtime answers a body: relay --to A --say T [--why W] [--reply-to r-…] [--from discord:#x] [--approval a-…] [--conversation cv-…] | relays [--thread r-…] | gates people | gates propose --slug S --entry JSON [--why W] [--then-relay-say T --then-relay-via slack]', 2);
+  return no('the runtime answers a body: place --conversation cv-… | relay --to A --say T [--why W] [--reply-to r-…] [--from discord:#x] [--approval a-…] [--conversation cv-…] | relays [--thread r-…] | gates people | gates propose --slug S --entry JSON [--why W] [--then-relay-say T --then-relay-via slack]', 2);
 }

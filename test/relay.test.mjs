@@ -621,3 +621,22 @@ describe('a body the record lost track of still counts', () => {
     assert.equal(originOf(w.env, caller, a)?.conversation, a);
   });
 });
+
+describe('place: a body asks where it is (t-1745)', () => {
+  test('only the body holding the conversation, proved by its key and session, hears its venue, place and members', async () => {
+    const w = world();
+    const cv = (await deliver(w.env, w.msg('dm:U1', 'hi', { venue: 'slack', label: 'DM with Phil', from: { kind: 'person', slug: 'phil' } }), w.o)).conversation;
+    const c = loadConv(w.env, cv);
+    const key = w.runner.envs[c.body.split(':')[1]].LOOM_BODY_KEY;
+    const session = w.sessionFor(cv);
+    const r = await runFor(w.env, { kind: 'agent', agent: 'art' }, ['place', '--conversation', cv], memStore(), undefined, undefined, { key, session });
+    assert.equal(r.exit, 0, JSON.stringify(r));
+    assert.deepEqual(JSON.parse(r.stdout), { conversation: cv, agent: 'art', venue: 'slack', place: 'dm:U1', label: 'DM with Phil', members: [] });
+    const no = async (caller, proof, argv = ['place', '--conversation', cv]) => (await runFor(w.env, caller, argv, memStore(), undefined, undefined, proof)).exit;
+    assert.equal(await no({ kind: 'agent', agent: 'art' }, { key }), 1, 'no session: proves nothing');
+    assert.equal(await no({ kind: 'agent', agent: 'art' }, { key, session: 'someone-else' }), 1, 'another session');
+    assert.equal(await no({ kind: 'agent', agent: 'art' }, { key: 'f'.repeat(64), session }), 1, 'another key');
+    assert.equal(await no({ kind: 'agent', agent: 'mark' }, { key, session }), 1, 'another agent');
+    assert.equal(await no({ kind: 'agent', agent: 'art' }, { key, session }, ['place']), 2, 'it names its conversation');
+  });
+});

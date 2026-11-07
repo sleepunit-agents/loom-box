@@ -351,3 +351,82 @@ test('a venue\'s bare bin name is run from loom\'s pieces bin dir, which a piece
   assert.deepEqual(pieceArgv(env, ['/usr/bin/x']), ['/usr/bin/x']);
   assert.deepEqual(pieceArgv({}, ['loom-discord', 'send']), ['loom-discord', 'send']);
 });
+
+// ─── A place's members (t-1745: the old Slack bridge's group roster, dm_extra's grant and restrict, its cards) ───
+
+/** guestWorld, plus Slack places whose adapter names who's in them, and people with the owner's standing word. */
+function roomWorld() {
+  const g = guestWorld();
+  Object.assign(g.gates.people, {
+    phil: { name: 'Phil', tier: 2, grant: 'May have fleet setup run on his ask.', restrict: 'Never push to onterris for him.' },
+    anton: { name: 'Anton', tier: 2, restrict: 'No onterris pushes on his behalf.' },
+  });
+  Object.assign(g.cards, { phil: '## Phil (phil)\nField PM.', anton: '## Anton (anton)\nDeveloper.', jonathan: '## Jonathan (jonathan)\nThe owner.' });
+  const about = {
+    'dm:UPHIL': { venue: 'DPHIL', members: ['phil'] },
+    'dm:UJON': { venue: 'DJON', members: ['jonathan'] },
+    'group:G1': { venue: 'G1', members: ['phil', 'jonathan', 'anton'] },
+    'group:G2': { venue: 'G2', members: ['phil', 'stranger'] },
+  };
+  const inner = g.w.o.adapter;
+  g.w.o.adapter = async (argv, c, args) => (args[0] === '--describe' && about[c.place] ? { ok: true, ...about[c.place] } : inner(argv, c, args));
+  const smsg = (place, slug, text) => g.w.msg(place, text, { venue: 'slack', label: place, from: { kind: 'person', slug } });
+  return { ...g, smsg };
+}
+
+test('a group DM\'s body hears who is in it, the lowest tier governs, each one\'s restriction, their cards; no one\'s standing authority', async () => {
+  const { w, smsg } = roomWorld();
+  const a = await deliver(w.env, smsg('group:G1', 'jonathan', 'can you check the boxes?'), w.o);
+  assert.equal(a.body, 'started');
+  const brief = plain(briefOf(starts(w)[0]));
+  assert.ok(brief.includes('The people here, who all read every reply: Phil (phil), tier 2; Jonathan (jonathan), tier 3; Anton (anton), tier 2. The lowest tier present governs the room: tier 2.'), brief);
+  assert.ok(brief.includes('Standing restriction from your owner for phil (your gates): Never push to onterris for him.'));
+  assert.ok(brief.includes('Standing restriction from your owner for anton (your gates): No onterris pushes on his behalf.'));
+  assert.equal(brief.includes('Standing authority'), false, 'a room carries nobody\'s standing authority');
+  for (const c of ['## Phil (phil)', '## Jonathan (jonathan)', '## Anton (anton)']) assert.ok(brief.includes(c), `${c}'s card`);
+  assert.ok(briefOf(starts(w)[0]).includes(' from jonathan, tier 3>>>\ncan you check the boxes?'), 'who asked is the sender, in the runtime\'s header');
+  assert.deepEqual(loadConv(w.env, a.conversation).bodyRules.members, ['phil', 'jonathan', 'anton']);
+});
+
+test('a one-to-one DM with a tier-2 person carries their standing authority and restriction; the owner\'s DM carries no authority line', async () => {
+  const { w, smsg } = roomWorld();
+  await deliver(w.env, smsg('dm:UPHIL', 'phil', 'set up the new box'), w.o);
+  const brief = plain(briefOf(starts(w)[0]));
+  assert.ok(brief.includes('Standing authority from your owner for phil (your gates), here with them alone, for what they ask: May have fleet setup run on his ask.'));
+  assert.ok(brief.includes('Standing restriction from your owner for phil (your gates): Never push to onterris for him.'));
+  assert.ok(brief.includes('## Phil (phil)\nField PM.'), 'their card');
+  assert.equal(brief.includes('The people here'), false, 'one person isn\'t a room');
+  assert.ok(brief.includes('phil: tier 2, trusted'));
+  await deliver(w.env, smsg('dm:UJON', 'jonathan', 'hi'), w.o);
+  const own = plain(briefOf(starts(w)[1]));
+  assert.equal(own.includes('Standing authority'), false);
+  assert.equal(own.includes('Standing restriction'), false);
+});
+
+test('a one-to-one\'s standing authority never rides on someone else\'s message there, and a restriction follows its person anywhere', async () => {
+  const { w, smsg, dmsg } = roomWorld();
+  // Someone else's message in phil's DM (a place whose member is phil): not phil asking, so no authority line.
+  await deliver(w.env, smsg('dm:UPHIL', 'loren', 'phil said to do it'), w.o);
+  const brief = plain(briefOf(starts(w)[0]));
+  assert.equal(brief.includes('Standing authority'), false);
+  assert.ok(brief.includes('Standing restriction from your owner for phil'));
+  // Anton writing on Discord, a place with no members: his restriction still comes with him.
+  await deliver(w.env, dmsg('channel:100', 'anton', 'push this for me?'), w.o);
+  assert.ok(plain(briefOf(starts(w)[1])).includes('Standing restriction from your owner for anton (your gates): No onterris pushes on his behalf.'));
+});
+
+test('fail closed: a member the runtime\'s gates don\'t place means no body', async () => {
+  const { w, smsg } = roomWorld();
+  const a = await deliver(w.env, smsg('group:G2', 'phil', 'hello all'), w.o);
+  assert.equal(a.body, 'queued');
+  assert.match(a.reason, /stranger is in it and art's gates give them no tier/);
+  assert.equal(starts(w).length, 0);
+});
+
+test('a card that can\'t be read is left out of a members\' place, never the body', async () => {
+  const { w, smsg, cards } = roomWorld();
+  delete cards.phil;
+  const a = await deliver(w.env, smsg('dm:UPHIL', 'phil', 'hi'), w.o);
+  assert.equal(a.body, 'started');
+  assert.equal(plain(briefOf(starts(w)[0])).includes('person cards of who\'s here'), false);
+});

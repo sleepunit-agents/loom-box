@@ -555,6 +555,20 @@ async function main(argv, env) {
       process.stdout.write(`${traceText(t)}\n`);
       return;
     }
+    case 'place': {
+      // Where this body is (gates-api.mjs, place): its own conversation, proved as a relay proves it.
+      if (!env.LOOM_URL || !env.LOOM_TOKEN_FILE) throw new Fail('loom runtime place is a body\'s, from its house (its token: LOOM_URL and LOOM_TOKEN_FILE)', 2);
+      const mine = /^cv-[0-9a-f]{12}$/.test(env.LOOM_BODY_CONVERSATION ?? '') ? env.LOOM_BODY_CONVERSATION : undefined;
+      if (!mine) throw new Fail('loom runtime place: this isn\'t a body holding a conversation (no LOOM_BODY_CONVERSATION)', 2);
+      const key = bodyKeyFor(env, mine);
+      const session = env.CLAUDE_CODE_SESSION_ID || env.CODEX_THREAD_ID || undefined;
+      const r = await pieceCall(env)('run', { argv: ['place', '--conversation', mine], ...(key ? { key } : {}), ...(key && session ? { session } : {}) });
+      if (r.stdout) process.stdout.write(r.stdout);
+      if (r.stderr) process.stderr.write(r.stderr);
+      if (!Number.isInteger(r.exit) && r.ok !== false) throw new Fail('runtime did not return a command outcome');
+      if (r.exit || r.ok === false) throw new Fail(r.error ?? r.reason ?? '', r.exit || 1);
+      return;
+    }
     case 'relays':
     case 'relay': {
       if (cmd === 'relays' || rest[0] !== 'tool') {
