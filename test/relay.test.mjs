@@ -563,3 +563,14 @@ describe('round 3 of the cold review', () => {
     assert.ok(!named.some((m) => /^r-[0-9a-f]{8}$/.test(m)), JSON.stringify(named));
   });
 });
+
+test('a conversation whose body has ended isn\'t at work, whatever its run record says', async () => {
+  const { w } = relayWorld();
+  const a = (await deliver(w.env, w.msg('th:a', 'one', { venue: 'loom', source: 'loom' }), w.o)).conversation;
+  const b = (await deliver(w.env, w.msg('th:b', 'two', { venue: 'loom', source: 'loom' }), w.o)).conversation;
+  assert.equal(originOf(w.env, { agent: 'art' }, a), null, 'two at work');
+  // b's body ended (evicted, retired); its last run stays open on the record until its next plan.
+  const f = join(deliveryDir(w.env), 'conversations', `${b}.json`);
+  const c = JSON.parse(readFileSync(f)); delete c.body; writeFileSync(f, JSON.stringify(c));
+  assert.equal(originOf(w.env, { agent: 'art' }, a)?.conversation, a);
+});
