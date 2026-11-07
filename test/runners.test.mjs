@@ -213,7 +213,9 @@ test('Codex: a made home goes once no live body uses it: at a body\'s end, and i
   const b = r.start({ brief: 'x', model: 'm', cwd, env: h.env, deny: ['mcp__handoff'] });
   const c = r.start({ brief: 'x', model: 'm', cwd, env: h.env });
   await until(() => h.argv().length === 3);
-  const [ha, hb, hc] = h.argv().map((x) => x.home);
+  // The fakes log in whatever order they start: each home by its body.
+  const homeOf = (body) => h.argv().find((x) => x.body === body.id).home;
+  const [ha, hb, hc] = [a, b, c].map(homeOf);
   assert.equal(ha, hb);
   assert.notEqual(ha, hc);
   assert.equal(statSync(ha).mode & 0o777, 0o700);
@@ -238,7 +240,7 @@ test('Codex: a made home goes once no live body uses it: at a body\'s end, and i
   restoreFiles(r, files);
   const a2 = r.resume(slot, { brief: 'more', model: 'm', cwd, env: h.env, deny: ['mcp__handoff'] });
   await until(() => h.argv().length === 4);
-  assert.equal(h.argv()[3].home, ha, 'the same home, made again');
+  assert.equal(homeOf(a2), ha, 'the same home, made again');
   r.end(a2);
   await until(() => !r.alive(a2.id));
   dropSession(r, slot, a2);
@@ -255,9 +257,9 @@ test('Codex: a made home goes once no live body uses it: at a body\'s end, and i
   rmSync(join(h.D, 'runs', d.id, 'home'));
   mkdirSync(join(homes, '0123456789abcdef'));
   assert.deepEqual(r.sweepHomes({ now: Date.now() + 11 * 60_000 }), []);
-  writeFileSync(join(h.D, 'runs', d.id, 'home'), `${h.argv()[4].home.split('/').pop()}\n`);
+  writeFileSync(join(h.D, 'runs', d.id, 'home'), `${homeOf(d).split('/').pop()}\n`);
   assert.deepEqual(r.sweepHomes({ now: Date.now() + 11 * 60_000 }), ['0123456789abcdef'], 'the live one\'s stays');
-  assert.ok(existsSync(h.argv()[4].home));
+  assert.ok(existsSync(homeOf(d)));
   // A home with something moved aside in it (homeFor) keeps that, and loses its config (the credentials' copy).
   mkdirSync(join(homes, 'fedcba9876543210', 'sessions.aside-1-ab', 'kept'), { recursive: true });
   writeFileSync(join(homes, 'fedcba9876543210', 'config.toml'), 'x');
