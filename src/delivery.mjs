@@ -1499,8 +1499,11 @@ async function execute(env, op, d, mem) {
           const retry = keep.length > 0 && Number.isFinite(c.retryAt);
           c.startStatus = {
             status: retry ? 'start-retry' : 'start-failed', run: c.runLog.at(-1).run,
-            messages: msgs.filter((m) => m.kind === 'message').map((m) => m.id), attempt: tries,
-            reason: asData(reason).replace(/[\p{C}\p{Z}]/gu, ' ').slice(0, 300),
+            // Within core's contract (loom comms.md, t-1946): at most 50 ids, and a reason of 1-200 printable characters
+            // on one line. A longer one is a 400 that the runtime takes for an older core and drops (asData's quoting
+            // can double a 120-character reason's backslashes and quotes).
+            messages: msgs.filter((m) => m.kind === 'message').map((m) => m.id).slice(0, 50), attempt: tries,
+            reason: asData(reason).replace(/[\p{C}\p{Z}]/gu, ' ').slice(0, 200),
             ...(retry ? { retry_at: new Date(c.retryAt).toISOString() } : {}),
           };
         }

@@ -63,3 +63,14 @@ test('successful startup cancels unsent failure status and an older core rejecti
     assert.equal(statuses(w).length, attempts, 'never send stale status after working');
   }
 });
+
+test('a status stays inside core\'s contract: a reason of at most 200 printable characters on one line, redacted', async () => {
+  const w = world();
+  w.runner.failStart = `${'\\"'.repeat(60)}\nLOOM_TOKEN=sk-ant-api03-${'x'.repeat(40)}`;
+  await deliver(w.env, message(w), w.o);
+  const note = statuses(w)[0];
+  assert.ok(note.reason.length >= 1 && note.reason.length <= 200, `reason is ${note.reason.length} characters`);
+  assert.match(note.reason, /^[^\x00-\x1f\x7f\u2028\u2029]*$/);
+  assert.doesNotMatch(note.reason, /sk-ant-api03-x/);
+  assert.ok(note.messages.length <= 50);
+});
