@@ -117,6 +117,13 @@ test('a body asks on whose behalf it acts, proven as send is: its conversation\'
   const v = verify(deliveryDir(w.env), r.statement, w.clock.now().getTime());
   assert.deepEqual([v.ok, v.agent, v.conversation, v.for, v.owner], [true, 'art', c.conversation, 'loren', false]);
   assert.equal(verifyStatement(w.env, r.statement, w.clock.now().getTime()).ok, true);
+  // Several people: the names it gives are the conversation's now, not the statement's.
+  await deliver(w.env, w.msg('dm:S', 'one', { from: { kind: 'person', slug: 'loren' } }), w.o);
+  await deliver(w.env, w.msg('dm:S', 'two', { from: { kind: 'person', slug: 'daniel' } }), w.o);
+  const S = loadConv(w.env, cvOf('art', 'slack', 'dm:S'));
+  const sk = bodyPrincipal(w.env, { conversation: S.conversation, key: w.runner.envs[S.body.split(':')[1]].LOOM_BODY_KEY, session: w.sessionFor(S.conversation) }, { ...w.o, caller: { kind: 'agent', agent: 'art' } });
+  await deliver(w.env, w.msg('dm:S', 'three', { from: { kind: 'person', slug: 'eve' } }), w.o);
+  assert.deepEqual(verifyStatement(w.env, sk.statement, w.clock.now().getTime()).people, ['loren', 'daniel', 'eve']);
   // Someone else speaks there after it was minted: the statement is stale.
   await deliver(w.env, w.msg('dm:L', 'me too', { from: { kind: 'person', slug: 'daniel' } }), w.o);
   assert.deepEqual(verifyStatement(w.env, r.statement, w.clock.now().getTime()), { ok: false, reason: 'its conversation has heard from someone since: ask for a new one' });

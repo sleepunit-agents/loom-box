@@ -2037,7 +2037,8 @@ export function verifyStatement(env, statement, nowMs = Date.now()) {
   const c = loadConv(env, v.conversation);
   const now = c && c.agent === v.agent ? principalOf(env, c) : null;
   if (!now || now.for !== v.for || now.owner !== v.owner) return { ok: false, reason: 'its conversation has heard from someone since: ask for a new one' };
-  return v;
+  // Who it names is who the conversation has heard now (several people can grow while `for` stays null).
+  return { ...v, people: now.people, ...(now.unknown ? { unknown: true } : {}) };
 }
 
 /** A platform id from a gate entry's ids for a venue: a list, one id, or (Slack) {team: [ids]}; the first. */
