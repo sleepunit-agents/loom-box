@@ -115,7 +115,7 @@ import { join } from 'node:path';
 import { readModels, resolveFor, setModels } from './models.mjs';
 import { endBody, feedBody, listBodies, resumeBody, startBody } from './bodies.mjs';
 import { PART_RAW, joinParts, partsOf } from './blobs.mjs';
-import { answerLoop, deliver, listConvs, post, send, tick } from './delivery.mjs';
+import { answerLoop, deliver, listConvs, post, send, sendOutcome, sendStatus, tick } from './delivery.mjs';
 import { watchBridges } from './nowboard.mjs';
 import { reviewStatus, reviewTick, runReview } from './review.mjs';
 import { bodyKeyFor, runBodyHost } from './bodyhost.mjs';
@@ -449,9 +449,17 @@ async function main(argv, env) {
       const person = flag(rest, '--person');
       const via = flag(rest, '--via');
       const msg = { conversation, text: await textOf(rest, '--text'), key: bodyKeyFor(env, conversation), ...(session ? { session } : {}), ...(person !== undefined ? { person } : {}), ...(via !== undefined ? { via } : {}) };
-      const r = env.LOOM_URL && env.LOOM_TOKEN_FILE ? await pieceCall(env, flag(rest, '--piece'))('send', msg) : await send(env, msg, { detach: true });
-      out(r);
-      if (!r.accepted) process.exitCode = 1;
+      const remote = env.LOOM_URL && env.LOOM_TOKEN_FILE;
+      const call = remote ? pieceCall(env, flag(rest, '--piece')) : null;
+      const r = remote ? await call('send', msg) : await send(env, msg, { detach: true });
+      // Accepted isn't posted (t-1920): wait for what the venue said, so a body never reports a message it didn't send.
+      const answer = r.accepted ? await sendOutcome({
+        status: (q) => (remote ? call('send-status', q) : sendStatus(env, q)),
+        relay: remote ? (piece, argv) => pieceCall(env, piece)('run', { argv }) : null,
+        sleep,
+      }, { conversation, ref: r.ref, text: msg.text, person, via }) : r;
+      out(answer);
+      if (!answer.ok) process.exitCode = 1;
       return;
     }
     case 'body-host': {
