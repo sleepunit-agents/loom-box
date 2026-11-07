@@ -598,3 +598,43 @@ test('a grant or restriction written as a list or named items is told as words, 
   assert.ok(brief.includes('Standing restriction from your owner for phil (your gates): No onterris pushes.; No spending.'));
   assert.ok(brief.includes('here with them alone, for what they ask: fleet: fleet setup on his ask; staff'));
 });
+
+// ─── Independent read: the gates' words change under a session ───
+
+test('a working body told a grant is reseated when the owner takes the grant away or narrows it', async () => {
+  const { w, smsg, gates } = roomWorld();
+  const a = await deliver(w.env, smsg('dm:UPHIL', 'phil', 'set up the box'), w.o);
+  const first = loadConv(w.env, a.conversation).body;
+  gates.people.phil.grant = 'Only read the fleet status for him.';
+  const b = await deliver(w.env, smsg('dm:UPHIL', 'phil', 'and the other one'), w.o);
+  assert.equal(b.body, 'started', 'never fed to the body told the old authority');
+  assert.ok(w.log.some((l) => l[0] === 'end' && l[1] === first.split(':')[1]));
+  const brief = plain(briefOf(starts(w).at(-1)));
+  assert.ok(brief.includes('for what they ask: Only read the fleet status for him.'));
+  assert.equal(brief.includes('May have fleet setup run on his ask.'), false);
+});
+
+test('a session told someone\'s gates words never resumes once they change: a new restriction, a lowered tier', async () => {
+  for (const [what, change, want] of [
+    ['a new restriction', (g) => { g.people.phil.restrict = 'No spending.'; }, 'Standing restriction from your owner for phil (your gates): No spending.'],
+    ['a lowered tier in a room', (g) => { g.people.jonathan.tier = 2; }, 'Jonathan (jonathan), tier 2'],
+  ]) {
+    const { w, smsg, gates } = roomWorld();
+    const place = what.includes('room') ? 'group:G1' : 'dm:UPHIL';
+    const a = await deliver(w.env, smsg(place, 'phil', 'one'), w.o);
+    w.runner.finish(loadConv(w.env, a.conversation).body);
+    await tick(w.env, w.o);
+    change(gates);
+    await deliver(w.env, smsg(place, 'phil', 'two'), w.o);
+    const last = starts(w).at(-1);
+    assert.equal(last[0], 'start', `${what}: a fresh body, not the session told the old words`);
+    assert.ok(plain(briefOf(last)).includes(want), what);
+  }
+  // Nothing changed: the session resumes.
+  const { w, smsg } = roomWorld();
+  const a = await deliver(w.env, smsg('dm:UPHIL', 'phil', 'one'), w.o);
+  w.runner.finish(loadConv(w.env, a.conversation).body);
+  await tick(w.env, w.o);
+  await deliver(w.env, smsg('dm:UPHIL', 'phil', 'two'), w.o);
+  assert.equal(starts(w).at(-1)[0], 'resume');
+});

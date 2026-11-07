@@ -60,7 +60,8 @@ export async function runFor(env, caller, argv, store = loomStore(env), core = c
  * `members` is who was in the place when the body's rules were made (`membersAt`). An adapter names members only for
  * places whose membership can't change under a body (policy.mjs), and a body is reseated when a person outside them
  * writes (delivery.mjs, needsReseat), so it holds for the body's run. `principal` is whom it
- * works for now (principal.mjs): a tool scoped by a person checks both name that same one.
+ * works for now (principal.mjs), and `ownerSpoke` whether the owner ever spoke there (principalOf names a lone non-owner
+ * even then): a tool scoped by a person checks both name that same one and that the owner never spoke.
  */
 export async function placeOf(env, cv, proof = {}, agent = undefined) {
   const d = await import('./delivery.mjs');
@@ -68,5 +69,5 @@ export async function placeOf(env, cv, proof = {}, agent = undefined) {
   const c = d.loadConv(env, cv);
   if (!c || (agent !== undefined && c.agent !== agent) || !d.holdsRun(env, cv, proof)) return { ok: false, reason: `place: only the body holding ${cv} in its current run asks where it is` };
   const p = principalOf(env, c);
-  return { ok: true, place: { conversation: c.conversation, agent: c.agent, venue: c.venue, place: c.place, ...(c.label !== undefined ? { label: c.label } : {}), members: c.bodyRules?.members ?? [], ...(c.bodyRules?.membersAt ? { membersAt: c.bodyRules.membersAt } : {}), principal: { for: p.for, owner: p.owner, ...(p.unknown ? { unknown: true } : {}) } } };
+  return { ok: true, place: { conversation: c.conversation, agent: c.agent, venue: c.venue, place: c.place, ...(c.label !== undefined ? { label: c.label } : {}), members: c.bodyRules?.members ?? [], ...(c.bodyRules?.membersAt ? { membersAt: c.bodyRules.membersAt } : {}), principal: { for: p.for, owner: p.owner, ownerSpoke: c.actsFor?.owner === true, ...(p.unknown ? { unknown: true } : {}) } } };
 }

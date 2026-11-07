@@ -86,7 +86,7 @@ import { venueKind as kindOf, resolveFor } from './models.mjs';
 import { pieceName, setting } from './piece.mjs';
 import { dropSession, packSession, restoreFiles } from './sessions.mjs';
 import { ageSealer } from './sealed.mjs';
-import { RulesError, policyOf, rulesFor, sameRules, tierOf } from './policy.mjs';
+import { RulesError, gatesWords, policyOf, rulesFor, sameRules, tierOf } from './policy.mjs';
 import { gatesOf } from './gates.mjs';
 import { loomStore } from './store.mjs';
 import { namesFiles } from './briefs.mjs';
@@ -983,7 +983,7 @@ function plan(env, cv, d, mem) {
     // Nor a message its rules weren't made for (t-1745, t-1943): a body told a person's standing authority hears no one
     // else (another person, a relay, the schedule, someone unnamed), and a body told a place's people hears no person
     // who isn't one of them. It's reseated, and the fresh body's rules are made for everyone it will hear.
-    if (needsReseat(c)) return begin({ type: 'reseat', body: c.body });
+    if (needsReseat(c) || gatesMoved(c, d)) return begin({ type: 'reseat', body: c.body });
     // Mid-turn: into its inbox, where its harness hears it (shuttle's hand_over).
     const rec = readBody(env, c.body);
     const runner = d.runner(rec.harness, rec.local);
@@ -1065,6 +1065,19 @@ export function needsReseat(c) {
   if (r.grantFor && fed.some((x) => x.from?.kind !== 'person' || x.from.slug !== r.grantFor)) return true;
   if (Array.isArray(r.members) && r.members.length && fed.some((x) => x.from?.kind === 'person' && !r.members.includes(x.from.slug))) return true;
   return false;
+}
+
+/**
+ * Whether the gates' words about the people a working body was told of (tier, standing authority, restriction) have
+ * changed since its rules were made (policy.mjs, gatesWords): then it's reseated, never fed under the old words.
+ * Gates that can't be read count as changed (the fresh start then fails closed).
+ */
+function gatesMoved(c, d) {
+  const r = c.bodyRules ?? {};
+  if (!r.words || !Array.isArray(r.persons)) return false;
+  let gates;
+  try { gates = d.gates(c.agent); } catch { return true; }
+  return gatesWords(gates, r.persons, r.notes ?? []) !== r.words;
 }
 
 /** What policy.mjs's rulesFor reads, for one conversation in its venue. */
@@ -1476,7 +1489,7 @@ async function execute(env, op, d, mem) {
       // A local body speaks with its run's key as a house's body does: from the keys dir (bodyhost.mjs, keyFile), as
       // `claude --bg` gives every session its daemon's environment, not this launch's (t-1830).
       if (local) keepKey(env, op.cv, runKey);
-      c.bodyRules = { guest: rules.guest, key: rules.key, ...(rules.members?.length ? { members: rules.members, membersAt: new Date(now()).toISOString() } : {}), ...(rules.grantFor ? { grantFor: rules.grantFor } : {}) };
+      c.bodyRules = { guest: rules.guest, key: rules.key, ...(rules.members?.length ? { members: rules.members, membersAt: new Date(now()).toISOString() } : {}), ...(rules.grantFor ? { grantFor: rules.grantFor } : {}), ...(rules.words ? { words: rules.words, persons: rules.persons, notes: rules.notes ?? [] } : {}) };
       ack(c, op.msgs);
       delete c.retryAt; delete c.startFails; delete c.retryReason; delete c.startStatus;
       c.sendKey = keyHash(runKey).toString('hex');

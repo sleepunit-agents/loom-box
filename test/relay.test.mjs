@@ -631,7 +631,7 @@ describe('place: a body asks where it is (t-1745)', () => {
     const session = w.sessionFor(cv);
     const r = await runFor(w.env, { kind: 'agent', agent: 'art' }, ['place', '--conversation', cv], memStore(), undefined, undefined, { key, session });
     assert.equal(r.exit, 0, JSON.stringify(r));
-    assert.deepEqual(JSON.parse(r.stdout), { conversation: cv, agent: 'art', venue: 'slack', place: 'dm:U1', label: 'DM with Phil', members: [], principal: { for: 'phil', owner: false } });
+    assert.deepEqual(JSON.parse(r.stdout), { conversation: cv, agent: 'art', venue: 'slack', place: 'dm:U1', label: 'DM with Phil', members: [], principal: { for: 'phil', owner: false, ownerSpoke: false } });
     const no = async (caller, proof, argv = ['place', '--conversation', cv]) => (await runFor(w.env, caller, argv, memStore(), undefined, undefined, proof)).exit;
     assert.equal(await no({ kind: 'agent', agent: 'art' }, { key }), 1, 'no session: proves nothing');
     assert.equal(await no({ kind: 'agent', agent: 'art' }, { key, session: 'someone-else' }), 1, 'another session');
@@ -660,6 +660,6 @@ describe('place in a place with members (t-1745)', () => {
     assert.deepEqual(p.members, ['phil', 'anton']);
     assert.equal(p.membersAt, c.bodyRules.membersAt);
     assert.match(p.membersAt, /^\d{4}-\d\d-\d\dT/);
-    assert.deepEqual(p.principal, { for: 'phil', owner: false });
+    assert.deepEqual(p.principal, { for: 'phil', owner: false, ownerSpoke: false });
   });
 });

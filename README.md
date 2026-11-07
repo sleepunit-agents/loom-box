@@ -281,7 +281,7 @@ Anything addressed to an agent arrives through core's `deliver`, which runs this
 
   It fails closed. A guest venue with no `guest_deny`, no floor, no readers or an unread card gets no body. So does a platform venue whose adapter can't describe the place, any person's message (on any venue) when the gates can't be read, a `members` roster that can't be taken whole (empty, over 12, a bad or repeated slug), a member the gates give no tier, and a person writing in a place whose roster doesn't have them. The start fails and is retried, and the owner gets the notice.
 
-  **Where am I** (t-1745): `loom runtime place`, from a body, answers `{conversation, agent, venue, place, label?, members, membersAt?, principal: {for, owner, unknown?}}` only to the body proving it holds the conversation (its run key and harness session, as `send`), in a house through the piece API or on loom's machine directly. A tool scoped by whom a body works for (Art's `pond-field`) asks it instead of trusting the body's environment.
+  **Where am I** (t-1745): `loom runtime place`, from a body, answers `{conversation, agent, venue, place, label?, members, membersAt?, principal: {for, owner, ownerSpoke, unknown?}}` only to the body proving it holds the conversation (its run key and harness session, as `send`), in a house through the piece API or on loom's machine directly. A tool scoped by whom a body works for (Art's `pond-field`) asks it instead of trusting the body's environment.
 - **The policy** is owner-written (collection `policy`, one document per agent). `loom runtime policy --agent a` shows it, and `loom runtime policy set --agent a < doc` sets it whole (the owner's run):
 
   ```json

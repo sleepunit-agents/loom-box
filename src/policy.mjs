@@ -168,13 +168,25 @@ export function cleanAbout(a) {
 }
 
 /** A body's rules' key: what makes two bodies the same as far as placement goes. */
-const keyOf = (guest, deny, members, grantFor) => createHash('sha256').update(JSON.stringify(namesPeople({ members, grantFor }) ? [guest, [...deny].sort(), [...members].sort(), grantFor] : [guest, [...deny].sort()])).digest('hex').slice(0, 16);
+const keyOf = (guest, deny, members, grantFor, words) => createHash('sha256').update(JSON.stringify(namesPeople({ members, grantFor, words }) ? [guest, [...deny].sort(), [...members].sort(), grantFor, words] : [guest, [...deny].sort()])).digest('hex').slice(0, 16);
+
+/**
+ * What the gates say of the people a body's rules were made from (each one's tier, standing authority and restriction)
+ * and the place's notes, as one digest: a session resumes, and a working body keeps hearing, only while it's the same
+ * (an owner who narrows a grant, adds a restriction or lowers a tier is never served by a body told the old words).
+ * '' when they say nothing a brief carries.
+ */
+export function gatesWords(gates, persons, notes = []) {
+  if (!persons.length && !notes.length) return '';
+  const rows = [...new Set(persons)].sort().map((s) => { const e = gates?.people?.[s]; return [s, tierOf(gates, { kind: 'person', slug: s }), wordsOf(e?.grant), wordsOf(e?.restrict)]; });
+  return createHash('sha256').update(JSON.stringify([rows, [...notes].sort()])).digest('hex').slice(0, 16);
+}
 
 /**
  * Whether a body's rules were made for particular people (a place's members, or a person's standing authority): such
  * a session resumes only under rules with the same key (delivery.mjs); any other only under the same `guest`.
  */
-export const namesPeople = (r) => !!(r?.members?.length || r?.grantFor);
+export const namesPeople = (r) => !!(r?.members?.length || r?.grantFor || r?.words);
 
 /**
  * Whether a session kept under rules `was` (a slot's, a parked home's) may resume under `rules`: the same `guest`, and,
@@ -333,7 +345,11 @@ export async function rulesFor(c, msgs, d, { platform, core = false, principal =
   for (const n of about.notes) if (briefs.notes?.[n]) file(briefs.notes[n], `${n}'s notes`);
   for (const t of uniq([...senders.map((s) => s.tier), lowest].filter((t) => t !== null)).sort()) if (briefs.tiers?.[String(t)]) file(briefs.tiers[String(t)], `tier ${t}'s notes`);
   const slugs = members.map((m) => m.slug);
-  return { guest, deny, readers, members: slugs, grantFor, key: keyOf(guest, deny, slugs, grantFor), sections };
+  // The people whose gates words this brief carries: the digest is only for a place that names people, or a sender
+  // with a restriction (a place with neither stays as it always was).
+  const told = members.length || grantFor || persons.some((s) => wordsOf(gates?.people?.[s]?.restrict)) ? persons : [];
+  const words = told.length ? gatesWords(gates, told, about.notes) : '';
+  return { guest, deny, readers, members: slugs, grantFor, words, persons: told, notes: about.notes, key: keyOf(guest, deny, slugs, grantFor, words), sections };
 }
 
 export { GATES, gatesOf };
