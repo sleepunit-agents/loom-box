@@ -565,22 +565,48 @@ describe('round 3 of the cold review', () => {
 });
 
 describe('a body the record lost track of still counts', () => {
-  // A retire whose endBody threw clears c.body but leaves the run open, and the body may still be mid-turn: until the
-  // run is closed, that conversation could be the one claiming another's return address (security review of #99).
-  test('a failed retire leaves the conversation held: a second conversation can\'t be claimed unproven', async () => {
+  // A reseat clears c.body with the run still open, even when ending that body failed and it is still mid-turn: until
+  // the run is closed, that conversation could be the one making a claim (security reviews of #99).
+  const caller = { agent: 'art', house: 'h-ours' };
+  const setup = async () => {
     const { w } = relayWorld();
-    const a = (await deliver(w.env, w.msg('th:a', 'one', { venue: 'loom', source: 'loom' }), w.o)).conversation;
-    const b = (await deliver(w.env, w.msg('th:b', 'two', { venue: 'loom', source: 'loom' }), w.o)).conversation;
-    const f = join(deliveryDir(w.env), 'conversations', `${b}.json`);
-    const c = JSON.parse(readFileSync(f)); delete c.body; writeFileSync(f, JSON.stringify(c));
-    assert.equal(originOf(w.env, { agent: 'art' }, a), null);
-  });
+    const conv = async (place) => {
+      const cv = (await deliver(w.env, w.msg(place, place, { venue: 'loom', source: 'loom' }), w.o)).conversation;
+      const path = join(w.env.LOOM_BOX_DATA, 'bodies', `${loadConv(w.env, cv).body.replace(':', '-')}.json`);
+      const rec = JSON.parse(readFileSync(path)); rec.house = caller.house; writeFileSync(path, JSON.stringify(rec));
+      return cv;
+    };
+    const lose = (cv) => {
+      const f = join(deliveryDir(w.env), 'conversations', `${cv}.json`);
+      const c = JSON.parse(readFileSync(f)); delete c.body; writeFileSync(f, JSON.stringify(c));
+    };
+    return { w, conv, lose };
+  };
+
+  for (const who of [caller, { agent: 'art' }]) {
+    test(`its open run still blocks a claim on another conversation (${who.house ? 'house' : 'no house'} caller)`, async () => {
+      const { w, conv, lose } = await setup();
+      const a = await conv('th:a');
+      const b = await conv('th:b');
+      lose(b);
+      assert.equal(originOf(w.env, who, a), null);
+      if (who.house) assert.equal(originOf(w.env, who), null, 'nor is a single one inferred');
+    });
+  }
 
   test('a conversation no body holds is never the return address, even alone', async () => {
-    const { w } = relayWorld();
-    const b = (await deliver(w.env, w.msg('th:b', 'two', { venue: 'loom', source: 'loom' }), w.o)).conversation;
-    const f = join(deliveryDir(w.env), 'conversations', `${b}.json`);
-    const c = JSON.parse(readFileSync(f)); delete c.body; writeFileSync(f, JSON.stringify(c));
+    const { w, conv, lose } = await setup();
+    const b = await conv('th:b');
+    lose(b);
     assert.equal(originOf(w.env, { agent: 'art' }, b), null);
+    await assert.rejects(Promise.resolve().then(() => originOf(w.env, caller, b)), /must be your own/);
+    assert.equal(originOf(w.env, caller), null);
+  });
+
+  test('alone and held, a house caller\'s conversation is still inferred', async () => {
+    const { w, conv } = await setup();
+    const a = await conv('th:a');
+    assert.equal(originOf(w.env, caller)?.conversation, a);
+    assert.equal(originOf(w.env, caller, a)?.conversation, a);
   });
 });
