@@ -575,4 +575,12 @@ describe('a body the record lost track of still counts', () => {
     const c = JSON.parse(readFileSync(f)); delete c.body; writeFileSync(f, JSON.stringify(c));
     assert.equal(originOf(w.env, { agent: 'art' }, a), null);
   });
+
+  test('a conversation no body holds is never the return address, even alone', async () => {
+    const { w } = relayWorld();
+    const b = (await deliver(w.env, w.msg('th:b', 'two', { venue: 'loom', source: 'loom' }), w.o)).conversation;
+    const f = join(deliveryDir(w.env), 'conversations', `${b}.json`);
+    const c = JSON.parse(readFileSync(f)); delete c.body; writeFileSync(f, JSON.stringify(c));
+    assert.equal(originOf(w.env, { agent: 'art' }, b), null);
+  });
 });

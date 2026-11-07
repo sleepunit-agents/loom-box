@@ -150,7 +150,9 @@ export function originOf(env, caller, id, proof = {}) {
     if (!c || !eligible(c)) no('relay: the return conversation must be your own, held by a body in your house');
     // A relay conversation is never a return address: its place is the peer it's with, and an answer from another
     // agent there would be recorded under the wrong peer and dodge that pair's ping-pong check.
-    if (c.venue === 'relay' || !atWork(c)) return null;
+    // The target must be held by a body now; any conversation with an open run, body or not (a retire that failed
+    // clears the body and leaves the run), still counts below as a body that could be making this claim.
+    if (c.venue === 'relay' || !c.body || !atWork(c)) return null;
     if (proof.key && holdsRun(env, id, proof)) return c;
     // Unproven, it's the asker's only when no other conversation of this agent is at work: any such body could be the
     // one claiming it (a guest venue's into the owner's thread, or the owner's thread's into a guest venue, where the
