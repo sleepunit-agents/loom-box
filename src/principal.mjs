@@ -96,8 +96,11 @@ export function principalOf(env, c) {
   if (people.length > 1) return { for: null, owner: false, people };
   if (a.owner) {
     // The owner who spoke (one of several, the first); a wake the clock called the owner's names the first owner.
-    const spoke = Array.isArray(a.owners) ? a.owners.filter((p) => PERSON.test(p)) : [];
-    return { for: spoke.length === 1 ? spoke[0] : spoke[0] ?? ownersFor(env, c.agent)[0] ?? null, owner: true, people: [] };
+    // Named only when one owner (still an owner now) spoke; several, or a wake the clock called the owner's, name the
+    // agent's sole owner if it has one, else no one. `owner` is what approvals reads; `for` is for the card.
+    const owners = ownersFor(env, c.agent);
+    const spoke = Array.isArray(a.owners) ? [...new Set(a.owners.filter((p) => PERSON.test(p) && owners.includes(p)))] : [];
+    return { for: spoke.length === 1 ? spoke[0] : spoke.length === 0 && owners.length === 1 ? owners[0] : null, owner: true, people: [] };
   }
   return { for: null, owner: false, people: [] };
 }

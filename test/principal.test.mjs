@@ -40,6 +40,8 @@ test('a conversation\'s principal: the owner only when every voice was his; one 
   const c2 = { agent: 'pip' };
   noteSender(env, c2, pip('dana'));
   assert.deepEqual(principalOf(env, c2), { for: 'dana', owner: true, people: [] });
+  noteSender(env, c2, pip('mark'));
+  assert.deepEqual(principalOf(env, c2), { for: null, owner: true, people: [] }, 'both owners spoke: neither named');
   // A relay from another agent, or a sender no one names: it can't say.
   assert.deepEqual(run([person('jonathan')], [{ agent: 'art', at, from: { kind: 'agent', id: 'pip' } }]), { for: null, owner: false, people: [], unknown: true });
   assert.equal(run([{ agent: 'art', at, from: { kind: 'unknown' } }]).owner, false);
