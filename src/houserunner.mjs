@@ -31,6 +31,7 @@ import { pieceName } from './piece.mjs';
 import { bodyBox } from './placement.mjs';
 import { isParts } from './briefs.mjs';
 import { RunnerError } from './runners.mjs';
+import { redact, UNPRINTABLE_ONE } from './redact.mjs';
 import { ageSealer } from './sealed.mjs';
 import { AGENT_NAME, StateError, load, update, withLock } from './state.mjs';
 
@@ -142,13 +143,18 @@ export const hostTask = (env, bootKey) => `loom-runtime body-host --piece ${piec
 // ─── The host's sync (the piece API's `body-sync`) ─────────────────────────
 
 /** A host's activity cards, as core takes them (loom src/comms.ts postActivity): anything else is left out. */
-function cleanCards(cards) {
+export function cleanCards(cards) {
   return cards.slice(-100).flatMap((c) => {
     if (!c || typeof c !== 'object' || typeof c.id !== 'string' || !/^[A-Za-z0-9_.:\-]{1,80}$/.test(c.id)) return [];
     if (typeof c.tool !== 'string' || !/^[A-Za-z0-9_.:\-]{1,64}$/.test(c.tool)) return [];
-    if (typeof c.summary !== 'string' || !c.summary || c.summary.length > 120 || /[\x00-\x1f\x7f\u2028\u2029]/.test(c.summary)) return [];
+    // A label never holds an unprintable character (redact.mjs UNPRINTABLE, the one list).
+    if (typeof c.summary !== 'string' || !c.summary || c.summary.length > 120 || UNPRINTABLE_ONE.test(c.summary)) return [];
     if (!['running', 'done', 'failed'].includes(c.state)) return [];
-    return [{ id: c.id, at: typeof c.at === 'string' && c.at.length <= 40 ? c.at : new Date().toISOString(), tool: c.tool, summary: c.summary, state: c.state }];
+    // A house's word is data: its label is redacted here too, and its time is a time or now.
+    const summary = redact(c.summary);
+    if (!summary || summary.length > 120 || UNPRINTABLE_ONE.test(summary)) return [];
+    const at = typeof c.at === 'string' && /^[0-9TZ:.+-]{10,40}$/.test(c.at) ? c.at : new Date().toISOString();
+    return [{ id: c.id, at, tool: c.tool, summary, state: c.state }];
   });
 }
 
