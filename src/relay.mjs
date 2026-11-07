@@ -125,32 +125,47 @@ export function relayText(entry, owner, thread) {
   return `${head}\n${quoted(entry.say)}${started}${tail}`;
 }
 
-/** A conversation whose current run is still open on its record: where a body may be calling from right now. */
+/**
+ * A conversation whose current run is still open on its record: a body may be calling from it right now. Its record
+ * can stop naming the body first: a reseat (a guest's message to a body that isn't a guest venue's) clears it with the
+ * run still open, even when ending that body failed and it is still mid-turn. So an open run counts, body or not.
+ */
 const atWork = (c) => !!c.run && !(c.runLog ?? []).findLast((r) => r.run === c.run)?.end;
 /**
  * The return address for this relay's answer: only the sender's own conversation, and in a house only one a body of
  * that house holds. Core names the caller's agent and house, never its conversation, so a named conversation is a
- * claim. It stands when the caller proves it holds that conversation's current run (`proof`: its LOOM_BODY_KEY and
- * harness session, as `send` takes them; the house CLI sends them). Unproven, it stands only when that conversation is
- * at work now and no other conversation of this agent is at work too: a guest venue's body, or one working for
- * someone else, can't make an answer land in the owner's own conversation (t-1943), nor the reverse. Unnamed, only
- * the one conversation at work in the caller's house, alone. Otherwise null: the answer goes to the relay
- * conversation, as before. A conversation that isn't the caller's agent's (or house's) is refused outright.
+ * claim. It is never one no body holds now, or a relay conversation. It stands when the caller proves it holds that
+ * conversation's current run (`proof`: its LOOM_BODY_KEY and harness session, as `send` takes them; the house CLI sends
+ * them). Unproven, it stands only when no other conversation of this agent is at work (atWork: an open run, whether
+ * or not its record still names a body) in the caller's house, or in a house that can't be told (no body on its
+ * record, or a body record that can't be read): a guest venue's body, or one working for someone else, can't make an answer land in the owner's own
+ * conversation (t-1943), nor the reverse. Unnamed, only the one conversation at work, held by a body in the caller's
+ * house. Otherwise null: the answer goes to the relay conversation, as before. A conversation that isn't the caller's
+ * agent's (or house's) is refused outright.
  */
 export function originOf(env, caller, id, proof = {}) {
-  const eligible = (c) => {
-    if (c.agent !== caller.agent) return false;
+  // The caller's house holds its body: true, false, or null when that can't be told (no body, an unreadable record).
+  const houseOf = (c) => {
     if (!caller.house) return true;
-    try { return readBody(env, c.body).house === caller.house; } catch { return false; }
+    if (!c.body) return null;
+    try { return readBody(env, c.body).house === caller.house; } catch { return null; }
   };
-  const working = () => listConvs(env).filter((c) => eligible(c) && atWork(c));
+  const inHouse = (c) => houseOf(c) === true;
+  const eligible = (c) => c.agent === caller.agent && inHouse(c);
+  // Who could be making this claim: every conversation of this agent at work, in the caller's house, or with no body
+  // on its record (whose house can't be told).
+  const working = () => listConvs(env).filter((c) => c.agent === caller.agent && atWork(c) && houseOf(c) !== false);
+  const held = (c) => !!c.body && atWork(c) && c.venue !== 'relay';
   if (id !== undefined) {
     if (!CV.test(id)) no('relay: conversation is your current conversation id (cv-…)');
     const c = loadConv(env, id);
-    if (!c || !eligible(c)) no('relay: the return conversation must be your own, held by a body in your house');
+    if (!c || c.agent !== caller.agent) no('relay: the return conversation must be your own, held by a body in your house');
+    // Its own conversation, its body lost from the record (a reseat under way): no return address, but the ask goes.
+    if (!c.body) return null;
+    if (!eligible(c)) no('relay: the return conversation must be your own, held by a body in your house');
     // A relay conversation is never a return address: its place is the peer it's with, and an answer from another
     // agent there would be recorded under the wrong peer and dodge that pair's ping-pong check.
-    if (c.venue === 'relay' || !atWork(c)) return null;
+    if (!held(c)) return null;
     if (proof.key && holdsRun(env, id, proof)) return c;
     // Unproven, it's the asker's only when no other conversation of this agent is at work: any such body could be the
     // one claiming it (a guest venue's into the owner's thread, or the owner's thread's into a guest venue, where the
@@ -159,7 +174,7 @@ export function originOf(env, caller, id, proof = {}) {
   }
   if (!caller.house) return null;
   const candidates = working();
-  return candidates.length === 1 && candidates[0].venue !== 'relay' ? candidates[0] : null;
+  return candidates.length === 1 && held(candidates[0]) && eligible(candidates[0]) ? candidates[0] : null;
 }
 
 /**
