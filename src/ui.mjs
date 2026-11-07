@@ -12,7 +12,7 @@ import { addBox, assertBoxOwner, resolveBox, isBoxOwner, boxLabelOf, boxOfCall, 
 import { LOGIN_HARNESSES } from './logins.mjs';
 import { ownCommit, swapCommand } from './version.mjs';
 import { stateAccounts } from './accounts.mjs';
-import { HARNESS_WORDS, answerLoop, deliveryNotices, loopAsks, readFallbacks, whenWords } from './delivery.mjs';
+import { COMMS_VENUE, HARNESS_WORDS, answerLoop, deliveryNotices, loopAsks, readFallbacks, whenWords, workingConversations } from './delivery.mjs';
 import { loomStore } from './store.mjs';
 import { asks as gateAsks, answer as gateAnswer, gatesPage, mergePeople, status as gatesStatus, proposals as gateProposals, PROPOSALS as PROPOSALS_COLLECTION } from './gates.mjs';
 import { GRANTS, KEY as GRANTS_KEY, GrantsError, grantsProblem, householdOf, setPiece, setRelay } from './grants.mjs';
@@ -104,7 +104,9 @@ export function manifest(env, nowMs = Date.now(), o = {}) {
   try { board = nowManifest(env, Date.now() / 1000, s); } catch { /* a board that can't be read leaves the rest of the manifest */ }
   // An always-on box gone silent is dark (watch.mjs): loom reads this manifest each minute, so it's checked here too.
   try { checkDark(env, s, nowMs, o.alert ? { alert: o.alert } : {}); } catch { /* next time */ }
-  const reports = agentReports(s, Date.now(), { ...reportedBusy(s), ...sessionsBusy(join(stateDir(env), 'session-cpu.json')) });
+  let convs = [];
+  try { convs = workingConversations(env); } catch { /* the delivery state unreadable this time: the cards say what else is known */ }
+  const reports = agentReports(s, Date.now(), { ...reportedBusy(s), ...sessionsBusy(join(stateDir(env), 'session-cpu.json')) }, convs);
   for (const [a, doing] of Object.entries(board.agents)) reports[a] = { readings: [], ...reports[a], doing: [...(reports[a]?.doing ?? []), ...doing].slice(0, 8) };
   try { withFallbacks(reports, readFallbacks(env), env, nowMs); } catch { /* a card without its model line */ }
   const boxes = Object.values(s.boxes).filter((b) => !b.revoked);
@@ -423,10 +425,10 @@ export function withFallbacks(reports, fallbacks, env = {}, nowMs = Date.now()) 
  * task house runs; unavailable while a service it wants up is down; broken when one keeps failing. Readings: its
  * bridges, its remote sessions, and how many tasks are running. It says nothing about an agent with nothing here.
  */
-export function agentReports(s, nowMs = Date.now(), busy = {}) {
+export function agentReports(s, nowMs = Date.now(), busy = {}, convs = []) {
   const out = {};
   const services = Object.values(s.services ?? {});
-  const agents = new Set([...Object.keys(s.agents ?? {}), ...services.map((v) => v.agent), ...Object.keys(s.remotes ?? {})]);
+  const agents = new Set([...Object.keys(s.agents ?? {}), ...services.map((v) => v.agent), ...Object.keys(s.remotes ?? {}), ...convs.map((c) => c.agent)]);
   for (const a of agents) {
     if (!/^[a-z][a-z0-9-]{0,39}$/.test(a)) continue;
     const mine = services.filter((v) => v.agent === a && v.want === 'up');
@@ -471,6 +473,8 @@ export function agentReports(s, nowMs = Date.now(), busy = {}) {
       ...tasks.filter((h) => h.state === 'running').map((h) => doingOf(h, s)),
       ...(r && r.want === 'up' && busy[`box:${r.name}`] === true ? [{ text: 'Working in a Claude session', kind: 'session', where: `Box session on ${boxLabelOf(s, r.box)}` }] : []),
       ...(rs && up(rs) && busy[`house:${rs.house}`] === true ? [{ text: 'Working in a Claude session', kind: 'session', where: 'House session' }] : []),
+      // Each delivered body mid-turn: a Comms thread, a bridge's chat, a wake (delivery.mjs, workingConversations).
+      ...convs.filter((c) => c.agent === a).map(convDoing),
     ].slice(0, 6);
     if (doing.length) report.doing = doing;
     if (failing.length) Object.assign(report, { state: 'broken', reason: `${failing.map((v) => v.name).join(' and ')} keep${failing.length === 1 ? 's' : ''} failing (${failing[0].restarts} restarts)` });
@@ -484,6 +488,19 @@ export function agentReports(s, nowMs = Date.now(), busy = {}) {
     if (report.state || report.readings.length || report.doing) out[a] = report;
   }
   return out;
+}
+
+/**
+ * A delivered body at work, as its card says it (loom's `doing`): its venue, its kind and its conversation's id only.
+ * A conversation's label can carry its subject (a Slack channel or DM, a person, a wake's note), and a manifest may
+ * reach viewers who aren't allowed to see that conversation: core puts the label in, and the link, only for a viewer
+ * who may see it (loom src/ui/handler.ts atWorkFor), as it does a Comms thread's title (comms.md, rule 4).
+ */
+export function convDoing(c) {
+  const since = Number.isFinite(c.since) ? { since: new Date(c.since).toISOString() } : {};
+  if (c.venue === COMMS_VENUE) return { text: 'In a Comms thread', kind: 'talk', where: 'Comms', conversation: c.conversation, ...since };
+  if (c.kind === 'scheduled') return { text: 'On a wake', kind: 'lane', conversation: c.conversation, ...since };
+  return { text: `Working · ${cap(c.venue)}`, kind: 'talk', conversation: c.conversation, ...since };
 }
 
 /** "12 days", "5 hours", "40 minutes": how long, for a box's uptime. */

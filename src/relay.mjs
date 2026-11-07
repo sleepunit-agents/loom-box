@@ -8,6 +8,11 @@
 //                         ──► core's deliver route, as the runtime: {venue: relay, place: <sender>, from: {kind: agent, id}}
 //                         ──► the other agent's body for that conversation (delivery.mjs), as any delivery
 //
+// An answer (`reply_to`) to a relay that recorded its asker's conversation (`origin`, originOf: proved, or the only
+// conversation of the asker's at work) skips core's deliver route: the runtime delivers it itself (delivery.mjs's
+// deliver, detached, source runtime) to that conversation's venue and place, `untilIdle`, so it waits out the asking
+// turn and then resumes its session. Within RETURN_MS of the ask; otherwise, or with no origin, the relay venue.
+//
 // Who may relay to whom is the runtime's grants document (`relay`: {sender: [agents]}), set on its Permissions page;
 // never household.json any more. An unpaired relay goes only with an allowed approval from the approvals piece, and
 // is refused when no approvals piece is installed. The answer is a relay back with `reply_to`, so an exchange is one
@@ -15,13 +20,14 @@
 // heads-up for the owner on loom's Inbox, never a stop.
 //
 // What's kept here is mechanism: <data>/delivery/relays.jsonl, one line a relay ({id, from, to, at, digest, shape,
-// reply_to?, thread?, where?, conversation, why}), never the words (they're the turn's, in core's audit), kept 30 days.
+// reply_to?, thread?, where?, origin?, origin_run?, conversation, why}), never the words (they're the turn's, in core's audit), kept 30 days.
 import { spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync, appendFileSync, mkdirSync } from 'node:fs';
 import { delimiter, dirname, join } from 'node:path';
 import { coreFrom } from './core.mjs';
-import { deliveryDir } from './delivery.mjs';
+import { deliver, deliveryDir, holdsRun, listConvs, loadConv } from './delivery.mjs';
+import { readBody } from './bodies.mjs';
 import { GRANTS, KEY, householdOf, paired } from './grants.mjs';
 import { setting } from './piece.mjs';
 import { loomStore } from './store.mjs';
@@ -33,8 +39,13 @@ export const WHY_MAX = 300;
 export const REPEAT_MS = 3_600_000;
 export const KEEP_MS = 30 * 86_400_000;
 export const HEADS_UP_DEFAULT = 8;
+/** How long an answer may still return to the conversation that asked; later, it goes to the relay conversation. */
+export const RETURN_MS = 6 * 3_600_000;
 const DAY_MS = 86_400_000;
-const WHERE = /^(discord|slack):[#a-z0-9:._-]{1,80}$/;
+const WHERE = /^(?:(discord|slack):[#a-z0-9:._-]{1,80}|(?:loom:|conversation:)?cv-[0-9a-f]{12})$/;
+/** A `from` that names a conversation (loom:cv-…, conversation:cv-… or cv-…), never a platform place ending in one. */
+const FROM_CV = /^(?:loom:|conversation:)?(cv-[0-9a-f]{12})$/;
+const CV = /^cv-[0-9a-f]{12}$/;
 const RELAY_ID = /^r-[0-9a-f]{8}$/;
 const APPROVAL_ID = /^a-[0-9a-f]{8}$/;
 
@@ -42,7 +53,7 @@ const APPROVAL_ID = /^a-[0-9a-f]{8}$/;
 export const TOOL = {
   description:
     'Ask another agent in this household something: it reaches a body of theirs with your words, framed as a peer\'s ' +
-    'request (none of the owner\'s authority). Their answer comes back the same way, as a relay to you. Without asking ' +
+    'request (none of the owner\'s authority). Include conversation to return answers to your requesting session. Without asking ' +
     'only between agents the household pairs (the runtime\'s permissions); for any other, ask the owner first ' +
     '(approvals request --kind relay --target <you>-><them>) and pass the allowed approval. The same words twice ' +
     'within the hour are refused. Answer a relay with reply_to set to its id.',
@@ -53,6 +64,7 @@ export const TOOL = {
       say: { type: 'string', description: `What to tell or ask them (${SAY_MAX} characters at most; point at a PR or file for more)` },
       why: { type: 'string', description: 'One line: why you are asking' },
       reply_to: { type: 'string', description: 'The relay id (r-…) this answers' },
+      conversation: { type: 'string', description: 'Your current conversation (cv-…): replies resume it, or its saved session, as peer messages' },
       from: { type: 'string', description: 'Where it was asked, e.g. "discord:#workshop", so the answer can go back there' },
       approval: { type: 'string', description: 'An approval id (a-…) the owner allowed, for a relay the household doesn\'t pair' },
     },
@@ -113,11 +125,49 @@ export function relayText(entry, owner, thread) {
   return `${head}\n${quoted(entry.say)}${started}${tail}`;
 }
 
+/** A conversation whose current run is still open on its record: where a body may be calling from right now. */
+const atWork = (c) => !!c.run && !(c.runLog ?? []).findLast((r) => r.run === c.run)?.end;
+/**
+ * The return address for this relay's answer: only the sender's own conversation, and in a house only one a body of
+ * that house holds. Core names the caller's agent and house, never its conversation, so a named conversation is a
+ * claim. It stands when the caller proves it holds that conversation's current run (`proof`: its LOOM_BODY_KEY and
+ * harness session, as `send` takes them; the house CLI sends them). Unproven, it stands only when that conversation is
+ * at work now and no other conversation of this agent is at work too: a guest venue's body, or one working for
+ * someone else, can't make an answer land in the owner's own conversation (t-1943), nor the reverse. Unnamed, only
+ * the one conversation at work in the caller's house, alone. Otherwise null: the answer goes to the relay
+ * conversation, as before. A conversation that isn't the caller's agent's (or house's) is refused outright.
+ */
+export function originOf(env, caller, id, proof = {}) {
+  const eligible = (c) => {
+    if (c.agent !== caller.agent) return false;
+    if (!caller.house) return true;
+    try { return readBody(env, c.body).house === caller.house; } catch { return false; }
+  };
+  const working = () => listConvs(env).filter((c) => eligible(c) && atWork(c));
+  if (id !== undefined) {
+    if (!CV.test(id)) no('relay: conversation is your current conversation id (cv-…)');
+    const c = loadConv(env, id);
+    if (!c || !eligible(c)) no('relay: the return conversation must be your own, held by a body in your house');
+    // A relay conversation is never a return address: its place is the peer it's with, and an answer from another
+    // agent there would be recorded under the wrong peer and dodge that pair's ping-pong check.
+    if (c.venue === 'relay' || !atWork(c)) return null;
+    if (proof.key && holdsRun(env, id, proof)) return c;
+    // Unproven, it's the asker's only when no other conversation of this agent is at work: any such body could be the
+    // one claiming it (a guest venue's into the owner's thread, or the owner's thread's into a guest venue, where the
+    // answer would be read by guests; a sibling thread; a DM with someone else).
+    return working().some((o) => o.conversation !== c.conversation) ? null : c;
+  }
+  if (!caller.house) return null;
+  const candidates = working();
+  return candidates.length === 1 && candidates[0].venue !== 'relay' ? candidates[0] : null;
+}
+
 /**
  * One relay from `caller.agent`: {text} when delivered, or a RelayError saying why not (nothing delivered, and an
- * approval spent only once the rest checked). `d`: {core, store, household, approvals: {installed(), spend(aid, target)}, now}.
+ * approval spent only once the rest checked). `d`: {core, store, household, approvals: {installed(), spend(aid, target)}, now,
+ * append, returnDelivery?} (returnDelivery: how an answer reaches the asking conversation; delivery.mjs's deliver, detached).
  */
-export async function relay(env, caller, args, d = depsOf(env)) {
+export async function relay(env, caller, args, d = depsOf(env), proof = {}) {
   const from = caller?.agent;
   if (!AGENT_NAME.test(from ?? '')) no('relay: the caller is an agent');
   const a = args && typeof args === 'object' && !Array.isArray(args) ? args : {};
@@ -130,9 +180,16 @@ export async function relay(env, caller, args, d = depsOf(env)) {
   if (!say) no('relay: say is what to tell them or ask');
   if (say.length > SAY_MAX) no(`relay: say is ${SAY_MAX} characters at most; point at a file or a PR for more`);
   const where = a.from === undefined || a.from === '' ? '' : String(a.from);
-  if (where && !WHERE.test(where)) no('relay: from is where it was asked, like discord:#general or slack:dm:someone');
+  if (where && !WHERE.test(where)) no('relay: from is where it was asked, like discord:#general, slack:dm:someone or loom:cv-…');
   const replyTo = a.reply_to === undefined || a.reply_to === '' ? '' : String(a.reply_to);
   const approval = a.approval === undefined || a.approval === '' ? '' : String(a.approval);
+  // A conversation named in `from` is its origin, not a place: never offered back as somewhere to post (relayText).
+  const fromCv = where.match(FROM_CV)?.[1];
+  const originId = a.conversation ?? fromCv;
+  const place = fromCv ? '' : where;
+  // Proof only ever comes from the piece API's request body (gates-api.mjs), never the tool's arguments: a run key in
+  // an MCP tool call would sit in core's record of it.
+  const origin = originOf(env, caller, originId, proof);
   const now = d.now();
   const log = readRelays(env, now);
   let thread = [];
@@ -161,20 +218,33 @@ export async function relay(env, caller, args, d = depsOf(env)) {
 
   // Its words' shape too (loops.mjs, shapeOf: a hash, never the words): near-identical relays back and forth are a
   // loop the runtime pauses (relay ping-pong, t-1763).
-  const entry = { id: `r-${randomBytes(4).toString('hex')}`, from, to, say, why: plain(a.why, WHY_MAX), where, at: now, digest, shape: shapeOf(say), ...(replyTo ? { reply_to: replyTo, thread: threadId } : {}) };
+  const entry = { id: `r-${randomBytes(4).toString('hex')}`, from, to, say, why: plain(a.why, WHY_MAX), where: place, ...(origin ? { origin: origin.conversation, origin_run: origin.run } : {}), at: now, digest, shape: shapeOf(say), ...(replyTo ? { reply_to: replyTo, thread: threadId } : {}) };
   let out;
+  let returnTo = null;
+  let original = null;
   try {
-    out = await d.core.deliver({
+    // A peer can answer only a recorded request. Its sender chose the return address;
+    // the responder cannot supply or replace it. Old/missing origins use the relay venue.
+    original = replyTo ? log.find((r) => r.id === replyTo) : null;
+    const fresh = original?.origin && now - original.at < RETURN_MS;
+    const back = fresh ? loadConv(env, original.origin) : null;
+    returnTo = back?.agent === to ? back : null;
+    const message = {
       id: entry.id, agent: to, venue: 'relay', place: from, label: `Relay from ${cap(from)}`,
       from: { kind: 'agent', id: from }, kind: 'message', at: new Date(now).toISOString(), text: relayText(entry, owner, thread),
-    });
+    };
+    out = returnTo
+      ? await (d.returnDelivery ?? ((b, o) => deliver(env, b, { detach: true, ...o })))({ ...message, source: 'runtime', venue: returnTo.venue, place: returnTo.place, label: returnTo.label }, { deferPeer: true })
+      : await d.core.deliver(message);
+    if (out?.status) throw new Error(out.error);
   } catch (e) {
     no(`relay: it didn't reach ${to} (${String(e.message ?? e).slice(0, 200)})${approval ? `; approval ${approval} was spent, so ask the owner again` : ''}`);
   }
   const { say: _words, ...kept } = entry;
   d.append({ ...kept, conversation: out?.conversation ?? null });
   const body = out?.body === 'failed' ? `, but its body didn't start (${out.reason ?? 'no reason given'}); the runtime tries again` : out?.body === 'queued' ? ': it waits for a body of theirs' : '';
-  return { text: `${entry.id}: ${to} has it${body}.` };
+  const routing = returnTo ? ` Returned to ${out?.conversation ?? returnTo.conversation}.` : original?.origin ? ` ${original.origin} ${now - original.at < RETURN_MS ? 'is no longer kept' : 'asked over 6 hours ago'}; delivered to the relay conversation instead.` : origin ? ` Replies return to ${origin.conversation}.` : originId !== undefined || caller.house ? ` Replies will use the relay conversation: ${originId !== undefined ? `${originId} couldn't be confirmed as the one asking (another conversation of yours is at work, or it isn't; from a house body's shell, \`loom runtime relay\` proves its own)` : 'no single conversation of yours is at work (name yours with conversation)'}.` : '';
+  return { text: `${entry.id}: ${to} has it${body}.${routing}` };
 }
 
 export function depsOf(env) {
@@ -221,7 +291,7 @@ export function relaysOf(env, agent, thread) {
   let rows = readRelays(env).filter((r) => r.from === agent || r.to === agent);
   if (thread) rows = rows.filter((r) => (r.thread ?? r.id) === thread);
   if (!rows.length) return `${agent} has no relays\n`;
-  return rows.slice(-50).map((r) => `${r.id} ${new Date(r.at).toISOString().slice(5, 16).replace('T', ' ')} ${r.from} -> ${r.to}${r.reply_to ? ` re ${r.reply_to}` : ''}${r.why ? `: ${r.why}` : ''}\n`).join('');
+  return rows.slice(-50).map((r) => `${r.id} ${new Date(r.at).toISOString().slice(5, 16).replace('T', ' ')} ${r.from} -> ${r.to}${r.reply_to ? ` re ${r.reply_to}` : ''}${r.why ? `: ${r.why}` : ''}${r.origin && r.from === agent ? ` [from ${r.origin}${r.origin_run ? ` ${r.origin_run}` : ''}]` : ''}${r.reply_to && r.conversation && r.to === agent ? ` [to ${r.conversation}]` : ''}\n`).join('');
 }
 
 /**

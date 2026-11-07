@@ -27,6 +27,9 @@
 // <data>/delivery: conversations/<cv>.json (which body, which run, what waits: each message's text sealed), slots/,
 // seen/ (each delivery's turn and answer for 24 h: the same (source, id) answers the same and writes nothing).
 //
+// A relay's answer returned to the conversation that asked (relay.mjs, originOf; `o.deferPeer`) waits on the queue
+// marked `untilIdle`: never fed into a body mid-turn, it goes with the next start or resume, once that turn is over.
+//
 // Who may do what (t-1756; policy.mjs): each message's sender tier is read from the runtime's gates when it's
 // delivered; a body's rules (tier, guest venue or not, its readers' cards, the owner, peers, the agent's own brief
 // files, the deny list its harness starts with) are resolved when it starts. A guest's message is never fed to a body
@@ -723,7 +726,7 @@ async function deliverOnce(env, raw, o) {
       if (m.kind === 'wake' && !!c.local !== local) return mismatch(m.place, c.local);
       if (m.label !== undefined) c.label = m.label;
       // A retry after a crash may find its message already queued (or already answered): never twice.
-      if (!c.queue.some((x) => x.key === key) && !c.outcomes?.[key]) c.queue.push({ key, id: m.id, at: m.at, from: m.from, kind: m.kind, ...(local ? { local: true } : {}), ...(tier ? { tier } : {}), ...(owner ? { owner: true } : {}), ...(tierUnread ? { tierUnread: true } : {}), ...(sealed ? { sealed } : { mem: true }) });
+      if (!c.queue.some((x) => x.key === key) && !c.outcomes?.[key]) c.queue.push({ key, id: m.id, at: m.at, from: m.from, kind: m.kind, ...(local ? { local: true } : {}), ...(o.deferPeer === true && m.from.kind === 'agent' ? { untilIdle: true } : {}), ...(tier ? { tier } : {}), ...(owner ? { owner: true } : {}), ...(tierUnread ? { tierUnread: true } : {}), ...(sealed ? { sealed } : { mem: true }) });
       c.last = d.now().toISOString();
       saveConv(env, c);
       return null;
@@ -811,6 +814,27 @@ function census(env, agent, d, now) {
 }
 
 /**
+ * Every conversation whose body is at work right now (starting, or mid-turn), whatever its venue: a Comms thread, a
+ * bridge's chat, a wake. The one record of a delivered body running, read for the agent's card (ui.mjs, agentReports)
+ * and for the tick's word to core when the set moves (workingPrint). Read only: no lock, no harness started.
+ */
+export function workingConversations(env, d = depsOf(env), now = Date.now()) {
+  const out = [];
+  for (const c of listConvs(env)) {
+    let st;
+    try { st = isStarting(c, now) ? 'working' : statusOf(env, c, d); } catch { st = 'unknown'; }
+    if (st !== 'working') continue;
+    const run = (c.runLog ?? []).findLast((x) => x.run === c.run);
+    out.push({ agent: c.agent, conversation: c.conversation, venue: c.venue, kind: c.kind, place: c.place,
+      ...(c.label !== undefined ? { label: c.label } : {}), ...(Number.isFinite(run?.at) ? { since: run.at } : c.starting ? { since: c.starting.since } : {}) });
+  }
+  return out;
+}
+
+/** The working set as one string: it changes when a body starts or ends, nothing else (the tick's word to core). */
+export const workingPrint = (ws) => ws.map((w) => `${w.agent}:${w.conversation}`).sort().join(',');
+
+/**
  * Messages as a body reads them. Who wrote and their tier are the runtime's, out of band: each message is fenced by a
  * header line the runtime writes, with a delimiter drawn fresh for each rendering, and its text inside. A sender
  * can't write a header (they can't know the delimiter, and it's taken out of their text if they somehow do), so
@@ -851,6 +875,7 @@ function startBrief(c, msgs, run, sends, rules = { sections: [] }) {
     `You are ${c.agent}, in a conversation on ${c.venue}: ${c.label ?? c.place}.`,
     `Its conversation is ${c.conversation} and this run is ${run}: call identity with {conversation: "${c.conversation}", run: "${run}"} first.`,
     ...(c.runs > 0 ? [`It has history this session doesn't: read it with conversation({id: "${c.conversation}"}) (its digests) before you answer.`] : []),
+    ...(returnHow(c) ? [returnHow(c)] : []),
     ...(sends ? [how] : []),
     ...(sends === 'post' ? [relay] : []),
   ].join('\n');
@@ -861,8 +886,17 @@ function startBrief(c, msgs, run, sends, rules = { sections: [] }) {
   return namesFiles(parts) ? parts : parts.map((p) => p.text).join('');
 }
 
+/**
+ * How a body has a relay's answer come back to it (relay.mjs, originOf), only where that can happen: never on venue
+ * relay (never a return address); a house body proves its conversation from its shell; a local body (no house token)
+ * has only the relay tool's unproven claim.
+ */
+const returnHow = (c) => (c.venue === 'relay' ? '' : c.local
+  ? `To have a relay's answer come back here, give the relay tool conversation: "${c.conversation}" (it comes back here only while no other conversation of yours is at work; otherwise to the relay conversation).`
+  : `To have a relay's answer come back here, relay from your shell with \`loom runtime relay --to <agent> --say <text>\` (it proves this conversation is yours). The relay tool with conversation: "${c.conversation}" brings it back only while no other conversation of yours is at work.`);
+
 /** What a resumed body is given: the new messages, and its new run. */
-const resumeBrief = (c, msgs, run) => `(${c.venue}: ${c.label ?? c.place}. This run is ${run}: call identity with {conversation: "${c.conversation}", run: "${run}"} again.)\n\n${render(msgs)}`;
+const resumeBrief = (c, msgs, run) => `(${c.venue}: ${c.label ?? c.place}. This run is ${run}: call identity with {conversation: "${c.conversation}", run: "${run}"} again.${returnHow(c) ? ` ${returnHow(c)}` : ''})\n\n${render(msgs)}`;
 
 function open(d, x, mem) {
   if (x.sealed) return d.sealer.open(Buffer.from(x.sealed, 'base64')).toString('utf-8');
@@ -939,6 +973,7 @@ function plan(env, cv, d, mem) {
     const runner = d.runner(rec.harness, rec.local);
     const left = [];
     for (const x of c.queue) {
+      if (x.untilIdle) { left.push({ x, reason: 'relay replies wait for the requesting turn to finish' }); continue; }
       if (x.tierUnread && !c.bodyRules?.guest) { left.push({ x, reason: 'its sender\'s tier couldn\'t be read' }); continue; }
       const text = open(d, x, mem);
       const r = text === null ? { fed: false, reason: 'its text is gone' } : runner.feed(bodyOf(c.body, rec), { id: x.key, text: render([{ ...x, text }]) });
@@ -1014,7 +1049,8 @@ const rulesDeps = (d, v, c) => ({
 /** Messages that reached a body: the adapter is told, on the drain's way out (announce). */
 function ack(c, msgs) {
   // A post-failure note is the runtime's, not a message on the platform: nothing there to show 👀 on.
-  const ids = msgs.filter((x) => x.kind === 'message' && !isNote(x) && typeof x.id === 'string').map((x) => x.id);
+  // Nor is an agent's relay returned to the conversation that asked (relay.mjs): its id is the runtime's, not the venue's.
+  const ids = msgs.filter((x) => x.kind === 'message' && !isNote(x) && x.from?.kind !== 'agent' && typeof x.id === 'string').map((x) => x.id);
   if (ids.length) c.acks = [...new Set([...(c.acks ?? []), ...ids])].slice(-20);
 }
 
@@ -1147,8 +1183,9 @@ function logRun(c, r) { c.runLog = [...(Array.isArray(c.runLog) ? c.runLog : [])
 /** A body started (or resumed) for these messages: its run begins (the one before it, over, if it wasn't yet). */
 function openRun(c, run, msgs, now, body) {
   for (const r of c.runLog ?? []) if (!Number.isFinite(r.end)) r.end = now;
+  const relays = msgs.filter((m) => m.from?.kind === 'agent' && /^r-[0-9a-f]{8}$/.test(m.id ?? '')).map((m) => m.id);
   // Which body ran it, and how it came (a fresh start or a resumed session): for its trace (trace.mjs, t-1895).
-  logRun(c, { run, at: now, ...causeOf(msgs), sent: 0, posts: [], ...(body ? { body: body.ref, how: body.how } : {}),
+  logRun(c, { run, at: now, ...causeOf(msgs), ...(relays.length ? { relays } : {}), sent: 0, posts: [], ...(body ? { body: body.ref, how: body.how } : {}),
     // A harness switch (t-1907): from which, and why; a return to the home session; a refused turn's one retry.
     ...(body?.switched ? { switched: body.switched } : {}), ...(body?.home ? { home: true } : {}), ...(body?.retryOf ? { retryOf: body.retryOf } : {}) });
 }
@@ -1184,7 +1221,12 @@ function loopOf(env, c, now) {
   // The relay log: for ping-pong (a relay conversation), and for what any run said by relaying.
   let relays = [];
   try { relays = readRelays(env, now).filter((x) => x.at >= since && (x.from === c.agent || x.to === c.agent)); } catch { relays = []; }
-  return detectLoop({ runs, relays, agent: c.agent, peer: relay ? c.place : null, now });
+  const peers = new Set([...(relay ? [c.place] : []), ...(c.queue ?? []).filter((m) => m.from?.kind === 'agent').map((m) => m.from.id)]);
+  for (const peer of peers) {
+    const loop = detectLoop({ runs, relays, agent: c.agent, peer, now });
+    if (loop) return loop;
+  }
+  return detectLoop({ runs, relays, agent: c.agent, now });
 }
 
 /** What the owner is asked about a paused conversation: where, and why. */
@@ -1935,6 +1977,20 @@ function sessionOf(d, ref) {
     const s = d.runner(rec.harness, rec.local).slotOf(bodyOf(ref, rec))?.session ?? rec.slot?.session;
     return typeof s === 'string' && SESSION_ID.test(s) ? s : null;
   } catch { return null; }
+}
+
+/**
+ * Whether `key` (and, where the runner knows the body's, `session`) prove the caller is the body holding `cv` in its
+ * current run: the same proof `send` takes (LOOM_BODY_KEY, the harness session). The relay's return address uses it
+ * (relay.mjs, originOf): a body that proves its conversation needs nothing else to name it.
+ */
+export function holdsRun(env, cv, { key, session } = {}, o = {}) {
+  const c = loadConv(env, cv);
+  const want = typeof c?.sendKey === 'string' && /^[0-9a-f]{64}$/.test(c.sendKey) ? Buffer.from(c.sendKey, 'hex') : null;
+  if (!want || !c.body || typeof key !== 'string' || !key || !timingSafeEqual(keyHash(key), want)) return false;
+  // Fail closed (unlike send's, kept as it was): a body whose session the runner can't name proves nothing yet.
+  const own = sessionOf({ ...depsOf(env, o), env }, c.body);
+  return !!own && session === own;
 }
 
 /**
