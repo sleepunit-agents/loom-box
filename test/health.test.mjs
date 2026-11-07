@@ -379,3 +379,8 @@ test('a report-only box never sweeps for sign-in containers (it runs none, and h
   assert.equal(sweeps, 0);
   assert.equal(logs.filter((l) => /sweep/.test(l)).length, 0);
 });
+
+test('arc-prune detail reads sizes of 2 GiB and up as positive MB', () => {
+  const p = problems({ arc: { prune_per_s: 262, dnode_size: 2106860184, dnode_limit: 2147483648 } }, 'wunder')['arc-prune'];
+  assert.equal(p.detail, 'arc_prune 262 calls/s (dnodes 2009 MB of a 2048 MB limit)');
+});

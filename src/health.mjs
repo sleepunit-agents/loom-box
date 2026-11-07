@@ -185,7 +185,7 @@ export function problems(s, label = 'this box') {
     const lat = Math.max(d.r_await ?? 0, d.w_await ?? 0);
     if ((d.util ?? 0) >= 80 && lat >= slow) out[`disk-${name}`] = { for: 10, reading: 'disks', severity: 'warn', title: `${label}: ${name} is slow`, detail: `${name} ${Math.round(d.util)}% busy, requests taking ${Math.round(lat)} ms (${d.r_mb_s} MB/s read, ${d.w_mb_s} written)` };
   }
-  if (s.arc && (s.arc.prune_per_s ?? 0) >= 100) out['arc-prune'] = { for: 5, reading: 'arc', severity: 'warn', title: `${label}: ZFS's cache is thrashing`, detail: `arc_prune ${Math.round(s.arc.prune_per_s)} calls/s (dnodes ${(s.arc.dnode_size ?? 0) >> 20} MB of a ${(s.arc.dnode_limit ?? 0) >> 20} MB limit)` };
+  if (s.arc && (s.arc.prune_per_s ?? 0) >= 100) out['arc-prune'] = { for: 5, reading: 'arc', severity: 'warn', title: `${label}: ZFS's cache is thrashing`, detail: `arc_prune ${Math.round(s.arc.prune_per_s)} calls/s (dnodes ${Math.floor((s.arc.dnode_size ?? 0) / 2 ** 20)} MB of a ${Math.floor((s.arc.dnode_limit ?? 0) / 2 ** 20)} MB limit)` };
   for (const p of s.pools ?? []) {
     if (p.health !== 'ONLINE') out[`pool-${p.name}`] = { for: 0, reading: 'pools', severity: 'bad', title: `${label}: ZFS pool ${p.name} is ${p.health}`, detail: `zpool says ${p.name} is ${p.health}` };
     if (p.cap >= 85) out[`pool-full-${p.name}`] = { for: 0, reading: 'pools', severity: 'bad', title: `${label}: ZFS pool ${p.name} is filling up`, detail: `${p.name} is ${p.cap}% full` };
