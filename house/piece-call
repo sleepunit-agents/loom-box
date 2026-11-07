@@ -17,7 +17,7 @@ The one copy every house runs (loom-box house/). sleepunit-agents/art keeps
 bin/piece-call, the same program, for loom's own machine.
 
 For approvals and clock, a body in a conversation (LOOM_BODY_CONVERSATION) also
-sends `--principal <statement>`: on whose behalf it acts, signed by the runtime
+sends `--principal <statement>` (any it typed is taken off first): on whose behalf it acts, signed by the runtime
 (`loom-runtime principal`, t-1943; PIECE_CALL_RUNTIME names another program,
 for tests). Without one the piece treats the body as acting for someone it
 can't name, never the owner.
@@ -81,12 +81,22 @@ def principal_statement():
 
 
 def with_principal(piece, argv):
-    """argv with `--principal <statement>` appended last, for a piece that decides by it. The piece takes the last one
-    and verifies it with the runtime: a typed one is worth only what the runtime says of it, so nothing is stripped."""
+    """argv with the runtime's `--principal <statement>` appended, for a piece that decides by it. Any the caller typed
+    (`--principal X`, `--principal=X`) is taken off first: the piece sees the runtime's, or none (someone it can't name)."""
     if piece not in PRINCIPAL_PIECES:
         return argv
+    clean, i = [], 0
+    while i < len(argv):
+        if argv[i] == "--principal":
+            i += 2
+            continue
+        if argv[i].startswith("--principal="):
+            i += 1
+            continue
+        clean.append(argv[i])
+        i += 1
     st = principal_statement()
-    return argv + ["--principal", st] if st else argv
+    return clean + ["--principal", st] if st else clean
 
 
 def main():

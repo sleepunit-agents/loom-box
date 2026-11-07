@@ -492,9 +492,8 @@ async function main(argv, env) {
       // On whose behalf a body acts (principal.mjs, t-1943). --verify and --wake read and write this machine's runtime
       // state only, never through the piece API: a house has no signing key (so nothing verifies there) and can't
       // hand over a wake's principal (only the clock, here, does).
-      const { putWakeFor } = await import('./principal.mjs');
-      const { deliveryDir, bodyPrincipal, verifyStatement, resetPrincipal } = await import('./delivery.mjs');
-      const { withLock, AGENT_NAME } = await import('./state.mjs');
+      const { bodyPrincipal, handOverWake, verifyStatement, resetPrincipal } = await import('./delivery.mjs');
+      const { AGENT_NAME } = await import('./state.mjs');
       if (rest.includes('--verify')) {
         const r = verifyStatement(env, (await readStdin()).trim());
         out(r);
@@ -516,7 +515,7 @@ async function main(argv, env) {
         const who = flag(rest, '--for');
         const id = flag(rest, '--id');
         if (!AGENT_NAME.test(agent ?? '') || typeof place !== 'string' || !place || place.length > 200) throw new Fail('principal --wake --agent <agent> --place <place> --id <delivery id> --for owner|<slug>|-');
-        try { withLock(deliveryDir(env), 'lock', () => putWakeFor(deliveryDir(env), { agent, place, id, for: who }), 'delivery'); } catch (e) { throw new Fail(e.message); }
+        try { handOverWake(env, { agent, place, id, for: who }); } catch (e) { throw new Fail(e.message); }
         out({ ok: true });
         return;
       }

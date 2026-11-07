@@ -80,7 +80,7 @@ import { endBody, readBody, resumeBody, startBody } from './bodies.mjs';
 import { CoreError, coreFrom } from './core.mjs';
 import { HouseRunner, sweepTransfers } from './houserunner.mjs';
 import { venueKind as kindOf, resolveFor } from './models.mjs';
-import { setting } from './piece.mjs';
+import { pieceName, setting } from './piece.mjs';
 import { dropSession, packSession, restoreFiles } from './sessions.mjs';
 import { ageSealer } from './sealed.mjs';
 import { RulesError, policyOf, rulesFor, tierOf } from './policy.mjs';
@@ -95,7 +95,7 @@ import { raiseAlert } from './alerthook.mjs';
 import { changed as changedCards } from './activity.mjs';
 import { keepKey } from './bodyhost.mjs';
 import { readRelays } from './relay.mjs';
-import { mint, noteSender, principalOf, resetActsFor, takeWakeFor, verify } from './principal.mjs';
+import { mint, noteSender, principalOf, putWakeFor, resetActsFor, takeWakeFor, verify } from './principal.mjs';
 
 const DAY_MS = 86_400_000;
 export const MAX_TEXT = 40_000;
@@ -181,6 +181,8 @@ export function listConvs(env) {
 
 /** Every change to delivery's state, under one lock: never while a harness starts (that's outside it). */
 const locked = (env, f) => withLock(deliveryDir(env), 'lock', f, 'delivery', num(env.LOOM_RUNTIME_LOCK_WAIT_MS, 10_000));
+/** The clock's hand-over of a wake's principal (cli.mjs, principal --wake), under delivery's own lock and wait. */
+export const handOverWake = (env, w) => locked(env, () => putWakeFor(deliveryDir(env), w));
 
 // ─── Settings and what it's made of ─────────────────────────────────────────
 
@@ -706,7 +708,9 @@ async function deliverOnce(env, raw, o) {
       // is only its owners'.
       if (!c.queue.some((x) => x.key === key) && !c.outcomes?.[key]) {
         const wake = m.venue === 'wake' && m.from.kind === 'schedule';
-        const wakeFor = wake ? takeWakeFor(deliveryDir(env), m.agent, m.place, m.id, d.now().getTime()) : undefined;
+        // The runtime's own daily review (review.mjs, source: this piece, which core sets) is the owner's schedule.
+        const own = wake && m.source === pieceName(env) && m.place === 'review';
+        const wakeFor = own ? 'owner' : wake ? takeWakeFor(deliveryDir(env), m.agent, m.place, m.id, d.now().getTime()) : undefined;
         noteSender(env, c, m, { wakeFor });
         c.queue.push({ key, id: m.id, at: m.at, from: m.from, kind: m.kind, ...(local ? { local: true } : {}), ...(tier ? { tier } : {}), ...(owner ? { owner: true } : {}), ...(tierUnread ? { tierUnread: true } : {}), ...(sealed ? { sealed } : { mem: true }) });
       }

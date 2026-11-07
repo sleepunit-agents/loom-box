@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { bodyPrincipal, deliver, deliveryDir, loadConv, verifyStatement } from '../src/delivery.mjs';
 import { api } from '../src/control.mjs';
+import { pieceName } from '../src/piece.mjs';
 import { STATEMENT_TTL_S, mint, noteSender, principalOf, putWakeFor, resetActsFor, takeWakeFor, verify } from '../src/principal.mjs';
 import { cvOf, here, world } from './delivery-world.mjs';
 
@@ -178,6 +179,11 @@ test('a body asks on whose behalf it acts, proven as send is: its conversation\'
     const r = await Promise.resolve().then(() => api(w.env, fx, { caller: { kind: 'agent', agent: 'art' }, path, body: { conversation: c.conversation } })).catch((e) => ({ status: e.status ?? 500 }));
     assert.notEqual(r.status, 200, path);
   }
+  // Nor the body's own remote CLI (path run, gates-api.mjs runFor): it has no principal verb.
+  for (const argv of [['principal', '--reset', '--conversation', c.conversation], ['principal', '--wake', '--agent', 'art', '--place', 'p', '--id', 'i', '--for', 'owner']]) {
+    const r = await Promise.resolve().then(() => api(w.env, fx, { caller: { kind: 'agent', agent: 'art' }, path: 'run', body: { argv } })).catch((e) => ({ status: e.status ?? 500, body: {} }));
+    assert.notEqual(r.body?.exit ?? 1, 0, argv.join(' '));
+  }
   assert.equal(loadConv(w.env, c.conversation).actsFor.people.includes('loren'), true, 'untouched');
 });
 
@@ -204,6 +210,11 @@ test('the owner in a Comms thread is the owner\'s; a wake is what the clock hand
   assert.equal(of(cvOf('art', 'wake', 'wake:w-222222')).owner, true);
   await deliver(w.env, wake('w-333333', 'wake:w-333333'), o);
   assert.deepEqual([of(cvOf('art', 'wake', 'wake:w-333333')).for, of(cvOf('art', 'wake', 'wake:w-333333')).owner], [null, false]);
+  // The runtime's own daily review (source: the runtime) is the owner's schedule; another piece's at that place isn't.
+  await deliver(w.env, { ...wake('review-2026-11-02-art', 'review'), source: pieceName(w.env) }, o);
+  const rv = loadConv(w.env, cvOf('art', 'wake', 'review'));
+  assert.ok(rv, 'the review wake was queued');
+  assert.equal(principalOf(w.env, rv).owner, true);
 });
 
 const cli = (env, args, input) => spawnSync(process.execPath, [join(ROOT, 'src/cli.mjs'), ...args], { env: { PATH: process.env.PATH, ...env }, input, encoding: 'utf-8' });
@@ -266,7 +277,7 @@ function pieceCall(env, args) {
   });
 }
 
-test('piece-call sends approvals and the clock the runtime\'s statement, last (the piece takes the last and verifies it); other pieces get none', async () => {
+test('piece-call sends approvals and the clock the runtime\'s statement and never a typed one; other pieces get none', async () => {
   const { createServer } = await import('node:http');
   const seen = [];
   const server = createServer((req, res) => { let b = ''; req.on('data', (c) => { b += c; }); req.on('end', () => { seen.push({ url: req.url, argv: JSON.parse(b).argv }); res.end(JSON.stringify({ exit: 0, stdout: '' })); }); });
@@ -281,9 +292,9 @@ test('piece-call sends approvals and the clock the runtime\'s statement, last (t
     await pieceCall(env, ['approvals', 'rule', 'merge', 'github:a/b#1@' + '0'.repeat(40), '--principal', 'typed.owner']);
     await pieceCall(env, ['clock', 'in', '4h']);
     await pieceCall(env, ['tasks', 'ready']);
-    await pieceCall({ ...env, LOOM_BODY_CONVERSATION: '' }, ['approvals', 'check', 'a-12345678']);
+    await pieceCall({ ...env, LOOM_BODY_CONVERSATION: '' }, ['approvals', 'check', 'a-12345678', '--principal=typed.owner']);
     assert.deepEqual(seen.map((s) => s.argv), [
-      ['rule', 'merge', 'github:a/b#1@' + '0'.repeat(40), '--principal', 'typed.owner', '--principal', 'eyJ2IjoxfQ.c2ln'],
+      ['rule', 'merge', 'github:a/b#1@' + '0'.repeat(40), '--principal', 'eyJ2IjoxfQ.c2ln'],
       ['in', '4h', '--principal', 'eyJ2IjoxfQ.c2ln'],
       ['ready'],
       ['check', 'a-12345678'],
