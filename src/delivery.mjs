@@ -700,7 +700,7 @@ async function deliverOnce(env, raw, o) {
       if (m.kind === 'wake' && !!c.local !== local) return mismatch(m.place, c.local);
       if (m.label !== undefined) c.label = m.label;
       // A retry after a crash may find its message already queued (or already answered): never twice.
-      if (!c.queue.some((x) => x.key === key) && !c.outcomes?.[key]) c.queue.push({ key, id: m.id, at: m.at, from: m.from, kind: m.kind, ...(local ? { local: true } : {}), ...(tier ? { tier } : {}), ...(owner ? { owner: true } : {}), ...(tierUnread ? { tierUnread: true } : {}), ...(sealed ? { sealed } : { mem: true }) });
+      if (!c.queue.some((x) => x.key === key) && !c.outcomes?.[key]) c.queue.push({ key, id: m.id, at: m.at, from: m.from, kind: m.kind, ...(local ? { local: true } : {}), ...(o.deferPeer === true && m.from.kind === 'agent' ? { afterTurn: true } : {}), ...(tier ? { tier } : {}), ...(owner ? { owner: true } : {}), ...(tierUnread ? { tierUnread: true } : {}), ...(sealed ? { sealed } : { mem: true }) });
       c.last = d.now().toISOString();
       saveConv(env, c);
       return null;
@@ -828,6 +828,7 @@ function startBrief(c, msgs, run, sends, rules = { sections: [] }) {
     `You are ${c.agent}, in a conversation on ${c.venue}: ${c.label ?? c.place}.`,
     `Its conversation is ${c.conversation} and this run is ${run}: call identity with {conversation: "${c.conversation}", run: "${run}"} first.`,
     ...(c.runs > 0 ? [`It has history this session doesn't: read it with conversation({id: "${c.conversation}"}) (its digests) before you answer.`] : []),
+    `When using the relay tool, include conversation: "${c.conversation}" so replies return to this session.`,
     ...(sends ? [how] : []),
     ...(sends === 'post' ? [relay] : []),
   ].join('\n');
@@ -839,7 +840,7 @@ function startBrief(c, msgs, run, sends, rules = { sections: [] }) {
 }
 
 /** What a resumed body is given: the new messages, and its new run. */
-const resumeBrief = (c, msgs, run) => `(${c.venue}: ${c.label ?? c.place}. This run is ${run}: call identity with {conversation: "${c.conversation}", run: "${run}"} again.)\n\n${render(msgs)}`;
+const resumeBrief = (c, msgs, run) => `(${c.venue}: ${c.label ?? c.place}. This run is ${run}: call identity with {conversation: "${c.conversation}", run: "${run}"} again. For relay requests, include conversation: "${c.conversation}" so replies return here.)\n\n${render(msgs)}`;
 
 function open(d, x, mem) {
   if (x.sealed) return d.sealer.open(Buffer.from(x.sealed, 'base64')).toString('utf-8');
@@ -916,6 +917,7 @@ function plan(env, cv, d, mem) {
     const runner = d.runner(rec.harness, rec.local);
     const left = [];
     for (const x of c.queue) {
+      if (x.afterTurn) { left.push({ x, reason: 'relay replies wait for the requesting turn to finish' }); continue; }
       if (x.tierUnread && !c.bodyRules?.guest) { left.push({ x, reason: 'its sender\'s tier couldn\'t be read' }); continue; }
       const text = open(d, x, mem);
       const r = text === null ? { fed: false, reason: 'its text is gone' } : runner.feed(bodyOf(c.body, rec), { id: x.key, text: render([{ ...x, text }]) });
@@ -1124,8 +1126,9 @@ function logRun(c, r) { c.runLog = [...(Array.isArray(c.runLog) ? c.runLog : [])
 /** A body started (or resumed) for these messages: its run begins (the one before it, over, if it wasn't yet). */
 function openRun(c, run, msgs, now, body) {
   for (const r of c.runLog ?? []) if (!Number.isFinite(r.end)) r.end = now;
+  const relays = msgs.filter((m) => m.from?.kind === 'agent' && /^r-[0-9a-f]{8}$/.test(m.id ?? '')).map((m) => m.id);
   // Which body ran it, and how it came (a fresh start or a resumed session): for its trace (trace.mjs, t-1895).
-  logRun(c, { run, at: now, ...causeOf(msgs), sent: 0, posts: [], ...(body ? { body: body.ref, how: body.how } : {}),
+  logRun(c, { run, at: now, ...causeOf(msgs), ...(relays.length ? { relays } : {}), sent: 0, posts: [], ...(body ? { body: body.ref, how: body.how } : {}),
     // A harness switch (t-1907): from which, and why; a return to the home session; a refused turn's one retry.
     ...(body?.switched ? { switched: body.switched } : {}), ...(body?.home ? { home: true } : {}), ...(body?.retryOf ? { retryOf: body.retryOf } : {}) });
 }
@@ -1161,7 +1164,12 @@ function loopOf(env, c, now) {
   // The relay log: for ping-pong (a relay conversation), and for what any run said by relaying.
   let relays = [];
   try { relays = readRelays(env, now).filter((x) => x.at >= since && (x.from === c.agent || x.to === c.agent)); } catch { relays = []; }
-  return detectLoop({ runs, relays, agent: c.agent, peer: relay ? c.place : null, now });
+  const peers = new Set(relay ? [c.place] : (c.queue ?? []).filter((m) => m.from?.kind === 'agent').map((m) => m.from.id));
+  for (const peer of peers) {
+    const loop = detectLoop({ runs, relays, agent: c.agent, peer, now });
+    if (loop) return loop;
+  }
+  return detectLoop({ runs, relays, agent: c.agent, now });
 }
 
 /** What the owner is asked about a paused conversation: where, and why. */

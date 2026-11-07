@@ -5,12 +5,13 @@
 // in an agent's MCP session only when the runtime offers it) is in loom's suite (src/offered-tools.integration.test.ts).
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { deliver, deliveryDir } from '../src/delivery.mjs';
+import { deliver, deliveryDir, loadConv, tick } from '../src/delivery.mjs';
 import { GRANTS, KEY, setRelay } from '../src/grants.mjs';
 import { approvalsInstalled, appendRelay, readRelays, relay, relayNotices, relayText, relayTool, relaysOf, TOOL } from '../src/relay.mjs';
+import { originOf } from '../src/relay.mjs';
 import { runFor } from '../src/gates-api.mjs';
 import { memStore } from '../src/store.mjs';
 import { plain, world } from './delivery-world.mjs';
@@ -28,6 +29,7 @@ function relayWorld({ pairs = { art: ['mark'], mark: ['art'] }, approvals = true
   const d = {
     // Core's deliver route, as core forwards the runtime's own call: the source is the runtime.
     core: { deliver: async (b) => { delivered.push(b); const r = await deliver(w.env, { ...b, source: 'runtime' }, w.o); if (r.status) throw new Error(r.error); return r; } },
+    returnDelivery: (b, o) => deliver(w.env, b, { ...w.o, ...o }),
     store: () => store,
     household: () => ({ v: 1, agents: ['art', 'mark', 'fez'], owner: 'jonathan' }),
     approvals: {
@@ -51,7 +53,7 @@ describe('test 6: relay', () => {
   test('a paired relay delivers on the relay venue, from the agent, and starts the other agent\'s body', async () => {
     const { w, d, delivered, spent } = relayWorld();
     const r = await relay(w.env, art, { to: 'mark', say: 'can you review loom#12?', why: 'a second pair of eyes' }, d);
-    assert.match(r.text, /^r-[0-9a-f]{8}: mark has it\.$/);
+    assert.match(r.text, /^r-[0-9a-f]{8}: mark has it\./);
     assert.equal(delivered.length, 1);
     const b = delivered[0];
     assert.equal(b.agent, 'mark');
@@ -206,4 +208,87 @@ describe('the tool core runs, and the house CLI', () => {
     assert.equal(approvalsInstalled({ LOOM_PIECE_HOME: join(D, 'pieces', 'runtime'), PATH: '/nonexistent' }), true);
     assert.equal(approvalsInstalled({ PATH: join(D, 'pieces', 'bin') }), true);
   });
+});
+
+describe('relay return to the requesting session', () => {
+  test('a reply resumes the original Comms body, retains peer framing and records the turn there', async () => {
+    const { w, d, delivered } = relayWorld();
+    const origin = await deliver(w.env, w.msg('th:origin', 'ask for a review', { venue: 'loom', source: 'loom' }), w.o);
+    const before = loadConv(w.env, origin.conversation);
+    const session = w.sessionFor(origin.conversation);
+    w.runner.finish(before.body);
+    const request = await relay(w.env, { agent: 'art' }, { to: 'mark', say: 'review this', conversation: origin.conversation }, d);
+    const id = request.text.slice(0, 10);
+    const reply = await relay(w.env, { agent: 'mark' }, { to: 'art', say: 'looks good', reply_to: id }, d);
+    assert.match(reply.text, /art has it/);
+    assert.equal(delivered.length, 1, 'reply does not create a separate relay conversation');
+    assert.equal(w.sessionFor(origin.conversation), session, 'same harness session resumes');
+    const turn = w.core.turns.at(-1);
+    assert.equal(turn.conversation, origin.conversation);
+    assert.deepEqual(turn.from, { kind: 'agent', id: 'mark' });
+    const feed = w.log.findLast((l) => l[0] === 'resume' || l[0] === 'feed');
+    assert.ok(feed, JSON.stringify(w.log));
+    assert.match(plain(feed[0] === 'resume' ? feed[4] : feed[2]), /another agent in this household/);
+    assert.match(plain(feed[0] === 'resume' ? feed[4] : feed[2]), /looks good/);
+    const rec = readRelays(w.env, w.clock.now().getTime()).at(-1);
+    assert.equal(rec.conversation, origin.conversation);
+  });
+
+  test('foreign and unheld return addresses are refused before a relay or approval spend', async () => {
+    const { w, d, delivered } = relayWorld();
+    const origin = await deliver(w.env, w.msg('dm:origin', 'hello'), w.o);
+    for (const caller of [{ agent: 'mark' }, { agent: 'art', house: 'h-other' }]) {
+      await assert.rejects(relay(w.env, caller, { to: caller.agent === 'art' ? 'mark' : 'art', say: 'hello', conversation: origin.conversation }, d), /return conversation must be your own/);
+    }
+    assert.equal(delivered.length, 0);
+  });
+
+  test('a legacy relay without an origin still answers on the relay venue', async () => {
+    const { w, d, delivered } = relayWorld();
+    const q = await relay(w.env, { agent: 'art' }, { to: 'mark', say: 'question' }, d);
+    await relay(w.env, { agent: 'mark' }, { to: 'art', say: 'answer', reply_to: q.text.slice(0, 10) }, d);
+    assert.equal(delivered.at(-1).venue, 'relay');
+  });
+});
+
+test('a working origin queues its reply until the turn ends without starting a sibling body', async () => {
+  const { w, d } = relayWorld();
+  const first = await deliver(w.env, w.msg('th:active', 'review please', { venue: 'loom', source: 'loom' }), w.o);
+  const body = loadConv(w.env, first.conversation).body;
+  const q = await relay(w.env, { agent: 'art' }, { to: 'mark', say: 'check it', conversation: first.conversation }, d);
+  await relay(w.env, { agent: 'mark' }, { to: 'art', say: 'checked it', reply_to: q.text.slice(0, 10) }, d);
+  assert.equal(loadConv(w.env, first.conversation).body, body);
+  assert.equal(w.log.filter((l) => l[0] === 'start').length, 2, 'one requesting body, one reviewing body');
+  assert.equal(w.log.filter((l) => l[0] === 'feed').length, 0, 'no live injection');
+  assert.equal(loadConv(w.env, first.conversation).queue.length, 1);
+  w.runner.finish(body);
+  await tick(w.env, w.o);
+  const resumed = w.log.findLast((l) => l[0] === 'resume');
+  assert.match(plain(resumed[4]), /checked it/);
+  assert.deepEqual(loadConv(w.env, first.conversation).runLog.at(-1).relays.length, 1);
+});
+
+test('a missing origin falls back visibly to the legacy relay conversation', async () => {
+  const { w, d, delivered } = relayWorld();
+  const first = await deliver(w.env, w.msg('th:gone', 'hello', { venue: 'loom', source: 'loom' }), w.o);
+  const q = await relay(w.env, { agent: 'art' }, { to: 'mark', say: 'check it', from: `loom:${first.conversation}` }, d);
+  rmSync(join(deliveryDir(w.env), 'conversations', `${first.conversation}.json`));
+  await relay(w.env, { agent: 'mark' }, { to: 'art', say: 'checked it', reply_to: q.text.slice(0, 10) }, d);
+  assert.equal(delivered.at(-1).venue, 'relay');
+});
+
+test('implicit origin requires exactly one active conversation hosted in the calling house', async () => {
+  const { w } = relayWorld();
+  const caller = { agent: 'art', house: 'h-ours' };
+  const host = (cv) => {
+    const c = loadConv(w.env, cv);
+    const path = join(w.env.LOOM_BOX_DATA, 'bodies', `${c.body.replace(':', '-')}.json`);
+    const rec = JSON.parse(readFileSync(path)); rec.house = caller.house;
+    writeFileSync(path, JSON.stringify(rec));
+  };
+  const first = await deliver(w.env, w.msg('dm:first', 'first'), w.o); host(first.conversation);
+  assert.equal(originOf(w.env, caller).conversation, first.conversation);
+  const second = await deliver(w.env, w.msg('dm:second', 'second'), w.o); host(second.conversation);
+  assert.equal(originOf(w.env, caller), null, 'never chooses the newest conversation');
+  assert.equal(originOf(w.env, caller, first.conversation).conversation, first.conversation);
 });

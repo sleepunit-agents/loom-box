@@ -19,9 +19,9 @@ export async function runFor(env, caller, argv, store = loomStore(env), core = c
     const args = argv.slice(1);
     const flag = (n) => { const i = args.indexOf(n); return i >= 0 ? args[i + 1] : undefined; };
     if (a === 'relays') return ok(r.relaysOf(env, caller.agent, flag('--thread')));
-    const bad = args.filter((x, i) => x.startsWith('--') && !['--to', '--say', '--why', '--reply-to', '--from', '--approval'].includes(x) && !(i > 0 && args[i - 1].startsWith('--')));
-    if (bad.length) return no(`relay: no flag ${bad[0]} (it takes --to, --say, --why, --reply-to, --from, --approval)`, 2);
-    const t = { to: flag('--to'), say: flag('--say'), why: flag('--why'), reply_to: flag('--reply-to'), from: flag('--from'), approval: flag('--approval') };
+    const bad = args.filter((x, i) => x.startsWith('--') && !['--to', '--say', '--why', '--reply-to', '--from', '--approval', '--conversation'].includes(x) && !(i > 0 && args[i - 1].startsWith('--')));
+    if (bad.length) return no(`relay: no flag ${bad[0]} (it takes --to, --say, --why, --reply-to, --from, --approval, --conversation)`, 2);
+    const t = { to: flag('--to'), say: flag('--say'), why: flag('--why'), reply_to: flag('--reply-to'), from: flag('--from'), approval: flag('--approval'), conversation: flag('--conversation') };
     try { return ok(`${(await r.relay(env, caller, t, relayDeps ?? r.depsOf(env))).text}\n`); } catch (e) {
       if (e instanceof r.RelayError) return no(e.message);
       throw e;

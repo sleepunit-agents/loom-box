@@ -488,8 +488,17 @@ async function main(argv, env) {
       process.stdout.write(`${traceText(t)}\n`);
       return;
     }
+    case 'relays':
     case 'relay': {
-      if (rest[0] !== 'tool') throw new Fail('loom runtime relay is a body\'s, from its house (its token): loom runtime relay --to <agent> --say <text>; the tool core runs is `relay tool`', 2);
+      if (cmd === 'relays' || rest[0] !== 'tool') {
+        if (!env.LOOM_URL || !env.LOOM_TOKEN_FILE) throw new Fail('relay and relays need a house token (LOOM_URL and LOOM_TOKEN_FILE)', 2);
+        const r = await pieceCall(env)('run', { argv: [cmd, ...rest] });
+        if (r.stdout) process.stdout.write(r.stdout);
+        if (r.stderr) process.stderr.write(r.stderr);
+        if (!Number.isInteger(r.exit) && r.ok !== false) throw new Fail('runtime did not return a command outcome');
+        if (r.exit || r.ok === false) throw new Fail(r.error ?? r.reason ?? '', r.exit || 1);
+        return;
+      }
       const { relayTool } = await import('./relay.mjs');
       const r = await relayTool(env, rest.slice(1), await readStdin());
       process.stdout.write(`${JSON.stringify(r.answer)}\n`);

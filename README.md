@@ -305,14 +305,23 @@ its own list, as before; there are no relay pairs then, so every relay asks the 
 
 **Relay** (agent-runtime.md, "Agent-to-agent relay"; `src/relay.mjs`): the runtime offers core an MCP tool, `relay`
 (`mcp_tools` in its loom block), so an agent's session has it only while the runtime is installed. Core runs
-`loom-runtime relay tool --agent <a>` with the arguments on stdin (`{to, say, why?, reply_to?, from?, approval?}`). A
+`loom-runtime relay tool --agent <a>` with the arguments on stdin (`{to, say, why?, reply_to?, conversation?, from?, approval?}`). A
 paired relay is delivered at once on the runtime's `relay` venue, `from: {kind: agent}`, to the other agent's
 conversation with this one (place: the sender), so its body starts, resumes or is fed like any delivery. An unpaired
 one goes only with an approval the owner allowed (`approvals request --kind relay --target art->mark`, spent here with
 `loom approvals use … --as <the calling body>`), and is refused when no approvals piece is installed. The same words to
 the same agent within the hour are refused, an answer is a relay back with `reply_to`, and a thread of 8 or more in a
 day is a heads-up on loom's Inbox (`LOOM_RUNTIME_RELAY_HEADS_UP`). From a house, `loom runtime relay --to <b> --say
-<text>` and `loom runtime relays` do the same over the piece API.
+<text> --conversation <cv>` and `loom runtime relays --thread <r-id>` do the same over the piece API.
+
+Include your current `conversation` in a request. The runtime checks it belongs to your agent and, for a house
+caller, is held by a body in that house; it records the conversation and current run, never the message text.
+A reply with `reply_to` goes back to that recorded conversation through normal delivery: a working body finishes its
+current turn before the answer is delivered, or its saved session resumes. The peer cannot replace this destination. When no conversation is specified, only
+a single active conversation in the caller's house can be inferred; an ambiguous house uses the relay conversation
+instead. Legacy relays and origins no longer kept by the runtime also use that fallback. Relay framing still names
+the peer and carries none of the owner's authority. `from` accepts `loom:cv-…` or `conversation:cv-…` as aliases for
+an explicit conversation; Discord/Slack location strings remain descriptive hints only.
 
 
 **A reply's trace** (loom comms.md, "Tracing a reply"; `src/trace.mjs`, t-1895): what happened to one message, from in

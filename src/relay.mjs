@@ -21,7 +21,8 @@ import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync, appendFileSync, mkdirSync } from 'node:fs';
 import { delimiter, dirname, join } from 'node:path';
 import { coreFrom } from './core.mjs';
-import { deliveryDir } from './delivery.mjs';
+import { deliver, deliveryDir, listConvs, loadConv } from './delivery.mjs';
+import { readBody } from './bodies.mjs';
 import { GRANTS, KEY, householdOf, paired } from './grants.mjs';
 import { setting } from './piece.mjs';
 import { loomStore } from './store.mjs';
@@ -34,7 +35,8 @@ export const REPEAT_MS = 3_600_000;
 export const KEEP_MS = 30 * 86_400_000;
 export const HEADS_UP_DEFAULT = 8;
 const DAY_MS = 86_400_000;
-const WHERE = /^(discord|slack):[#a-z0-9:._-]{1,80}$/;
+const WHERE = /^(?:(discord|slack):[#a-z0-9:._-]{1,80}|(?:loom:|conversation:)?cv-[0-9a-f]{12})$/;
+const CV = /^cv-[0-9a-f]{12}$/;
 const RELAY_ID = /^r-[0-9a-f]{8}$/;
 const APPROVAL_ID = /^a-[0-9a-f]{8}$/;
 
@@ -42,7 +44,7 @@ const APPROVAL_ID = /^a-[0-9a-f]{8}$/;
 export const TOOL = {
   description:
     'Ask another agent in this household something: it reaches a body of theirs with your words, framed as a peer\'s ' +
-    'request (none of the owner\'s authority). Their answer comes back the same way, as a relay to you. Without asking ' +
+    'request (none of the owner\'s authority). Include conversation to return answers to your requesting session. Without asking ' +
     'only between agents the household pairs (the runtime\'s permissions); for any other, ask the owner first ' +
     '(approvals request --kind relay --target <you>-><them>) and pass the allowed approval. The same words twice ' +
     'within the hour are refused. Answer a relay with reply_to set to its id.',
@@ -53,6 +55,7 @@ export const TOOL = {
       say: { type: 'string', description: `What to tell or ask them (${SAY_MAX} characters at most; point at a PR or file for more)` },
       why: { type: 'string', description: 'One line: why you are asking' },
       reply_to: { type: 'string', description: 'The relay id (r-…) this answers' },
+      conversation: { type: 'string', description: 'Your current conversation (cv-…): replies resume it, or its saved session, as peer messages' },
       from: { type: 'string', description: 'Where it was asked, e.g. "discord:#workshop", so the answer can go back there' },
       approval: { type: 'string', description: 'An approval id (a-…) the owner allowed, for a relay the household doesn\'t pair' },
     },
@@ -113,6 +116,25 @@ export function relayText(entry, owner, thread) {
   return `${head}\n${quoted(entry.say)}${started}${tail}`;
 }
 
+/** Resolve only the sender's own conversation. A house must actually host its body.
+ * Without an explicit id, infer only one active conversation in that house; never guess. */
+export function originOf(env, caller, id) {
+  const eligible = (c) => {
+    if (c.agent !== caller.agent) return false;
+    if (!caller.house) return true;
+    try { return readBody(env, c.body).house === caller.house; } catch { return false; }
+  };
+  if (id !== undefined) {
+    if (!CV.test(id)) no('relay: conversation is your current conversation id (cv-…)');
+    const c = loadConv(env, id);
+    if (!c || !eligible(c)) no('relay: the return conversation must be your own, held by a body in your house');
+    return c;
+  }
+  if (!caller.house) return null;
+  const candidates = listConvs(env).filter((c) => eligible(c) && c.run && !(c.runLog ?? []).findLast((r) => r.run === c.run)?.end);
+  return candidates.length === 1 ? candidates[0] : null;
+}
+
 /**
  * One relay from `caller.agent`: {text} when delivered, or a RelayError saying why not (nothing delivered, and an
  * approval spent only once the rest checked). `d`: {core, store, household, approvals: {installed(), spend(aid, target)}, now}.
@@ -130,9 +152,11 @@ export async function relay(env, caller, args, d = depsOf(env)) {
   if (!say) no('relay: say is what to tell them or ask');
   if (say.length > SAY_MAX) no(`relay: say is ${SAY_MAX} characters at most; point at a file or a PR for more`);
   const where = a.from === undefined || a.from === '' ? '' : String(a.from);
-  if (where && !WHERE.test(where)) no('relay: from is where it was asked, like discord:#general or slack:dm:someone');
+  if (where && !WHERE.test(where)) no('relay: from is where it was asked, like discord:#general, slack:dm:someone or loom:cv-…');
   const replyTo = a.reply_to === undefined || a.reply_to === '' ? '' : String(a.reply_to);
   const approval = a.approval === undefined || a.approval === '' ? '' : String(a.approval);
+  const originId = a.conversation ?? (where.match(/cv-[0-9a-f]{12}$/)?.[0]);
+  const origin = originOf(env, caller, originId);
   const now = d.now();
   const log = readRelays(env, now);
   let thread = [];
@@ -161,20 +185,32 @@ export async function relay(env, caller, args, d = depsOf(env)) {
 
   // Its words' shape too (loops.mjs, shapeOf: a hash, never the words): near-identical relays back and forth are a
   // loop the runtime pauses (relay ping-pong, t-1763).
-  const entry = { id: `r-${randomBytes(4).toString('hex')}`, from, to, say, why: plain(a.why, WHY_MAX), where, at: now, digest, shape: shapeOf(say), ...(replyTo ? { reply_to: replyTo, thread: threadId } : {}) };
+  const entry = { id: `r-${randomBytes(4).toString('hex')}`, from, to, say, why: plain(a.why, WHY_MAX), where, ...(origin ? { origin: origin.conversation, origin_run: origin.run } : {}), at: now, digest, shape: shapeOf(say), ...(replyTo ? { reply_to: replyTo, thread: threadId } : {}) };
   let out;
+  let returnTo = null;
+  let original = null;
   try {
-    out = await d.core.deliver({
+    // A peer can answer only a recorded request. Its sender chose the return address;
+    // the responder cannot supply or replace it. Old/missing origins use the relay venue.
+    original = replyTo ? log.find((r) => r.id === replyTo) : null;
+    const target = original?.origin ? loadConv(env, original.origin) : null;
+    returnTo = target?.agent === to ? target : null;
+    const message = {
       id: entry.id, agent: to, venue: 'relay', place: from, label: `Relay from ${cap(from)}`,
       from: { kind: 'agent', id: from }, kind: 'message', at: new Date(now).toISOString(), text: relayText(entry, owner, thread),
-    });
+    };
+    out = returnTo
+      ? await (d.returnDelivery ?? ((b, o) => deliver(env, b, { detach: true, ...o })))({ ...message, source: 'runtime', venue: returnTo.venue, place: returnTo.place, label: returnTo.label }, { deferPeer: true })
+      : await d.core.deliver(message);
+    if (out?.status) throw new Error(out.error);
   } catch (e) {
     no(`relay: it didn't reach ${to} (${String(e.message ?? e).slice(0, 200)})${approval ? `; approval ${approval} was spent, so ask the owner again` : ''}`);
   }
   const { say: _words, ...kept } = entry;
   d.append({ ...kept, conversation: out?.conversation ?? null });
   const body = out?.body === 'failed' ? `, but its body didn't start (${out.reason ?? 'no reason given'}); the runtime tries again` : out?.body === 'queued' ? ': it waits for a body of theirs' : '';
-  return { text: `${entry.id}: ${to} has it${body}.` };
+  const routing = returnTo ? ` Returned to ${returnTo.conversation}.` : original?.origin ? ' Original conversation is no longer available; delivered to the relay conversation instead.' : origin ? ` Replies return to ${origin.conversation}.` : caller.house ? ' No unambiguous origin session; replies will use the relay conversation (include conversation to choose your own session).' : '';
+  return { text: `${entry.id}: ${to} has it${body}.${routing}` };
 }
 
 export function depsOf(env) {
@@ -221,7 +257,7 @@ export function relaysOf(env, agent, thread) {
   let rows = readRelays(env).filter((r) => r.from === agent || r.to === agent);
   if (thread) rows = rows.filter((r) => (r.thread ?? r.id) === thread);
   if (!rows.length) return `${agent} has no relays\n`;
-  return rows.slice(-50).map((r) => `${r.id} ${new Date(r.at).toISOString().slice(5, 16).replace('T', ' ')} ${r.from} -> ${r.to}${r.reply_to ? ` re ${r.reply_to}` : ''}${r.why ? `: ${r.why}` : ''}\n`).join('');
+  return rows.slice(-50).map((r) => `${r.id} ${new Date(r.at).toISOString().slice(5, 16).replace('T', ' ')} ${r.from} -> ${r.to}${r.reply_to ? ` re ${r.reply_to}` : ''}${r.why ? `: ${r.why}` : ''}${r.origin ? ` [from ${r.origin}${r.origin_run ? ` ${r.origin_run}` : ''}]` : ''}${r.reply_to && r.conversation ? ` [to ${r.conversation}]` : ''}\n`).join('');
 }
 
 /**
