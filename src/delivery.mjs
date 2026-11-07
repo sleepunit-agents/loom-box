@@ -546,6 +546,29 @@ async function callAdapter(d, v, c, args, extra = {}) {
   throw new Error(typeof a?.reason === 'string' ? a.reason.slice(0, 300) : 'core said no');
 }
 
+/** Startup can fail long after the initial delivery response. Keep the latest status
+ * until core takes it; a successful start cancels it. Core deduplicates run/attempt/status. */
+async function startupStatusPass(env, cv, d) {
+  const c = loadConv(env, cv);
+  const note = c?.startStatus;
+  if (c?.venue !== COMMS_VENUE || !note || c.starting) return;
+  let settled = false;
+  try {
+    const r = await d.core.comms({ op: 'status', place: c.place, agent: c.agent, ...note });
+    settled = r?.ok === true || r?.permanent === true;
+    if (!settled) d.warn(`${cv}: core couldn't show startup status`);
+  } catch (e) {
+    // An older core doesn't know these status values. Do not retry an unsupported
+    // contract forever; transport errors remain pending for the next delivery tick.
+    settled = e?.status >= 400 && e?.status < 500;
+    d.warn(`${cv}: core couldn't show startup status (${e.message})`);
+  }
+  if (settled) locked(env, () => {
+    const x = loadConv(env, cv);
+    if (x && JSON.stringify(x.startStatus) === JSON.stringify(note)) { delete x.startStatus; saveConv(env, x); }
+  });
+}
+
 /** A post through core's adapter route: sendOnce's answer shape. A refusal core gave is answered; no answer isn't. */
 async function coreSend(d, c, text, run, on) {
   let a;
@@ -1211,7 +1234,7 @@ export async function answerLoop(env, cv, answer, o = {}) {
     if (answer === 'dismiss') {
       outcome(c, (c.queue ?? []).map((x) => x.key), { body: 'failed', reason: 'dropped: the owner dismissed a loop here' }, now);
       c.queue = [];
-      delete c.retryAt; delete c.startFails; delete c.retryReason;
+      delete c.retryAt; delete c.startFails; delete c.retryReason; delete c.startStatus;
     }
     delete c.paused;
     delete c.waiting;
@@ -1384,7 +1407,7 @@ async function execute(env, op, d, mem) {
       if (local) keepKey(env, op.cv, runKey);
       c.bodyRules = { guest: rules.guest, key: rules.key };
       ack(c, op.msgs);
-      delete c.retryAt; delete c.startFails; delete c.retryReason;
+      delete c.retryAt; delete c.startFails; delete c.retryReason; delete c.startStatus;
       c.sendKey = keyHash(runKey).toString('hex');
       c.runs = (c.runs ?? 0) + 1;
       openRun(c, run, op.msgs, now(), { ref: r.body, how: way.how === 'start' ? 'started' : 'resumed', ...(r.switched ? { switched: { from: r.switched.from, why: r.switched.why } } : {}), ...(way.home ? { home: true } : {}), ...(c.quota ? { retryOf: c.quota.run } : {}) });
@@ -1469,12 +1492,22 @@ async function execute(env, op, d, mem) {
           outcome(c, keep.map((x) => x.key), { body: 'queued', reason: `no body could start (${reason}): trying again in ${Math.round(delays[tries - 1] / 1000)} s` }, now());
         } else if (keep.length) {
           outcome(c, keep.map((x) => x.key), { body: 'failed', reason }, now());
-          delete c.retryAt; delete c.startFails; delete c.retryReason;
+          delete c.retryAt; delete c.startFails; delete c.retryReason; delete c.startStatus;
           gaveUp = { c: { ...c }, reason, tries };
+        }
+        if (c.venue === COMMS_VENUE) {
+          const retry = keep.length > 0 && Number.isFinite(c.retryAt);
+          c.startStatus = {
+            status: retry ? 'start-retry' : 'start-failed', run: c.runLog.at(-1).run,
+            messages: msgs.filter((m) => m.kind === 'message').map((m) => m.id), attempt: tries,
+            reason: asData(reason).replace(/[\p{C}\p{Z}]/gu, ' ').slice(0, 300),
+            ...(retry ? { retry_at: new Date(c.retryAt).toISOString() } : {}),
+          };
         }
       }
       saveConv(env, c);
     });
+    await startupStatusPass(env, op.cv, d);
     if (gaveUp) await giveUp(env, gaveUp.c, gaveUp.reason, gaveUp.tries, d);
   }
 }
@@ -1835,6 +1868,7 @@ export async function tick(env, o = {}, only, mem = new Map()) {
   for (const c of listConvs(env)) if (c.presence) { try { await presencePass(env, c, d, now); } catch (e) { d.warn(`presence for ${c.conversation}: ${e.message}`); } }
   for (const c of listConvs(env)) if (c.venue === COMMS_VENUE && c.body && !c.starting) { try { await activityPass(env, c, d); } catch (e) { d.warn(`activity for ${c.conversation}: ${e.message}`); } }
   for (const c of listConvs(env)) if (c.queue?.length) await drain(env, c.conversation, d);
+  for (const c of listConvs(env)) if (c.startStatus) await startupStatusPass(env, c.conversation, d);
 }
 
 // ─── Outbound ───────────────────────────────────────────────────────────────
