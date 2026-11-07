@@ -38,15 +38,8 @@ export async function runFor(env, caller, argv, store = loomStore(env), core = c
   if (a === 'place') {
     const args = argv.slice(1);
     if (args.length !== 2 || args[0] !== '--conversation' || !/^cv-[0-9a-f]{12}$/.test(args[1])) return no('place --conversation cv-… (this body\'s own)', 2);
-    const d = await import('./delivery.mjs');
-    const c = d.loadConv(env, args[1]);
-    if (!c || c.agent !== caller.agent || !d.holdsRun(env, args[1], proof)) return no(`place: only the body holding ${args[1]} in its current run asks where it is`);
-    // `members` is who was in the place when this body's rules were made (`membersAt`): a body is reseated if a person
-    // outside them writes (delivery.mjs, needsReseat), so it holds for this body's run. `principal` is whom it works
-    // for now (principal.mjs): a tool scoped by a person checks both name the same one.
-    const { principalOf } = await import('./principal.mjs');
-    const p = principalOf(env, c);
-    return ok(`${JSON.stringify({ conversation: c.conversation, agent: c.agent, venue: c.venue, place: c.place, ...(c.label !== undefined ? { label: c.label } : {}), members: c.bodyRules?.members ?? [], ...(c.bodyRules?.membersAt ? { membersAt: c.bodyRules.membersAt } : {}), principal: { for: p.for, owner: p.owner, ...(p.unknown ? { unknown: true } : {}) } })}\n`);
+    const r = await placeOf(env, args[1], proof, caller.agent);
+    return r.ok ? ok(`${JSON.stringify(r.place)}\n`) : no(r.reason);
   }
   const tail = a === 'propose-person' ? [b, ...rest].filter((x) => x !== undefined) : a === 'gates' && b === 'propose' ? rest : null;
   if (tail) {
@@ -58,4 +51,21 @@ export async function runFor(env, caller, argv, store = loomStore(env), core = c
     return r.ok ? ok(`${r.message}\n`) : no(`propose-person: ${r.message}`);
   }
   return no('the runtime answers a body: place --conversation cv-… | relay --to A --say T [--why W] [--reply-to r-…] [--from discord:#x] [--approval a-…] [--conversation cv-…] | relays [--thread r-…] | gates people | gates propose --slug S --entry JSON [--why W] [--then-relay-say T --then-relay-via slack]', 2);
+}
+
+/**
+ * A body's own place (t-1745): only for the body proving it holds `cv` in its current run (its run's key and harness
+ * session, as `send` proves it; delivery.mjs holdsRun), and only its own agent's (`agent`, when a house asks).
+ * {ok, place: {conversation, agent, venue, place, label?, members, membersAt?, principal}} or {ok: false, reason}.
+ * `members` is who was in the place when the body's rules were made (`membersAt`); it holds for the body's run,
+ * because a body is reseated when a person outside them writes (delivery.mjs, needsReseat). `principal` is whom it
+ * works for now (principal.mjs): a tool scoped by a person checks both name that same one.
+ */
+export async function placeOf(env, cv, proof = {}, agent = undefined) {
+  const d = await import('./delivery.mjs');
+  const { principalOf } = await import('./principal.mjs');
+  const c = d.loadConv(env, cv);
+  if (!c || (agent !== undefined && c.agent !== agent) || !d.holdsRun(env, cv, proof)) return { ok: false, reason: `place: only the body holding ${cv} in its current run asks where it is` };
+  const p = principalOf(env, c);
+  return { ok: true, place: { conversation: c.conversation, agent: c.agent, venue: c.venue, place: c.place, ...(c.label !== undefined ? { label: c.label } : {}), members: c.bodyRules?.members ?? [], ...(c.bodyRules?.membersAt ? { membersAt: c.bodyRules.membersAt } : {}), principal: { for: p.for, owner: p.owner, ...(p.unknown ? { unknown: true } : {}) } } };
 }

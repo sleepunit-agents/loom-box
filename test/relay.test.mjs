@@ -640,3 +640,26 @@ describe('place: a body asks where it is (t-1745)', () => {
     assert.equal(await no({ kind: 'agent', agent: 'art' }, { key, session }, ['place']), 2, 'it names its conversation');
   });
 });
+
+describe('place in a place with members (t-1745)', () => {
+  test('its members, and when they were taken, come from the body\'s own rules', async () => {
+    const w = world();
+    const about = { 'group:G1': { venue: 'G1', members: ['phil', 'anton'] } };
+    Object.assign(w.o, {
+      gates: () => ({ people: { phil: { name: 'Phil', tier: 2 }, anton: { name: 'Anton', tier: 2 } } }),
+      card: () => null,
+      policy: () => ({}),
+      venues: () => ({ slack: { kind: 'live', send: [process.execPath, join(import.meta.dirname, 'fake-send.mjs')] } }),
+      adapter: async (argv, c, args) => (args[0] === '--describe' ? { ok: true, ...about[c.place] } : { ok: true }),
+    });
+    const cv = (await deliver(w.env, w.msg('group:G1', 'hi', { venue: 'slack', label: 'group DM', from: { kind: 'person', slug: 'phil' } }), w.o)).conversation;
+    const c = loadConv(w.env, cv);
+    const proof = { key: w.runner.envs[c.body.split(':')[1]].LOOM_BODY_KEY, session: w.sessionFor(cv) };
+    const r = await runFor(w.env, { kind: 'agent', agent: 'art' }, ['place', '--conversation', cv], memStore(), undefined, undefined, proof);
+    const p = JSON.parse(r.stdout);
+    assert.deepEqual(p.members, ['phil', 'anton']);
+    assert.equal(p.membersAt, c.bodyRules.membersAt);
+    assert.match(p.membersAt, /^\d{4}-\d\d-\d\dT/);
+    assert.deepEqual(p.principal, { for: 'phil', owner: false });
+  });
+});

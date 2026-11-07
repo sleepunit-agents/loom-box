@@ -86,7 +86,7 @@ import { venueKind as kindOf, resolveFor } from './models.mjs';
 import { pieceName, setting } from './piece.mjs';
 import { dropSession, packSession, restoreFiles } from './sessions.mjs';
 import { ageSealer } from './sealed.mjs';
-import { RulesError, policyOf, rulesFor, tierOf } from './policy.mjs';
+import { RulesError, personal, policyOf, rulesFor, tierOf } from './policy.mjs';
 import { gatesOf } from './gates.mjs';
 import { loomStore } from './store.mjs';
 import { namesFiles } from './briefs.mjs';
@@ -1056,8 +1056,9 @@ export async function drain(env, cv, d = depsOf(env), mem = new Map()) {
 
 // ─── Rules, presence and the stop word ──────────────────────────────────────
 
-/** Whether a working body's rules don't cover what's queued for it (rulesFor: grantFor, members). Notes and relay
- * replies that wait for its turn to end aren't fed to it, so they don't count. */
+/** Whether a working body's rules don't cover what's queued for it (rulesFor: grantFor, members). A post-failure note
+ * is the runtime's own, never a sender's, and a relay reply that waits for the turn to end isn't fed to it: neither
+ * counts. */
 export function needsReseat(c) {
   const r = c.bodyRules ?? {};
   const fed = (c.queue ?? []).filter((x) => !isNote(x) && !x.untilIdle);
@@ -1388,9 +1389,9 @@ async function execute(env, op, d, mem) {
     const v0 = await venueOf(d, c0.venue);
     const sends = posts(v0) ? 'post' : recordsOnly(v0) ? 'record' : null;
     // Its rules (policy.mjs): what it's told and what it may use. Any that can't be had is no body (fail closed).
-    rules = await rulesFor(c0, msgs.filter((x) => !isNote(x)), rulesDeps(d, v0, c0), { platform: posts(v0), core: coreAdapted(v0), principal: principalOf(env, c0) });
+    rules = await rulesFor(c0, msgs.filter((x) => !isNote(x)), rulesDeps(d, v0, c0), { platform: posts(v0), core: coreAdapted(v0), principal: principalOf(env, c0), ownerSpoke: c0.actsFor?.owner === true });
     const was = op.slot?.rules ?? {};
-    if (op.type === 'resume' && ((was.guest ?? false) !== rules.guest || ((was.members?.length || was.grantFor || rules.members.length || rules.grantFor) && was.key !== rules.key))) {
+    if (op.type === 'resume' && ((was.guest ?? false) !== rules.guest || ((personal(was) || personal(rules)) && was.key !== rules.key))) {
       // A session is resumed only under the rules it began with: a guest venue's never as anyone else's, nor the other
       // way; nor one that heard a place's people, or a person's standing authority, under any others (t-1745). Its
       // slot goes, and its messages go back for a fresh body, in this same drain.
