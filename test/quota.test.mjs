@@ -420,6 +420,51 @@ test('a body whose deny list Codex can\'t keep never falls back to Codex; with C
   assert.match(w4.conv().body, /^claude:/);
 });
 
+test('a body on loom\'s machine never falls back to Codex (its guards are Claude Code hooks there) unless the owner says so (t-1921)', async () => {
+  const LOCAL = (more = {}) => JSON.stringify({ agents: ['art'], cwd: '/home/art/Art', ...more });
+  for (const [lb, want] of [[LOCAL(), null], [LOCAL({ codex: true }), 'codex']]) {
+    const w = world({ LOOM_RUNTIME_LOCAL_BODIES: lb });
+    setModels(w.env, { list: [OPUS, GPT], agent: 'art', prefer: ['opus'] });
+    const localClaude = fakeRunner(w.log, join(w.env.HOME, 'lc'), 'claude');
+    const localCodex = fakeRunner(w.log, join(w.env.HOME, 'lx'), 'codex');
+    const max = acct('max', 'anthropic', { held: Math.floor(w.clock.now().getTime() / 1000) + 600 });
+    w.o.accounts = staticAccounts({ accounts: [max, acct('pro', 'openai')] });
+    w.o.runner = (h, local) => (local ? (h === 'codex' ? localCodex : localClaude) : w.runner);
+    const alerts = [];
+    w.o.alert = (_e, a) => { alerts.push(a); return true; };
+    const wake = w.msg('alert:test', 'look at this', { venue: 'wake', from: { kind: 'schedule' }, kind: 'wake', source: 'clock', local: true });
+    await deliver(w.env, wake, w.o);
+    const c = loadConv(w.env, cvOf('art', 'wake', 'alert:test'));
+    if (want) {
+      assert.match(c.body, /^codex:/, 'the owner let it: Codex, as any body falls back');
+      continue;
+    }
+    assert.equal(c.body, undefined);
+    assert.equal(w.log.filter((l) => l[0] === 'start').length, 0, 'no Codex body on loom\'s machine');
+    assert.match(alerts[0].facts.cant, /runs only on Claude Code, whose hooks there keep its guards/);
+  }
+});
+
+test('a Codex that won\'t run a body in its house (only its host can tell, at the start) is passed over in the same delivery (t-1924)', async () => {
+  const w = twoHarnesses();
+  setModels(w.env, { list: [OPUS, GPT], agent: 'art', prefer: ['gpt'] });
+  w.codex.failStart = "codex won't run this body here: Codex would read /home/art/Art/.codex/config.toml too, a config the runtime can't replace";
+  const warned = [];
+  w.o.warn = (m) => warned.push(m);
+  const a = await deliver(w.env, w.msg('dm:U1', 'hi'), w.o);
+  assert.equal(a.body, 'started', 'never a failed start');
+  assert.match(w.conv().body, /^claude:/, 'on Claude, off Codex');
+  assert.equal(w.conv().retryAt, undefined);
+  assert.ok(warned.some((m) => /starting it off Codex/.test(m)));
+  // Any other failed start is one, as before.
+  const w2 = twoHarnesses();
+  setModels(w2.env, { list: [OPUS, GPT], agent: 'art', prefer: ['gpt'] });
+  w2.codex.failStart = 'no box may host art';
+  const b = await deliver(w2.env, w2.msg('dm:U1', 'hi'), w2.o);
+  assert.notEqual(b.body, 'started');
+  assert.equal(w2.starts().length, 0);
+});
+
 test('a refusal holds only the account the body ran on, not another of the same label', async () => {
   const w = twoHarnesses();
   // A second Claude Max login of the same owner: the same label, another account.

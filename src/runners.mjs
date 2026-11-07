@@ -42,6 +42,7 @@ import { keptReading } from './statusline.mjs';
 import { claudeCards, codexCards } from './activity.mjs';
 import { CRED_FILE, lastRateLimit, lastRefusal, refusedUntil, tailOf } from './logins.mjs';
 import { lastToolUse } from './stuck.mjs';
+import { withLock } from './state.mjs';
 import { parse as parseToml, stringify as stringifyToml } from './vendor/smol-toml/index.js';
 
 export class RunnerError extends Error {}
@@ -350,6 +351,16 @@ export function codexLayers(cwd, { realHome, systemDir = '/etc/codex' } = {}) {
 /** What a made Codex home links from the real one: its login, and what tells the body how to work. Never its config. */
 // The login is linked, never read: its file's name is logins.mjs's (CRED_FILE), which moves it between homes unread.
 const HOME_LINKS = [CRED_FILE.codex, 'AGENTS.md', 'skills', 'rules'];
+/**
+ * How a Codex runner's refusal to run a body begins (plan), here or in a house, where it comes back as a failed start:
+ * delivery reads it to start that body again off Codex, in the same drain (t-1924).
+ */
+const CODEX_WONT_WORDS = "codex won't run this body here: ";
+export const CODEX_WONT = /^codex won't run this body here: /;
+
+/** A made home's name (homeIdOf), and how new a run dir is that counts as a body starting (sweepHomes). */
+const HOME_ID = /^[0-9a-f]{16}$/;
+const HOME_GRACE_MS = 10 * 60_000;
 
 /**
  * Codex, `codex exec --json`: a body is one process, started in its own session with the brief on stdin, its events
@@ -396,10 +407,15 @@ export class CodexRunner {
   launch({ brief, model, cwd, env, deny = [], resume }) {
     const plan = this.plan(deny, cwd, env);
     if (plan.why) throw new RunnerError(plan.why);
-    const home = this.homeFor(plan);
     const key = this.key();
     const dir = join(this.runsDir, key);
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    // Its run dir names its home before the home is made, under the homes' lock: a sweep never takes a home a body is
+    // starting in (t-1924).
+    const home = this.homesLocked(() => {
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      writeFileSync(join(dir, 'home'), `${this.homeIdOf(plan)}\n`, { mode: 0o600 });
+      return this.homeFor(plan);
+    });
     const e = { ...scrub(env ?? process.env), CODEX_HOME: home, SHUTTLE_BODY: key, ...(this.inbox ? { SHUTTLE_INBOX_DIR: this.inbox.dir } : {}) };
     const argv = ['exec', '--json', '--skip-git-repo-check', '--dangerously-bypass-hook-trust', '--dangerously-bypass-approvals-and-sandbox',
       ...(model ? ['-m', model] : []), ...plan.args, '-C', cwd ?? process.cwd(), '-o', join(dir, 'last.txt'),
@@ -426,6 +442,11 @@ export class CodexRunner {
    * with a deny list, a config layer the made home can't replace (codexLayers); a real config that can't be read.
    */
   plan(deny, cwd, env) {
+    const p = this.planOf(deny, cwd, env);
+    return p.why ? { why: `${CODEX_WONT_WORDS}${p.why}` } : p;
+  }
+
+  planOf(deny, cwd, env) {
     if (this.profile) return { why: `LOOM_RUNTIME_CODEX_PROFILE is set (${String(this.profile).slice(0, 64)}): a Codex profile can turn a denied tool server back on, so the codex runner runs no body under one; unset it` };
     const off = codexDeny(deny);
     if (off.error) return { why: off.error };
@@ -455,8 +476,7 @@ export class CodexRunner {
    * home's login and instructions (HOME_LINKS, where they exist) and this runner's sessions dir.
    */
   homeFor({ src, servers, args }) {
-    const id = createHash('sha256').update(JSON.stringify([src, args])).digest('hex').slice(0, 16);
-    const home = join(this.homesDir, id);
+    const home = join(this.homesDir, this.homeIdOf({ src, args }));
     mkdirSync(home, { recursive: true, mode: 0o700 });
     chmodSync(home, 0o700);
     const tmp = join(home, `.config.toml.${process.pid}.${hex8()}`);
@@ -475,6 +495,47 @@ export class CodexRunner {
       symlinkSync(to, at);
     }
     return home;
+  }
+
+  /** A made home's name: one per real home and deny list. */
+  homeIdOf({ src, args }) { return createHash('sha256').update(JSON.stringify([src, args])).digest('hex').slice(0, 16); }
+
+  /** The made homes' lock (homesDir/lock): a launch naming its home, and a sweep, never at once. */
+  homesLocked(f) { return withLock(this.homesDir, 'lock', f, 'the codex homes', 10_000); }
+
+  /**
+   * The made homes no live body uses, deleted (t-1924): each holds a copy of its tool servers' credentials. A home is
+   * in use while a run dir names it (its `home` file) and that run's codex is alive, or the run dir is new (a body
+   * starting). Run with every body's end (sessions.mjs, dropSession) and on the runtime's tick. A body's resume makes
+   * its home again (homeFor), and Codex resumes a thread from its rollout, in the shared sessions dir, in a home it
+   * has never seen (codex-cli 0.162.1, checked 2026-11-07). A live run dir with no `home` file (a body an older
+   * runtime started) stops the sweep: what it uses can't be told. A home with something moved aside in it (homeFor)
+   * keeps that, and loses only its config. → the names deleted.
+   */
+  sweepHomes({ now = Date.now(), graceMs = HOME_GRACE_MS } = {}) {
+    if (!existsSync(this.homesDir)) return [];
+    return this.homesLocked(() => {
+      const used = new Set();
+      for (const id of this.ids()) {
+        const dir = join(this.runsDir, id);
+        let young = false;
+        try { young = now - statSync(dir).mtimeMs < graceMs; } catch { continue; }
+        if (!young && !this.alive(id)) continue;
+        let h = '';
+        try { h = readFileSync(join(dir, 'home'), 'utf-8').trim(); } catch { /* none */ }
+        if (!HOME_ID.test(h)) return [];
+        used.add(h);
+      }
+      const gone = [];
+      for (const n of dirs(this.homesDir)) {
+        if (!HOME_ID.test(n) || used.has(n)) continue;
+        const at = join(this.homesDir, n);
+        if (dirs(at, true).some((x) => x.includes('.aside-'))) { rmSync(join(at, 'config.toml'), { force: true }); continue; }
+        rmSync(at, { recursive: true, force: true });
+        gone.push(n);
+      }
+      return gone;
+    });
   }
 
   start(o) { return this.launch(o); }
