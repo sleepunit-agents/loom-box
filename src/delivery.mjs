@@ -88,7 +88,7 @@ import { namesFiles } from './briefs.mjs';
 import { AGENT_NAME, StateError, alive, withLock } from './state.mjs';
 import { RUNS_KEPT, causeOf, detectLoop, textHash } from './loops.mjs';
 import { STUCK_AFTER_MIN, asData, taskComment, taskOf } from './stuck.mjs';
-import { codexDeny, runnerFor } from './runners.mjs';
+import { CODEX_WONT, codexDeny, runnerFor } from './runners.mjs';
 import { raiseAlert } from './alerthook.mjs';
 import { changed as changedCards } from './activity.mjs';
 import { keepKey } from './bodyhost.mjs';
@@ -191,6 +191,8 @@ const num = (v, d) => { const n = Number(v); return v !== undefined && v !== '' 
  * LOOM_RUNTIME_LOCAL_BODIES, JSON: {"agents": ["art"], "cwd": "/home/art/Art", "from": "clock", "claude":
  * "/home/art/.local/bin/claude", "args": ["--dangerously-skip-permissions"], "path": "…"}. agents and cwd are
  * required; unset or unreadable, there are none and such a wake is refused (403): the clock then runs it its old way.
+ * "codex": true lets a local body fall back to Codex when Claude's accounts are out; left out, it never does (its
+ * guards are Claude Code hooks on loom's machine, which Codex doesn't run: t-1921).
  */
 export function localBodiesOf(env) {
   let v;
@@ -200,7 +202,7 @@ export function localBodiesOf(env) {
   if (!agents.length || typeof v.cwd !== 'string' || !v.cwd.startsWith('/')) return null;
   const args = Array.isArray(v.args) && v.args.every((a) => typeof a === 'string') ? v.args : [];
   const from = typeof v.from === 'string' && PIECE.test(v.from) ? v.from : 'clock';
-  return { agents, cwd: v.cwd, from, ...(typeof v.claude === 'string' && v.claude ? { claude: v.claude } : {}), args, ...(typeof v.path === 'string' && v.path ? { path: v.path } : {}) };
+  return { agents, cwd: v.cwd, from, ...(typeof v.claude === 'string' && v.claude ? { claude: v.claude } : {}), args, ...(typeof v.path === 'string' && v.path ? { path: v.path } : {}), ...(v.codex === true ? { codex: true } : {}) };
 }
 const mismatch = (place, local) => `forbidden: ${place}'s bodies run ${local ? "on loom's machine" : 'in a house'}, and this wake's would not`;
 
@@ -1326,6 +1328,10 @@ async function execute(env, op, d, mem) {
     // A deny list Codex can't keep (a tool within a server, a built-in: runners.mjs, codexDeny) keeps this body off
     // Codex: never an unrestricted body there, and said so if nothing else has room.
     cantWhy = codexDeny(rules.deny).error ?? '';
+    // A body on loom's machine runs under the guards its owner's Claude Code hooks keep there (a poll with no
+    // deadline, a post as someone else, a standby's writes: t-1921), which Codex doesn't run. So it's never on Codex
+    // unless the owner says Codex carries the same (LOOM_RUNTIME_LOCAL_BODIES "codex": true).
+    if (!cantWhy && local && !lb.codex) cantWhy = 'a body on loom\'s machine runs only on Claude Code, whose hooks there keep its guards (LOOM_RUNTIME_LOCAL_BODIES has no "codex": true)';
     cant = cantWhy ? ['codex'] : [];
     // Or one this runtime's own Codex won't run here (runners.mjs, CodexRunner.wontRun: LOOM_RUNTIME_CODEX_PROFILE set,
     // or a config layer its made home can't replace). A house's runner can't say from here: its host refuses the start.
@@ -1333,12 +1339,21 @@ async function execute(env, op, d, mem) {
       let cx = null;
       try { cx = d.runner('codex', local); } catch { /* no codex runner: routing says so */ }
       const why = cx?.wontRun?.(rules.deny, base.cwd, bodyEnv);
-      if (why) { cant = ['codex']; cantWhy = String(why); }
+      if (why) { cant = ['codex']; cantWhy = String(why).replace(CODEX_WONT, ''); }
     }
     way = await routeOf(env, c0, op, rules, d, cant);
     const notes = quotaNotes(c0, way);
     if (way.how === 'start') {
-      r = await startBody(env, { ...base, place: c0.place, avoid: way.avoid, brief: startBrief(c0, [...notes, ...msgs], run, sends, rules) }, bodyDeps);
+      const go = (avoid) => startBody(env, { ...base, place: c0.place, avoid, brief: startBrief(c0, [...notes, ...msgs], run, sends, rules) }, bodyDeps);
+      try { r = await go(way.avoid); } catch (e) {
+        // A Codex that won't run this body where it would run (a house's: only its host can tell, at the start;
+        // runners.mjs, CODEX_WONT): started again off Codex now, never a failed start (t-1924).
+        if (cant.includes('codex') || !CODEX_WONT.test(String(e?.message ?? ''))) throw e;
+        cant = ['codex'];
+        cantWhy = String(e.message).replace(CODEX_WONT, '');
+        d.warn(`${op.cv}: ${String(e.message).slice(0, 200)}; starting it off Codex`);
+        r = await go([...new Set([...(way.avoid ?? []), 'codex'])]);
+      }
     } else {
       const pack = JSON.parse(d.sealer.open(readFileSync(way.file)).toString('utf-8'));
       if (pack?.v !== 1 || !Array.isArray(pack.files)) throw new DeliveryError('its slot isn\'t one this runtime wrote');
@@ -1812,6 +1827,9 @@ export async function tick(env, o = {}, only, mem = new Map()) {
     }
   });
   for (const op of ops) await execute(env, op, d, new Map());
+  // Codex homes no live local body uses (runners.mjs, sweepHomes, t-1924): a body's end sweeps too; this catches what
+  // an end missed (a runtime that stopped mid-way, a home left by an older one). A house's are its host's.
+  try { d.runner('codex', true).sweepHomes?.(); } catch { /* no local Codex runner, or its homes are busy: the next tick */ }
   for (const c of listConvs(env)) if (c.presence) { try { await presencePass(env, c, d, now); } catch (e) { d.warn(`presence for ${c.conversation}: ${e.message}`); } }
   for (const c of listConvs(env)) if (c.venue === COMMS_VENUE && c.body && !c.starting) { try { await activityPass(env, c, d); } catch (e) { d.warn(`activity for ${c.conversation}: ${e.message}`); } }
   for (const c of listConvs(env)) if (c.queue?.length) await drain(env, c.conversation, d);

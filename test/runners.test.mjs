@@ -12,6 +12,7 @@ import { staticAccounts } from '../src/accounts.mjs';
 import { endBody, feedBody, forgetBody, listBodies, readBody, resumeBody, startBody } from '../src/bodies.mjs';
 import { setModels } from '../src/models.mjs';
 import { ClaudeRunner, CodexRunner, RunnerError, codexLayers, runnerFor } from '../src/runners.mjs';
+import { dropSession, packSession, restoreFiles } from '../src/sessions.mjs';
 import { parse as parseToml } from '../src/vendor/smol-toml/index.js';
 import { scratch } from './scratch.mjs';
 
@@ -197,6 +198,74 @@ test('Codex: a body runs in a home the runner makes, whose config has only the s
   assert.throws(() => mk({ profile: 'work' }).start({ brief: 'x', model: 'm', cwd: join(h.D, 'repo'), env: h.env }), /LOOM_RUNTIME_CODEX_PROFILE is set \(work\)/);
   assert.match(mk({ profile: 'work' }).wontRun([], join(h.D, 'repo'), h.env), /LOOM_RUNTIME_CODEX_PROFILE/);
   assert.equal(h.argv().length, 5);
+});
+
+test('Codex: a made home goes once no live body uses it: at a body\'s end, and in a sweep; never one in use (t-1924)', async () => {
+  const h = harness();
+  const real = realCodexHome(h.D);
+  const homes = join(h.D, 'codex-homes');
+  const r = new CodexRunner({ codex: join(here, 'fake-codex.mjs'), runsDir: join(h.D, 'runs'), codexHome: real, sessionsDir: join(h.D, 'sessions'), systemDir: join(h.D, 'etc-codex') });
+  mkdirSync(join(h.D, 'repo', '.git'), { recursive: true });
+  const cwd = join(h.D, 'repo');
+  const homeIds = () => readdirSync(homes).filter((n) => /^[0-9a-f]{16}$/.test(n)).sort();
+  // Two bodies with the same deny list share a home; a third, with none, has its own.
+  const a = r.start({ brief: 'x', model: 'm', cwd, env: { ...h.env, FAKE_ROLLOUT: '1' }, deny: ['mcp__handoff'] });
+  const b = r.start({ brief: 'x', model: 'm', cwd, env: h.env, deny: ['mcp__handoff'] });
+  const c = r.start({ brief: 'x', model: 'm', cwd, env: h.env });
+  await until(() => h.argv().length === 3);
+  const [ha, hb, hc] = h.argv().map((x) => x.home);
+  assert.equal(ha, hb);
+  assert.notEqual(ha, hc);
+  assert.equal(statSync(ha).mode & 0o777, 0o700);
+  assert.equal(readFileSync(join(h.D, 'runs', a.id, 'home'), 'utf-8').trim(), ha.split('/').pop(), 'its run dir names its home');
+  // A sweep while all three live: nothing goes.
+  assert.deepEqual(r.sweepHomes(), []);
+  assert.equal(homeIds().length, 2);
+  // a ends, packed into a slot: its home stays while b uses it. Then b ends with nothing kept.
+  await until(() => r.slotOf(a));
+  const slot = r.slotOf(a);
+  r.end(a);
+  const files = packSession(r, slot, a);
+  dropSession(r, slot, a);
+  assert.ok(existsSync(ha), 'b still uses it');
+  r.end(b);
+  await until(() => !r.alive(b.id));
+  dropSession(r, r.slotOf(b), b);
+  assert.equal(existsSync(ha), false, 'no live body uses it: gone, with its copied credentials');
+  assert.ok(existsSync(join(real, 'auth.json')), 'the login it linked is the real home\'s, untouched');
+  assert.ok(existsSync(hc), 'c still runs in its own');
+  // The slot resumes into a home made again, and its end leaves none.
+  restoreFiles(r, files);
+  const a2 = r.resume(slot, { brief: 'more', model: 'm', cwd, env: h.env, deny: ['mcp__handoff'] });
+  await until(() => h.argv().length === 4);
+  assert.equal(h.argv()[3].home, ha, 'the same home, made again');
+  r.end(a2);
+  await until(() => !r.alive(a2.id));
+  dropSession(r, slot, a2);
+  assert.equal(existsSync(ha), false, 'a slot\'s body gone: no home left');
+  // A dead body whose run dir is still here (not yet retired) holds no home, once it's past its start.
+  r.end(c);
+  await until(() => !r.alive(c.id));
+  assert.deepEqual(r.sweepHomes(), [], 'its run dir is new: a body may be starting there');
+  assert.deepEqual(r.sweepHomes({ now: Date.now() + 11 * 60_000 }), [hc.split('/').pop()]);
+  assert.deepEqual(homeIds(), []);
+  // A live run dir that doesn't name its home (an older runtime's body): nothing is swept.
+  const d = r.start({ brief: 'x', model: 'm', cwd, env: h.env });
+  await until(() => h.argv().length === 5);
+  rmSync(join(h.D, 'runs', d.id, 'home'));
+  mkdirSync(join(homes, '0123456789abcdef'));
+  assert.deepEqual(r.sweepHomes({ now: Date.now() + 11 * 60_000 }), []);
+  writeFileSync(join(h.D, 'runs', d.id, 'home'), `${h.argv()[4].home.split('/').pop()}\n`);
+  assert.deepEqual(r.sweepHomes({ now: Date.now() + 11 * 60_000 }), ['0123456789abcdef'], 'the live one\'s stays');
+  assert.ok(existsSync(h.argv()[4].home));
+  // A home with something moved aside in it (homeFor) keeps that, and loses its config (the credentials' copy).
+  mkdirSync(join(homes, 'fedcba9876543210', 'sessions.aside-1-ab', 'kept'), { recursive: true });
+  writeFileSync(join(homes, 'fedcba9876543210', 'config.toml'), 'x');
+  r.sweepHomes({ now: Date.now() + 11 * 60_000 });
+  assert.equal(existsSync(join(homes, 'fedcba9876543210', 'config.toml')), false);
+  assert.ok(existsSync(join(homes, 'fedcba9876543210', 'sessions.aside-1-ab', 'kept')));
+  writeFileSync(join(h.D, 'finish'), '');
+  r.end(d);
 });
 
 test('Codex: a config layer no CODEX_HOME replaces (a project\'s .codex, /etc/codex) refuses a body with a deny list (t-1916)', () => {
