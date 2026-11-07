@@ -504,3 +504,30 @@ test('`models resolve --json --suppose-out` prints JSON (the flag never shadows 
     assert.ok(JSON.parse(r.stdout).model, r.stdout);
   }
 });
+
+test('a parked home session that was told a person\'s standing authority goes home only under the same rules (t-1745)', async () => {
+  const w = twoHarnesses();
+  const gates = { people: { phil: { name: 'Phil', tier: 2, grant: 'May have fleet setup run on his ask.' } } };
+  Object.assign(w.o, {
+    policy: () => ({ deny: ['mcp__handoff'] }), gates: () => gates, card: () => null,
+    venues: () => ({ slack: { kind: 'live', send: [process.execPath, join(dirname(fileURLToPath(import.meta.url)), 'fake-send.mjs')] } }),
+    adapter: async (argv, c, args) => (args[0] === '--describe' ? { ok: true, venue: 'DPHIL', members: ['phil'] } : { ok: true }),
+  });
+  const phil = (text) => w.msg('dm:UPHIL', text, { from: { kind: 'person', slug: 'phil' } });
+  await deliver(w.env, phil('first'), w.o);
+  const conv = () => w.conv('dm:UPHIL');
+  assert.equal(conv().bodyRules.grantFor, 'phil');
+  w.runner.finish(conv().body);
+  w.max.usage = { '7d': 0.99, reset_7d: Math.floor(w.clock.now().getTime() / 1000) + 3600 };
+  await deliver(w.env, phil('second'), w.o);
+  assert.match(conv().body, /^codex:/);
+  assert.equal(conv().home.rules.grantFor, 'phil', 'the parked home holds phil\'s authority');
+  w.codex.finish(conv().body);
+  w.clock.advance(3601_000);
+  // Room on Claude again, but what comes is a relay, not phil: never the session that held his authority.
+  await deliver(w.env, w.msg('dm:UPHIL', 'a relay for phil', { from: { kind: 'agent', id: 'mark' } }), w.o);
+  const last = w.starts().at(-1);
+  assert.notEqual(last[0] === 'resume' && last[2] === readBody(w.env, conv().body)?.slot?.session, true);
+  assert.equal(conv().runLog.at(-1).home, undefined, 'not resumed from home');
+  assert.equal(plain(last[0] === 'start' ? last[2] : last[4]).includes('Standing authority'), false);
+});

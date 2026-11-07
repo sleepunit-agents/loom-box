@@ -96,6 +96,8 @@
 //                      the relay MCP tool core offers an agent's session: {text, isError?}
 //   loom runtime relay --to b --say <text> [--why w] [--reply-to r-…] [--from discord:#x] [--approval a-…]   from a house
 //   loom runtime relays [--thread r-…]                  from a house: its agent's relays, sent and received
+// A body's own place (gates-api.mjs, placeOf; t-1745): proved by its run key and session, in a house or on loom's machine
+//   loom runtime place                                   {conversation, agent, venue, place, label?, members, membersAt?, principal}
 // The now board (nowboard.mjs): a bridge's POST /api/runtime/now/snapshot | now/event, and from a house:
 //   loom runtime now talking                            its agent's bridges: talking, waiting, how fresh
 // For loom (the piece contract):
@@ -555,6 +557,17 @@ async function main(argv, env) {
       process.stdout.write(`${traceText(t)}\n`);
       return;
     }
+    case 'place': {
+      // Where this body is (gates-api.mjs, placeOf): its own conversation, proved as a relay or `send` proves it. In a
+      // house, through the piece API; on loom's machine (a local body), here.
+      const mine = ownConversation(env);
+      if (!mine) throw new Fail('loom runtime place: this isn\'t a body holding a conversation (no LOOM_BODY_CONVERSATION)', 2);
+      if (env.LOOM_URL && env.LOOM_TOKEN_FILE) return runAnswer(await pieceCall(env, flag(rest, '--piece'))('run', { argv: ['place', '--conversation', mine], ...bodyProof(env, mine) }));
+      const { placeOf } = await import('./gates-api.mjs');
+      const r = await placeOf(env, mine, bodyProof(env, mine));
+      if (!r.ok) throw new Fail(r.reason);
+      return out(r.place);
+    }
     case 'relays':
     case 'relay': {
       if (cmd === 'relays' || rest[0] !== 'tool') {
@@ -564,21 +577,14 @@ async function main(argv, env) {
         let argv = [cmd, ...rest];
         let proof = {};
         if (cmd === 'relay') {
-          const mine = /^cv-[0-9a-f]{12}$/.test(env.LOOM_BODY_CONVERSATION ?? '') ? env.LOOM_BODY_CONVERSATION : undefined;
+          const mine = ownConversation(env);
           const named = argv.includes('--conversation') ? argv[argv.indexOf('--conversation') + 1] : undefined;
           // Only this body's own conversation: naming another is refused here, and proved nowhere (the runtime checks too).
           if (mine && named !== undefined && named !== mine) throw new Fail(`relay: --conversation is this body's own (${mine}); a relay's answer comes back only to the conversation that asked`, 2);
           if (mine && named === undefined) argv = [...argv, '--conversation', mine];
-          const key = mine ? bodyKeyFor(env, mine) : undefined;
-          const session = env.CLAUDE_CODE_SESSION_ID || env.CODEX_THREAD_ID || undefined;
-          proof = { ...(key ? { key } : {}), ...(key && session ? { session } : {}) };
+          proof = mine ? bodyProof(env, mine) : {};
         }
-        const r = await pieceCall(env)('run', { argv, ...proof });
-        if (r.stdout) process.stdout.write(r.stdout);
-        if (r.stderr) process.stderr.write(r.stderr);
-        if (!Number.isInteger(r.exit) && r.ok !== false) throw new Fail('runtime did not return a command outcome');
-        if (r.exit || r.ok === false) throw new Fail(r.error ?? r.reason ?? '', r.exit || 1);
-        return;
+        return runAnswer(await pieceCall(env)('run', { argv, ...proof }));
       }
       const { relayTool } = await import('./relay.mjs');
       const r = await relayTool(env, rest.slice(1), await readStdin());
@@ -869,3 +875,23 @@ if (isMain) {
 }
 
 export { main };
+
+/** This body's own conversation (LOOM_BODY_CONVERSATION), or undefined. */
+function ownConversation(env) {
+  return /^cv-[0-9a-f]{12}$/.test(env.LOOM_BODY_CONVERSATION ?? '') ? env.LOOM_BODY_CONVERSATION : undefined;
+}
+
+/** A body's proof that it holds `cv` in its current run (as `send` takes it): its run's key and harness session. */
+function bodyProof(env, cv) {
+  const key = bodyKeyFor(env, cv);
+  const session = env.CLAUDE_CODE_SESSION_ID || env.CODEX_THREAD_ID || undefined;
+  return { ...(key ? { key } : {}), ...(key && session ? { session } : {}) };
+}
+
+/** A piece API `run` answer, as this command's own output and exit. */
+function runAnswer(r) {
+  if (r.stdout) process.stdout.write(r.stdout);
+  if (r.stderr) process.stderr.write(r.stderr);
+  if (!Number.isInteger(r.exit) && r.ok !== false) throw new Fail('runtime did not return a command outcome');
+  if (r.exit || r.ok === false) throw new Fail(r.error ?? r.reason ?? '', r.exit || 1);
+}

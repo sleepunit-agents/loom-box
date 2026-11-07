@@ -86,7 +86,7 @@ import { venueKind as kindOf, resolveFor } from './models.mjs';
 import { pieceName, setting } from './piece.mjs';
 import { dropSession, packSession, restoreFiles } from './sessions.mjs';
 import { ageSealer } from './sealed.mjs';
-import { RulesError, policyOf, rulesFor, tierOf } from './policy.mjs';
+import { RulesError, gatesWords, policyOf, rulesFor, sameRules, tierOf } from './policy.mjs';
 import { gatesOf } from './gates.mjs';
 import { loomStore } from './store.mjs';
 import { namesFiles } from './briefs.mjs';
@@ -980,6 +980,10 @@ function plan(env, cv, d, mem) {
     // A guest's message never reaches a body that isn't a guest venue's (its tools aren't narrowed, its brief has no
     // floor): that body is ended, its session not kept, and a body under a guest venue's rules starts for it.
     if (!c.bodyRules?.guest && c.queue.some((x) => x.tier === 1)) return begin({ type: 'reseat', body: c.body });
+    // Nor a message its rules weren't made for (t-1745, t-1943): a body told a person's standing authority hears no one
+    // else (another person, a relay, the schedule, someone unnamed), and a body told a place's people hears no person
+    // who isn't one of them. It's reseated, and the fresh body's rules are made for everyone it will hear.
+    if (needsReseat(c) || gatesMoved(c, d)) return begin({ type: 'reseat', body: c.body });
     // Mid-turn: into its inbox, where its harness hears it (shuttle's hand_over).
     const rec = readBody(env, c.body);
     const runner = d.runner(rec.harness, rec.local);
@@ -1051,6 +1055,30 @@ export async function drain(env, cv, d = depsOf(env), mem = new Map()) {
 }
 
 // ─── Rules, presence and the stop word ──────────────────────────────────────
+
+/** Whether a working body's rules don't cover what's queued for it (rulesFor: grantFor, members). A post-failure note
+ * is the runtime's own, never a sender's, and a relay reply that waits for the turn to end isn't fed to it: neither
+ * counts. */
+export function needsReseat(c) {
+  const r = c.bodyRules ?? {};
+  const fed = (c.queue ?? []).filter((x) => !isNote(x) && !x.untilIdle);
+  if (r.grantFor && fed.some((x) => x.from?.kind !== 'person' || x.from.slug !== r.grantFor)) return true;
+  if (Array.isArray(r.members) && r.members.length && fed.some((x) => x.from?.kind === 'person' && !r.members.includes(x.from.slug))) return true;
+  return false;
+}
+
+/**
+ * Whether the gates' words about the people a working body was told of (tier, standing authority, restriction) have
+ * changed since its rules were made (policy.mjs, gatesWords): then it's reseated, never fed under the old words.
+ * Gates that can't be read count as changed (the fresh start then fails closed).
+ */
+function gatesMoved(c, d) {
+  const r = c.bodyRules ?? {};
+  if (!r.words || !Array.isArray(r.persons)) return false;
+  let gates;
+  try { gates = d.gates(c.agent); } catch { return true; }
+  return gatesWords(gates, r.persons, r.notes ?? []) !== r.words;
+}
 
 /** What policy.mjs's rulesFor reads, for one conversation in its venue. */
 const rulesDeps = (d, v, c) => ({
@@ -1374,10 +1402,12 @@ async function execute(env, op, d, mem) {
     const v0 = await venueOf(d, c0.venue);
     const sends = posts(v0) ? 'post' : recordsOnly(v0) ? 'record' : null;
     // Its rules (policy.mjs): what it's told and what it may use. Any that can't be had is no body (fail closed).
-    rules = await rulesFor(c0, msgs.filter((x) => !isNote(x)), rulesDeps(d, v0, c0), { platform: posts(v0), core: coreAdapted(v0) });
-    if (op.type === 'resume' && (op.slot?.rules?.guest ?? false) !== rules.guest) {
+    rules = await rulesFor(c0, msgs.filter((x) => !isNote(x)), rulesDeps(d, v0, c0), { platform: posts(v0), core: coreAdapted(v0), principal: principalOf(env, c0), ownerSpoke: c0.actsFor?.owner === true });
+    const was = op.slot?.rules ?? {};
+    if (op.type === 'resume' && !sameRules(was, rules)) {
       // A session is resumed only under the rules it began with: a guest venue's never as anyone else's, nor the other
-      // way. Its slot goes, and its messages go back for a fresh body, in this same drain.
+      // way; nor one that heard a place's people, or a person's standing authority, under any others (t-1745). Its
+      // slot goes, and its messages go back for a fresh body, in this same drain.
       locked(env, () => {
         rmSync(slotFile(env, op.cv), { force: true });
         const c = loadConv(env, op.cv);
@@ -1459,7 +1489,7 @@ async function execute(env, op, d, mem) {
       // A local body speaks with its run's key as a house's body does: from the keys dir (bodyhost.mjs, keyFile), as
       // `claude --bg` gives every session its daemon's environment, not this launch's (t-1830).
       if (local) keepKey(env, op.cv, runKey);
-      c.bodyRules = { guest: rules.guest, key: rules.key };
+      c.bodyRules = { guest: rules.guest, key: rules.key, ...(rules.members?.length ? { members: rules.members, membersAt: new Date(now()).toISOString() } : {}), ...(rules.grantFor ? { grantFor: rules.grantFor } : {}), ...(rules.words ? { words: rules.words, persons: rules.persons, notes: rules.notes ?? [] } : {}) };
       ack(c, op.msgs);
       delete c.retryAt; delete c.startFails; delete c.retryReason; delete c.startStatus;
       c.sendKey = keyHash(runKey).toString('hex');
@@ -1581,7 +1611,7 @@ async function routeOf(env, c0, op, rules, d, cant = []) {
   const now = d.now().getTime();
   const avoid = [...new Set([...(c0.quota?.from ? [c0.quota.from] : []), ...cant])];
   const home = c0.home && Date.parse(c0.home.until) > now && existsSync(homeFile(env, op.cv)) ? c0.home : null;
-  if (home && (home.rules?.guest ?? false) === rules.guest && !avoid.includes(home.harness)
+  if (home && sameRules(home.rules ?? {}, rules) && !avoid.includes(home.harness)
     && !(Number.isFinite(c0.fallback?.until) && now < c0.fallback.until * 1000) && await roomOn(env, c0, home.harness, d)) {
     return { how: 'resume', file: homeFile(env, op.cv), home: true };
   }
