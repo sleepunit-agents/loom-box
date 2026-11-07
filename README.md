@@ -266,6 +266,7 @@ Anything addressed to an agent arrives through core's `deliver`, which runs this
 - **Once only:** each turn carries core's idempotency key, `<source>:<id>` (loom#426). A retry after a lost answer gets the same turn back, and a key that belongs to another turn is refused. The same `(source, id)` arriving with a different message is refused (409), and one still being made answers 503 with `retryAfter`.
 - **A body that can't start is the runtime's to retry.** The turn stands and the source is answered `queued`, saying why. The runtime tries again on its tick, after 1, 4 and 10 minutes (`LOOM_RUNTIME_RETRY_S`). If the last try fails too, it records a `failed` note on the conversation (an agent `note` turn, outcome `failed`, the reason as its audit text) and puts a notice on its page for the owner ("Art's wake lane:knowledge couldn't start a body: …"). A source never polls. A body that started and then died is retired as before, not started again: it may have done its work.
 - **Capacity** counts busy bodies (`LOOM_RUNTIME_BUSY_LIMIT`, 5 per agent). Over it, a new conversation takes the least recently active idle body's place. A body idle for `LOOM_RUNTIME_WARM_IDLE_S` (600) ends, and so does a house with no body.
+- **Startup status in Comms:** a body-host timeout can happen after the delivery response already said “starting.” The runtime sends an asynchronous `comms/adapter` status (`start-retry` or `start-failed`) with the stable failed-start run, attempt number, message IDs, bounded reason and retry time. The latest notification waits durably through transport errors; a successful start cancels unsent failure status. Older cores that reject the new status with a 4xx are not retried indefinitely. Core owns deduplication, clearing the busy indicator and drawing the retry/failure state.
 - **Loops, not caps** (`src/loops.mjs`, t-1763). Nothing limits how many bodies a conversation starts, or how fast: a busy lane, two agents working something through, a burst of wakes all go. What's caught is a crash loop, from each run's outcome (a run is one body started or resumed; the last 12 are kept on its conversation, with hashes of what it posted, never the words). The patterns are: 4 runs in a row that failed, however far apart (it couldn't start, with a delivery's own retries counted as one run; its harness failed the turn; its post was refused; or no reply and no tool work, as the harness reports it), 4 runs in a row, none for a person and each within 2 minutes of the last, that posted the same words or had the same post refused, two agents relaying near-identical words back and forth more than 4 round trips in 30 minutes, and more than 4 very short runs in a row (under 90 s), each started by what the last one left (a wake it set: not a person's message or another agent's) within 90 s of its end, and saying nothing. A run for a person's message never counts toward repeats or churn. Before its next body starts, such a conversation is **paused**: whatever comes is recorded and queued, and a note turn (outcome `deferred`, the reason as its audit text) goes on the conversation. The owner gets one ask, "Looks like a loop in Art's slack:lane:knowledge: 4 runs in a row failed with '…'. Paused.", with **Resume** (what waited starts now) and **Dismiss** (what waited is dropped, and its next message starts it fresh). Either way the check starts over. From a shell: `loom runtime deliver resume|dismiss <cv>`; `deliver list` shows what's paused.
 - **Stuck on a permission prompt** (t-1858, the clock's t-1854 for what the runtime starts). A body on loom's machine (a local wake's, an alert triage) has nobody at its terminal, so one that stops on a permission prompt would wait forever. The tick asks its harness (`claude agents --json`, at most every 30 s: status `waiting`, `waitingFor` a permission prompt); one that has waited `LOOM_RUNTIME_STUCK_AFTER` minutes (default 10; `0` or `off`: never), counted from when the tick first saw it waiting, is stopped with its session kept in its slot, as an eviction (the conversation's next message resumes it). Its run is a failure on the conversation's record (so a run of them pauses it as a loop), a `failed` note turn goes on the conversation, the owner gets a notice and an alert (`runtime-stuck`: the tool and the session, never the command), and the task its label names (a `t-NNN`) a comment with the tool and a redacted 120-character excerpt of the call, quoted as data (`LOOM_RUNTIME_TASK_COMMENT`, a JSON argv with `{task}` and `{text}`; unset, `taskstore comment {task} {text}` in the local bodies' folder when `taskstore` is on their PATH; `off`, never). A house's body isn't looked at: its runner can't say.
 - **Continuity:** a body that ends leaves a slot. Its session files are sent back by its host, sealed with age to the runtime's own key (`<LOOM_BOX_DATA>/delivery/runtime.key`), and kept for its venue's window (`LOOM_RUNTIME_CONTINUITY`, at most 14 days). A resume puts the files back in the house before resuming. When the slot goes, the conversation resumes from its digests.
@@ -305,14 +306,36 @@ its own list, as before; there are no relay pairs then, so every relay asks the 
 
 **Relay** (agent-runtime.md, "Agent-to-agent relay"; `src/relay.mjs`): the runtime offers core an MCP tool, `relay`
 (`mcp_tools` in its loom block), so an agent's session has it only while the runtime is installed. Core runs
-`loom-runtime relay tool --agent <a>` with the arguments on stdin (`{to, say, why?, reply_to?, from?, approval?}`). A
+`loom-runtime relay tool --agent <a>` with the arguments on stdin (`{to, say, why?, reply_to?, conversation?, from?, approval?}`). A
 paired relay is delivered at once on the runtime's `relay` venue, `from: {kind: agent}`, to the other agent's
 conversation with this one (place: the sender), so its body starts, resumes or is fed like any delivery. An unpaired
 one goes only with an approval the owner allowed (`approvals request --kind relay --target art->mark`, spent here with
 `loom approvals use … --as <the calling body>`), and is refused when no approvals piece is installed. The same words to
 the same agent within the hour are refused, an answer is a relay back with `reply_to`, and a thread of 8 or more in a
 day is a heads-up on loom's Inbox (`LOOM_RUNTIME_RELAY_HEADS_UP`). From a house, `loom runtime relay --to <b> --say
-<text>` and `loom runtime relays` do the same over the piece API.
+<text> --conversation <cv>` and `loom runtime relays --thread <r-id>` do the same over the piece API.
+
+Include your current `conversation` in a request. The runtime checks it belongs to your agent and, for a house
+caller, is held by a body in that house; it records the conversation and current run, never the message text.
+Core names a caller's agent and house, never its conversation, so a named conversation is a claim: it stands when the
+caller proves it holds that conversation's current run (its `LOOM_BODY_KEY` and harness session, as `send` takes
+them, and only while that run is at work and its session is known; `loom runtime relay` from a house body's shell, where
+`LOOM_BODY_CONVERSATION` is set, names it, refuses any other, and sends both in the call's body, never argv; the MCP
+tool never takes proof), or, unproven (the MCP tool), only while that conversation is at work and no other conversation of the
+agent is (any such body could be the one claiming it). So a guest
+venue's body, or one working for someone else, can't make an answer land in the owner's own thread (t-1943), nor
+the owner's thread's body one in a guest venue;
+otherwise the answer goes to the relay conversation, and the relay's answer says why. A relay conversation is never
+a return address. The origin's run is recorded for the trace, not checked: an answer that arrives after that run ended
+still goes to the conversation (it waits, `untilIdle`, until no turn is under way, then resumes its session), within
+6 hours of the ask (`RETURN_MS`); later, or when the runtime no longer keeps the conversation, it falls back. A peer ping-pong into a thread pauses that thread, the owner's
+own messages there included, until the owner resumes it.
+A reply with `reply_to` goes back to that recorded conversation through normal delivery: a working body finishes its
+current turn before the answer is delivered, or its saved session resumes. The peer cannot replace this destination. When no conversation is specified, only
+a single active conversation in the caller's house can be inferred; an ambiguous house uses the relay conversation
+instead. Legacy relays and origins no longer kept by the runtime also use that fallback. Relay framing still names
+the peer and carries none of the owner's authority. `from` accepts `loom:cv-…`, `conversation:cv-…` or a bare `cv-…` as aliases for
+an explicit conversation; Discord/Slack location strings remain descriptive hints only.
 
 
 **A reply's trace** (loom comms.md, "Tracing a reply"; `src/trace.mjs`, t-1895): what happened to one message, from in

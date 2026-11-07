@@ -555,8 +555,31 @@ async function main(argv, env) {
       process.stdout.write(`${traceText(t)}\n`);
       return;
     }
+    case 'relays':
     case 'relay': {
-      if (rest[0] !== 'tool') throw new Fail('loom runtime relay is a body\'s, from its house (its token): loom runtime relay --to <agent> --say <text>; the tool core runs is `relay tool`', 2);
+      if (cmd === 'relays' || rest[0] !== 'tool') {
+        if (!env.LOOM_URL || !env.LOOM_TOKEN_FILE) throw new Fail('loom runtime relay and relays are a body\'s, from its house (its token: LOOM_URL and LOOM_TOKEN_FILE): loom runtime relay --to <agent> --say <text>; the tool core runs is `relay tool`', 2);
+        // A relay from a body names its own conversation (LOOM_BODY_CONVERSATION, unless it names one) and proves it
+        // holds it, as `send` does: its run's key and harness session, in the body of the call, never in argv.
+        let argv = [cmd, ...rest];
+        let proof = {};
+        if (cmd === 'relay') {
+          const mine = /^cv-[0-9a-f]{12}$/.test(env.LOOM_BODY_CONVERSATION ?? '') ? env.LOOM_BODY_CONVERSATION : undefined;
+          const named = argv.includes('--conversation') ? argv[argv.indexOf('--conversation') + 1] : undefined;
+          // Only this body's own conversation: naming another is refused here, and proved nowhere (the runtime checks too).
+          if (mine && named !== undefined && named !== mine) throw new Fail(`relay: --conversation is this body's own (${mine}); a relay's answer comes back only to the conversation that asked`, 2);
+          if (mine && named === undefined) argv = [...argv, '--conversation', mine];
+          const key = mine ? bodyKeyFor(env, mine) : undefined;
+          const session = env.CLAUDE_CODE_SESSION_ID || env.CODEX_THREAD_ID || undefined;
+          proof = { ...(key ? { key } : {}), ...(key && session ? { session } : {}) };
+        }
+        const r = await pieceCall(env)('run', { argv, ...proof });
+        if (r.stdout) process.stdout.write(r.stdout);
+        if (r.stderr) process.stderr.write(r.stderr);
+        if (!Number.isInteger(r.exit) && r.ok !== false) throw new Fail('runtime did not return a command outcome');
+        if (r.exit || r.ok === false) throw new Fail(r.error ?? r.reason ?? '', r.exit || 1);
+        return;
+      }
       const { relayTool } = await import('./relay.mjs');
       const r = await relayTool(env, rest.slice(1), await readStdin());
       process.stdout.write(`${JSON.stringify(r.answer)}\n`);

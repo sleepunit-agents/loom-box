@@ -491,16 +491,16 @@ export function agentReports(s, nowMs = Date.now(), busy = {}, convs = []) {
 }
 
 /**
- * A delivered body at work, as its card says it (loom's `doing`), with its conversation's id, so core can say which
- * one and link it. A Comms thread's title is its member's alone (loom docs/specs/comms.md, rule 4): never here; core
- * puts it in, and only for that member.
+ * A delivered body at work, as its card says it (loom's `doing`): its venue, its kind and its conversation's id only.
+ * A conversation's label can carry its subject (a Slack channel or DM, a person, a wake's note), and a manifest may
+ * reach viewers who aren't allowed to see that conversation: core puts the label in, and the link, only for a viewer
+ * who may see it (loom src/ui/handler.ts atWorkFor), as it does a Comms thread's title (comms.md, rule 4).
  */
 export function convDoing(c) {
   const since = Number.isFinite(c.since) ? { since: new Date(c.since).toISOString() } : {};
-  const label = typeof c.label === 'string' && c.label.trim() ? short(c.label.trim(), 80) : '';
   if (c.venue === COMMS_VENUE) return { text: 'In a Comms thread', kind: 'talk', where: 'Comms', conversation: c.conversation, ...since };
-  if (c.kind === 'scheduled') return { text: label || 'A wake', kind: 'lane', where: 'Wake', conversation: c.conversation, ...since };
-  return { text: label ? `Talking in ${label}` : `A conversation on ${cap(c.venue)}`, kind: 'talk', where: cap(c.venue), conversation: c.conversation, ...since };
+  if (c.kind === 'scheduled') return { text: 'On a wake', kind: 'lane', conversation: c.conversation, ...since };
+  return { text: `Working · ${cap(c.venue)}`, kind: 'talk', conversation: c.conversation, ...since };
 }
 
 /** "12 days", "5 hours", "40 minutes": how long, for a box's uptime. */

@@ -61,7 +61,7 @@ function runOf(env, r) {
   return {
     run: r.run, cause: r.cause, ...(r.by ? { by: r.by } : {}), started: iso(r.at), ...(r.body ? { body: r.body, how: r.how, ...whereOf(env, r.body) } : {}),
     // A harness switch, a return to the home session, a refused turn's retry (delivery.mjs, t-1907).
-    ...(r.switched ? { switched: r.switched } : {}), ...(r.home ? { home: true } : {}), ...(r.retryOf ? { retryOf: r.retryOf } : {}),
+    ...(r.switched ? { switched: r.switched } : {}), ...(Array.isArray(r.relays) && r.relays.length ? { relays: r.relays } : {}), ...(r.home ? { home: true } : {}), ...(r.retryOf ? { retryOf: r.retryOf } : {}),
     ended: iso(r.end), ...(r.turn ? { turn: r.turn } : {}), ...(r.fail ? { fail: r.fail } : {}),
     sent: r.sent ?? 0, ...(r.refused ? { refused: r.refused, refusal: r.refusal } : {}),
     posts: (r.posts ?? []).map((p) => ({ ok: !!p.ok, ...(p.reason ? { reason: p.reason } : {}) })),

@@ -1460,7 +1460,7 @@ export function api(env, effects, { caller, path, body }) {
     // The runtime's remote CLI for an agent's bodies (loom's `run` path): its own agent's gates, and proposing a person.
     if (path === 'run') {
       if (caller.kind !== 'agent') fail('run is a body\'s, as its own agent (the owner uses `loom runtime` at loom\'s machine)', 403);
-      return import('./gates-api.mjs').then(async (m) => ({ status: 200, body: await m.runFor(env, caller, b.argv) })).catch(apiError);
+      return import('./gates-api.mjs').then(async (m) => ({ status: 200, body: await m.runFor(env, caller, b.argv, undefined, undefined, undefined, { key: b.key, session: b.session }) })).catch(apiError);
     }
     if (path === 'up') return { status: 200, body: up(env, effects, caller, b) };
     if (path === 'down') return { status: 200, body: down(env, effects, caller, b) };

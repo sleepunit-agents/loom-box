@@ -153,7 +153,7 @@
     },
     "mcp_tools": {
       "relay": {
-        "description": "Ask another agent in this household something: it reaches a body of theirs with your words, framed as a peer's request (none of the owner's authority). Their answer comes back the same way, as a relay to you. Without asking only between agents the household pairs (the runtime's permissions); for any other, ask the owner first (approvals request --kind relay --target <you>-><them>) and pass the allowed approval. The same words twice within the hour are refused. Answer a relay with reply_to set to its id.",
+        "description": "Ask another agent in this household something: it reaches a body of theirs with your words, framed as a peer's request (none of the owner's authority). Include conversation to return answers to your requesting session. Without asking only between agents the household pairs (the runtime's permissions); for any other, ask the owner first (approvals request --kind relay --target <you>-><them>) and pass the allowed approval. The same words twice within the hour are refused. Answer a relay with reply_to set to its id.",
         "input_schema": {
           "type": "object",
           "properties": {
@@ -180,6 +180,10 @@
             "approval": {
               "type": "string",
               "description": "An approval id (a-…) the owner allowed, for a relay the household doesn't pair"
+            },
+            "conversation": {
+              "type": "string",
+              "description": "Your current conversation (cv-…): replies resume it, or its saved session, as peer messages"
             }
           },
           "required": [
