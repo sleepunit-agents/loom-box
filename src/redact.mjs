@@ -282,11 +282,11 @@ export function fileName(p) {
  * characters (U+206A–F, U+E0000–FF), variation selectors, the soft hyphen, the byte-order mark, specials (U+FFF0–B)
  * and a lone surrogate. `UNPRINTABLE_ONE` is the same, unflagged, for a test (`.test` on a /g regex keeps state between calls).
  */
-export const UNPRINTABLE = /(?:[\p{Cc}\p{Cf}\p{Co}\p{Cn}\p{Cs}\p{Zl}\p{Zp}\u034f\u115f\u1160\u17b4\u17b5\u180b-\u180f\u2800\u3164\ufe00-\ufe0f\uffa0]|\p{M}{3,})+/gu;
+export const UNPRINTABLE = /(?:[\p{Cc}\p{Cf}\p{Co}\p{Cn}\p{Cs}\p{Zl}\p{Zp}\u034f\u115f\u1160\u17b4\u17b5\u180b-\u180f\u2800\u3164\ufe00-\ufe0f\uffa0\u{E0100}-\u{E01EF}]|\p{M}{3,})+/gu;
 export const UNPRINTABLE_ONE = new RegExp(UNPRINTABLE.source, 'u');
 /** The invisible ones (format, fillers, variation selectors): taken out with nothing in their place, so one can't split
  * a token into pieces short enough to pass. */
-export const INVISIBLE = /[\p{Cf}\u034f\u115f\u1160\u17b4\u17b5\u180b-\u180f\u2800\u3164\ufe00-\ufe0f\uffa0]|\udb40[\udd00-\uddef]/gu;
+export const INVISIBLE = /[\p{Cf}\u034f\u115f\u1160\u17b4\u17b5\u180b-\u180f\u2800\u3164\ufe00-\ufe0f\uffa0\u{E0100}-\u{E01EF}]/gu;
 
 /** Each kind of part: its longest, and the characters it may hold. A `text` part is any printable words. */
 const KINDS = {

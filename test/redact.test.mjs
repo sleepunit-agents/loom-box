@@ -511,3 +511,14 @@ test('read 2: every invisible it found is gone from a label and refused at the h
     assert.deepEqual(cleanCards([{ id: 'c', at: 'x', tool: 'B', summary: `a${ch}b`, state: 'done' }]).filter((c) => UNPRINTABLE_ONE.test(c.summary)), [], JSON.stringify(ch));
   }
 });
+
+test('a supplementary variation selector (U+E0100–E01EF) inside a key doesn\'t split it: the key is still redacted', () => {
+  const key = j('gh', 'p_', 'A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8');
+  for (const sel of ['\u{E0100}', '\u{E01EF}']) {
+    const split = `${key.slice(0, 14)}${sel}${key.slice(14)}`;
+    for (const out of [redact(`use ${split} now`), claudeSummary('Bash', { command: 'x', description: `use ${split}` }), cleanCards([{ id: 'c', at: 'x', tool: 'B', summary: `use ${split}`, state: 'done' }])[0]?.summary ?? '']) {
+      assert.ok(!out.includes(key.slice(0, 12)) && !out.includes(key.slice(14, 26)), JSON.stringify(out));
+      assert.ok(!UNPRINTABLE_ONE.test(out), JSON.stringify(out));
+    }
+  }
+});
