@@ -34,6 +34,7 @@
 // at 14:02"); a blip under the threshold leaves nothing. The alert's text is fixed for its outage (when it began), so
 // loom pushes it once (loom src/ui/push.ts: an ask's key is its text); the FYI is a notice, which never pushes.
 import { existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, writeFileSync, appendFileSync, closeSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { setting } from './piece.mjs';
@@ -169,7 +170,7 @@ export function bridgesOf(dir, nowS = Date.now() / 1000) {
 /** Every agent's board under the base: {agent: [bridge…]}, the agents whose board has a bridge. */
 export function boards(env, nowS = Date.now() / 1000) {
   let names = [];
-  try { names = readdirSync(nowBase(env)); } catch { return {}; }
+  try { names = readdirSync(nowBase(env)); } catch { /* Adapters may have no legacy board. */ }
   const out = {};
   for (const n of names.sort()) {
     const m = /^([a-z][a-z0-9-]{0,39})-now$/.exec(n);
@@ -177,7 +178,34 @@ export function boards(env, nowS = Date.now() / 1000) {
     const bs = bridgesOf(join(nowBase(env), n), nowS);
     if (bs.length) out[m[1]] = bs;
   }
+  return mergeAdapters(out, adapterStatuses(env), nowS);
+}
+
+function adapterStatuses(env) {
+  const out = {};
+  const home = env.LOOM_HOME || join(env.XDG_CONFIG_HOME || join(env.HOME || homedir(), '.config'), 'loom');
+  for (const venue of ['discord', 'slack']) {
+    if (!existsSync(join(home, 'pieces', venue, 'piece.json'))) continue;
+    try {
+      const d = JSON.parse(execFileSync(env.LOOM_BIN || 'loom', [venue, 'status', '--json'], { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] }));
+      if (d.mode === 'live' && Array.isArray(d.agents)) out[venue] = d;
+    } catch { /* Missing or unavailable: the old board remains authoritative. */ }
+  }
   return out;
+}
+
+export function mergeAdapters(boards, adapters, nowS) {
+  for (const [venue, d] of Object.entries(adapters)) {
+    if (d.mode !== 'live') continue;
+    for (const agent of d.agents) {
+      if (!AGENT_NAME.test(agent)) continue;
+      const bs = boards[agent] ??= [];
+      const i = bs.findIndex((b) => b.name === venue);
+      const b = { name: venue, at: nowS, stale: false, talking: [], waiting: [], slots: null, socket: null, adapter: true };
+      if (i < 0) bs.push(b); else bs[i] = b;
+    }
+  }
+  return boards;
 }
 
 // ─── What each bridge is: live, restarting, dark… ───────────────────────────
@@ -212,6 +240,7 @@ export function recentCrashes(svc, nowS) {
  * its silence to go by.
  */
 export function bridgeStatus(b, svc, house, nowS, darkS = DARK_DEFAULT_S) {
+  if (b.adapter) return { state: 'live' };
   const crashes = recentCrashes(svc, nowS);
   if (crashes.length >= LOOP_RESTARTS) return { state: 'looping', crashes };
   if (!b.stale) return { state: 'live' };
