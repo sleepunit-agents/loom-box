@@ -182,6 +182,45 @@ export function setPiece(store, { piece, agents, paths = ['*'] }) {
   return store.put(GRANTS, KEY, doc, cur ? cur.rev : 0);
 }
 
+/**
+ * One agent added to one piece's grant, everyone else's kept (`dryRun`: checked, not written) (t-1970: the owner's Allow on a `grant` approval). With no
+ * grants document yet there's nothing to add to: every agent may already use every piece, and writing one now would
+ * take every other piece away from every agent. So: {changed: false, why} there, and where the agent already has it.
+ */
+export function addGrant(store, { piece, agent, paths = ['*'] }, { dryRun = false } = {}) {
+  if (!PIECE.test(piece ?? '')) throw new GrantsError('that isn\'t a piece\'s name');
+  if (!AGENT.test(agent ?? '')) throw new GrantsError('that isn\'t an agent\'s name');
+  if (!grantPathsOk(paths)) throw new GrantsError('paths are *, a path, or a prefix ending in /*');
+  const cur = store.get(GRANTS, KEY);
+  if (!cur?.doc) return { changed: false, none: true, why: 'no grants yet: every agent may use every piece' };
+  const doc = structuredClone(cur.doc);
+  const g = Object.hasOwn(doc.pieces ?? {}, piece) ? { ...doc.pieces[piece] } : {};
+  const have = [...(Object.hasOwn(g, agent) ? g[agent] : []), ...(Object.hasOwn(g, '*') ? g['*'] : [])];
+  if (have.includes('*') || paths.every((p) => have.includes(p))) return { changed: false, why: `${agent} may already use ${piece}${have.includes('*') ? '' : ` for ${paths.join(', ')}`}` };
+  const mine = Object.hasOwn(g, agent) ? g[agent] : [];
+  g[agent] = paths.includes('*') ? ['*'] : [...new Set([...mine, ...paths])];
+  doc.pieces = { ...(doc.pieces ?? {}), [piece]: g };
+  const why = grantsProblem(doc);
+  if (why) throw new GrantsError(why);
+  if (dryRun) return { changed: true, dryRun: true };
+  return { changed: true, rev: store.put(GRANTS, KEY, doc, cur.rev) };
+}
+
+/** Paths a grant from an approval may add: 1-50 patterns, each one with real segments. */
+export const grantPathsOk = (paths) => Array.isArray(paths) && paths.length > 0 && paths.length <= 50
+  && paths.every((x) => typeof x === 'string' && x.length <= 200 && PATTERN.test(x) && canonicalPattern(x));
+
+/** A pattern whose segments are real ones (no . or .., none empty): what a grant from an approval may add. */
+const canonicalPattern = (p) => p === '*' || canonicalPath(p.endsWith('/*') ? p.slice(0, -2) : p);
+
+/** What `agent` may use, piece by piece, from the grants (null: none yet, so everything). [{piece, paths}] sorted. */
+export function usableBy(doc, agent) {
+  if (doc == null) return null;
+  return Object.entries(doc.pieces ?? {}).sort(([a], [b]) => a.localeCompare(b)).map(([piece, g]) => ({
+    piece, paths: [...new Set([...(Object.hasOwn(g, agent) ? g[agent] : []), ...(Object.hasOwn(g, '*') ? g['*'] : [])])],
+  }));
+}
+
 /** Who `agent` may relay to without asking, set by the owner (the Permissions page): the household's other agents. */
 export function setRelay(store, { agent, to, agents }) {
   if (!AGENT.test(agent ?? '') || !agents.includes(agent)) throw new GrantsError(`no agent ${agent} in this household`);
