@@ -1344,7 +1344,12 @@ function closeRun(env, c, d, now) {
     try {
       const rec = readBody(env, c.body);
       const text = d.runner(rec.harness, rec.local).final?.(bodyOf(c.body, rec));
-      if (typeof text === 'string' && text.trim()) { c.spawn.report = d.sealer.seal(Buffer.from(text.slice(0, MAX_TEXT))).toString('base64'); c.spawn.reportRun = r.run; }
+      if (typeof text === 'string' && text.trim()) {
+        c.spawn.report = d.sealer.seal(Buffer.from(text.slice(0, MAX_TEXT))).toString('base64');
+        c.spawn.reportRun = r.run;
+        r.sent = (r.sent ?? 0) + 1;
+        (r.posts ??= []).push({ h: textHash(text), ok: true });
+      }
       else c.spawn.failed = 'The turn ended without a final report';
     } catch (e) { c.spawn.failed = `Could not collect final report: ${e.message}`; }
   }
