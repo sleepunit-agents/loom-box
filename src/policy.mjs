@@ -223,7 +223,7 @@ function rosterProblem(m) {
  * `principal`: whom the conversation's body acts for (principal.mjs, principalOf); `ownerSpoke`: the owner has ever
  * spoken in it (its actsFor). A person's standing authority is told only when both say it's that person's alone.
  */
-export async function rulesFor(c, msgs, d, { platform, core = false, principal = null, ownerSpoke = false }) {
+export async function rulesFor(c, msgs, d, { platform, core = false, principal = null, ownerSpoke = false, narrowing = null }) {
   let pol;
   try { pol = d.policy(c.agent); } catch (e) { throw new RulesError(`${c.agent}'s policy can't be read (${e.message})`); }
   if (pol && policyProblem(pol)) throw new RulesError(`${c.agent}'s policy isn't one: ${policyProblem(pol)}`);
@@ -259,10 +259,10 @@ export async function rulesFor(c, msgs, d, { platform, core = false, principal =
   const guestSenders = senders.filter((s) => s.tier === 1).map((s) => s.x.from.slug);
   const owned = pol.guest_places?.[c.venue]?.[c.place];
   const venueGuests = guestsOf(gates, about.venue);
-  const guest = about.guest || Array.isArray(owned) || guestSenders.length > 0 || venueGuests.length > 0 || memberGuests.length > 0;
-  const readers = guest ? uniq([...memberGuests, ...about.readers, ...(owned ?? []), ...venueGuests, ...guestSenders]).slice(0, READERS_MAX) : [];
+  const guest = narrowing?.guest === true || about.guest || Array.isArray(owned) || guestSenders.length > 0 || venueGuests.length > 0 || memberGuests.length > 0;
+  const readers = guest ? uniq([...memberGuests, ...about.readers, ...(owned ?? []), ...venueGuests, ...guestSenders, ...(narrowing?.readers ?? [])]).slice(0, READERS_MAX) : [];
   const briefs = pol.briefs ?? {};
-  const deny = uniq([...(pol.deny ?? []), ...(guest ? pol.guest_deny ?? [] : [])]);
+  const deny = uniq([...(narrowing?.deny ?? []), ...(pol.deny ?? []), ...(guest ? pol.guest_deny ?? [] : [])]);
   const sections = [];
   const text = (t) => sections.push({ text: t });
   const file = (f, what) => { sections.push({ file: f, what }); text('\n'); };

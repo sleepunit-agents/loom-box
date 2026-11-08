@@ -687,3 +687,41 @@ and every sample in `<LOOM_BOX_DATA>/health/<box>-<YYYY-MM>.jsonl` (three months
 once a condition has held its time. An always-on box (loom's own, a report-only one, or `loom runtime always-on <box>
 on`) quiet for 10 minutes is dark. `loom runtime health [<box>]` says how each is. `loom runtime join … --report-only`
 makes a box that only reports: it hosts nothing and never upgrades itself from what loom says.
+
+## Spawned jobs
+
+A body can hand work to a fresh conversation of the same agent. It runs in an
+agent venue, with the asker's principal, permissions and house rules; it cannot
+choose another principal or a return address.
+
+```bash
+loom runtime spawn --brief 'Review this change' --prefer gpt-6.1-sol --title 'Review'
+loom runtime spawn --brief - < brief.md
+loom runtime spawn say cv-0123456789ab --text 'Also check authorization'
+loom runtime spawn wait cv-0123456789ab --timeout 600
+loom runtime spawn result cv-0123456789ab
+```
+
+`spawn` returns a JSON handle (the new conversation id). `wait` and `result`
+print the final report when ready; a timed-out wait exits 3, a failed job exits
+1. The shell on loom's machine can use these too, with `--agent <name>` (or the
+household default). A body uses `--agent self`, the default: another agent is
+refused. The matching `spawn` MCP tool takes `brief`, `prefer`, `title` and your
+`conversation`; `action: say` takes `handle` and `text`, `action: result` takes
+`handle`. Where multiple bodies could be asking, use the shell, which proves
+its current run without putting its key in a tool call.
+
+Follow-ups use body feed mid-turn where supported, and otherwise wait for the
+next turn. Reports are collected from the harness's final response, sealed on
+disk, and returned to the asking conversation after its current turn finishes,
+through the relay-return delivery path. Comms shows a separate thread with a
+link to the asker; the agent card shows its working body. Reports and handles
+survive runtime restarts. A principal reset invalidates the old handle's access
+and return routing. A source conversation's guest rules and restrictions are
+re-evaluated at each child start, and its inherited tool narrowing is retained.
+
+`LOOM_RUNTIME_SPAWN_LIMIT` defaults to 3 concurrent spawned turns per agent;
+extra jobs queue, and also respect delivery's overall busy limit. Spawn chains
+count in the loop detector and stop before a ninth generation. Shell callers
+outside the runtime have no parent conversation, so use wait/result for their
+reports. A body can fetch or steer only its own spawned jobs.

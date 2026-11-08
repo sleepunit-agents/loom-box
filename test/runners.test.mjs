@@ -451,3 +451,24 @@ test('a runner names its session\'s own local files: the transcript a slot keeps
   c.inbox.remove(b.id);
   assert.equal(existsSync(join(h.inbox, b.id)), false);
 });
+
+test('spawn reports use the final assistant text from Claude and Codex, not tool output', () => {
+  const h = harness();
+  const claude = new ClaudeRunner({ jobsDir: join(h.D, 'jobs') });
+  const transcript = join(h.D, 'final.jsonl');
+  writeFileSync(transcript, [
+    { type: 'assistant', message: { content: [{ type: 'text', text: 'Working' }] } },
+    { type: 'user', message: { content: [{ type: 'tool_result', content: 'tool output' }] } },
+    { type: 'assistant', message: { content: [{ type: 'text', text: 'ok' }] } },
+  ].map(JSON.stringify).join('\n'));
+  claude.transcriptOf = () => transcript;
+  assert.equal(claude.final({ id: 'one' }), 'ok');
+  const codex = new CodexRunner({ runsDir: join(h.D, 'runs') });
+  codex.events = () => [
+    { type: 'item.completed', item: { type: 'agent_message', text: 'Working' } },
+    { type: 'item.completed', item: { type: 'command_execution', aggregated_output: 'tool output' } },
+    { type: 'item.completed', item: { type: 'agent_message', text: 'ok' } },
+    { type: 'turn.completed' },
+  ];
+  assert.equal(codex.final({ id: 'one' }), 'ok');
+});
