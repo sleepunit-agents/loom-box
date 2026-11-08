@@ -30,6 +30,21 @@ function setup(extra = { LOOM_RUNTIME_LOCAL_BODIES: LOCAL }) {
 }
 
 describe('local bodies', () => {
+  test('a local conversation someone other than the owner writes into gets no body on loom\'s machine (t-1952)', async () => {
+    const { w, localLog, lwake, conv } = setup();
+    const a = await deliver(w.env, lwake('alert:x', 'disk at 90%'), w.o);
+    assert.equal(a.body, 'started');
+    const first = conv('alert:x').body;
+    // Loren writes there (a person's message joins a local conversation): the body on loom's machine is never fed it.
+    const b = await deliver(w.env, w.msg('alert:x', 'what is this?', { venue: 'wake', from: { kind: 'person', slug: 'loren' } }), w.o);
+    assert.equal(b.conversation, a.conversation);
+    assert.notEqual(b.body, 'fed');
+    assert.notEqual(b.body, 'started');
+    assert.equal(localLog.some((l) => l[0] === 'feed'), false);
+    assert.ok(localLog.some((l) => l[0] === 'end' && l[1] === first.split(':')[1]), 'its body there is ended');
+    assert.equal(localLog.filter((l) => l[0] === 'start' || l[0] === 'resume').length, 1, 'and none starts there for it');
+  });
+
   test('the setting: agents and an absolute cwd, or none', () => {
     assert.deepEqual(localBodiesOf({ LOOM_RUNTIME_LOCAL_BODIES: LOCAL }), { agents: ['art'], cwd: '/home/art/Art', from: 'clock', claude: '/home/art/.local/bin/claude', args: ['--dangerously-skip-permissions'], path: '/home/art/Art/bin:/usr/bin' });
     for (const bad of [undefined, '', 'nope', '[]', '{"agents":["art"]}', '{"agents":[],"cwd":"/x"}', '{"agents":["art"],"cwd":"rel"}']) {

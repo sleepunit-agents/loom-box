@@ -99,7 +99,7 @@ import { raiseAlert } from './alerthook.mjs';
 import { changed as changedCards } from './activity.mjs';
 import { keepKey } from './bodyhost.mjs';
 import { readRelays } from './relay.mjs';
-import { OWNER_SEAT, mint, noteSender, principalOf, putWakeFor, resetActsFor, seatOf, takeWakeFor, verify } from './principal.mjs';
+import { OWNER_SEAT, carriesSession, mint, noteSender, principalOf, putWakeFor, resetActsFor, seatOf, takeWakeFor, verify } from './principal.mjs';
 
 const DAY_MS = 86_400_000;
 export const MAX_TEXT = 40_000;
@@ -1068,19 +1068,28 @@ export async function drain(env, cv, d = depsOf(env), mem = new Map()) {
 
 // ─── Rules, presence and the stop word ──────────────────────────────────────
 
-/** Whether a working body's rules don't cover what's queued for it (rulesFor: grantFor, members). A post-failure note
- * is the runtime's own, never a sender's, and a relay reply that waits for the turn to end isn't fed to it: neither
- * counts. */
 /**
  * Whether a conversation's body sits in another principal's house than its principal's now (t-1952; principal.mjs,
  * seatOf): its rules say which house it was seated in (none: the owner's, as every body was before). A local body
- * (loom's machine, t-1830) has no house.
+ * (loom's machine, t-1830) has no house and is the owner's work only: one whose conversation a person other than the
+ * owner has written into has moved too (and its next start is refused: execute, localForeign).
  */
 export function seatMoved(env, c) {
-  if (!c?.body || c.local) return false;
+  if (!c?.body) return false;
+  if (c.local) return localForeign(env, c);
   return (c.bodyRules?.seat ?? OWNER_SEAT) !== seatOf(principalOf(env, c), c.conversation);
 }
 
+/**
+ * Whether a local conversation (loom's machine, t-1830) has heard a person other than its agent's owner. Its wakes
+ * are set on loom's machine (no house's wake is ever delivered local), and a person joins it only by writing there:
+ * the owner's Reply is his; anyone else's makes it no work for a body that shares the runtime account's keys.
+ */
+const localForeign = (env, c) => (principalOf(env, c).people ?? []).length > 0;
+
+/** Whether a working body's rules don't cover what's queued for it (rulesFor: grantFor, members). A post-failure note
+ * is the runtime's own, never a sender's, and a relay reply that waits for the turn to end isn't fed to it: neither
+ * counts. */
 export function needsReseat(c) {
   const r = c.bodyRules ?? {};
   const fed = (c.queue ?? []).filter((x) => !isNote(x) && !x.untilIdle);
@@ -1428,8 +1437,13 @@ async function execute(env, op, d, mem) {
     // Whose house it runs in (t-1952): its principal's, as everything it was given was noted before this plan. Its own
     // slot goes with it: a session is this conversation's own, and what's walled off is every other conversation's.
     if (!c0.local) rules = { ...rules, seat: seatOf(principalOf(env, c0), op.cv) };
+    // A body on loom's machine does its owner's work only (t-1830): it shares the runtime account's keys dir and its
+    // signing key, so a conversation someone else has written into gets no body there at all (fail closed).
+    else if (localForeign(env, c0)) throw new DeliveryError('a body on loom\'s machine does only its owner\'s work, and this conversation is someone else\'s now', 403);
     const was = op.slot?.rules ?? {};
-    if (op.type === 'resume' && !sameRules(was, rules)) {
+    // ...and a session only follows the conversation into a house no one else's bodies would read it in (principal.mjs,
+    // carriesSession): never into a person's house that runs their other conversations.
+    if (op.type === 'resume' && (!sameRules(was, rules) || !carriesSession(was.seat, rules.seat, op.cv))) {
       // A session is resumed only under the rules it began with: a guest venue's never as anyone else's, nor the other
       // way; nor one that heard a place's people, or a person's standing authority, under any others (t-1745). Its
       // slot goes, and its messages go back for a fresh body, in this same drain.
@@ -1565,6 +1579,21 @@ async function execute(env, op, d, mem) {
       return;
     }
     for (const p of restored) rmSync(p, { recursive: true, force: true });
+    // The agent's houses for other people were at the cap when its house was asked for (t-1952; a start that raced
+    // past plan's look): it waits, as plan would have made it, and its slot (or home) stays. Never a lost session.
+    if (e?.seatFull) {
+      locked(env, () => {
+        const c = loadConv(env, op.cv);
+        if (!c) return;
+        const msgs = ours(c, op) ? op.msgs : stillMine(c, op.msgs);
+        if (ours(c, op)) delete c.starting;
+        requeue(c, msgs);
+        c.waiting = String(e.message).slice(0, 300);
+        outcome(c, msgs.map((x) => x.key), { body: 'queued', reason: c.waiting }, now());
+        saveConv(env, c);
+      });
+      return;
+    }
     let gaveUp = null;
     locked(env, () => {
       const c = loadConv(env, op.cv);
@@ -1636,7 +1665,7 @@ async function routeOf(env, c0, op, rules, d, cant = []) {
   const now = d.now().getTime();
   const avoid = [...new Set([...(c0.quota?.from ? [c0.quota.from] : []), ...cant])];
   const home = c0.home && Date.parse(c0.home.until) > now && existsSync(homeFile(env, op.cv)) ? c0.home : null;
-  if (home && sameRules(home.rules ?? {}, rules) && !avoid.includes(home.harness)
+  if (home && sameRules(home.rules ?? {}, rules) && carriesSession(home.rules?.seat, rules.seat, op.cv) && !avoid.includes(home.harness)
     && !(Number.isFinite(c0.fallback?.until) && now < c0.fallback.until * 1000) && await roomOn(env, c0, home.harness, d)) {
     return { how: 'resume', file: homeFile(env, op.cv), home: true };
   }
@@ -2139,7 +2168,8 @@ function houseProblem(env, c, caller) {
   try { rec = readBody(env, c.body); } catch { return 'its body\'s house can\'t be told'; }
   const want = typeof rec?.house === 'string' ? rec.house : null;
   const got = typeof caller.house === 'string' ? caller.house : null;
-  // A local body's (loom's machine, t-1830): only from no house, as its own CLI there speaks.
+  // A body whose record names no house (a local body's, loom's machine, t-1830): only from no house, as its own CLI
+  // there speaks; never from a house. (Every house body's record names its house: the runner's start says it.)
   if (!want) return got ? `its body runs on loom's machine, not in ${got}` : null;
   return got === want ? null : (got ? `${got} isn't its body's house` : 'this caller is in no house');
 }

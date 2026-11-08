@@ -424,21 +424,25 @@ one container, so walling conversations apart inside a house isn't possible; wal
   unknown principal is never shared: two conversations nobody can name are no more one principal than two strangers.
   The owner's seat keeps the record it always had (`delivery/hosts/<agent>.json`), so his warm house is kept across the
   change; each other seat has `delivery/hosts/<agent>@<seat>.json` and its own house. A body host's house says its
-  seat (`seat`, on `loom box list` and the Boxes page).
+  seat (`seat` in `loom box list`, "for p-loren" in its text, and "body host, for loren" on the Boxes page).
 - **The proof is bound to the house.** `send`, `principal`, a body's `place` and the relay's return address all take
   the run's key and session as before, and now also refuse a caller whose house (core names it, from the house's
   token) isn't the house of the body holding that conversation. A key or session id carried out of its house proves
   nothing from another, nor from no house.
 - **A principal that changes moves the body.** Each body's rules record its seat. When the next message would change
   it (Loren writes into the owner's group, a second person into Loren's DM, the owner resets a conversation that was
-  someone else's and writes), the body is never fed where it is: it's ended there, its session packed into its slot,
-  and the conversation resumes in the right house with that message. The conversation's own session goes with it
-  (it's that conversation's history, which its new principal is party to); no other conversation's ever does. A guest
-  venue's rules still drop a session that wasn't a guest venue's (`sameRules`). A relay's answer that waits for the
-  requesting turn to end (`untilIdle`) doesn't interrupt that turn: the move comes when it's over.
+  someone else's and writes), the body is never fed where it is: it's ended there (mid-turn too: a second voice in a
+  conversation cuts the turn it's in), and the conversation goes on in the right house with that message. Its own
+  session (its slot) goes with it only into a house nobody else's bodies would read it in (`carriesSession`): the
+  same seat, the conversation's own unknown house, or the owner's. Into a person's house, which runs that person's
+  other conversations too, it's dropped and the body starts fresh from the digests: a group member who wrote one line
+  was never party to what the body read before. No other conversation's session ever moves. A guest venue's rules
+  still drop a session that wasn't a guest venue's (`sameRules`). A relay's answer that waits for the requesting turn
+  to end (`untilIdle`) doesn't interrupt that turn: the move comes when it's over.
 - **Cost.** Houses for other people are capped per agent: `LOOM_RUNTIME_SEAT_HOUSES` (default 4) live houses for seats
-  other than the owner's. At the cap a conversation that needs another house waits (`queued`, saying so) for one to
-  idle out, and is started by the tick once one has; it never shares a house. The owner's house is never held by the
+  other than the owner's, counted in the same state write that makes a house (two starts at once can't both pass it).
+  At the cap a conversation that needs another house waits (`queued`, saying so) for one to idle out, keeping its slot,
+  and is started by the tick once one has; it never shares a house. The owner's house is never held by the
   cap. Every house idles out as before (a warm body after 600 s, its house 600 s after its last body), its seat's
   record is swept once its house is over, and all of an agent's houses run the same image (one build per repo tree,
   so more houses make no more images: t-1933).
@@ -446,9 +450,14 @@ one container, so walling conversations apart inside a house isn't possible; wal
   sessions and its per-house state dir. Secrets are the agent's house config's, the same for every seat: a non-owner's
   house gets exactly what one house got before this, no more.
 - **What doesn't**: the agent's own loom token reaches the agent's memory, knowledge and conversations from any of its
-  houses (an agent token is the agent's; core doesn't scope it by principal), and the box's model login dir is one
-  read-write dir every house of that agent on that box mounts. Neither is a run key or session.
-- **Local bodies** (loom's machine, t-1830) have no houses: they're only the owner's wakes, and run as before.
+  houses (an agent token is the agent's; core doesn't scope it by principal); the runtime's `trace` and `send-status`
+  answer any of the agent's houses about any of its conversations (mechanism only: run ids, body refs, outcomes, never
+  a key, a session's files or a message's words); and the box's model login dir is one read-write dir every house of
+  that agent on that box mounts. None of them is a run key or a session.
+- **Local bodies** (loom's machine, t-1830) have no houses and share the runtime account's keys dir, so they do the
+  owner's work only: a local conversation that a person other than the owner has written into has its body ended and
+  gets none there (its start is refused, saying why). Its wakes are set on loom's machine, so a wake there with no
+  word from the clock isn't a stranger's.
 
 ## Model choice
 

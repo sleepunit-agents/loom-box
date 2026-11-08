@@ -349,7 +349,13 @@ export function houseName(h, s) {
   // A body host's house (houserunner.mjs): where delivery's bodies run, never its command and boot key.
   // By the runtime's own mark (control.mjs, isHostHouse), never by its task's text alone (an agent writes that). Given
   // the state, one from before the mark counts too when no agent asked for it.
-  if (h.kind === 'body-host' || (s && isHostHouse(h, s))) return `${who}'s body host`;
+  // Whose work it's for (t-1952: one house per steering principal): the owner's, a person's, one unknown conversation's.
+  if (h.kind === 'body-host' || (s && isHostHouse(h, s))) {
+    const seat = typeof h.seat === 'string' ? h.seat : 'owner';
+    if (seat.startsWith('p-')) return `${who}'s body host, for ${seat.slice(2)}`;
+    if (seat.startsWith('u-')) return `${who}'s body host, for one conversation (${seat.slice(2)})`;
+    return `${who}'s body host`;
+  }
   const w = wakeOf(h.task);
   if (w.kind === 'schedule') {
     const t = taskLine(h.task);

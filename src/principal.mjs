@@ -127,6 +127,38 @@ export function seatOf(p, conversation) {
   return `u-${conversation}`;
 }
 
+/**
+ * Whether a conversation's own session (its slot) may follow it from seat `was` to seat `now`: only into a house no
+ * other principal's bodies share in a way that matters. The same seat; the conversation's own unknown house (no one
+ * else is in it); or the owner's (he reads every conversation of his agent already, and his reset is his word). Never
+ * into one person's house: that house runs that person's other conversations, whose bodies could read the transcript
+ * (what was said before they wrote, the files the body read). Then the session is dropped and the body starts fresh.
+ */
+export function carriesSession(was, now, conversation) {
+  const w = was ?? OWNER_SEAT;
+  const n = now ?? OWNER_SEAT;
+  return w === n || n === OWNER_SEAT || n === `u-${conversation}`;
+}
+
+/** The houses for seats other than the owner's, at work for an agent in state `s`, but `seat`'s own. */
+export function otherSeatHouses(s, agent, seat) {
+  const LIVE = new Set(['wanted', 'starting', 'running', 'stopping']);
+  const of = (h) => (typeof h?.seat === 'string' && SEAT.test(h.seat) ? h.seat : OWNER_SEAT);
+  const host = (h) => h.kind === 'body-host' || /^loom-runtime body-host /.test(String(h.task ?? ''));
+  return Object.values(s?.houses ?? {}).filter((h) => h.agent === agent && LIVE.has(h.state) && host(h) && of(h) !== OWNER_SEAT && of(h) !== seat);
+}
+
+/** The cap on an agent's houses for other people (LOOM_RUNTIME_SEAT_HOUSES, default 4). */
+export const SEAT_HOUSES = 4;
+export const seatCap = (env) => { const n = Number(env?.LOOM_RUNTIME_SEAT_HOUSES); return env?.LOOM_RUNTIME_SEAT_HOUSES !== undefined && env.LOOM_RUNTIME_SEAT_HOUSES !== '' && Number.isInteger(n) && n >= 0 && n <= 64 ? n : SEAT_HOUSES; };
+/** Why a house for `seat` can't be had at the cap, or null. The owner's is never capped. */
+export function seatCapProblem(env, s, agent, seat) {
+  if (seat === OWNER_SEAT) return null;
+  const others = otherSeatHouses(s, agent, seat);
+  const cap = seatCap(env);
+  return others.length >= cap ? `${agent} already has ${others.length} house${others.length === 1 ? '' : 's'} at work for other people (the cap is ${cap}, LOOM_RUNTIME_SEAT_HOUSES): it waits for one to idle out` : null;
+}
+
 // ─── Statements ─────────────────────────────────────────────────────────────
 
 const b64u = (b) => Buffer.from(b).toString('base64url');

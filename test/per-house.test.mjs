@@ -70,9 +70,15 @@ test('a body in one principal\'s house can\'t speak, ask its principal, or ask i
   // The relay's return address (relay.mjs, originOf) takes the same proof: her house never claims his conversation.
   const { originOf } = await import('../src/relay.mjs');
   assert.throws(() => originOf(w.env, fromLoren, J, { key: stolen.key, session: stolen.session }), /held by a body in your house/);
-  // Nor a caller with no house at all (an agent token outside every house), for a house body.
+  // Nor a caller with no house at all (an agent token outside every house), for a house body: not for its principal,
+  // and not as a relay's return address (there no older check stands in front: a houseless caller is eligible).
   const none = await api(w.env, fx, { caller: { kind: 'agent', agent: 'art' }, path: 'principal', body: stolen });
   assert.equal(none.status, 409);
+  const { holdsRun } = await import('../src/delivery.mjs');
+  assert.equal(holdsRun(w.env, J, stolen, { ...w.o, caller: { kind: 'agent', agent: 'art' } }), false);
+  assert.equal(holdsRun(w.env, J, stolen, { ...w.o, caller: fromLoren }), false);
+  assert.equal(holdsRun(w.env, J, stolen, { ...w.o, caller: { kind: 'agent', agent: 'art', house: 'h-1' } }), true);
+  assert.notEqual(originOf(w.env, { kind: 'agent', agent: 'art' }, J, { key: stolen.key, session: stolen.session })?.conversation, J);
 
   // His own body, in his house, with the same proof: answered.
   const own = await api(w.env, fx, { caller: { kind: 'agent', agent: 'art', house: 'h-1' }, path: 'principal', body: stolen });
@@ -83,7 +89,7 @@ test('a body in one principal\'s house can\'t speak, ask its principal, or ask i
   assert.deepEqual([hers.status, hers.body.for], [200, 'loren']);
 });
 
-test('a principal that changes reseats the body in the right house: never fed where it was; its own session goes with it', async () => {
+test('a principal that changes reseats the body in the right house: never fed where it was; its session never into a person\'s house', async () => {
   const w = world();
   household(w.env);
   w.runner.houses = { owner: 'h-1', 'p-loren': 'h-2' };
@@ -100,11 +106,10 @@ test('a principal that changes reseats the body in the right house: never fed wh
   const second = loadConv(w.env, J).body;
   assert.notEqual(second, first);
   assert.equal(w.runner.seats[second.split(':')[1]], 'p-loren');
-  // The conversation's own session goes with it (it's this conversation's, which she's now steering); nothing of any
-  // other conversation's does. Her message is in the resumed body's brief.
-  const resumed = after.find((l) => l[0] === 'resume');
-  assert.ok(resumed, 'resumed from its own slot, in her house');
-  assert.match(resumed[4], /merge mine too/);
+  // His session stays out of her house (her other conversations' bodies run there): a fresh body, her message in it.
+  assert.equal(after.some((l) => l[0] === 'resume'), false, 'never resumed in her house');
+  assert.match(after.find((l) => l[0] === 'start')[2], /merge mine too/);
+  assert.equal(loadConv(w.env, J).slot, undefined);
 
   // The owner says it's his again (--reset), and writes: back to his house, the same way.
   w.runner.finish(second);
@@ -116,7 +121,7 @@ test('a principal that changes reseats the body in the right house: never fed wh
   assert.equal(w.runner.seats[third.split(':')[1]], 'owner');
   assert.equal(w.log.slice(m).some((l) => l[0] === 'feed'), false, 'nothing fed in her house');
 
-  // A slot from one seat isn't resumed in another: an evicted owner's body leaves a slot; then Loren writes.
+  // A slot from one seat isn't resumed in a person's: an evicted owner's body leaves a slot; then Loren writes.
   const K = cvOf('art', 'slack', 'group:K');
   await deliver(w.env, w.msg('group:K', 'one', person('jonathan')), w.o);
   w.runner.finish(loadConv(w.env, K).body);
@@ -127,8 +132,77 @@ test('a principal that changes reseats the body in the right house: never fed wh
   assert.equal(loadConv(w.env, K).slot.rules.seat, 'owner');
   const k = w.log.length;
   await deliver(w.env, w.msg('group:K', 'two', person('loren')), w.o);
-  assert.ok(w.log.slice(k).some((l) => l[0] === 'resume'), 'its slot resumes where its principal is now');
+  assert.equal(w.log.slice(k).some((l) => l[0] === 'resume'), false, 'the owner\'s session never resumes in her house');
   assert.equal(w.runner.seats[loadConv(w.env, K).body.split(':')[1]], 'p-loren');
+
+  // Into a house of the conversation's own (a second person: unknown), its session does follow: no one else is there.
+  const M = cvOf('art', 'slack', 'group:M');
+  await deliver(w.env, w.msg('group:M', 'one', person('loren')), w.o);
+  const lb = loadConv(w.env, M).body;
+  assert.equal(w.runner.seats[lb.split(':')[1]], 'p-loren');
+  const j = w.log.length;
+  await deliver(w.env, w.msg('group:M', 'two', person('daniel')), w.o);
+  const moved = w.log.slice(j).find((l) => l[0] === 'resume');
+  assert.ok(moved, 'resumed, in its own house');
+  assert.equal(w.runner.seats[moved[1]], `u-${M}`);
+  assert.match(moved[4], /two/);
+});
+
+test('a resume that meets the cap at its house waits, its slot kept; up() counts the cap in the write that makes a house', async () => {
+  const w = world();
+  household(w.env);
+  w.runner.houses = { owner: 'h-1', 'p-loren': 'h-2' };
+  const L = cvOf('art', 'slack', 'dm:L');
+  await deliver(w.env, w.msg('dm:L', 'one', person('loren')), w.o);
+  w.runner.finish(loadConv(w.env, L).body);
+  await tick(w.env, w.o);
+  w.clock.advance(11 * 60_000);
+  await tick(w.env, w.o);
+  assert.ok(loadConv(w.env, L).slot);
+  // Another seat's house came up between plan's look and the house's (houserunner.mjs, warm: seatFull).
+  const resume = w.runner.resume;
+  w.runner.resume = () => { throw Object.assign(new Error('art already has 4 houses at work for other people (the cap is 4, LOOM_RUNTIME_SEAT_HOUSES): it waits for one to idle out'), { seatFull: true }); };
+  const out = await deliver(w.env, w.msg('dm:L', 'two', person('loren')), w.o);
+  assert.equal(out.body, 'queued');
+  assert.match(out.reason, /the cap is 4/);
+  assert.ok(loadConv(w.env, L).slot, 'its session is kept');
+  assert.equal(loadConv(w.env, L).queue.length, 1);
+  w.runner.resume = resume;
+  await tick(w.env, w.o);
+  assert.ok(w.log.some((l) => l[0] === 'resume'), 'resumed once there\'s room');
+
+  // The cap at the state write itself: two asks at once can't both pass a look made before either.
+  const env = { ...w.env, LOOM_RUNTIME_SEAT_HOUSES: '1' };
+  setAgent(env, fx, { agent: 'art', repo: 'https://example.com/art.git' });
+  const { up } = await import('../src/control.mjs');
+  const task = 'loom-runtime body-host --piece box --host-key 00';
+  up(env, fx, { kind: 'owner' }, { agent: 'art', task }, { kind: 'body-host', seat: 'p-loren' });
+  assert.throws(() => up(env, fx, { kind: 'owner' }, { agent: 'art', task }, { kind: 'body-host', seat: 'p-dana' }), (e) => e.seatFull === true && /the cap is 1/.test(e.message));
+  assert.ok(up(env, fx, { kind: 'owner' }, { agent: 'art', task }, { kind: 'body-host', seat: 'owner' }).id, 'the owner\'s never capped');
+  // A seat that isn't one is refused, never recorded as the owner's.
+  assert.throws(() => up(env, fx, { kind: 'owner' }, { agent: 'art', task }, { kind: 'body-host', seat: 'Bad Seat' }), /seat is owner/);
+});
+
+test('a seat record whose house was just asked for is never swept; one whose house is over is', () => {
+  const w = world();
+  setAgent(w.env, fx, { agent: 'art', repo: 'https://example.com/art.git' });
+  const dir = join(w.env.LOOM_BOX_DATA, 'delivery', 'hosts');
+  mkdirSync(dir, { recursive: true });
+  update(w.env, (s) => { s.houses['h-7'] = { id: 'h-7', agent: 'art', kind: 'body-host', seat: 'p-loren', state: 'wanted', task: 'loom-runtime body-host --piece box --host-key x' }; });
+  writeFileSync(join(dir, 'art@p-loren.json'), JSON.stringify({ agent: 'art', seat: 'p-loren', house: 'h-7', req: {}, stop: {}, inbox: {} }));
+  writeFileSync(join(dir, 'art@p-dana.json'), JSON.stringify({ agent: 'art', seat: 'p-dana', house: 'h-3', req: {}, stop: {}, inbox: {} }));
+  sweepSeats(w.env);
+  assert.equal(existsSync(join(dir, 'art@p-loren.json')), true);
+  assert.equal(existsSync(join(dir, 'art@p-dana.json')), false);
+});
+
+test('a local body (loom\'s machine) is the owner\'s work only: a person other than the owner writing there gets no body', async () => {
+  const { seatMoved } = await import('../src/delivery.mjs');
+  const env = household(world().env);
+  const c = { conversation: 'cv-00000000000d', agent: 'art', local: true, body: 'claude:x0000001', actsFor: { owner: true, owners: ['jonathan'], people: [], unknown: true } };
+  assert.equal(seatMoved(env, c), false, 'a local wake with no word from the clock is still the owner\'s machine\'s');
+  c.actsFor.people = ['loren'];
+  assert.equal(seatMoved(env, c), true);
 });
 
 test('houses for other people are capped per agent: at the cap a body waits (the owner\'s never does), and starts once one idles out', async () => {
@@ -140,7 +214,13 @@ test('houses for other people are capped per agent: at the cap a body waits (the
   update(w.env, (s) => { s.houses['h-5'] = { id: 'h-5', agent: 'art', kind: 'body-host', seat: 'p-dana', state: 'running', task: 'loom-runtime body-host --piece box --host-key x' }; });
   assert.match(seatRoom(w.env, 'art', 'p-loren'), /already has 1 house at work for other people \(the cap is 1/);
   assert.equal(seatRoom(w.env, 'art', 'owner'), null);
-  assert.equal(seatRoom(w.env, 'art', 'p-dana'), null, 'a seat whose house is up is in it (its record names it)', );
+  assert.equal(seatRoom(w.env, 'art', 'p-dana'), null, 'its own house isn\'t one of the others');
+  // A seat whose record names a house that's up: in it, whatever the count.
+  mkdirSync(join(w.env.LOOM_BOX_DATA, 'delivery', 'hosts'), { recursive: true });
+  update(w.env, (s) => { s.houses['h-6'] = { id: 'h-6', agent: 'art', kind: 'body-host', seat: 'p-eve', state: 'running', task: 'loom-runtime body-host --piece box --host-key x' }; });
+  writeFileSync(join(w.env.LOOM_BOX_DATA, 'delivery', 'hosts', 'art@p-eve.json'), JSON.stringify({ agent: 'art', seat: 'p-eve', house: 'h-6', req: {}, stop: {}, inbox: {} }));
+  assert.equal(seatRoom(w.env, 'art', 'p-eve'), null);
+  update(w.env, (s) => { delete s.houses['h-6']; });
   const L = cvOf('art', 'slack', 'dm:L');
   const out = await deliver(w.env, w.msg('dm:L', 'hello?', person('loren')), w.o);
   assert.equal(out.body, 'queued');

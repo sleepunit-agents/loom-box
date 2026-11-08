@@ -6,7 +6,7 @@
 // It is not a scheduler. A house goes where it's told (a box), or to the one
 // permitted box that has what it needs, or to the agent's primary. If that
 // doesn't name exactly one box, it says why and starts nothing.
-import { OWNER_SEAT, SEAT } from './principal.mjs';
+import { OWNER_SEAT, SEAT, seatCapProblem } from './principal.mjs';
 import { ownCommit } from './version.mjs';
 import { pieceName } from './piece.mjs';
 import { randomBytes } from 'node:crypto';
@@ -347,7 +347,8 @@ export function up(env, effects, caller, { agent, box, needs, task, session, slo
   const hostHouse = own.kind === 'body-host';
   // Whose work a body host's house is for (t-1952; principal.mjs, seatOf): the owner's, a person's, or one unknown
   // conversation's. The runtime's own say, like its kind; shown on the house, for the owner's listing.
-  const seat = hostHouse && typeof own.seat === 'string' && SEAT.test(own.seat) ? own.seat : null;
+  const seat = hostHouse ? (own.seat === undefined ? OWNER_SEAT : own.seat) : null;
+  if (hostHouse && !(typeof seat === 'string' && SEAT.test(seat))) fail('a body host\'s seat is owner, p-<person> or u-<conversation>');
   let a;
   if (caller.kind === 'agent') {
     if (agent && agent !== caller.agent) fail(`this token is ${caller.agent}'s; it can only ask for its own house`, 403);
@@ -372,10 +373,13 @@ export function up(env, effects, caller, { agent, box, needs, task, session, slo
     // One house holds a slot at a time: two would each start from the same state and the later save would win.
     const holder = sl && Object.values(s.houses).find((x) => x.agent === a && x.slot === sl && LIVE.has(x.state));
     if (holder) fail(`${holder.id} holds ${a}'s ${sl} slot; one house at a time`, 409);
+    // At most the cap of houses for other people (t-1952), counted in this same write: never two past it at once.
+    const full = hostHouse ? seatCapProblem(env, s, a, seat) : null;
+    if (full) throw Object.assign(new StateError(full, 409), { seatFull: true });
     const where = placeHouse(s, a, { box: box || undefined, needs: n }, env);
     const id = nextHouseId(s);
     const at = now(effects);
-    s.houses[id] = { id, agent: a, box: where, task: t, needs: n, state: 'wanted', created: at, updated: at, by: actor(caller), ...(sess ? { session: true } : {}), ...(sl ? { slot: sl } : {}), ...(hostHouse ? { kind: 'body-host', seat: seat ?? OWNER_SEAT } : {}) };
+    s.houses[id] = { id, agent: a, box: where, task: t, needs: n, state: 'wanted', created: at, updated: at, by: actor(caller), ...(sess ? { session: true } : {}), ...(sl ? { slot: sl } : {}), ...(hostHouse ? { kind: 'body-host', seat } : {}) };
     return { id, agent: a, box: where, boxName: boxLabelOf(s, where), state: 'wanted', ...(sess ? { session: true } : {}), ...(sl ? { slot: sl } : {}) };
   });
 }
