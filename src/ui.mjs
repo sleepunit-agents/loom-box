@@ -18,7 +18,7 @@ import { asks as gateAsks, answer as gateAnswer, gatesPage, mergePeople, status 
 import { GRANTS, KEY as GRANTS_KEY, GrantsError, addGrant, grantPathsOk, grantsProblem, householdOf, setPiece, setRelay, usableBy } from './grants.mjs';
 import { spawnSync } from 'node:child_process';
 import { relayNotices } from './relay.mjs';
-import { nowAgentPage, nowManifest, nowPage } from './nowboard.mjs';
+import { adapterStatuses, nowAgentPage, nowManifest, nowPage } from './nowboard.mjs';
 import { boxPagePath, checkDark, watchAsks, watchNotices, watchOf, watchRows } from './watch.mjs';
 import { coreFrom } from './core.mjs';
 
@@ -178,7 +178,7 @@ export function manifest(env, nowMs = Date.now(), o = {}) {
   try { checkDark(env, s, nowMs, o.alert ? { alert: o.alert } : {}); } catch { /* next time */ }
   let convs = [];
   try { convs = workingConversations(env); } catch { /* the delivery state unreadable this time: the cards say what else is known */ }
-  const reports = agentReports(s, Date.now(), { ...reportedBusy(s), ...sessionsBusy(join(stateDir(env), 'session-cpu.json')) }, convs);
+  const reports = agentReports(s, Date.now(), { ...reportedBusy(s), ...sessionsBusy(join(stateDir(env), 'session-cpu.json')) }, convs, adapterStatuses(env));
   for (const [a, doing] of Object.entries(board.agents)) reports[a] = { readings: [], ...reports[a], doing: [...(reports[a]?.doing ?? []), ...doing].slice(0, 8) };
   try { withFallbacks(reports, readFallbacks(env), env, nowMs); } catch { /* a card without its model line */ }
   const boxes = Object.values(s.boxes).filter((b) => !b.revoked);
@@ -534,14 +534,15 @@ export function withFallbacks(reports, fallbacks, env = {}, nowMs = Date.now()) 
  * task house runs; unavailable while a service it wants up is down; broken when one keeps failing. Readings: its
  * bridges, its remote sessions, and how many tasks are running. It says nothing about an agent with nothing here.
  */
-export function agentReports(s, nowMs = Date.now(), busy = {}, convs = []) {
+export function agentReports(s, nowMs = Date.now(), busy = {}, convs = [], adapters = {}) {
   const out = {};
-  const services = Object.values(s.services ?? {});
+  const liveAdapters = Object.entries(adapters).filter(([, d]) => d.mode === 'live').flatMap(([name, d]) => d.agents.map((agent) => ({name, agent, want: 'up', adapter: true})));
+  const services = [...Object.values(s.services ?? {}).filter((v) => !liveAdapters.some((a) => a.agent === v.agent && a.name === v.name)), ...liveAdapters];
   const agents = new Set([...Object.keys(s.agents ?? {}), ...services.map((v) => v.agent), ...Object.keys(s.remotes ?? {}), ...convs.map((c) => c.agent)]);
   for (const a of agents) {
     if (!/^[a-z][a-z0-9-]{0,39}$/.test(a)) continue;
     const mine = services.filter((v) => v.agent === a && v.want === 'up');
-    const up = (v) => s.houses[v.house]?.state === 'running';
+    const up = (v) => v.adapter || s.houses[v.house]?.state === 'running';
     const late = (v) => { const h = s.houses[v.house]; return !h || !LIVE.has(h.state) || (h.state !== 'running' && nowMs - Date.parse(h.updated ?? h.created) > STARTING_GRACE_MS); };
     const down = mine.filter((v) => !up(v) && late(v));
     const failing = down.filter((v) => (v.restarts ?? 0) >= BROKEN_RESTARTS);
