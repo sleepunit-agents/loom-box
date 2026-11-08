@@ -782,8 +782,10 @@ async function delivery(rest, env, json) {
     // Read only (t-1958): conversations whose current run is still open with its body gone, what a sweep would close.
     const l = staleRuns(env);
     if (json) return out(l);
-    for (const r of l) process.stdout.write(`${r.conversation} ${r.agent} ${r.venue} ${r.place}: ${r.run} open since ${r.since}, body ${r.body ?? 'none'} ${r.bodyState}${r.onRecord ? '' : ', off its record'}\n`);
-    process.stdout.write(`${l.length} open run${l.length === 1 ? '' : 's'} with no body at work\n`);
+    // A 'live' one is off its record but may still be mid-turn: never one to close without looking.
+    for (const r of l) process.stdout.write(`${r.conversation} ${r.agent} ${r.venue} ${r.place}: ${r.run} open since ${r.since}, body ${r.body ?? 'none'} ${r.bodyState}${r.onRecord ? '' : ', off its record'}${r.bodyState === 'live' ? ' (may still be working: look first)' : ''}\n`);
+    const live = l.filter((r) => r.bodyState === 'live').length;
+    process.stdout.write(`${l.length} open run${l.length === 1 ? '' : 's'} off a body at work${live ? `, ${live} whose body may still be working` : ''}\n`);
     return;
   }
   if (sub === 'resume' || sub === 'dismiss') {

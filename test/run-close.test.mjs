@@ -24,6 +24,7 @@ async function reseated(o = {}) {
   household(w.env);
   w.runner.houses = { owner: 'h-1', 'p-loren': 'h-2' };
   if (o.endFails) w.runner.end = () => { throw new Error('its house is unreachable'); };
+  if (o.stopOnly) w.runner.end = () => {};
   const J = cvOf('art', 'slack', 'group:G');
   await deliver(w.env, w.msg('group:G', 'here is the plan', person('jonathan')), w.o);
   const first = loadConv(w.env, J).body;
@@ -41,6 +42,14 @@ test('a body ended mid-turn (its conversation moved house) closes the run it hel
   assert.ok(w.log.some((l) => l[0] === 'end' && l[1] === first.split(':')[1]), 'the owner\'s body is ended');
   assert.ok(Number.isFinite(runOf(c, first).end), 'the ended body\'s run is closed');
   assert.deepEqual(staleRuns(w.env), [], 'nothing left open');
+});
+
+test('a body whose stop was only asked for (its house carries it out later) keeps its run open', async () => {
+  // A house's end writes a stop for its host and returns (houserunner.mjs, end): the record says ended, the body works.
+  const { w, J, first } = await reseated({ stopOnly: true });
+  const c = loadConv(w.env, J);
+  assert.equal(c.body, undefined);
+  assert.equal(Number.isFinite(runOf(c, first).end), false, 'still mid-turn as its harness says: its run stays open');
 });
 
 test('a body whose end failed keeps its run open: it may still be mid-turn', async () => {
