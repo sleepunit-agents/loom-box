@@ -4,6 +4,7 @@ import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnCall, SPAWN_DEPTH } from '../src/spawn.mjs';
 import { deliver, deliveryDir, loadConv, saveConv, tick } from '../src/delivery.mjs';
+import { judge } from '../src/loops.mjs';
 import { principalOf } from '../src/principal.mjs';
 import { world } from './delivery-world.mjs';
 const owner = { kind: 'owner' };
@@ -22,12 +23,13 @@ test('spawn finishes, survives reload, and result returns the sealed final repor
   assert.equal(c.label, 'spawn test');
   assert.equal(r.body, 'started');
   assert.equal((await spawnCall(w.env, owner, { agent: 'art', action: 'result', handle: r.handle }, w.o)).state, 'pending');
-  w.runner.finish(c.body);
+  w.runner.finish(c.body, { failed: false, worked: false });
   await tick(w.env, w.o);
+  assert.equal(judge(loadConv(w.env, r.handle).runLog.at(-1)).failed, null, 'a final report counts as a reply even without tool work');
   const result = await spawnCall(w.env, owner, { agent: 'art', action: 'result', handle: r.handle }, w.o);
   assert.equal(result.state, 'done');
   assert.equal(result.report, 'ok');
-  assert.equal(readFileSync(join(deliveryDir(w.env), 'conversations', `${r.handle}.json`), 'utf8').includes('"ok"'), false);
+  assert.doesNotMatch(readFileSync(join(deliveryDir(w.env), 'conversations', `${r.handle}.json`), 'utf8'), /:\s*"ok"/);
 });
 
 test('say reaches a running spawn through runner.feed', async () => {
