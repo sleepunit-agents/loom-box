@@ -80,3 +80,22 @@ test('staleRuns lists open runs whose body is gone, and changes nothing', async 
   assert.deepEqual(l.map((x) => [x.conversation, x.body, x.bodyState]), [[J, ref, 'ended']], 'K is at work: never listed');
   assert.equal(readFileSync(f, 'utf-8'), before, 'read only');
 });
+
+
+test('staleRuns includes historical run ids without runLog, without changing them', async () => {
+  const w = world(); household(w.env);
+  const J = cvOf('art', 'slack', 'group:G');
+  await deliver(w.env, w.msg('group:G', 'old', person('jonathan')), w.o);
+  const f = join(deliveryDir(w.env), 'conversations', `${J}.json`);
+  const c = JSON.parse(readFileSync(f));
+  delete c.body; delete c.runLog;
+  writeFileSync(f, JSON.stringify(c));
+  const before = readFileSync(f, 'utf-8');
+  const [r] = staleRuns(w.env);
+  assert.equal(r.conversation, J);
+  assert.equal(r.run, c.run);
+  assert.equal(r.missingLog, true);
+  assert.equal(r.bodyState, 'gone');
+  assert.equal(r.since, c.last);
+  assert.equal(readFileSync(f, 'utf-8'), before);
+});

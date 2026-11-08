@@ -195,13 +195,14 @@ export function staleRuns(env) {
   const out = [];
   for (const c of listConvs(env)) {
     const r = c.run ? (c.runLog ?? []).findLast((x) => x.run === c.run) : null;
-    if (!r || Number.isFinite(r.end)) continue;
-    const ref = r.body ?? c.body;
+    if (!c.run || (r && Number.isFinite(r.end))) continue;
+    const ref = r?.body ?? c.body;
     let rec = null;
     try { rec = ref ? readBody(env, ref) : null; } catch { rec = null; }
     const bodyState = !rec ? 'gone' : rec.ended ? 'ended' : 'live';
     if (c.body && bodyState === 'live') continue;
-    out.push({ conversation: c.conversation, agent: c.agent, venue: c.venue, place: c.label ?? c.place, run: c.run, since: new Date(r.at).toISOString(), body: ref ?? null, bodyState, onRecord: !!c.body });
+    const since = r?.at ?? Date.parse(c.last ?? c.started);
+    out.push({ conversation: c.conversation, agent: c.agent, venue: c.venue, place: c.label ?? c.place, run: c.run, since: Number.isFinite(since) ? new Date(since).toISOString() : null, body: ref ?? null, bodyState, onRecord: !!c.body, ...(!r ? { missingLog: true } : {}) });
   }
   return out;
 }
