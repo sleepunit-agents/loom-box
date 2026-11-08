@@ -184,3 +184,22 @@ test('an unreadable grants document: each agent\'s row says so, not a count', ()
   const rows = page(env, { path: 'permissions' }).sections.find((s) => s.id === 'agents').blocks[0].rows;
   assert.ok(rows.every((r) => r.tone === 'bad'));
 });
+
+test('the real spend: `loom approvals use ID --kind grant --target T --as {kind: agent, agent}`, without the runtime\'s store grant', async () => {
+  const { chmodSync, readFileSync } = await import('node:fs');
+  const { env, st } = setup({ allowed: {} });
+  delete env.LOOM_RUNTIME_TEST_APPROVALS;
+  const bin = join(env.HOME, 'fake-loom');
+  const log = join(env.HOME, 'loom-argv');
+  // As approvals answers: exit 0 and "<id>: used" for exactly this shape; anything else, 1.
+  writeFileSync(bin, `#!${process.execPath}\nconst fs = require('node:fs');\nconst a = process.argv.slice(2);\nfs.writeFileSync(${JSON.stringify(log)}, JSON.stringify({ a, grant: process.env.LOOM_STORE_GRANT || null }));\n`
+    + `const ok = a[0] === 'approvals' && a[1] === 'use' && a[3] === '--kind' && a[4] === 'grant' && a[5] === '--target' && a[7] === '--as' && a.length === 9;\n`
+    + `if (!ok) { process.stderr.write('approvals: usage'); process.exit(1); }\nconst as = JSON.parse(a[8]); if (as.kind !== 'agent' || as.agent !== 'art') process.exit(1);\nconsole.log(a[2] + ': used');\n`);
+  chmodSync(bin, 0o755);
+  const r = approve({ ...env, LOOM_BIN: bin, LOOM_STORE_GRANT: 'abc.def' }, { id: 'a-0000beef', agent: 'art', target: 'tasks:mark' });
+  assert.equal(r.ok, true, r.message);
+  const seen = JSON.parse(readFileSync(log, 'utf-8'));
+  assert.deepEqual(seen.a, ['approvals', 'use', 'a-0000beef', '--kind', 'grant', '--target', 'tasks:mark', '--as', '{"kind":"agent","agent":"art"}']);
+  assert.equal(seen.grant, null, 'the runtime\'s store grant never goes to another piece');
+  assert.deepEqual(grantsOf(st).pieces.tasks.mark, ['*']);
+});
