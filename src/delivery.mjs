@@ -1967,7 +1967,9 @@ export async function tick(env, o = {}, only, mem = new Map()) {
  * old Slack bridge's body in that person's DM passes it on. Whichever is live posts: the adapter once it's live (it
  * never answers shadow then), the old bridge until it is. Remove a venue once its old bridge is gone.
  */
-export const LEGACY_SEND = { slack: 'shuttle' };
+// Slack went live on loom-slack (t-1745, 2026-11-08): no venue's old bridge posts for the runtime now. The mechanism
+// stays for a venue that switches later: its old bridge's piece here, until its adapter posts.
+export const LEGACY_SEND = {};
 
 /** How long a post's outcome is kept for its sender to ask after (`sendStatus`). */
 const SENT_KEPT_MS = 3_600_000;
