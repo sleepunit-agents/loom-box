@@ -181,7 +181,7 @@ export function boards(env, nowS = Date.now() / 1000) {
   return mergeAdapters(out, adapterStatuses(env), nowS);
 }
 
-function adapterStatuses(env) {
+export function adapterStatuses(env) {
   const out = {};
   const home = env.LOOM_HOME || join(env.XDG_CONFIG_HOME || join(env.HOME || homedir(), '.config'), 'loom');
   for (const venue of ['discord', 'slack']) {
