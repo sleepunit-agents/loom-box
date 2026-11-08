@@ -2797,7 +2797,7 @@ export async function spawnComms(env, d = depsOf(env)) {
         const report = d.sealer.open(Buffer.from(c.spawn.report, 'base64')).toString('utf-8');
         const end = c.runLog?.findLast((r) => r.run === c.spawn.reportRun)?.end;
         const t = await d.core.turn({ key: `runtime:spawn-final-${c.conversation}-${c.spawn.reportRun}`, agent: c.agent, venue: c.venue, place: c.place,
-          at: new Date(end ?? Date.parse(c.spawn.created)).toISOString(), from: { kind: 'agent', id: c.agent }, kind: 'reply', run: c.spawn.reportRun, label: c.label });
+          at: new Date(end ?? Date.parse(c.spawn.created)).toISOString(), from: { kind: 'agent', id: c.agent }, kind: 'reply', outcome: 'answered', run: c.spawn.reportRun, label: c.label });
         try { await d.core.audit({ conversation: c.conversation, seq: t.seq, text: report }); } catch (e) { if (e.status !== 409) throw e; }
         locked(env, () => { const fresh = loadConv(env, c.conversation); fresh.spawn.recordedRun = c.spawn.reportRun; saveConv(env, fresh); });
       }

@@ -1,12 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { readFileSync, mkdirSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { homedir } from 'node:os';
 import { spawnCall, SPAWN_DEPTH } from '../src/spawn.mjs';
 import { deliver, deliveryDir, loadConv, saveConv, tick } from '../src/delivery.mjs';
 import { judge } from '../src/loops.mjs';
 import { principalOf } from '../src/principal.mjs';
 import { world } from './delivery-world.mjs';
+const coreTurnPath = join(process.env.LOOM_DIST || join(homedir(), 'Code', 'loom', 'dist'), 'backends', 'conversations.js');
+const parseCoreTurn = existsSync(coreTurnPath) ? (await import(coreTurnPath)).parseTurn : null;
 const owner = { kind: 'owner' };
 const start = (w, q = {}) => spawnCall(w.env, owner, { agent: 'art', brief: 'Reply ok', ...q }, w.o);
 const proof = (w, cv) => {
@@ -17,6 +20,15 @@ const proof = (w, cv) => {
 test('spawn finishes, survives reload, and result returns the sealed final report', async () => {
   const w = world();
   w.runner.final = () => 'ok';
+  const turn = w.core.turn.bind(w.core);
+  w.core.turn = async (t) => {
+    if (t.kind === 'reply') {
+      const { agent, key, ...input } = t;
+      if (parseCoreTurn) parseCoreTurn(input, agent);
+      else if (!t.outcome) throw new Error('core requires a reply outcome');
+    }
+    return turn(t);
+  };
   const r = await start(w, { title: 'spawn test' });
   const c = loadConv(w.env, r.handle);
   assert.equal(c.kind, 'agent');
@@ -26,6 +38,7 @@ test('spawn finishes, survives reload, and result returns the sealed final repor
   w.runner.finish(c.body, { failed: false, worked: false });
   await tick(w.env, w.o);
   assert.equal(judge(loadConv(w.env, r.handle).runLog.at(-1)).failed, null, 'a final report counts as a reply even without tool work');
+  assert.equal(loadConv(w.env, r.handle).spawn.recordedRun, loadConv(w.env, r.handle).spawn.reportRun, 'the report is accepted by core before it is shown in Comms');
   const result = await spawnCall(w.env, owner, { agent: 'art', action: 'result', handle: r.handle }, w.o);
   assert.equal(result.state, 'done');
   assert.equal(result.report, 'ok');
