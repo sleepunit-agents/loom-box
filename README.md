@@ -747,3 +747,9 @@ extra jobs queue, and also respect delivery's overall busy limit. Spawn chains
 count in the loop detector and stop before a ninth generation. Shell callers
 outside the runtime have no parent conversation, so use wait/result for their
 reports. A body can fetch or steer only its own spawned jobs.
+
+A delivery that cannot start for quota returns `body: "failed", code: "quota"`
+and, when known, `retryAfter` as an ISO timestamp for the earliest available account
+reset. Its reason includes why another harness was excluded (for example the local
+Codex opt-in), rather than implying every household account is exhausted. The clock
+can wait for that reset without creating a failure-alert retry chain.

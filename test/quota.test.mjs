@@ -436,12 +436,15 @@ test('a body on loom\'s machine never falls back to Codex (its guards are Claude
     const wake = w.msg('alert:test', 'look at this', { venue: 'wake', from: { kind: 'schedule' }, kind: 'wake', source: 'clock', local: true });
     // The clock's word first, as it fires one (t-1952): set on loom's machine, the owner's.
     putWakeFor(deliveryDir(w.env), { agent: wake.agent, place: wake.place, id: wake.id, for: 'owner' });
-    await deliver(w.env, wake, w.o);
+    const answer = await deliver(w.env, wake, w.o);
     const c = loadConv(w.env, cvOf('art', 'wake', 'alert:test'));
     if (want) {
       assert.match(c.body, /^codex:/, 'the owner let it: Codex, as any body falls back');
       continue;
     }
+    assert.equal(answer.code, 'quota');
+    assert.equal(answer.retryAfter, new Date(max.usage.held * 1000).toISOString());
+    assert.match(answer.reason, /runs only on Claude Code/);
     assert.equal(c.body, undefined);
     assert.equal(w.log.filter((l) => l[0] === 'start').length, 0, 'no Codex body on loom\'s machine');
     assert.match(alerts[0].facts.cant, /runs only on Claude Code, whose hooks there keep its guards/);
