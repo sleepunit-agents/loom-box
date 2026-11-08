@@ -48,6 +48,8 @@ test('1. one way to start a body: a delivery from a source, and a relay, each st
   assert.equal(brief.split('\n')[0], 'You are art, in a conversation on slack: Loren (dm:U1).');
   assert.ok(brief.includes(`identity with {conversation: "${cv}", run: "${c.run}"}`));
   assert.ok(brief.includes(`loom runtime send --conversation ${cv}`), 'slack declares a send: the body is told how to answer');
+  assert.match(brief, /final response alone does not send a reply/);
+  assert.match(brief, /arrange a concrete continuation/);
   assert.ok(plain(brief).endsWith('loren: what did we decide about the pond?'));
   assert.equal(c.body, `claude:${id}`);
   assert.equal(readBody(w.env, c.body).venue, 'slack');
@@ -176,6 +178,9 @@ test('3. capacity and continuity: same body, busy-only capacity, a warm idle bod
   assert.match(resumed[3], /^transcript of c0000000: You are art/, 'the slot restored the session before the resume');
   assert.match(plain(resumed[4]), /loren: three$/);
   assert.match(resumed[4], new RegExp(`run is ${loadConv(w.env, A).run}`));
+  assert.ok(resumed[4].includes(`loom runtime send --conversation ${A}`));
+  assert.match(resumed[4], /final response alone does not send a reply/);
+  assert.match(resumed[4], /arrange a concrete continuation/);
   assert.equal(existsSync(slotPath), false, 'restored: the session is the live body\'s again');
   assert.equal(loadConv(w.env, B).slot.session.startsWith('s-c'), true);
 

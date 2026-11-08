@@ -921,17 +921,19 @@ const render = (msgs) => {
  * wrote, the owner, a guest venue's floor and cards, the agent's own files), and the messages. Text, or parts when
  * its rules name the agent's files (briefs.mjs).
  */
-function startBrief(c, msgs, run, sends, rules = { sections: [] }) {
-  const how = sends === 'record'
+const replyHow = (c, sends) => sends === 'record'
     ? `When you're done, pipe a short account of what you did to \`loom runtime send --conversation ${c.conversation}\`: on ${c.venue} nothing is posted; it's recorded as this run's reply.`
     : `To say something there, pipe it to \`loom runtime send --conversation ${c.conversation}\`; it waits for the venue and answers {ok: true, posted: true, id?} once it's posted, or {ok: false, reason} when it couldn't post. Say a message went (in a reply, a digest or a summary) only when its send answered posted: true.`;
+
+function startBrief(c, msgs, run, sends, rules = { sections: [] }) {
+  const how = replyHow(c, sends);
   const relay = `To message one person directly instead (one DM, posted as you, in a venue that has DMs), add \`--person <their slug> --via <venue>\`${rules.guest ? ': from a guest venue, only to your owner' : ''}. Where that venue's old bridge still posts, it answers {ok: true, posted: false, relay}: handed to that bridge, which passes it on; say it's on its way, not that it was sent.`;
   const head = [
     `You are ${c.agent}, in a conversation on ${c.venue}: ${c.label ?? c.place}.`,
     `Its conversation is ${c.conversation} and this run is ${run}: call identity with {conversation: "${c.conversation}", run: "${run}"} first.`,
     ...(c.runs > 0 ? [`It has history this session doesn't: read it with conversation({id: "${c.conversation}"}) (its digests) before you answer.`] : []),
     ...(returnHow(c) ? [returnHow(c)] : []),
-    ...(sends ? [how] : []),
+    ...(sends ? [how, TURN_FOLLOW_THROUGH] : []),
     ...(sends === 'post' ? [relay] : []),
     ...(c.spawn ? [`This is a spawned job. Your final response is automatically returned to the asking conversation${c.spawn.origin ? ` (${c.spawn.origin}, run ${c.spawn.origin_run})` : ''}. Put your report in your final response.`] : []),
     OWNER_STEPS,
@@ -962,8 +964,11 @@ export const OWNER_STEPS = 'When you need your owner\'s say on something loom ca
   + 'Your own pending wakes that loom can\'t say are his work (set before it kept whom each was for): if you know they are, `wake ask-vouch <w-id>…` puts them on one card for him; never for one a person asked for. '
   + 'A conversation of yours refused a body on loom\'s machine as no one\'s: the runtime asks him itself.';
 
-/** What a resumed body is given: the new messages, and its new run. */
-const resumeBrief = (c, msgs, run) => `(${c.venue}: ${c.label ?? c.place}. This run is ${run}: call identity with {conversation: "${c.conversation}", run: "${run}"} again.${returnHow(c) ? ` ${returnHow(c)}` : ''})\n\n${render(msgs)}`;
+// A final response is harness output, not a venue post. Repeat this on resume too: an old session may predate it.
+const TURN_FOLLOW_THROUGH = 'Your final response alone does not send a reply to this conversation. For substantial work, send a brief progress update, then keep working. Before ending, send the result or current blocker with the command above and check its receipt; do not claim delivery without it. If authorized work remains, continue now or arrange a concrete continuation using the installed work/wake tools and record where it resumes. A progress message alone does not finish the work. Write this run\'s conversation_digest before ending.';
+
+/** What a resumed body is given: new messages, its new run, and the reply/continuation contract again. */
+const resumeBrief = (c, msgs, run, sends) => `(${c.venue}: ${c.label ?? c.place}. This run is ${run}: call identity with {conversation: "${c.conversation}", run: "${run}"} again.${returnHow(c) ? ` ${returnHow(c)}` : ''})\n\n${sends ? `${replyHow(c, sends)}\n${TURN_FOLLOW_THROUGH}\n\n` : ''}${render(msgs)}`;
 
 function open(d, x, mem) {
   if (x.sealed) return d.sealer.open(Buffer.from(x.sealed, 'base64')).toString('utf-8');
@@ -1637,7 +1642,7 @@ async function execute(env, op, d, mem) {
       const slot = { harness: pack.harness, session: pack.session };
       // A house's body gets its files with the resume (its host puts them back); a local one, here.
       if (!runner.remote) restored = restoreFiles(runner, pack.files);
-      r = await resumeBody(env, { ...base, slot, brief: resumeBrief(c0, [...notes, ...msgs], run), ...(runner.remote ? { files: pack.files } : {}) }, bodyDeps);
+      r = await resumeBody(env, { ...base, slot, brief: resumeBrief(c0, [...notes, ...msgs], run, sends), ...(runner.remote ? { files: pack.files } : {}) }, bodyDeps);
       rmSync(way.file, { force: true });
       // Back home: the fallback's own session isn't kept (what it said is in the digests).
       if (way.home) rmSync(slotFile(env, op.cv), { force: true });
