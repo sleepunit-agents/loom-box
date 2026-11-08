@@ -107,6 +107,28 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFi
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
+import { closeSync, openSync, readSync, writeSync } from 'node:fs';
+
+/**
+ * The owner, at a terminal: the controlling terminal (/dev/tty, not stdin, which a caller can pipe) asks `prompt`, and
+ * the line typed must be `want`. False with no controlling terminal (a body's: `claude --bg`, a detached process).
+ */
+function ownerAtTerminal(prompt, want) {
+  let fd;
+  try { fd = openSync('/dev/tty', 'r+'); } catch { return false; }
+  try {
+    writeSync(fd, prompt);
+    const buf = Buffer.alloc(1);
+    let line = '';
+    while (line.length < 200) {
+      let n;
+      try { n = readSync(fd, buf, 0, 1, null); } catch (e) { if (e?.code === 'EAGAIN') continue; return false; }
+      if (n === 0 || buf[0] === 10) break;
+      line += String.fromCharCode(buf[0]);
+    }
+    return !!want && line.trim() === want;
+  } finally { closeSync(fd); }
+}
 import { addBox, api, down, list, remoteDown, remoteUp, revokeBox, setAgent, setBoxWatch, setPrimary, up } from './control.mjs';
 import { watchOf } from './watch.mjs';
 import { healthWords } from './health.mjs';
@@ -508,7 +530,11 @@ async function main(argv, env) {
         // Never a body's, wherever it runs: a house's, or a local one's on this machine (its run's key and conversation
         // are in its environment). t-1952: the reset it makes is signed as the owner's.
         if ((env.LOOM_URL && env.LOOM_TOKEN_FILE && env.HOUSE_ID) || env.HOUSE_ID || env.LOOM_BODY_KEY || env.LOOM_BODY_CONVERSATION) throw new Fail('principal --reset is the owner\'s, on loom\'s machine, never a body\'s');
-        const r = resetPrincipal(env, flag(rest, '--conversation'));
+        // The environment is the caller's to unset, so the owner says it at the point of action: at a terminal, typing
+        // the conversation's id (t-1952). A body has no controlling terminal (`claude --bg`, a house, a detached worker).
+        const cv = flag(rest, '--conversation');
+        if (!ownerAtTerminal(`Reset who ${cv ?? '?'} acts for, as the owner (its session is dropped)? Type its id to confirm: `, cv)) throw new Fail('principal --reset is the owner\'s, at a terminal on loom\'s machine, never a body\'s: run it yourself and type the conversation id');
+        const r = resetPrincipal(env, cv);
         out(r);
         if (!r.ok) process.exitCode = 1;
         return;

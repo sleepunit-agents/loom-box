@@ -278,6 +278,13 @@ test('the owner\'s reset: refused to a body, signed, and the session that heard 
     assert.notEqual(r.status, 0, JSON.stringify(extra));
     assert.match(r.stdout + r.stderr, /never a body's/);
   }
+  // A body that unsets all of them (env -u) is still refused: the owner confirms at the controlling terminal, which a
+  // body has none of (a new session here, as `claude --bg` and a detached worker are), and piping the id in is no use.
+  const before = JSON.stringify(loadConv(w.env, L).actsFor);
+  const bare = spawnSync(process.execPath, [cli, 'principal', '--reset', '--conversation', L], { env: { PATH: process.env.PATH, HOME: w.env.HOME, LOOM_BOX_DATA: w.env.LOOM_BOX_DATA }, input: `${L}\n`, detached: true, encoding: 'utf-8' });
+  assert.notEqual(bare.status, 0);
+  assert.match(bare.stdout + bare.stderr, /at a terminal/);
+  assert.equal(JSON.stringify(loadConv(w.env, L).actsFor), before, 'nothing reset');
 });
 
 test('down: an agent stops a body host\'s house only from one of the same seat; no answer names a seat but the owner\'s', async () => {
@@ -334,6 +341,45 @@ test('the cap\'s release never stops a house just handed to a start', async () =
   assert.deepEqual(releaseEmptySeatHouses(w.env, 'art', 'p-x', now), [], 'handed out: kept');
   writeFileSync(join(dir, 'art@p-y.json'), JSON.stringify(rec));
   assert.deepEqual(releaseEmptySeatHouses(w.env, 'art', 'p-x', now), ['h-5'], 'empty and not handed out: let go');
+});
+
+test('a body whose conversation moved house can\'t speak or get a statement there; the owner\'s own may finish its turn', async () => {
+  const w = world();
+  household(w.env);
+  w.runner.houses = { owner: 'h-1', 'p-loren': 'h-2' };
+  const { resetPrincipal } = await import('../src/delivery.mjs');
+  // Loren's DM, her body at work in her house; the owner resets it (before writing in it himself).
+  const L = cvOf('art', 'slack', 'dm:MV');
+  await deliver(w.env, w.msg('dm:MV', 'hi', person('loren')), w.o);
+  const proof = { conversation: L, key: keyOf(w, L), session: w.sessionFor(L) };
+  const hers = { kind: 'agent', agent: 'art', house: 'h-2' };
+  assert.equal((await api(w.env, fx, { caller: hers, path: 'principal', body: proof })).status, 200);
+  assert.equal(resetPrincipal(w.env, L).ok, true);
+  const p = await api(w.env, fx, { caller: hers, path: 'principal', body: proof });
+  assert.equal(p.status, 409, 'no statement for the owner to the body in her house');
+  assert.equal(p.body.statement, undefined);
+  const hs = await w.send({ ...proof, text: 'done, as the owner' }, { ...w.o, caller: hers });
+  assert.equal(hs.accepted, undefined);
+  assert.match(hs.reason, /doesn't match|moved to another principal's house/);
+  const { holdsRun } = await import('../src/delivery.mjs');
+  // The owner's thread with a relay's answer waiting on its turn: his body may still send its reply, but asks no
+  // principal (the conversation's is unknown now) and proves no place.
+  const O = cvOf('art', 'slack', 'dm:MO');
+  await deliver(w.env, w.msg('dm:MO', 'ask mark', person('jonathan')), w.o);
+  const po = { conversation: O, key: keyOf(w, O), session: w.sessionFor(O) };
+  await deliver(w.env, w.msg('dm:MO', 'mark: yes', { from: { kind: 'agent', id: 'mark' } }), { ...w.o, deferPeer: true });
+  const his = { kind: 'agent', agent: 'art', house: 'h-1' };
+  const sent = await w.send({ ...po, text: 'asked mark' }, { ...w.o, caller: his });
+  assert.equal(sent.accepted, true, JSON.stringify(sent));
+  assert.equal((await api(w.env, fx, { caller: his, path: 'principal', body: po })).status, 409);
+  assert.equal(holdsRun(w.env, O, po, { ...w.o, caller: his }), false);
+});
+
+test('a session that heard people resumes only under the same rules key (sameRules, apart from seats)', async () => {
+  const { sameRules } = await import('../src/policy.mjs');
+  assert.equal(sameRules({ guest: false, grantFor: 'phil', key: 'a' }, { guest: false, key: 'b' }), false);
+  assert.equal(sameRules({ guest: false, members: ['phil'], key: 'a' }, { guest: false, members: ['phil'], key: 'a' }), true);
+  assert.equal(sameRules({ guest: false }, { guest: true }), false);
 });
 
 test('a seat record whose house was just asked for is never swept; one whose house is over is', () => {

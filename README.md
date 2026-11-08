@@ -440,6 +440,14 @@ one container, so walling conversations apart inside a house isn't possible; wal
   house never inherits a session someone else steered. No other conversation's session ever moves. A guest venue's rules
   still drop a session that wasn't a guest venue's (`sameRules`). A relay's answer that waits for the requesting turn
   to end (`untilIdle`) doesn't interrupt that turn: the move comes when it's over.
+- **The limit on loom's machine.** A local body runs as the runtime's own account, so none of this holds against one
+  set on getting round it: it can run itself under a pseudo-terminal (`script`) and type the id, read the signing
+  key, rewrite a conversation's record, or call `principal --wake` (the clock's hand-over, which has no owner proof).
+  The terminal and the signature stop a mistake and a body that only has the CLI; only running local bodies as
+  another OS user than the runtime would wall them off. Until then, local bodies get only the owner's work (above).
+- **The proof is bound to the seat too.** A body whose conversation has moved to another principal's house gets no
+  statement and proves no place there, and speaks no more unless it's the owner's body and the move only narrows it
+  (a relay's answer waiting on its turn); a reset also drops the running body's key at once.
 - **Across the upgrade.** Bodies seated before this change have rules that name no seat, and count as the owner's
   house's (where they are). One in a conversation someone else steers moves at that conversation's next message, or
   idles out (`LOOM_RUNTIME_WARM_IDLE_S`); until then it sits in the owner's house. A proof with no caller at all is
@@ -470,7 +478,8 @@ one container, so walling conversations apart inside a house isn't possible; wal
   clock's explicit word for each local wake it fires, `--wake --for owner`, or his own Reply). Anything else (another
   person, a relay, a sender nobody names, a wake whose hand-over failed, history from before principals were kept)
   has its body ended and its start refused, saying why, until the owner vouches for it (`principal --reset` on loom's
-  machine, refused from any body's environment, signed with the runtime's key as the owner's, and dropping the
+  machine, typed at his terminal: it asks for the conversation's id on the controlling terminal, which a body has
+  none of; refused from any body's environment; signed with the runtime's key as the owner's; dropping the
   conversation's slot and ending the body that heard what came before; an unsigned reset vouches for nothing; once
   what someone else wrote is no longer waiting there: what's queued is heard again). A refused start goes down the
   usual retry ladder, so it shows on the conversation's record as failed starts.

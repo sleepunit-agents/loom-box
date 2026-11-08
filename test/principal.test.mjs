@@ -251,8 +251,16 @@ test('the CLI: --verify checks a statement on this machine; --wake takes the clo
   assert.notEqual(cli(env, ['principal', '--wake', '--agent', 'art', '--place', 'wake:w-9', '--for', 'loren']).status, 0, 'no id');
   // --reset: the owner vouches for a conversation; its statement verifies again only once it's his.
   writeFileSync(join(dir, 'conversations', 'cv-000000000003.json'), JSON.stringify({ conversation: 'cv-000000000003', agent: 'art', actsFor: { owner: true, people: [], unknown: true } }));
-  const r = cli(env, ['principal', '--reset', '--conversation', 'cv-000000000003']);
-  assert.equal(r.status, 0, r.stderr);
+  // Not from a process with no terminal (a body's), even with the id piped in: the owner types it at his (t-1952).
+  const r0 = spawnSync(process.execPath, [join(ROOT, 'src/cli.mjs'), 'principal', '--reset', '--conversation', 'cv-000000000003'], { env: { PATH: process.env.PATH, ...env }, input: 'cv-000000000003\n', detached: true, encoding: 'utf-8' });
+  assert.notEqual(r0.status, 0);
+  assert.equal(JSON.parse(readFileSync(join(dir, 'conversations', 'cv-000000000003.json'), 'utf-8')).actsFor.unknown, true);
+  // At a terminal (here a pseudo-terminal, `script`), typing the id: reset.
+  const hasScript = spawnSync('script', ['--version']).status === 0;
+  if (!hasScript) return;
+  const q = (x) => `'${String(x).replace(/'/g, "'\\''")}'`;
+  const r = spawnSync('script', ['-qec', `${q(process.execPath)} ${q(join(ROOT, 'src/cli.mjs'))} principal --reset --conversation cv-000000000003`, '/dev/null'], { env: { PATH: process.env.PATH, ...env }, input: 'cv-000000000003\n', encoding: 'utf-8' });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.deepEqual(JSON.parse(readFileSync(join(dir, 'conversations', 'cv-000000000003.json'), 'utf-8')).actsFor.unknown, false);
   assert.notEqual(cli(env, ['principal', '--reset', '--conversation', 'cv-00000000000f']).status, 0, 'no such conversation');
   // In a house, --reset is refused (and would only touch the house's own copy).

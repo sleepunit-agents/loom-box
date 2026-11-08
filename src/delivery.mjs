@@ -2104,6 +2104,8 @@ export function holdsRun(env, cv, { key, session } = {}, o = {}) {
   if (!want || !c.body || typeof key !== 'string' || !key || !timingSafeEqual(keyHash(key), want)) return false;
   // From a house, only the body's own (t-1952): a key carried out of its house proves nothing in another.
   if (houseProblem(env, c, o.caller)) return false;
+  // Nor from a body whose conversation has moved to another principal's house (t-1952).
+  if (seatMoved(env, c)) return false;
   // Fail closed (unlike send's, kept as it was): a body whose session the runner can't name proves nothing yet.
   const own = sessionOf({ ...depsOf(env, o), env }, c.body);
   return !!own && session === own;
@@ -2203,6 +2205,12 @@ function holderProblem(env, d, c, { key, session }, does = 'speaks in it', calle
   }
   const away = houseProblem(env, c, caller);
   if (away) return `only the body holding ${c.conversation} ${does} (${away})`;
+  // Bound to the seat its rules were made for, too (t-1952): a body whose conversation has moved to another principal's
+  // house speaks no more there (it's being ended), unless it's the owner's body and the move only narrows it (a relay's
+  // answer waiting on its turn). Its principal it never asks once moved (bodyPrincipal).
+  if (seatMoved(env, c) && (does !== 'speaks in it' || (c.local ? OWNER_SEAT : c.bodyRules?.seat ?? OWNER_SEAT) !== OWNER_SEAT)) {
+    return `only the body holding ${c.conversation} ${does} (its conversation has moved to another principal's house)`;
+  }
   const own = sessionOf({ ...d, env }, c.body);
   if (own && session !== own) {
     return `only the body holding ${c.conversation} ${does} (${session ? 'another session is' : 'no session is named'}: ${c.conversation} is a session of its own)`;
@@ -2238,7 +2246,8 @@ export function resetPrincipal(env, conversation) {
     rmSync(slotFile(env, conversation), { force: true });
     rmSync(homeFile(env, conversation), { force: true });
     delete c.slot; delete c.home; delete c.fallback;
-    if (c.body) c.resetPending = true;
+    // The run that heard what came before speaks no more: its key is gone now, not when its body is ended.
+    if (c.body) { c.resetPending = true; delete c.sendKey; }
     saveConv(env, c);
     return { ok: true, conversation };
   });
