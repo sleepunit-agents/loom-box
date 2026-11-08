@@ -1,7 +1,8 @@
 // t-1920: a body started on one venue sends a DM on another, whose new adapter is still in shadow. Before: the
 // adapter refused it for good, `loom runtime send` had already answered {accepted}, and the run's digest said the DM
 // went (cv-67406263d047, "I DM'd Loren in Slack"). Now: send waits for what the venue said, and a DM the adapter
-// refuses as shadow is handed to the old bridge's relay (LEGACY_SEND), which is what posts there meanwhile.
+// refuses as shadow is handed to the old bridge's relay (LEGACY_SEND), while a venue still has one. Since Slack went
+// live (t-1745) none has: the hand-on is tested through sendOutcome.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
@@ -33,7 +34,7 @@ function setup() {
   return { w, S, calls, start, sendNow };
 }
 
-test('a DM to a venue whose adapter is in shadow: handed back for the old bridge, not refused for good, nobody told it failed for good', async () => {
+test('a DM to a venue whose adapter is in shadow, with no old bridge left (LEGACY_SEND is empty since Slack went live, t-1745): refused for good, never handed on', async () => {
   const { w, S, calls, start, sendNow } = setup();
   writeFileSync(join(S, 'refuse'), JSON.stringify(SLACK_SHADOW));
   const { cv, key } = await start('channel:100', 'DM Loren that the build is green');
@@ -41,16 +42,11 @@ test('a DM to a venue whose adapter is in shadow: handed back for the old bridge
   assert.equal(r.accepted, true);
   assert.equal(calls().length, 1, 'the adapter was asked once, never retried');
   assert.deepEqual(calls()[0].argv, ['--place', 'dm:U9', '--agent', 'art']);
-  assert.deepEqual(r.post.legacy, { piece: 'shuttle', via: 'slack', from: 'discord:#pond' });
-  // Its sender learns this, and only this: nothing says it posted.
-  assert.deepEqual(sendStatus(w.env, { conversation: cv, ref: r.ref }, { caller: { kind: 'agent', agent: 'art' } }),
-    { done: true, ok: false, reason: SLACK_SHADOW.reason, legacy: { piece: 'shuttle', via: 'slack', from: 'discord:#pond' } });
-  const c = loadConv(w.env, cv);
-  assert.equal(c.refused, undefined, 'not kept as refused for good');
-  assert.equal(deliveryNotices(w.env, w.clock.now().getTime()).filter((x) => /refused a post for good/.test(x.text)).length, 0);
-  assert.equal(w.log.some((l) => l[0] === 'feed' && /nothing will post there/.test(l[2])), false, 'the body isn\'t told "don\'t try again"');
-  // Another agent asks after it: no.
-  assert.match(sendStatus(w.env, { conversation: cv, ref: r.ref }, { caller: { kind: 'agent', agent: 'mark' } }).reason, /only art/);
+  assert.equal(r.post.legacy, undefined, 'no old bridge to hand it to');
+  const st = sendStatus(w.env, { conversation: cv, ref: r.ref }, { caller: { kind: 'agent', agent: 'art' } });
+  assert.equal(st.ok, false);
+  assert.equal(st.legacy, undefined);
+  assert.equal(st.permanent, true, 'nothing says it posted, and nothing pretends it will');
   delete process.env.FAKE_SEND;
 });
 
