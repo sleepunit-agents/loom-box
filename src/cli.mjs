@@ -107,6 +107,28 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFi
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
+import { closeSync, openSync, readSync, writeSync } from 'node:fs';
+
+/**
+ * The owner, at a terminal: the controlling terminal (/dev/tty, not stdin, which a caller can pipe) asks `prompt`, and
+ * the line typed must be `want`. False with no controlling terminal (a body's: `claude --bg`, a detached process).
+ */
+function ownerAtTerminal(prompt, want) {
+  let fd;
+  try { fd = openSync('/dev/tty', 'r+'); } catch { return false; }
+  try {
+    writeSync(fd, prompt);
+    const buf = Buffer.alloc(1);
+    let line = '';
+    while (line.length < 200) {
+      let n;
+      try { n = readSync(fd, buf, 0, 1, null); } catch (e) { if (e?.code === 'EAGAIN') continue; return false; }
+      if (n === 0 || buf[0] === 10) break;
+      line += String.fromCharCode(buf[0]);
+    }
+    return !!want && line.trim() === want;
+  } finally { closeSync(fd); }
+}
 import { addBox, api, down, list, remoteDown, remoteUp, revokeBox, setAgent, setBoxWatch, setPrimary, up } from './control.mjs';
 import { watchOf } from './watch.mjs';
 import { healthWords } from './health.mjs';
@@ -366,7 +388,7 @@ async function main(argv, env) {
       for (const b of r.boxes) process.stdout.write(`box ${b.name}${b.id !== b.name ? ` [${b.id}]` : ''}${b.local ? ' (loom\'s own)' : ''}${b.revoked ? ' REVOKED' : ''}: ${b.facts.join(', ')}\n`);
       for (const v of r.services ?? []) process.stdout.write(`service ${v.service} on ${v.box}${v.moveTo ? ` → ${v.moveTo}` : ''}: ${v.want}, house ${v.house} ${v.state ?? ''}\n`);
       for (const v of r.remotes ?? []) if (v.want === 'up' || v.state !== 'stopped') process.stdout.write(`box session "${v.name}" in ${v.dir}: ${v.want}, ${v.state}${v.url ? ` ${v.url}` : ''}${v.error ? ` (${v.error})` : ''}\n`);
-      for (const h of r.houses) process.stdout.write(`${h.id} ${h.agent} on ${h.box}: ${houseBadge(h)}  ${h.task.slice(0, 60)}\n`);
+      for (const h of r.houses) process.stdout.write(`${h.id} ${h.agent}${h.seat && h.seat !== 'owner' ? ` (for ${h.seat.startsWith('p-') ? h.seat.slice(2) : `one conversation, ${h.seat.slice(2)}`})` : ''} on ${h.box}: ${houseBadge(h)}  ${h.task.slice(0, 60)}\n`);
       return;
     }
     case 'join': {
@@ -505,8 +527,14 @@ async function main(argv, env) {
       if (rest.includes('--reset')) {
         // The owner's, on loom's machine: this conversation is his from here (it ran before the runtime kept who
         // steered it, or heard someone he vouches for). Never through the piece API.
-        if (env.LOOM_URL && env.LOOM_TOKEN_FILE && env.HOUSE_ID) throw new Fail('principal --reset is the owner\'s, on loom\'s machine');
-        const r = resetPrincipal(env, flag(rest, '--conversation'));
+        // Never a body's, wherever it runs: a house's, or a local one's on this machine (its run's key and conversation
+        // are in its environment). t-1952: the reset it makes is signed as the owner's.
+        if ((env.LOOM_URL && env.LOOM_TOKEN_FILE && env.HOUSE_ID) || env.HOUSE_ID || env.LOOM_BODY_KEY || env.LOOM_BODY_CONVERSATION) throw new Fail('principal --reset is the owner\'s, on loom\'s machine, never a body\'s');
+        // The environment is the caller's to unset, so the owner says it at the point of action: at a terminal, typing
+        // the conversation's id (t-1952). A body has no controlling terminal (`claude --bg`, a house, a detached worker).
+        const cv = flag(rest, '--conversation');
+        if (!ownerAtTerminal(`Reset who ${cv ?? '?'} acts for, as the owner (its session is dropped)? Type its id to confirm: `, cv)) throw new Fail('principal --reset is the owner\'s, at a terminal on loom\'s machine, never a body\'s: run it yourself and type the conversation id');
+        const r = resetPrincipal(env, cv);
         out(r);
         if (!r.ok) process.exitCode = 1;
         return;

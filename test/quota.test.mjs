@@ -6,6 +6,7 @@
 //   - a turn refused mid-way holds its account and is retried once on the other harness; never a second retry, and
 //     "all out" is said plainly in the conversation and alerted;
 //   - one Inbox FYI per switch, the agent's card, the Comms reply's "on Codex", the trace.
+import { putWakeFor } from '../src/principal.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -433,6 +434,8 @@ test('a body on loom\'s machine never falls back to Codex (its guards are Claude
     const alerts = [];
     w.o.alert = (_e, a) => { alerts.push(a); return true; };
     const wake = w.msg('alert:test', 'look at this', { venue: 'wake', from: { kind: 'schedule' }, kind: 'wake', source: 'clock', local: true });
+    // The clock's word first, as it fires one (t-1952): set on loom's machine, the owner's.
+    putWakeFor(deliveryDir(w.env), { agent: wake.agent, place: wake.place, id: wake.id, for: 'owner' });
     await deliver(w.env, wake, w.o);
     const c = loadConv(w.env, cvOf('art', 'wake', 'alert:test'));
     if (want) {

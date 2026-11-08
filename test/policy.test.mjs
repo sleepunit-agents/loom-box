@@ -75,13 +75,16 @@ test('a guest venue\'s body starts with the deny list and the guest brief: the f
   assert.deepEqual(readBody(w.env, c.body).deny, ['mcp__handoff', ...GUEST_DENY], 'the body\'s record says what it was denied');
   assert.equal(readBody(w.env, c.body).guest, true);
   // A tier-2 person in the same guest venue: the venue is the guest's, so the body is narrowed all the same.
+  // (A second person there makes its principal unknown: the conversation moves to a house of its own, t-1952, never
+  // fed in the house it was in, and Robin's session doesn't follow it out of her house: a fresh body.)
   const b = await deliver(w.env, dmsg('channel:555', 'loren', 'hi'), w.o);
-  assert.equal(b.body, 'fed');
+  assert.equal(b.body, 'started');
+  assert.equal(readBody(w.env, loadConv(w.env, a.conversation).body).guest, true, 'still a guest venue\'s body');
   // A thread under it: its gate venue is the guest's channel (a tier-1 person's venues), so it's a guest venue too.
   const t = await deliver(w.env, dmsg('thread:556', 'loren', 'in the thread'), w.o);
   assert.equal(t.body, 'started');
-  assert.deepEqual(w.runner.denies[starts(w)[1][1]], ['mcp__handoff', ...GUEST_DENY]);
-  assert.ok(briefOf(starts(w)[1]).includes('THIS IS A GUEST VENUE. Its readers (robin)'));
+  assert.deepEqual(w.runner.denies[starts(w).at(-1)[1]], ['mcp__handoff', ...GUEST_DENY]);
+  assert.ok(briefOf(starts(w).at(-1)).includes('THIS IS A GUEST VENUE. Its readers (robin)'));
 });
 
 test('a tier-2 message\'s body, anywhere else, starts without the guest deny list or the guest brief', async () => {
@@ -534,7 +537,10 @@ test('a group body hears no person outside the members its rules were made for: 
   const { w, smsg } = roomWorld();
   const a = await deliver(w.env, smsg('group:G1', 'phil', 'hi all'), w.o);
   const first = loadConv(w.env, a.conversation).body;
-  assert.equal((await deliver(w.env, smsg('group:G1', 'anton', 'hi'), w.o)).body, 'fed', 'a member: fed');
+  // A member: heard, in a house of the conversation's own now (two people steer it: unknown, t-1952), never fed where it
+  // was, and Phil's session left behind (a session a person steered stays in their house).
+  assert.equal((await deliver(w.env, smsg('group:G1', 'anton', 'hi'), w.o)).body, 'started', 'a member: heard');
+  assert.equal(w.log.some((l) => l[0] === 'feed' && l[1] === first.split(':')[1]), false);
   const b = await deliver(w.env, smsg('group:G1', 'loren', 'me too'), w.o);
   assert.ok(w.log.some((l) => l[0] === 'end' && l[1] === first.split(':')[1]), 'never fed: the body was ended');
   assert.equal(w.log.some((l) => l[0] === 'feed' && String(l[2]).includes('me too')), false);

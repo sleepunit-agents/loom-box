@@ -23,6 +23,14 @@
 // The host reaches it through the piece API, `body-sync`, as its house's own token (an agent caller with its house):
 // an agent's host sees only its own agent's record, and only the house the record names (or a live house of that
 // agent, adopted when the record names none).
+//
+// One house per steering principal (t-1952): an agent has a host record per *seat* (principal.mjs, seatOf): the
+// owner's is <agent>.json (as it always was, so a live house is kept across the change), a person's or an unknown
+// conversation's is <agent>@<seat>.json, each with its own house. A body is started in its conversation's seat's
+// house, its record says which seat (`seat`), and everything asked of it goes through that seat's record. A house's
+// host finds its record by its house (from its token), so no house is ever handed another seat's bodies, keys or
+// sessions. Houses for anyone but the owner are capped per agent (seatRoom, LOOM_RUNTIME_SEAT_HOUSES): at the cap a
+// body waits for one to idle out; it never shares one.
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -35,6 +43,7 @@ import { GONE, part, redact, UNPRINTABLE_ONE } from './redact.mjs';
 import { cardTime } from './activity.mjs';
 import { ageSealer } from './sealed.mjs';
 import { AGENT_NAME, StateError, load, update, withLock } from './state.mjs';
+import { OWNER_SEAT, SEAT, seatCapProblem } from './principal.mjs';
 
 /** A host report older than this: no host (its house is gone, or its host stopped). */
 export const HOST_STALE_MS = 30_000;
@@ -51,6 +60,8 @@ const BODY_ID = /^[A-Za-z0-9-]{4,64}$/;
 const HOUSE = /^h-[0-9]{1,9}$/;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+/** A start that found the agent's houses for other people at the cap (t-1952): delivery makes it wait, never a failure. */
+const seatFull = (m) => Object.assign(new RunnerError(m), { seatFull: true });
 /** A part transfer that hasn't finished in this long is given up, and swept. */
 export const PARTS_MS = 3_600_000;
 /** A request given up on (its claim wait ran out) is remembered this long, so a body its house starts late is stopped. */
@@ -96,7 +107,19 @@ const keyHash = (k) => createHash('sha256').update(String(k)).digest('hex');
 const sameHash = (a, b) => typeof a === 'string' && typeof b === 'string' && a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
 const dataDir = (env) => env.LOOM_BOX_DATA || join(env.HOME || '', '.local', 'share', 'loom-box');
 const hostsDir = (env) => join(dataDir(env), 'delivery', 'hosts');
-const hostFile = (env, agent) => join(hostsDir(env), `${agent}.json`);
+const ownerSeat = (seat) => seat === undefined || seat === null || seat === OWNER_SEAT;
+const hostFile = (env, agent, seat) => {
+  if (ownerSeat(seat)) return join(hostsDir(env), `${agent}.json`);
+  if (!SEAT.test(seat)) throw new StateError('not a seat', 400);
+  return join(hostsDir(env), `${agent}@${seat}.json`);
+};
+/** The agent's seats with a host record: the owner's (always), then each other seat's. */
+function seatsOf(env, agent) {
+  let names = [];
+  try { names = readdirSync(hostsDir(env)); } catch { /* none yet */ }
+  const pre = `${agent}@`;
+  return [OWNER_SEAT, ...names.filter((n) => n.startsWith(pre) && n.endsWith('.json')).map((n) => n.slice(pre.length, -5)).filter((x) => SEAT.test(x) && x !== OWNER_SEAT)];
+}
 // Every path is the agent's and the house's own, and an id is checked before it names one.
 const safe = (agent, house, id) => AGENT_NAME.test(agent ?? '') && HOUSE.test(house ?? '') && BODY_ID.test(id ?? '');
 const packedFile = (env, agent, house, id) => { if (!safe(agent, house, id)) throw new StateError('not a body of a house', 400); return join(hostsDir(env), 'packed', agent, house, `${id}.age`); };
@@ -117,8 +140,85 @@ function writeJson(p, v) {
 }
 
 const hostLocked = (env, f) => withLock(hostsDir(env), 'lock', f, 'the body hosts', 10_000);
-const loadHost = (env, agent) => readJson(hostFile(env, agent)) ?? { agent, req: {}, stop: {}, inbox: {} };
+const loadHost = (env, agent, seat) => readJson(hostFile(env, agent, seat)) ?? { agent, ...(ownerSeat(seat) ? {} : { seat }), req: {}, stop: {}, inbox: {} };
 export const hostOf = loadHost;
+
+
+/**
+ * Whether a body for `seat` can have a house now: null when it can (the owner's always can; a seat whose house is up
+ * already can), else why it waits. Another seat's house is never shared: at the cap, the body waits for one of the
+ * agent's other houses (a person's, an unknown conversation's) to idle out.
+ */
+export function seatRoom(env, agent, seat) {
+  if (ownerSeat(seat)) return null;
+  let s;
+  try { s = load(env); } catch { return null; }   // the start reads it again, and says so
+  const own = loadHost(env, agent, seat);
+  if (own.house && TAKES.has(s.houses[own.house]?.state)) return null;
+  return seatCapProblem(env, s, agent, seat);
+}
+
+/**
+ * At the cap (seatRoom), the agent's houses for other seats that hold no body at all are asked to stop now, rather
+ * than idling out their host's 600 s: what waits gets a house sooner. Only a running house whose host reports, fresh,
+ * that every body it had has ended, and that nothing is asked of it. Returns the houses asked down.
+ */
+export function releaseEmptySeatHouses(env, agent, seat, nowMs = Date.now()) {
+  // Under the hosts lock: no request joins a record between its look here and its house's stop.
+  try { return hostLocked(env, () => releaseLocked(env, agent, seat, nowMs)); } catch { return []; }
+}
+function releaseLocked(env, agent, seat, nowMs) {
+  let s;
+  try { s = load(env); } catch { return []; }
+  const empty = [];
+  for (const other of seatsOf(env, agent)) {
+    if (other === OWNER_SEAT || other === seat) continue;
+    const h = loadHost(env, agent, other);
+    if (!h.house || s.houses[h.house]?.state !== 'running' || !freshRec(h, h.house, nowMs) || h.draining) continue;
+    if (Object.values(h.report.bodies ?? {}).some((b) => b.status !== 'ended')) continue;
+    if (Object.keys(h.req ?? {}).length || Object.keys(h.stop ?? {}).length || Object.keys(h.inbox ?? {}).length) continue;
+    // Just handed to a start (warm, then launch's request): not empty, it's about to have a body.
+    if (Number.isFinite(h.handedAt) && nowMs - h.handedAt < CLAIM_MS) continue;
+    empty.push(h.house);
+  }
+  if (!empty.length) return [];
+  try {
+    update(env, (st) => { for (const id of empty) { const x = st.houses[id]; if (x?.state === 'running') { x.state = 'stopping'; x.updated = new Date(nowMs).toISOString(); x.log = 'stopped early: its agent\'s houses for other people were at the cap, and it held no body'; } } });
+  } catch { return []; }
+  return empty;
+}
+
+/** The record of the seat whose house (the agent's, or one draining) is `house`, with its seat; null when none is. */
+function recordOfHouse(env, agent, house) {
+  for (const seat of seatsOf(env, agent)) {
+    const h = loadHost(env, agent, seat);
+    if (houseRec(h, house)) return { h, seat };
+  }
+  return null;
+}
+
+/**
+ * Seat records that are over: no house that's live, nothing draining, nothing asked. The owner's is kept (it's the
+ * agent's own); an unknown conversation's or a person's goes, and comes back with its next body.
+ */
+export function sweepSeats(env) {
+  let names = [];
+  try { names = readdirSync(hostsDir(env)); } catch { return; }
+  for (const n of names) {
+    const m = /^([a-z][a-z0-9-]{0,39})@(.+)\.json$/.exec(n);
+    if (!m || !SEAT.test(m[2]) || m[2] === OWNER_SEAT) continue;
+    hostLocked(env, () => {
+      const h = readJson(join(hostsDir(env), n));
+      if (!h) return;
+      // The state read under the lock, after the record: a house warm() asked for (up, then its record) is in it.
+      let s;
+      try { s = load(env); } catch { return; }
+      pruneDraining(env, h);
+      const live = h.house && LIVE.has(s.houses[h.house]?.state);
+      if (!live && !h.draining && !Object.keys(h.req ?? {}).length) rmSync(join(hostsDir(env), n), { force: true });
+    });
+  }
+}
 /** One house's part of its agent's host record: the record itself for the agent's house, else that house's draining entry. */
 const houseRec = (h, house) => (house && h.house === house ? h : (house && h.draining?.[house]) || null);
 const freshRec = (x, house, now) => !!x?.report && now - x.report.at < HOST_STALE_MS && x.report.house === house;
@@ -204,10 +304,12 @@ export function bodySync(env, caller, body, o = {}) {
   const t = transit(sealer);
   const now = (o.now ?? (() => new Date()))().getTime();
   return hostLocked(env, () => {
-    const h = loadHost(env, agent);
-    // The agent's house, or one of its draining houses (an older image's: it finishes its bodies, and gets no new one).
+    // The seat whose house this is (t-1952): the agent's house for it, or one of its draining houses (an older image's:
+    // it finishes its bodies, and gets no new one). Only from its token's house, never from what it says.
+    const found = recordOfHouse(env, agent, house);
+    if (!found) return { exit: true, reason: `${agent}'s bodies aren't ${house}'s now` };
+    const { h, seat } = found;
     const x = houseRec(h, house);
-    if (!x) return { exit: true, reason: `${agent}'s bodies are ${h.house ?? 'nowhere'}'s now` };
     // Only the body host, with its own key: never a body (an agent's token in the house is all a body has).
     const given = keyHash(body?.hostKey ?? '');
     let issued;
@@ -279,7 +381,7 @@ export function bodySync(env, caller, body, o = {}) {
       inbox[id] = items.flatMap((y) => { try { return [{ id: y.key, text: t.open(y.sealed).toString('utf-8') }]; } catch { return []; } });
     }
     if (x === h) pruneDraining(env, h);
-    writeJson(hostFile(env, agent), h);
+    writeJson(hostFile(env, agent, seat), h);
     return { req, stop: x.stop ?? {}, inbox, acked: got, ...(issued ? { hostKey: issued } : {}) };
   });
 }
@@ -305,26 +407,42 @@ export class HouseRunner {
     return this.sealable;
   }
 
-  host(agent) { return loadHost(this.env, agent); }
+  host(agent, seat) { return loadHost(this.env, agent, seat); }
 
-  /** The agent's house with its body host up: asked for when there's none. */
-  async warm(agent) {
+  /** The seat a body's record (and so its house) is: its own word, else the seat whose house it's in, else the owner's. */
+  seatFor(body) {
+    if (typeof body?.seat === 'string' && SEAT.test(body.seat)) return body.seat;
+    return (body?.agent && body?.house && recordOfHouse(this.env, body.agent, body.house)?.seat) || OWNER_SEAT;
+  }
+
+  /** The seat's house (the owner's, a person's, an unknown conversation's) with its body host up: asked for when there's none. */
+  async warm(agent, seat = OWNER_SEAT) {
     const end = Date.now() + this.warmMs;
     for (;;) {
       const now = this.now().getTime();
-      const h = this.host(agent);
+      const h = this.host(agent, seat);
       let takes = !!h.house && houseTakes(this.env, h.house);
       // An older image than the agent's current build: drained, and the next body goes to a fresh house (t-1764).
-      if (takes && this.drain(agent, h.house)) takes = false;
-      else if (fresh(h, now) && takes) return h.house;
+      if (takes && this.drain(agent, h.house, seat)) takes = false;
+      else if (fresh(h, now) && takes) {
+        // Handed out (its launch writes the request next): marked, so the cap's release never stops it in between.
+        hostLocked(this.env, () => { const x = loadHost(this.env, agent, seat); if (x.house === h.house) { x.handedAt = now; writeJson(hostFile(this.env, agent, seat), x); } });
+        return h.house;
+      }
       if (!takes) {
+        // Never past the cap, and never into another seat's house: the body waits (delivery.mjs asks seatRoom first;
+        // this is the same check, for a start that raced past it).
+        const full = seatRoom(this.env, agent, seat);
+        if (full) { releaseEmptySeatHouses(this.env, agent, seat, now); throw seatFull(full); }
         const s = load(this.env);
         const at = bodyBox(s, agent, this.harness, this.env);
         if (!at.box) throw new RunnerError(at.reason);
         const boot = randomBytes(24).toString('hex');
-        const r = this.up(this.env, { now: () => this.now() }, { kind: 'owner' }, { agent, box: at.box, task: hostTask(this.env, boot) }, { kind: 'body-host' });
+        // up() checks the cap again in the same state write that makes the house: two starts at once never pass it both.
+        let r;
+        try { r = this.up(this.env, { now: () => this.now() }, { kind: 'owner' }, { agent, box: at.box, task: hostTask(this.env, boot) }, { kind: 'body-host', seat }); } catch (e) { if (e?.seatFull) throw seatFull(e.message); throw e; }
         // A new house: what was asked of the last one (and what it claimed) isn't this one's, nor is its host's key.
-        hostLocked(this.env, () => { const x = loadHost(this.env, agent); x.house = r.id; delete x.report; delete x.hostHash; delete x.cancel; x.bootHash = keyHash(boot); x.req = {}; x.stop = {}; x.inbox = {}; x.claimed = {}; pruneDraining(this.env, x); writeJson(hostFile(this.env, agent), x); });
+        hostLocked(this.env, () => { const x = loadHost(this.env, agent, seat); x.house = r.id; delete x.report; delete x.hostHash; delete x.cancel; x.bootHash = keyHash(boot); x.req = {}; x.stop = {}; x.inbox = {}; x.claimed = {}; pruneDraining(this.env, x); writeJson(hostFile(this.env, agent, seat), x); });
       }
       if (Date.now() > end) throw new RunnerError(`${agent}'s house ${h.house ?? ''} didn't start its body host in ${this.warmMs / 1000} s`);
       await sleep(this.poll);
@@ -336,19 +454,19 @@ export class HouseRunner {
    * draining houses (its host's key, its bodies, what's asked of them all go with it) and the record names no house:
    * the caller asks for a fresh one. Its state record says so (`draining`), for the page. True if it was drained.
    */
-  drain(agent, house) {
+  drain(agent, house, seat = OWNER_SEAT) {
     let s;
     try { s = load(this.env); } catch { return false; }
     if (!outdatedHouse(s, house)) return false;
     const at = this.now().toISOString();
     const moved = hostLocked(this.env, () => {
-      const x = loadHost(this.env, agent);
+      const x = loadHost(this.env, agent, seat);
       if (x.house !== house) return false;
       (x.draining ??= {})[house] = { since: this.now().getTime(), ...Object.fromEntries(PER_HOUSE.filter((k) => k in x).map((k) => [k, x[k]])) };
       for (const k of PER_HOUSE) delete x[k];
       delete x.house;
       x.req = {}; x.stop = {}; x.inbox = {};
-      writeJson(hostFile(this.env, agent), x);
+      writeJson(hostFile(this.env, agent, seat), x);
       return true;
     });
     if (moved) {
@@ -361,6 +479,9 @@ export class HouseRunner {
 
   async launch(o, resume) {
     if (!AGENT_NAME.test(o.agent ?? '')) throw new RunnerError('a body in a house is some agent\'s: say which');
+    // Whose house (t-1952): the seat delivery gives, by the conversation's principal; none given is the owner's.
+    const seat = o.seat ?? OWNER_SEAT;
+    if (!SEAT.test(seat)) throw new RunnerError('a body\'s seat is owner, p-<person> or u-<conversation>');
     // A brief that names the agent's files goes as `parts`, never as `brief`: only a host that says it reads them
     // gets one (an older host would start the body without them).
     const parts = isParts(o.brief);
@@ -370,13 +491,13 @@ export class HouseRunner {
     // Asked of the house warm() gave, only while it's still the agent's house (not drained since): else warm again.
     let house;
     for (;;) {
-      house = await this.warm(o.agent);
+      house = await this.warm(o.agent, seat);
       const asked = hostLocked(this.env, () => {
-        const h = loadHost(this.env, o.agent);
+        const h = loadHost(this.env, o.agent, seat);
         if (h.house !== house) return false;
         if (parts && !h.report?.caps?.includes('parts')) return 'old';
         (h.req ??= {})[rid] = { at: this.now().getTime(), sealed };
-        writeJson(hostFile(this.env, o.agent), h);
+        writeJson(hostFile(this.env, o.agent, seat), h);
         return true;
       });
       if (asked === 'old') throw new RunnerError(`${o.agent}'s house ${house} runs a body host too old to read its brief files: update the house's loom-runtime`);
@@ -386,7 +507,7 @@ export class HouseRunner {
     const end = Date.now() + this.claimMs;
     try {
       for (;;) {
-        const d = houseRec(this.host(o.agent), house)?.report?.done?.[rid];
+        const d = houseRec(this.host(o.agent, seat), house)?.report?.done?.[rid];
         if (d?.id) {
           const id = bodyIdOf(house, d.id);
           // The composed id must still be a body ref (bodies.mjs REF: 4-64 of [A-Za-z0-9-]): the house's id takes room.
@@ -397,25 +518,25 @@ export class HouseRunner {
           // (Refused, an id that's a live body's is left alone: it is that body's harness job, and stopping it would end the body it is.)
           const rec = readJson(join(dataDir(this.env), 'bodies', `${this.harness}-${id}.json`));
           if (rec && !(resume && rec.ended)) throw new RunnerError(`${house} reported ${d.id}, which is already a body's`);
-          if (rec) this.forgetStop(o.agent, house, d.id);
-          return { id, harness: this.harness, model: o.model, house, ...(resume ? { slot: resume } : {}) };
+          if (rec) this.forgetStop(o.agent, house, d.id, seat);
+          return { id, harness: this.harness, model: o.model, house, seat, ...(resume ? { slot: resume } : {}) };
         }
         if (d?.error) throw new RunnerError(d.error);
         if (Date.now() > end) {
           // Given up on: should its house start it late, that body is stopped, never run (bodySync, h.cancel).
-          hostLocked(this.env, () => { const h = loadHost(this.env, o.agent); const x = houseRec(h, house); if (x) { (x.cancel ??= {})[rid] = this.now().getTime(); writeJson(hostFile(this.env, o.agent), h); } });
+          hostLocked(this.env, () => { const h = loadHost(this.env, o.agent, seat); const x = houseRec(h, house); if (x) { (x.cancel ??= {})[rid] = this.now().getTime(); writeJson(hostFile(this.env, o.agent, seat), h); } });
           throw new RunnerError(`${o.agent}'s body host didn't start the body in ${this.claimMs / 1000} s`);
         }
         await sleep(this.poll);
       }
     } finally {
-      hostLocked(this.env, () => { const h = loadHost(this.env, o.agent); const x = houseRec(h, house); if (x?.req?.[rid]) { delete x.req[rid]; writeJson(hostFile(this.env, o.agent), h); } });
+      hostLocked(this.env, () => { const h = loadHost(this.env, o.agent, seat); const x = houseRec(h, house); if (x?.req?.[rid]) { delete x.req[rid]; writeJson(hostFile(this.env, o.agent, seat), h); } });
     }
   }
 
   /** The stop a body's last run had, gone from its house's record: it was that run's, never this body's (t-1881). */
-  forgetStop(agent, house, raw) {
-    hostLocked(this.env, () => { const h = loadHost(this.env, agent); const x = houseRec(h, house); if (x?.stop?.[raw]) { delete x.stop[raw]; writeJson(hostFile(this.env, agent), h); } });
+  forgetStop(agent, house, raw, seat = OWNER_SEAT) {
+    hostLocked(this.env, () => { const h = loadHost(this.env, agent, seat); const x = houseRec(h, house); if (x?.stop?.[raw]) { delete x.stop[raw]; writeJson(hostFile(this.env, agent, seat), h); } });
   }
 
   start(o) { return this.launch(o); }
@@ -426,7 +547,7 @@ export class HouseRunner {
 
   /** Its house's part of the record, if its house is the agent's or draining, and its host is reporting. */
   rec(body) {
-    const x = houseRec(this.host(body.agent), body.house);
+    const x = houseRec(this.host(body.agent, this.seatFor(body)), body.house);
     return x && freshRec(x, body.house, this.now().getTime()) ? x : null;
   }
 
@@ -451,11 +572,12 @@ export class HouseRunner {
     if (e?.status !== 'working') return { fed: false, reason: 'its turn is over: resume it' };
     if (!e.feedable) return { fed: false, reason: 'its house\'s harness has no inbox, so a body hears nothing mid-turn' };
     hostLocked(this.env, () => {
-      const h = loadHost(this.env, body.agent);
+      const seat = this.seatFor(body);
+      const h = loadHost(this.env, body.agent, seat);
       const x = houseRec(h, body.house);
       if (!x) return;
       ((x.inbox ??= {})[rawOf(body)] ??= []).push({ key: message.id, sealed: this.transit.seal(Buffer.from(String(message.text))) });
-      writeJson(hostFile(this.env, body.agent), h);
+      writeJson(hostFile(this.env, body.agent, seat), h);
     });
     return { fed: true };
   }
@@ -475,20 +597,22 @@ export class HouseRunner {
   forgetInbox(body) {
     const raw = rawOf(body);
     if (!raw) return;
-    hostLocked(this.env, () => { const h = loadHost(this.env, body.agent); const x = houseRec(h, body.house); if (x?.inbox?.[raw]) { delete x.inbox[raw]; writeJson(hostFile(this.env, body.agent), h); } });
+    const seat = this.seatFor(body);
+    hostLocked(this.env, () => { const h = loadHost(this.env, body.agent, seat); const x = houseRec(h, body.house); if (x?.inbox?.[raw]) { delete x.inbox[raw]; writeJson(hostFile(this.env, body.agent, seat), h); } });
   }
 
   end(body) {
     const raw = rawOf(body);
     if (!body.agent || !raw) return;
     hostLocked(this.env, () => {
-      const h = loadHost(this.env, body.agent);
+      const seat = this.seatFor(body);
+      const h = loadHost(this.env, body.agent, seat);
       const x = houseRec(h, body.house);
       if (!x) return;
       // A stop of its own, with its own time (a pack already asked for stays one): its host carries out each stop once,
       // so an older one still on the record would never end this body (bodyhost.mjs, t-1881).
       (x.stop ??= {})[raw] = { pack: x.stop[raw]?.pack ?? false, at: this.now().getTime() };
-      writeJson(hostFile(this.env, body.agent), h);
+      writeJson(hostFile(this.env, body.agent, seat), h);
     });
   }
 
@@ -501,12 +625,13 @@ export class HouseRunner {
     const f = packedFile(this.env, body.agent, body.house, raw);
     if (!this.alive(body) && !existsSync(f)) return [];
     const asked = hostLocked(this.env, () => {
-      const h = loadHost(this.env, body.agent);
+      const seat = this.seatFor(body);
+      const h = loadHost(this.env, body.agent, seat);
       // Its house isn't the agent's house now, nor one draining: nothing there to ask, and nothing to wait for.
       const x = houseRec(h, body.house);
       if (!x) return false;
       (x.stop ??= {})[raw] = { pack: true, at: this.now().getTime() };
-      writeJson(hostFile(this.env, body.agent), h);
+      writeJson(hostFile(this.env, body.agent, seat), h);
       return true;
     });
     if (!asked) return [];

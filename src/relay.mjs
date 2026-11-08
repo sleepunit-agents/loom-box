@@ -145,10 +145,11 @@ const atWork = (c) => !!c.run && !(c.runLog ?? []).findLast((r) => r.run === c.r
  */
 export function originOf(env, caller, id, proof = {}) {
   // The caller's house holds its body: true, false, or null when that can't be told (no body, an unreadable record).
+  // A caller in no house (loom's machine: its CLI, a local body) holds only a body in no house (t-1952): a house body's
+  // conversation is never claimed from outside every house.
   const houseOf = (c) => {
-    if (!caller.house) return true;
-    if (!c.body) return null;
-    try { return readBody(env, c.body).house === caller.house; } catch { return null; }
+    if (!c.body) return caller.house ? null : true;
+    try { return (readBody(env, c.body).house ?? null) === (caller.house ?? null); } catch { return null; }
   };
   const inHouse = (c) => houseOf(c) === true;
   const eligible = (c) => c.agent === caller.agent && inHouse(c);
@@ -166,7 +167,7 @@ export function originOf(env, caller, id, proof = {}) {
     // A relay conversation is never a return address: its place is the peer it's with, and an answer from another
     // agent there would be recorded under the wrong peer and dodge that pair's ping-pong check.
     if (!held(c)) return null;
-    if (proof.key && holdsRun(env, id, proof)) return c;
+    if (proof.key && holdsRun(env, id, proof, { caller })) return c;
     // Unproven, it's the asker's only when no other conversation of this agent is at work: any such body could be the
     // one claiming it (a guest venue's into the owner's thread, or the owner's thread's into a guest venue, where the
     // answer would be read by guests; a sibling thread; a DM with someone else).

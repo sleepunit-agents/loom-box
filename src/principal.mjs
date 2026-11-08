@@ -19,12 +19,15 @@
 //      (`--wake`, loom's machine only). It's taken as the wake's message is queued, so a wake set by a body working
 //      for someone else stays theirs.
 //
-// The limit (as `send`'s, README "Threat model"): one agent's bodies share its house, so a body that sets out to pose
-// as a sibling can read that sibling's run key and session and get its statement. Isolating them is the house's job.
+// Houses (t-1952): one per steering principal. A body runs in the house of whom its conversation acts for (seatOf):
+// the owner's work in the agent's one owner house, a person's in that person's own, an unknown principal's in a house
+// of that conversation alone. So a body can't read the run key or session of a conversation steered by someone else:
+// they're files in another container. A principal that changes moves the body (delivery.mjs, plan: reseat).
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { membersOf, ownersOf } from './owners.mjs';
+import { setting } from './piece.mjs';
 
 export const STATEMENT_TTL_S = 5 * 60;   // README: 5 minutes
 const PERSON = /^[a-z0-9]+(-[a-z0-9]+)*$/;
@@ -47,6 +50,9 @@ export function noteSender(env, c, m, { wakeFor } = {}) {
     c.actsFor = { owner: false, people: [], unknown: (c.runs ?? 0) > 0 || (c.runLog ?? []).length > 0 };
     for (const q of c.queue ?? []) noteOne(env, c.actsFor, { ...q, agent: c.agent }, undefined);
   }
+  // A local wake (t-1830) is no exception: the clock says whom every wake it fires is for (`--wake --for`, its explicit
+  // word: `owner` for one set on loom's machine), and a wake with no word (its hand-over failed, or expired) is unknown,
+  // as anywhere (fail closed; the clock logs `principal-fail`).
   return noteOne(env, c.actsFor, m, wakeFor);
 }
 
@@ -54,10 +60,26 @@ export function noteSender(env, c, m, { wakeFor } = {}) {
  * The owner's word that a conversation is his from here (loom's machine only): what it heard before is set aside.
  * What still waits in its queue, the body hasn't heard yet: that's noted again, as at the first message.
  */
-export function resetActsFor(env, c, at) {
+export function resetActsFor(env, c, at, { dir, by } = {}) {
   c.actsFor = { owner: false, people: [], unknown: false, reset: at };
+  // Who made it, signed with the runtime's key (t-1952): only a signed reset vouches a local conversation for a body
+  // on loom's machine (delivery.mjs, localForeign). An unsigned one (from before, or a test's) sets the record aside
+  // and vouches for nothing more.
+  if (dir && by) { c.actsFor.resetBy = by; c.actsFor.resetSig = b64u(sign(signingKey(dir), resetPayload(c, at, by))); }
   for (const q of c.queue ?? []) noteOne(env, c.actsFor, { ...q, agent: c.agent }, undefined);
   return c.actsFor;
+}
+
+const resetPayload = (c, at, by) => JSON.stringify(['reset', 1, c.agent, c.conversation, at, by]);
+/** Whether a conversation's reset was the owner's, made here: signed with this runtime's key, for it, by the owner. */
+export function resetSigned(dir, c) {
+  const a = c?.actsFor;
+  if (typeof a?.reset !== 'string' || a.resetBy !== 'owner' || typeof a.resetSig !== 'string') return false;
+  const key = signingKey(dir, { make: false });
+  if (!key) return false;
+  const want = sign(key, resetPayload(c, a.reset, a.resetBy));
+  const got = Buffer.from(a.resetSig, 'base64url');
+  return got.length === want.length && timingSafeEqual(got, want);
 }
 
 function noteOne(env, a, m, wakeFor) {
@@ -105,6 +127,58 @@ export function principalOf(env, c) {
     return { for: spoke.length === 1 ? spoke[0] : spoke.length === 0 && owners.length === 1 ? owners[0] : null, owner: true, people: [] };
   }
   return { for: null, owner: false, people: [] };
+}
+
+// ─── Seats: whose house a body runs in (t-1952) ────────────────────────────
+
+/** A house's seat: `owner`, `p-<person>` (one non-owner person's) or `u-<conversation>` (an unknown principal's). */
+export const SEAT = /^(owner|p-[a-z0-9]+(-[a-z0-9]+)*|u-cv-[0-9a-f]{12})$/;
+export const OWNER_SEAT = 'owner';
+
+/**
+ * Whose house a conversation's body runs in, by its principal (principalOf): the owner's only when every voice was the
+ * owner's; one non-owner person's, theirs; anything else (unknown, several people, nothing heard) is a house of this
+ * conversation alone, never shared: two unknowns are no more one principal than two strangers are.
+ */
+export function seatOf(p, conversation) {
+  if (p?.owner === true) return OWNER_SEAT;
+  if (typeof p?.for === 'string' && PERSON.test(p.for) && p.for.length <= 40) return `p-${p.for}`;
+  if (!/^cv-[0-9a-f]{12}$/.test(conversation ?? '')) throw new Error('an unknown principal\'s seat is its conversation\'s');
+  return `u-${conversation}`;
+}
+
+/**
+ * Whether a conversation's own session (its slot) may follow it from seat `was` to seat `now`: resumed only in the
+ * seat it began in, or moved from the owner's seat into this conversation's own unknown house (no one else's bodies
+ * are there; a relay's answer into his thread lands that way). Never into a person's house (it runs their other
+ * conversations, whose bodies could read the transcript), and never out of one: a session a person steered goes
+ * nowhere but their house, so one person's context never reaches another's work, and the owner's house never
+ * inherits a session someone else steered. Otherwise the session is dropped and a fresh body reads the digests.
+ */
+export function carriesSession(was, now, conversation) {
+  const w = was ?? OWNER_SEAT;
+  const n = now ?? OWNER_SEAT;
+  return w === n || (w === OWNER_SEAT && n === `u-${conversation}`);
+}
+
+/** The houses for seats other than the owner's, at work for an agent in state `s`, but `seat`'s own. */
+export function otherSeatHouses(s, agent, seat) {
+  const LIVE = new Set(['wanted', 'starting', 'running', 'stopping']);
+  const of = (h) => (typeof h?.seat === 'string' && SEAT.test(h.seat) ? h.seat : OWNER_SEAT);
+  const host = (h) => h.kind === 'body-host' || /^loom-runtime body-host /.test(String(h.task ?? ''));
+  return Object.values(s?.houses ?? {}).filter((h) => h.agent === agent && LIVE.has(h.state) && host(h) && of(h) !== OWNER_SEAT && of(h) !== seat);
+}
+
+/** The cap on an agent's houses for other people (LOOM_RUNTIME_SEAT_HOUSES, default 4). */
+export const SEAT_HOUSES = 4;
+export const seatCap = (env) => { const v = setting(env ?? {}, 'SEAT_HOUSES'); const n = Number(v); return v !== undefined && Number.isInteger(n) && n >= 1 && n <= 64 ? n : SEAT_HOUSES; };
+/** Why a house for `seat` can't be had at the cap, or null. The owner's is never capped. */
+export function seatCapProblem(env, s, agent, seat) {
+  if (seat === OWNER_SEAT) return null;
+  // Counted by seat: a seat's draining house and its new one are one seat's.
+  const seats = new Set(otherSeatHouses(s, agent, seat).map((h) => h.seat)).size;
+  const cap = seatCap(env);
+  return seats >= cap ? `${agent} already has ${seats} house${seats === 1 ? '' : 's'} at work for other people (the cap is ${cap}, LOOM_RUNTIME_SEAT_HOUSES): it waits for one to idle out` : null;
 }
 
 // ─── Statements ─────────────────────────────────────────────────────────────

@@ -7,7 +7,8 @@
 //                     ended with a slot → resumed from it; none → started through the runner interface
 //                  3. {conversation, seq, body: fed|resumed|started|queued|failed, reason?}
 //
-// A body is a session in its agent's own warm house (houserunner.mjs, bodyhost.mjs): the house holds only that
+// A body is a session in its agent's own warm house, the one for its conversation's principal (t-1952: one house per
+// steering principal, houserunner.mjs seats; bodyhost.mjs): the house holds only that
 // agent's token, its secrets, its repo and its box's harness login. The runtime never runs one on loom's own machine.
 //
 // Bodies, capacity and continuity are bridges.md's, ported from the bridges piece (shuttle): dispatch.py's `offer`
@@ -81,7 +82,7 @@ import { fileURLToPath } from 'node:url';
 import { accountsFrom, accountsOfRecord } from './accounts.mjs';
 import { endBody, readBody, resumeBody, startBody } from './bodies.mjs';
 import { CoreError, coreFrom } from './core.mjs';
-import { HouseRunner, sweepTransfers } from './houserunner.mjs';
+import { HouseRunner, releaseEmptySeatHouses, seatRoom, sweepSeats, sweepTransfers } from './houserunner.mjs';
 import { venueKind as kindOf, resolveFor } from './models.mjs';
 import { pieceName, setting } from './piece.mjs';
 import { dropSession, packSession, restoreFiles } from './sessions.mjs';
@@ -98,7 +99,7 @@ import { raiseAlert } from './alerthook.mjs';
 import { changed as changedCards } from './activity.mjs';
 import { keepKey } from './bodyhost.mjs';
 import { readRelays } from './relay.mjs';
-import { mint, noteSender, principalOf, putWakeFor, resetActsFor, takeWakeFor, verify } from './principal.mjs';
+import { OWNER_SEAT, carriesSession, mint, noteSender, resetSigned, principalOf, putWakeFor, resetActsFor, seatOf, takeWakeFor, verify } from './principal.mjs';
 
 const DAY_MS = 86_400_000;
 export const MAX_TEXT = 40_000;
@@ -976,6 +977,9 @@ function plan(env, cv, d, mem) {
   // (the runtime restarted under it) leaves it to go back on the queue (abandon), never only in that process's memory.
   const begin = (op) => { c.starting = { ...mark(now), ...(op.msgs?.length ? { msgs: op.msgs } : {}) }; saveConv(env, c); return { cv, mark: c.starting.op, ...op }; };
   const st = statusOf(env, c, d);
+  // The owner reset it (resetPrincipal): the body that heard what came before ends, its session not kept.
+  if (c.resetPending && (st === 'working' || st === 'idle')) return begin({ type: 'reseat', body: c.body });
+  if (c.resetPending && st === 'none') delete c.resetPending;
   if (st === 'working') {
     // A guest's message never reaches a body that isn't a guest venue's (its tools aren't narrowed, its brief has no
     // floor): that body is ended, its session not kept, and a body under a guest venue's rules starts for it.
@@ -984,12 +988,20 @@ function plan(env, cv, d, mem) {
     // else (another person, a relay, the schedule, someone unnamed), and a body told a place's people hears no person
     // who isn't one of them. It's reseated, and the fresh body's rules are made for everyone it will hear.
     if (needsReseat(c) || gatesMoved(c, d)) return begin({ type: 'reseat', body: c.body });
+    // Nor a message from someone its house isn't for (t-1952): one house per steering principal. A conversation whose
+    // principal has moved (a guest wrote into the owner's, the owner reset a guest's) has its body ended where it is,
+    // its session packed into its slot, and resumed in the right house; what's queued is never fed where it is. (A
+    // relay's answer that waits for this turn to end isn't fed now: it moves at the turn's end, as any idle body does.)
+    if (seatMoved(env, c) && c.queue.some((x) => !x.untilIdle && !isNote(x))) return begin({ type: 'resume-warm', body: c.body, msgs: [] });
     // Mid-turn: into its inbox, where its harness hears it (shuttle's hand_over).
     const rec = readBody(env, c.body);
     const runner = d.runner(rec.harness, rec.local);
     const left = [];
+    // A body whose house is no longer its conversation's (t-1952) is fed nothing there, not even the runtime's own note.
+    const moved = seatMoved(env, c);
     for (const x of c.queue) {
       if (x.untilIdle) { left.push({ x, reason: 'relay replies wait for the requesting turn to finish' }); continue; }
+      if (moved) { left.push({ x, reason: 'its conversation moves house when this turn is over' }); continue; }
       if (x.tierUnread && !c.bodyRules?.guest) { left.push({ x, reason: 'its sender\'s tier couldn\'t be read' }); continue; }
       const text = open(d, x, mem);
       const r = text === null ? { fed: false, reason: 'its text is gone' } : runner.feed(bodyOf(c.body, rec), { id: x.key, text: render([{ ...x, text }]) });
@@ -1024,13 +1036,21 @@ function plan(env, cv, d, mem) {
   const { busy, idle } = census(env, c.agent, d, now);
   const limits = limitsOf(env);
   if (st === 'idle') {
-    // Its own body, warm, its turn over: resumed in the same session, if the agent has a slot free.
+    // Its own body, warm, its turn over: resumed in the same session, if the agent has a slot free. (Resumed in its
+    // principal's house: a body whose seat has moved, t-1952, is packed where it is and resumes in the right one.)
     if (busy.length >= limits.busy) return wait(`every body is busy (${busy.length} of ${limits.busy} mid-turn)`);
     return begin({ type: 'resume-warm', body: c.body, msgs: take() });
   }
   // A start that failed is tried again at its time, on the tick: until then it waits (what it was told stands).
   if (c.retryAt && now < c.retryAt) return null;
   if (busy.length >= limits.busy) return wait(`every body is busy (${busy.length} of ${limits.busy} mid-turn)`);
+  // A house for its principal (t-1952): at the cap on the agent's houses for other people, it waits; never shares one.
+  if (!c.local) {
+    const seat = seatOf(principalOf(env, c), cv);
+    const full = seatRoom(env, c.agent, seat);
+    // Houses that hold no body are let go at once, so the wait is for a house at work, not one idling out.
+    if (full) { releaseEmptySeatHouses(env, c.agent, seat, now); return wait(full); }
+  }
   if (busy.length + idle.length >= limits.busy) {
     // Over the limit with a warm idle body: it makes room (the least recently active), its conversation saved.
     const victim = idle.filter((v) => v.conversation !== cv && !v.queue?.length).sort((a, b) => String(a.last).localeCompare(String(b.last)))[0];
@@ -1055,6 +1075,33 @@ export async function drain(env, cv, d = depsOf(env), mem = new Map()) {
 }
 
 // ─── Rules, presence and the stop word ──────────────────────────────────────
+
+/**
+ * Whether a conversation's body sits in another principal's house than its principal's now (t-1952; principal.mjs,
+ * seatOf): its rules say which house it was seated in (none: the owner's, as every body was before). A local body
+ * (loom's machine, t-1830) has no house and is the owner's work only: one whose conversation a person other than the
+ * owner has written into has moved too (and its next start is refused: execute, localForeign).
+ */
+export function seatMoved(env, c) {
+  if (!c?.body) return false;
+  if (c.local) return localForeign(env, c);
+  return (c.bodyRules?.seat ?? OWNER_SEAT) !== seatOf(principalOf(env, c), c.conversation);
+}
+
+/**
+ * Whether a local conversation (loom's machine, t-1830) is anyone's but its owner's: it is, fail closed, unless its
+ * principal is the owner (the clock's explicit word for each local wake it fires, `--wake --for owner`; the owner's
+ * own Reply), or the owner's signed reset with nothing heard since. Anything else (a person who isn't the owner, a
+ * relay, a sender nobody names, a wake whose hand-over failed, history from before principals were kept) makes it no
+ * work for a body that shares the runtime account's keys.
+ */
+function localForeign(env, c) {
+  const p = principalOf(env, c);
+  if (p.owner === true) return false;
+  const a = c.actsFor ?? {};
+  // The owner's signed reset (his word that what it heard before is his), and nothing else since.
+  return !(resetSigned(deliveryDir(env), c) && !a.unknown && !a.owner && !(a.people ?? []).length && !(a.owners ?? []).length && !(p.people ?? []).length);
+}
 
 /** Whether a working body's rules don't cover what's queued for it (rulesFor: grantFor, members). A post-failure note
  * is the runtime's own, never a sender's, and a relay reply that waits for the turn to end isn't fed to it: neither
@@ -1337,9 +1384,9 @@ async function execute(env, op, d, mem) {
   if (op.type === 'loop-note') return loopNote(env, op, d);
   if (op.type === 'stuck') return stopStuck(env, op, d);
   if (op.type === 'resume-warm') {
-    // Its own warm body, its turn over: its session is sealed into its slot first (so a resume that fails leaves no
-    // transcript in the clear), and what it was given goes back on the queue; the next plan resumes from that slot,
-    // or starts fresh when there's none.
+    // Its own warm body, its turn over (or, mid-turn, a body whose principal has moved house: t-1952): its session is
+    // sealed into its slot first (so a resume that fails leaves no transcript in the clear), and what it was given goes
+    // back on the queue; the next plan resumes from that slot (where carriesSession lets it), or starts fresh.
     let saved = { slot: null, pending: [] };
     try { saved = await retire(env, op.cv, op.body, d, true); } catch (e) { d.warn(`ending ${op.body}: ${e.message}`); }
     locked(env, () => {
@@ -1362,7 +1409,7 @@ async function execute(env, op, d, mem) {
       rmSync(slotFile(env, op.cv), { force: true });
       const c = loadConv(env, op.cv);
       if (!c) return;
-      if (c.body === op.body) { c.body = undefined; c.idleSince = undefined; delete c.bodyRules; }
+      if (c.body === op.body) { c.body = undefined; c.idleSince = undefined; delete c.bodyRules; delete c.resetPending; }
       delete c.slot;
       if (ours(c, op)) delete c.starting;
       requeue(c, saved.pending);
@@ -1403,8 +1450,16 @@ async function execute(env, op, d, mem) {
     const sends = posts(v0) ? 'post' : recordsOnly(v0) ? 'record' : null;
     // Its rules (policy.mjs): what it's told and what it may use. Any that can't be had is no body (fail closed).
     rules = await rulesFor(c0, msgs.filter((x) => !isNote(x)), rulesDeps(d, v0, c0), { platform: posts(v0), core: coreAdapted(v0), principal: principalOf(env, c0), ownerSpoke: c0.actsFor?.owner === true });
+    // Whose house it runs in (t-1952): its principal's, as everything it was given was noted before this plan. Its own
+    // slot goes with it: a session is this conversation's own, and what's walled off is every other conversation's.
+    if (!c0.local) rules = { ...rules, seat: seatOf(principalOf(env, c0), op.cv) };
+    // A body on loom's machine does its owner's work only (t-1830): it shares the runtime account's keys dir and its
+    // signing key, so a conversation someone else has written into gets no body there at all (fail closed).
+    else if (localForeign(env, c0)) throw new DeliveryError('a body on loom\'s machine does only its owner\'s work, and this conversation is someone else\'s now', 403);
     const was = op.slot?.rules ?? {};
-    if (op.type === 'resume' && !sameRules(was, rules)) {
+    // ...and a session only follows the conversation into a house no one else's bodies would read it in (principal.mjs,
+    // carriesSession): never into a person's house that runs their other conversations.
+    if (op.type === 'resume' && (!sameRules(was, rules) || !carriesSession(was.seat, rules.seat, op.cv))) {
       // A session is resumed only under the rules it began with: a guest venue's never as anyone else's, nor the other
       // way; nor one that heard a place's people, or a person's standing authority, under any others (t-1745). Its
       // slot goes, and its messages go back for a fresh body, in this same drain.
@@ -1431,7 +1486,7 @@ async function execute(env, op, d, mem) {
     const bodyEnv = d.bodyEnv(runKey, op.cv);
     if (lb?.path) bodyEnv.PATH = lb.path;
     const bodyDeps = { runner: (h) => d.runner(h, local), accounts: d.accounts, now: d.now, fetchImpl: d.fetchImpl, bodyEnv };
-    const base = { agent: c0.agent, venue: c0.venue, venueKind: c0.kind, cwd: local ? lb.cwd : d.cwd, deny: rules.deny, guest: rules.guest, ...(local ? { local: true } : {}) };
+    const base = { agent: c0.agent, venue: c0.venue, venueKind: c0.kind, cwd: local ? lb.cwd : d.cwd, deny: rules.deny, guest: rules.guest, ...(local ? { local: true } : {}), ...(rules.seat ? { seat: rules.seat } : {}) };
     // Out of quota (t-1907): which session this run continues, on which harness. Its home slot, when the harness it
     // switched away from has room again; its own slot, when that one's harness has room; else a fresh body elsewhere.
     // A deny list Codex can't keep (a tool within a server, a built-in: runners.mjs, codexDeny) keeps this body off
@@ -1489,7 +1544,7 @@ async function execute(env, op, d, mem) {
       // A local body speaks with its run's key as a house's body does: from the keys dir (bodyhost.mjs, keyFile), as
       // `claude --bg` gives every session its daemon's environment, not this launch's (t-1830).
       if (local) keepKey(env, op.cv, runKey);
-      c.bodyRules = { guest: rules.guest, key: rules.key, ...(rules.members?.length ? { members: rules.members, membersAt: new Date(now()).toISOString() } : {}), ...(rules.grantFor ? { grantFor: rules.grantFor } : {}), ...(rules.words ? { words: rules.words, persons: rules.persons, notes: rules.notes ?? [] } : {}) };
+      c.bodyRules = { guest: rules.guest, key: rules.key, ...(rules.seat ? { seat: rules.seat } : {}), ...(rules.members?.length ? { members: rules.members, membersAt: new Date(now()).toISOString() } : {}), ...(rules.grantFor ? { grantFor: rules.grantFor } : {}), ...(rules.words ? { words: rules.words, persons: rules.persons, notes: rules.notes ?? [] } : {}) };
       ack(c, op.msgs);
       delete c.retryAt; delete c.startFails; delete c.retryReason; delete c.startStatus;
       c.sendKey = keyHash(runKey).toString('hex');
@@ -1540,6 +1595,21 @@ async function execute(env, op, d, mem) {
       return;
     }
     for (const p of restored) rmSync(p, { recursive: true, force: true });
+    // The agent's houses for other people were at the cap when its house was asked for (t-1952; a start that raced
+    // past plan's look): it waits, as plan would have made it, and its slot (or home) stays. Never a lost session.
+    if (e?.seatFull) {
+      locked(env, () => {
+        const c = loadConv(env, op.cv);
+        if (!c) return;
+        const msgs = ours(c, op) ? op.msgs : stillMine(c, op.msgs);
+        if (ours(c, op)) delete c.starting;
+        requeue(c, msgs);
+        c.waiting = String(e.message).slice(0, 300);
+        outcome(c, msgs.map((x) => x.key), { body: 'queued', reason: c.waiting }, now());
+        saveConv(env, c);
+      });
+      return;
+    }
     let gaveUp = null;
     locked(env, () => {
       const c = loadConv(env, op.cv);
@@ -1611,7 +1681,7 @@ async function routeOf(env, c0, op, rules, d, cant = []) {
   const now = d.now().getTime();
   const avoid = [...new Set([...(c0.quota?.from ? [c0.quota.from] : []), ...cant])];
   const home = c0.home && Date.parse(c0.home.until) > now && existsSync(homeFile(env, op.cv)) ? c0.home : null;
-  if (home && sameRules(home.rules ?? {}, rules) && !avoid.includes(home.harness)
+  if (home && sameRules(home.rules ?? {}, rules) && carriesSession(home.rules?.seat, rules.seat, op.cv) && !avoid.includes(home.harness)
     && !(Number.isFinite(c0.fallback?.until) && now < c0.fallback.until * 1000) && await roomOn(env, c0, home.harness, d)) {
     return { how: 'resume', file: homeFile(env, op.cv), home: true };
   }
@@ -1881,6 +1951,8 @@ export async function tick(env, o = {}, only, mem = new Map()) {
   const now = d.now().getTime();
   // Transfers from houses nobody will finish or collect (houserunner.mjs, sweepTransfers).
   try { sweepTransfers(env, now, Date.now()); } catch (e) { d.warn(`sweeping transfers: ${e.message}`); }
+  // Seat records whose house is over (houserunner.mjs, sweepSeats, t-1952): a guest's or an unknown's, never the owner's.
+  try { sweepSeats(env); } catch (e) { d.warn(`sweeping seats: ${e.message}`); }
   const warm = limitsOf(env).warmIdleS * 1000;
   const stuckAfter = stuckAfterOf(env);
   const ops = [];
@@ -2032,6 +2104,10 @@ export function holdsRun(env, cv, { key, session } = {}, o = {}) {
   const c = loadConv(env, cv);
   const want = typeof c?.sendKey === 'string' && /^[0-9a-f]{64}$/.test(c.sendKey) ? Buffer.from(c.sendKey, 'hex') : null;
   if (!want || !c.body || typeof key !== 'string' || !key || !timingSafeEqual(keyHash(key), want)) return false;
+  // From a house, only the body's own (t-1952): a key carried out of its house proves nothing in another.
+  if (houseProblem(env, c, o.caller)) return false;
+  // Nor from a body whose conversation has moved to another principal's house (t-1952).
+  if (seatMoved(env, c)) return false;
   // Fail closed (unlike send's, kept as it was): a body whose session the runner can't name proves nothing yet.
   const own = sessionOf({ ...depsOf(env, o), env }, c.body);
   return !!own && session === own;
@@ -2062,7 +2138,7 @@ export async function send(env, { conversation, text, key, session, person, via 
   const c = loadConv(env, conversation);
   if (!c) return { ok: false, reason: `no conversation ${conversation} here` };
   if (o.caller && (o.caller.kind !== 'agent' || o.caller.agent !== c.agent)) return { ok: false, reason: `only ${c.agent}'s own body speaks in ${conversation}` };
-  const notHolder = holderProblem(env, d, c, { key, session });
+  const notHolder = holderProblem(env, d, c, { key, session }, undefined, o.caller);
   if (notHolder) return refusedSend(env, c, notHolder);
   if (!str(text, MAX_TEXT)) return refusedSend(env, c, `a message is 1-${MAX_TEXT} characters`);
   // To a person (a DM), not the conversation's own place: the relay to a person, through that venue's adapter.
@@ -2101,15 +2177,41 @@ export async function send(env, { conversation, text, key, session, person, via 
 }
 
 /**
+ * Why a piece API caller isn't in the house of the body holding conversation `c` (t-1952), or null when it is, or when
+ * there's no caller (loom's machine: its own CLI, a local body). Core names the caller's house from its token, never
+ * from what it says. One house per steering principal: a key or session id carried out of its house (by a body set on
+ * posing as another conversation) is refused from any other house, an older or newer one of the same seat included.
+ */
+function houseProblem(env, c, caller) {
+  if (!caller) return null;
+  let rec;
+  try { rec = readBody(env, c.body); } catch { return 'its body\'s house can\'t be told'; }
+  const want = typeof rec?.house === 'string' ? rec.house : null;
+  const got = typeof caller.house === 'string' ? caller.house : null;
+  // A body whose record names no house (a local body's, loom's machine, t-1830): only from no house, as its own CLI
+  // there speaks; never from a house. (Every house body's record names its house: the runner's start says it.)
+  if (!want) return got ? `its body runs on loom's machine, not in ${got}` : null;
+  return got === want ? null : (got ? `${got} isn't its body's house` : 'this caller is in no house');
+}
+
+/**
  * Why the caller isn't the body holding conversation `c` in its current run, or null when it is: its run's key
  * (LOOM_BODY_KEY) matches, and so does its harness session, where the runner knows the body's (a sibling body holding
  * this conversation's key, its house's file, is another session; one that names no session is refused once the
  * body's is known). What `send` takes, and what a principal statement takes (bodyPrincipal).
  */
-function holderProblem(env, d, c, { key, session }, does = 'speaks in it') {
+function holderProblem(env, d, c, { key, session }, does = 'speaks in it', caller = undefined) {
   const want = typeof c.sendKey === 'string' && /^[0-9a-f]{64}$/.test(c.sendKey) ? Buffer.from(c.sendKey, 'hex') : null;
   if (!want || !c.body || typeof key !== 'string' || !key || !timingSafeEqual(keyHash(key), want)) {
     return `only the body holding ${c.conversation} ${does} (its run's ${BODY_KEY} doesn't match)`;
+  }
+  const away = houseProblem(env, c, caller);
+  if (away) return `only the body holding ${c.conversation} ${does} (${away})`;
+  // Bound to the seat its rules were made for, too (t-1952): a body whose conversation has moved to another principal's
+  // house speaks no more there (it's being ended), unless it's the owner's body and the move only narrows it (a relay's
+  // answer waiting on its turn). Its principal it never asks once moved (bodyPrincipal).
+  if (seatMoved(env, c) && (does !== 'speaks in it' || (c.local ? OWNER_SEAT : c.bodyRules?.seat ?? OWNER_SEAT) !== OWNER_SEAT)) {
+    return `only the body holding ${c.conversation} ${does} (its conversation has moved to another principal's house)`;
   }
   const own = sessionOf({ ...d, env }, c.body);
   if (own && session !== own) {
@@ -2128,7 +2230,7 @@ export function bodyPrincipal(env, { conversation, key, session }, o = {}) {
   const c = loadConv(env, conversation);
   if (!c) return { ok: false, reason: `no conversation ${conversation} here` };
   if (o.caller && (o.caller.kind !== 'agent' || o.caller.agent !== c.agent)) return { ok: false, reason: `only ${c.agent}'s own body asks about ${conversation}` };
-  const notHolder = holderProblem(env, d, c, { key, session }, 'asks on whose behalf it acts');
+  const notHolder = holderProblem(env, d, c, { key, session }, 'asks on whose behalf it acts', o.caller);
   if (notHolder) return { ok: false, reason: notHolder };
   const p = principalOf(env, c);
   return { ok: true, agent: c.agent, conversation: c.conversation, ...p, statement: mint(deliveryDir(env), { agent: c.agent, conversation: c.conversation, principal: p }, d.now().getTime()) };
@@ -2140,7 +2242,14 @@ export function resetPrincipal(env, conversation) {
   return locked(env, () => {
     const c = loadConv(env, conversation);
     if (!c) return { ok: false, reason: `no conversation ${conversation} here` };
-    resetActsFor(env, c, new Date().toISOString());
+    resetActsFor(env, c, new Date().toISOString(), { dir: deliveryDir(env), by: 'owner' });
+    // What it heard before is set aside, and so is any session that heard it (t-1952): its slot and home go, and a
+    // body holding it now is ended before it hears anything more, so no body resumes a transcript someone else steered.
+    rmSync(slotFile(env, conversation), { force: true });
+    rmSync(homeFile(env, conversation), { force: true });
+    delete c.slot; delete c.home; delete c.fallback;
+    // The run that heard what came before speaks no more: its key is gone now, not when its body is ended.
+    if (c.body) { c.resetPending = true; delete c.sendKey; }
     saveConv(env, c);
     return { ok: true, conversation };
   });

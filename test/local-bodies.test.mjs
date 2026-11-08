@@ -3,9 +3,10 @@
 // (LOOM_RUNTIME_LOCAL_BODIES); repeats feed the same conversation; a house's wake never joins it. And the owner's
 // alert command hears of what the runtime notices (failed starts, loop pauses, a bridge down), never for an alert's
 // own conversation.
+import { putWakeFor } from '../src/principal.mjs';
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { deliver, loadConv, localBodiesOf, tick } from '../src/delivery.mjs';
+import { deliver, deliveryDir, loadConv, localBodiesOf, tick } from '../src/delivery.mjs';
 import { alertCall, raiseAlert } from '../src/alerthook.mjs';
 import { readBody } from '../src/bodies.mjs';
 import { bodyKeyFor } from '../src/bodyhost.mjs';
@@ -25,11 +26,52 @@ function setup(extra = { LOOM_RUNTIME_LOCAL_BODIES: LOCAL }) {
   const asked = [];
   w.o.runner = (h, local) => { asked.push(!!local); return local ? localRunner : w.runner; };
   const wake = (place, text, more = {}) => w.msg(place, text, { venue: 'wake', from: { kind: 'schedule' }, kind: 'wake', source: 'clock', ...more });
-  const lwake = (place, text, more = {}) => wake(place, text, { local: true, ...more });
+  // As the clock fires one: it says whom the wake is for first (`principal --wake --for owner`: set on loom's machine).
+  // `handOver: null` is a hand-over that failed (the runtime then takes it as unknown, fail closed: t-1952).
+  const lwake = (place, text, { handOver = 'owner', ...more } = {}) => {
+    const m = wake(place, text, { local: true, ...more });
+    if (handOver) putWakeFor(deliveryDir(w.env), { agent: m.agent, place: m.place, id: m.id, for: handOver });
+    return m;
+  };
   return { w, localRunner, localLog, asked, wake, lwake, conv: (place) => loadConv(w.env, cvOf('art', 'wake', place)) };
 }
 
 describe('local bodies', () => {
+  test('a local conversation someone other than the owner writes into gets no body on loom\'s machine (t-1952)', async () => {
+    const { w, localLog, lwake, conv } = setup();
+    const a = await deliver(w.env, lwake('alert:x', 'disk at 90%'), w.o);
+    assert.equal(a.body, 'started');
+    const first = conv('alert:x').body;
+    // Loren writes there (a person's message joins a local conversation): the body on loom's machine is never fed it.
+    const b = await deliver(w.env, w.msg('alert:x', 'what is this?', { venue: 'wake', from: { kind: 'person', slug: 'loren' } }), w.o);
+    assert.equal(b.conversation, a.conversation);
+    assert.notEqual(b.body, 'fed');
+    assert.notEqual(b.body, 'started');
+    assert.equal(localLog.some((l) => l[0] === 'feed'), false);
+    assert.ok(localLog.some((l) => l[0] === 'end' && l[1] === first.split(':')[1]), 'its body there is ended');
+    assert.equal(localLog.filter((l) => l[0] === 'start' || l[0] === 'resume').length, 1, 'and none starts there for it');
+  });
+
+  test('fail closed: a local conversation is the owner\'s (the clock\'s word, or his signed reset), or it gets no body here', async () => {
+    const { w, localLog, lwake, conv } = setup();
+    // A relay (another agent) into a local conversation: unknown, so no body on loom's machine.
+    await deliver(w.env, lwake('alert:y', 'one'), w.o);
+    const first = conv('alert:y').body;
+    assert.equal(conv('alert:y').actsFor.owner, true, 'the clock said: the owner\'s');
+    const b = await deliver(w.env, w.msg('alert:y', 'from mark', { venue: 'wake', from: { kind: 'agent', id: 'mark' } }), w.o);
+    assert.notEqual(b.body, 'fed');
+    assert.ok(localLog.some((l) => l[0] === 'end' && l[1] === first.split(':')[1]));
+    // A local wake whose hand-over failed (or expired): unknown, no body here; never taken as the owner's.
+    const starts = localLog.filter((l) => l[0] === 'start').length;
+    const c = await deliver(w.env, lwake('alert:z', 'disk', { handOver: null }), w.o);
+    assert.notEqual(c.body, 'started');
+    assert.equal(localLog.filter((l) => l[0] === 'start').length, starts);
+    // History from before principals were kept: unknown, refused; only the owner's signed reset vouches for it.
+    const { seatMoved } = await import('../src/delivery.mjs');
+    assert.equal(seatMoved(w.env, { conversation: 'cv-00000000000a', agent: 'art', local: true, body: 'claude:x', actsFor: { owner: false, people: [], unknown: true } }), true);
+    assert.equal(seatMoved(w.env, { conversation: 'cv-00000000000a', agent: 'art', local: true, body: 'claude:x', actsFor: { owner: false, people: [], unknown: false, reset: '2026-11-07T23:45:24.347Z' } }), true, 'an unsigned reset vouches for nothing');
+  });
+
   test('the setting: agents and an absolute cwd, or none', () => {
     assert.deepEqual(localBodiesOf({ LOOM_RUNTIME_LOCAL_BODIES: LOCAL }), { agents: ['art'], cwd: '/home/art/Art', from: 'clock', claude: '/home/art/.local/bin/claude', args: ['--dangerously-skip-permissions'], path: '/home/art/Art/bin:/usr/bin' });
     for (const bad of [undefined, '', 'nope', '[]', '{"agents":["art"]}', '{"agents":[],"cwd":"/x"}', '{"agents":["art"],"cwd":"rel"}']) {

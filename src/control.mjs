@@ -6,6 +6,7 @@
 // It is not a scheduler. A house goes where it's told (a box), or to the one
 // permitted box that has what it needs, or to the agent's primary. If that
 // doesn't name exactly one box, it says why and starts nothing.
+import { OWNER_SEAT, SEAT, seatCapProblem } from './principal.mjs';
 import { ownCommit } from './version.mjs';
 import { pieceName } from './piece.mjs';
 import { randomBytes } from 'node:crypto';
@@ -175,9 +176,10 @@ function mayHostValue(v) {
  */
 export const shownTask = (t) => (typeof t === 'string' ? t.replace(/(--host-key )[0-9a-f]+/g, '$1…') : t);
 
-function houseView(h) {
-  const { tokenLabel: _t, ...rest } = h;
-  return { ...rest, task: shownTask(rest.task) };
+/** A house as an answer shows it: never its token's label, and whose work it's for (t-1952: `seat`) only to an owner. */
+function houseView(h, { seat = false } = {}) {
+  const { tokenLabel: _t, seat: st, ...rest } = h;
+  return { ...rest, task: shownTask(rest.task), ...(seat && st !== undefined ? { seat: st } : {}) };
 }
 
 // ------------------------------------------------------------- the owner's
@@ -344,6 +346,10 @@ const actor = (caller) => (caller.kind === 'agent' ? caller.agent : typeof calle
  */
 export function up(env, effects, caller, { agent, box, needs, task, session, slot }, own = {}) {
   const hostHouse = own.kind === 'body-host';
+  // Whose work a body host's house is for (t-1952; principal.mjs, seatOf): the owner's, a person's, or one unknown
+  // conversation's. The runtime's own say, like its kind; shown on the house, for the owner's listing.
+  const seat = hostHouse ? (own.seat === undefined ? OWNER_SEAT : own.seat) : null;
+  if (hostHouse && !(typeof seat === 'string' && SEAT.test(seat))) fail('a body host\'s seat is owner, p-<person> or u-<conversation>');
   let a;
   if (caller.kind === 'agent') {
     if (agent && agent !== caller.agent) fail(`this token is ${caller.agent}'s; it can only ask for its own house`, 403);
@@ -368,10 +374,13 @@ export function up(env, effects, caller, { agent, box, needs, task, session, slo
     // One house holds a slot at a time: two would each start from the same state and the later save would win.
     const holder = sl && Object.values(s.houses).find((x) => x.agent === a && x.slot === sl && LIVE.has(x.state));
     if (holder) fail(`${holder.id} holds ${a}'s ${sl} slot; one house at a time`, 409);
+    // At most the cap of houses for other people (t-1952), counted in this same write: never two past it at once.
+    const full = hostHouse ? seatCapProblem(env, s, a, seat) : null;
+    if (full) throw Object.assign(new StateError(full, 409), { seatFull: true });
     const where = placeHouse(s, a, { box: box || undefined, needs: n }, env);
     const id = nextHouseId(s);
     const at = now(effects);
-    s.houses[id] = { id, agent: a, box: where, task: t, needs: n, state: 'wanted', created: at, updated: at, by: actor(caller), ...(sess ? { session: true } : {}), ...(sl ? { slot: sl } : {}), ...(hostHouse ? { kind: 'body-host' } : {}) };
+    s.houses[id] = { id, agent: a, box: where, task: t, needs: n, state: 'wanted', created: at, updated: at, by: actor(caller), ...(sess ? { session: true } : {}), ...(sl ? { slot: sl } : {}), ...(hostHouse ? { kind: 'body-host', seat } : {}) };
     return { id, agent: a, box: where, boxName: boxLabelOf(s, where), state: 'wanted', ...(sess ? { session: true } : {}), ...(sl ? { slot: sl } : {}) };
   });
 }
@@ -380,6 +389,13 @@ export function down(env, effects, caller, { id }) {
   return update(env, (s) => {
     const h = s.houses[id];
     if (!h || !sees(caller, h.agent)) fail(`no house ${id}`, 404);
+    // A body host's house is taken down by the owner (or the runtime), and by an agent only from a house of the same
+    // seat (t-1952): a body in one principal's house never stops another principal's.
+    if (caller.kind === 'agent' && isHostHouse(h, s)) {
+      const mine = s.houses[caller.house];
+      const seatOf = (x) => (typeof x?.seat === 'string' ? x.seat : OWNER_SEAT);
+      if (!mine || !isHostHouse(mine, s) || seatOf(mine) !== seatOf(h)) fail(`no house ${id}`, 404);
+    }
     if (h.service && LIVE.has(h.state)) fail(`${id} is the ${h.service} service's house: take the service down (service-down) or move it`, 409);
     if (TERMINAL.has(h.state)) return houseView(h);
     if (h.state === 'wanted') h.state = 'stopped';
@@ -396,7 +412,9 @@ export function list(env, caller) {
     .filter((h) => sees(caller, h.agent))
     .sort((x, y) => Number(y.id.slice(2)) - Number(x.id.slice(2)))
     .slice(0, 50)
-    .map(houseView);
+    // Whose work each body host's house is for (t-1952) is the owner's to read: a body in one of them never learns who
+    // steers its agent's other conversations, nor their ids.
+    .map((h) => houseView(h, { seat: caller.kind === 'owner' }));
   // Boxes are the household's: its owner sees them all, with their grants; anyone else, the live ones that may host their agents.
   const mine = caller.kind === 'agent' ? [caller.agent] : Array.isArray(caller.agents) ? caller.agents : null;
   const boxes = Object.entries(s.boxes)

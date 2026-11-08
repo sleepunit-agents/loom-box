@@ -109,6 +109,8 @@ test('a delivered body is a session in its agent\'s own house: placed, woken by 
     await until(() => load(env).houses['h-1']);
     const house = load(env).houses['h-1'];
     assert.deepEqual([house.agent, house.box], ['art', local()]);
+    // Loren's conversation, in a house of hers (t-1952): its seat says whose, its host record is her seat's.
+    assert.equal(house.seat, 'p-loren');
     assert.match(house.task, /^loom-runtime body-host --piece box --host-key [0-9a-f]{48}$/, 'its task carries the host\'s one-time boot key');
 
     // The house: its own environment (its agent's token, its box's harness login), nothing of the runtime's.
@@ -133,11 +135,11 @@ test('a delivered body is a session in its agent\'s own house: placed, woken by 
       for (const k of ['ANTHROPIC_API_KEY', 'CLAUDE_CONFIG_DIR', 'FOO_SECRET', 'LOOM_RUNTIME_TOKEN_FILE', 'LOOM_BOX_DATA']) assert.equal(bodyEnv.names.includes(k), false, k);
       assert.ok(bodyEnv.names.includes('LOOM_TOKEN_FILE'), 'its own agent\'s token, the house\'s');
       assert.match(bodyEnv.key, /^[0-9a-f]{48}$/);
-      assert.ok(hostOf(env, 'art').report.bodies[c.body.split(':')[1].replace(/^h-1-/, '')]);
+      assert.ok(hostOf(env, 'art', 'p-loren').report.bodies[c.body.split(':')[1].replace(/^h-1-/, '')]);
 
       // The body answers as a real one does: `loom runtime send`, its env only its house's token and its run's key.
       // Its harness's own session id, as Claude Code sets it in a session (CLAUDE_CODE_SESSION_ID): its host reported it.
-      const session = hostOf(env, 'art').report.bodies[c.body.split(':')[1].replace(/^h-1-/, '')].session;
+      const session = hostOf(env, 'art', 'p-loren').report.bodies[c.body.split(':')[1].replace(/^h-1-/, '')].session;
       assert.ok(session);
       const bodyCli = { PATH: process.env.PATH, HOME: H, LOOM_URL: loom.url, LOOM_TOKEN_FILE: join(H, 'token'), LOOM_BODY_KEY: bodyEnv.key, CLAUDE_CODE_SESSION_ID: session };
       const ok = await run(['send', '--conversation', a.conversation, '--piece', 'box', '--text', 'Yes, Thursday at 3.'], '', bodyCli, H);
@@ -207,8 +209,8 @@ test('a Codex body in its house answers with `loom runtime send`, naming its Cod
       assert.match(c.body, /^codex:h-1-[0-9a-z]+$/);
       const raw = c.body.split(':')[1].replace(/^h-1-/, '');
       // Its host reports the thread Codex started as the body's session: the one the runtime checks a send against.
-      await until(() => hostOf(env, 'art').report?.bodies?.[raw]?.session);
-      const thread = hostOf(env, 'art').report.bodies[raw].session;
+      await until(() => hostOf(env, 'art', 'p-loren').report?.bodies?.[raw]?.session);
+      const thread = hostOf(env, 'art', 'p-loren').report.bodies[raw].session;
       // The body answers as a real Codex one does: a command Codex runs carries CODEX_THREAD_ID (codex-cli 0.162.1,
       // 0.164.0), and no Claude session id (CodexRunner scrubs CLAUDE_CODE_*).
       // Its run's key, as its house keeps it by conversation (bodyhost.mjs keepKey).

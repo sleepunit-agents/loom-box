@@ -24,6 +24,10 @@ const PKG = JSON.parse(readFileSync(fileURLToPath(new URL('../package.json', imp
 /** A relay's world: the delivery world, a grants document, an approvals piece that spends what `allowed` holds. */
 function relayWorld({ pairs = { art: ['mark'], mark: ['art'] }, approvals = true, allowed = {} } = {}) {
   const w = world();
+  // The threads that ask are their owner's (as a Comms thread is), so a session can follow its answer into the
+  // conversation's own house (t-1952, carriesSession): the world's sender, loren, owns the household here.
+  mkdirSync(join(w.env.HOME, '.config', 'loom'), { recursive: true });
+  writeFileSync(join(w.env.HOME, '.config', 'loom', 'household.json'), JSON.stringify({ members: [{ person: 'loren', agents: '*' }] }));
   const store = memStore();
   store.put(GRANTS, KEY, { v: 1, pieces: {}, relay: pairs });
   const spent = [];
@@ -589,7 +593,9 @@ describe('a body the record lost track of still counts', () => {
       const a = await conv('th:a');
       const b = await conv('th:b');
       lose(b);
-      assert.equal(originOf(w.env, who, a), null);
+      // A caller in no house is refused a house body's conversation outright (t-1952); one in the house gets none.
+      if (who.house) assert.equal(originOf(w.env, who, a), null);
+      else assert.throws(() => originOf(w.env, who, a), /held by a body in your house/);
       if (who.house) assert.equal(originOf(w.env, who), null, 'nor is a single one inferred');
     });
   }

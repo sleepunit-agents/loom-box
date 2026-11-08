@@ -140,12 +140,14 @@ test('the clock\'s word for a wake is taken once, and only for that agent and pl
 test('a body asks on whose behalf it acts, proven as send is: its conversation\'s own agent, its run\'s key, its session', async () => {
   const w = world();
   household(w.env);
+  // Its bodies are in a house, h-1 (t-1952): a body's call comes from there.
+  w.runner.houses = new Proxy({}, { get: () => 'h-1' });
   await deliver(w.env, w.msg('dm:L', 'please merge on-pond 220'), w.o);
   const c = loadConv(w.env, cvOf('art', 'slack', 'dm:L'));
-  const key = w.runner.envs[c.body.split(':')[1]].LOOM_BODY_KEY;
-  const session = w.sessionFor(c.conversation);
+  let key = w.runner.envs[c.body.split(':')[1]].LOOM_BODY_KEY;
+  let session = w.sessionFor(c.conversation);
   const ask = (caller, b) => bodyPrincipal(w.env, { conversation: c.conversation, ...b }, { ...w.o, caller });
-  const r = ask({ kind: 'agent', agent: 'art' }, { key, session });
+  const r = ask({ kind: 'agent', agent: 'art', house: 'h-1' }, { key, session });
   assert.deepEqual([r.ok, r.for, r.owner], [true, 'loren', false]);
   assert.equal(JSON.stringify(r).includes(key), false, 'the run\'s key is never in the answer');
   const v = verify(deliveryDir(w.env), r.statement, w.clock.now().getTime());
@@ -155,16 +157,22 @@ test('a body asks on whose behalf it acts, proven as send is: its conversation\'
   await deliver(w.env, w.msg('dm:S', 'one', { from: { kind: 'person', slug: 'loren' } }), w.o);
   await deliver(w.env, w.msg('dm:S', 'two', { from: { kind: 'person', slug: 'daniel' } }), w.o);
   const S = loadConv(w.env, cvOf('art', 'slack', 'dm:S'));
-  const sk = bodyPrincipal(w.env, { conversation: S.conversation, key: w.runner.envs[S.body.split(':')[1]].LOOM_BODY_KEY, session: w.sessionFor(S.conversation) }, { ...w.o, caller: { kind: 'agent', agent: 'art' } });
+  const sk = bodyPrincipal(w.env, { conversation: S.conversation, key: w.runner.envs[S.body.split(':')[1]].LOOM_BODY_KEY, session: w.sessionFor(S.conversation) }, { ...w.o, caller: { kind: 'agent', agent: 'art', house: 'h-1' } });
   await deliver(w.env, w.msg('dm:S', 'three', { from: { kind: 'person', slug: 'eve' } }), w.o);
   assert.deepEqual(verifyStatement(w.env, sk.statement, w.clock.now().getTime()).people, ['loren', 'daniel', 'eve']);
   // Someone else speaks there after it was minted: the statement is stale.
   await deliver(w.env, w.msg('dm:L', 'me too', { from: { kind: 'person', slug: 'daniel' } }), w.o);
   assert.deepEqual(verifyStatement(w.env, r.statement, w.clock.now().getTime()), { ok: false, reason: 'its conversation has heard from someone since: ask for a new one' });
+  // Two people steer it now: it moved to a house of its own (t-1952), as a new run, so Loren's run's key is spent.
+  assert.match(ask({ kind: 'agent', agent: 'art', house: 'h-1' }, { key, session }).reason ?? '', /doesn't match/);
+  const c2 = loadConv(w.env, c.conversation);
+  key = w.runner.envs[c2.body.split(':')[1]].LOOM_BODY_KEY;
+  session = w.sessionFor(c.conversation);
   assert.equal(ask({ kind: 'agent', agent: 'mark' }, { key, session }).ok, false, 'another agent, even with the key');
-  assert.equal(ask({ kind: 'agent', agent: 'art' }, { session }).ok, false, 'no key');
-  assert.match(ask({ kind: 'agent', agent: 'art' }, { key, session: 'someone-else' }).reason, /another session/);
-  // Through the piece API, as a house's call arrives: the agent's own body answered, another agent refused.
+  assert.equal(ask({ kind: 'agent', agent: 'art', house: 'h-1' }, { session }).ok, false, 'no key');
+  assert.match(ask({ kind: 'agent', agent: 'art', house: 'h-1' }, { key, session: 'someone-else' }).reason, /another session/);
+  // Through the piece API, as a house's call arrives (its body is in h-1): the agent's own body answered, another
+  // agent refused.
   const fx = { now: () => new Date() };
   const viaApi = await api(w.env, fx, { caller: { kind: 'agent', agent: 'art', house: 'h-1' }, path: 'principal', body: { conversation: c.conversation, key, session } });
   assert.equal(viaApi.status, 200, JSON.stringify(viaApi.body));
@@ -172,16 +180,16 @@ test('a body asks on whose behalf it acts, proven as send is: its conversation\'
   assert.deepEqual([viaApi.body.ok, viaApi.body.for, viaApi.body.people, verifyStatement(w.env, viaApi.body.statement).ok], [true, null, ['loren', 'daniel'], true]);
   const other = await api(w.env, fx, { caller: { kind: 'agent', agent: 'mark', house: 'h-2' }, path: 'principal', body: { conversation: c.conversation, key, session } });
   assert.equal(other.status, 409);
-  assert.equal((await api(w.env, fx, { caller: { kind: 'agent', agent: 'art' }, path: 'principal', body: { conversation: c.conversation, session } })).status, 409, 'no key');
+  assert.equal((await api(w.env, fx, { caller: { kind: 'agent', agent: 'art', house: 'h-1' }, path: 'principal', body: { conversation: c.conversation, session } })).status, 409, 'no key');
   assert.equal((await api(w.env, fx, { caller: { kind: 'owner' }, path: 'principal', body: {} })).status, 403);
   // Nothing on the piece API sets a principal: no reset, no wake hand-over, under any name a body might try.
   for (const path of ['reset', 'principal/reset', 'principal-reset', 'wake-for', 'principal/wake']) {
-    const r = await Promise.resolve().then(() => api(w.env, fx, { caller: { kind: 'agent', agent: 'art' }, path, body: { conversation: c.conversation } })).catch((e) => ({ status: e.status ?? 500 }));
+    const r = await Promise.resolve().then(() => api(w.env, fx, { caller: { kind: 'agent', agent: 'art', house: 'h-1' }, path, body: { conversation: c.conversation } })).catch((e) => ({ status: e.status ?? 500 }));
     assert.notEqual(r.status, 200, path);
   }
   // Nor the body's own remote CLI (path run, gates-api.mjs runFor): it has no principal verb.
   for (const argv of [['principal', '--reset', '--conversation', c.conversation], ['principal', '--wake', '--agent', 'art', '--place', 'p', '--id', 'i', '--for', 'owner']]) {
-    const r = await Promise.resolve().then(() => api(w.env, fx, { caller: { kind: 'agent', agent: 'art' }, path: 'run', body: { argv } })).catch((e) => ({ status: e.status ?? 500, body: {} }));
+    const r = await Promise.resolve().then(() => api(w.env, fx, { caller: { kind: 'agent', agent: 'art', house: 'h-1' }, path: 'run', body: { argv } })).catch((e) => ({ status: e.status ?? 500, body: {} }));
     assert.notEqual(r.body?.exit ?? 1, 0, argv.join(' '));
   }
   assert.equal(loadConv(w.env, c.conversation).actsFor.people.includes('loren'), true, 'untouched');
@@ -243,8 +251,16 @@ test('the CLI: --verify checks a statement on this machine; --wake takes the clo
   assert.notEqual(cli(env, ['principal', '--wake', '--agent', 'art', '--place', 'wake:w-9', '--for', 'loren']).status, 0, 'no id');
   // --reset: the owner vouches for a conversation; its statement verifies again only once it's his.
   writeFileSync(join(dir, 'conversations', 'cv-000000000003.json'), JSON.stringify({ conversation: 'cv-000000000003', agent: 'art', actsFor: { owner: true, people: [], unknown: true } }));
-  const r = cli(env, ['principal', '--reset', '--conversation', 'cv-000000000003']);
-  assert.equal(r.status, 0, r.stderr);
+  // Not from a process with no terminal (a body's), even with the id piped in: the owner types it at his (t-1952).
+  const r0 = spawnSync(process.execPath, [join(ROOT, 'src/cli.mjs'), 'principal', '--reset', '--conversation', 'cv-000000000003'], { env: { PATH: process.env.PATH, ...env }, input: 'cv-000000000003\n', detached: true, encoding: 'utf-8' });
+  assert.notEqual(r0.status, 0);
+  assert.equal(JSON.parse(readFileSync(join(dir, 'conversations', 'cv-000000000003.json'), 'utf-8')).actsFor.unknown, true);
+  // At a terminal (here a pseudo-terminal, `script`), typing the id: reset.
+  const hasScript = spawnSync('script', ['--version']).status === 0;
+  if (!hasScript) return;
+  const q = (x) => `'${String(x).replace(/'/g, "'\\''")}'`;
+  const r = spawnSync('script', ['-qec', `${q(process.execPath)} ${q(join(ROOT, 'src/cli.mjs'))} principal --reset --conversation cv-000000000003`, '/dev/null'], { env: { PATH: process.env.PATH, ...env }, input: 'cv-000000000003\n', encoding: 'utf-8' });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.deepEqual(JSON.parse(readFileSync(join(dir, 'conversations', 'cv-000000000003.json'), 'utf-8')).actsFor.unknown, false);
   assert.notEqual(cli(env, ['principal', '--reset', '--conversation', 'cv-00000000000f']).status, 0, 'no such conversation');
   // In a house, --reset is refused (and would only touch the house's own copy).
