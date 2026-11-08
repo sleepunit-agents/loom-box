@@ -60,6 +60,7 @@
 //   loom runtime principal --reset --conversation <cv>                 loom's machine, the owner's: what it heard before is set aside
 //   loom runtime principal --wake --agent a --place p --id <delivery id> --for owner|<slug>|-   loom's machine (the clock): who that firing wake is for
 //   loom runtime deliver tick [--conversation <cv>] | deliver run [--every <ms>] | deliver list [--json]
+//   loom runtime deliver stale-runs [--json]   read only: open runs whose body is gone (t-1958)
 //   loom runtime deliver resume|dismiss <cv>   a conversation paused as a loop (loops.mjs): start what waited, or drop it
 //   loom runtime body-host [--piece <name>] --host-key <boot key>   in an agent's house, as its task: the bodies delivery asks for
 // Models and accounts (the owner's, on loom's machine):
@@ -144,7 +145,7 @@ import { join } from 'node:path';
 import { readModels, resolveFor, setModels } from './models.mjs';
 import { endBody, feedBody, listBodies, resumeBody, startBody } from './bodies.mjs';
 import { PART_RAW, joinParts, partsOf } from './blobs.mjs';
-import { answerLoop, deliver, listConvs, post, send, sendOutcome, sendStatus, tick, workingConversations, workingPrint } from './delivery.mjs';
+import { answerLoop, deliver, listConvs, post, staleRuns, send, sendOutcome, sendStatus, tick, workingConversations, workingPrint } from './delivery.mjs';
 import { coreFrom } from './core.mjs';
 import { watchBridges } from './nowboard.mjs';
 import { reviewStatus, reviewTick, runReview } from './review.mjs';
@@ -777,6 +778,14 @@ async function delivery(rest, env, json) {
     for (const c of l) process.stdout.write(`${c.conversation} ${c.agent} ${c.venue} ${c.label ?? c.place}: ${c.paused ? `PAUSED (${c.paused.reason}), ` : ''}${c.body ?? (c.slot ? `slot until ${c.slot.until}` : 'no body')}${c.queued ? `, ${c.queued} waiting (${c.waiting})` : ''}\n`);
     return;
   }
+  if (sub === 'stale-runs') {
+    // Read only (t-1958): conversations whose current run is still open with its body gone, what a sweep would close.
+    const l = staleRuns(env);
+    if (json) return out(l);
+    for (const r of l) process.stdout.write(`${r.conversation} ${r.agent} ${r.venue} ${r.place}: ${r.run} open since ${r.since}, body ${r.body ?? 'none'} ${r.bodyState}${r.onRecord ? '' : ', off its record'}\n`);
+    process.stdout.write(`${l.length} open run${l.length === 1 ? '' : 's'} with no body at work\n`);
+    return;
+  }
   if (sub === 'resume' || sub === 'dismiss') {
     // A conversation paused as a loop (loops.mjs): resume starts what waited; dismiss drops it.
     const cv = positional(rest)[1];
@@ -785,7 +794,7 @@ async function delivery(rest, env, json) {
     process.stdout.write(`${cv}: ${sub === 'resume' ? `resumed, ${r.waiting} waiting starts` : `dismissed, ${r.waiting} waiting dropped`}\n`);
     return;
   }
-  throw new Fail('usage: loom runtime deliver [tick|run|list|resume <cv>|dismiss <cv>] …', 2);
+  throw new Fail('usage: loom runtime deliver [tick|run|list|stale-runs|resume <cv>|dismiss <cv>] …', 2);
 }
 
 /** loom runtime review …: a run by hand, and what the runs did (counts and families, never text). */
