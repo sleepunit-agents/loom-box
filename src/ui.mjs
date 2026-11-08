@@ -38,13 +38,20 @@ export function permsStore(env) {
  */
 function spendGrant(env, aid, target, agent) {
   if (env?.LOOM_RUNTIME_TEST_APPROVALS && typeof env.LOOM_RUNTIME_TEST_APPROVALS === 'object') return env.LOOM_RUNTIME_TEST_APPROVALS.spend(aid, target, agent);
+  // Well inside loom's 15 s for the whole action: a spend that's slow is refused here, before it's spent, rather than
+  // the action being killed between the spend and the grant's write.
   const r = spawnSync(env.LOOM_BIN || 'loom', ['approvals', 'use', aid, '--kind', 'grant', '--target', target, '--as', JSON.stringify({ kind: 'agent', agent })],
-    { env, encoding: 'utf-8', timeout: 30_000 });
+    { env, encoding: 'utf-8', timeout: 6_000 });
   if (r.error) return `the approvals piece didn't run (${r.error.message})`;
   return r.status === 0 ? '' : ((r.stderr || r.stdout || '').trim().slice(-300) || `exit ${r.status}`);
 }
 
-/** A grant approval's target, <piece>:<agent>[:<path>,<path>], as {piece, agent, paths}; else null (approvals' grant_of). */
+/**
+ * A grant approval's target, <piece>:<agent>[:<path>,<path>], as {piece, agent, paths}; else null (approvals' grant_of).
+ * A second reading of approvals' grammar, in another program: kept loose here on purpose. What decides is the spend
+ * (approvals matches the target exactly as filed) and grantPathsOk; a target this reads differently is refused, never
+ * widened.
+ */
 export function grantTarget(t) {
   const m = /^([a-z][a-z0-9-]{0,39}):([a-z][a-z0-9-]{0,39})(?::([^:\s]{1,600}))?$/.exec(typeof t === 'string' ? t : '');
   if (!m) return null;
@@ -66,7 +73,7 @@ function grantApproved(env, st, c, fields) {
   if (!/^a-[0-9a-f]{8}$/.test(id) || !AGENT_ID.test(asker) || !g || !grantPathsOk(g.paths)) return { ok: false, message: 'That isn\'t a grant approval.', page: 'permissions' };
   const agents = householdOf(env)?.agents ?? [];
   if (!agents.includes(g.agent)) return { ok: false, message: `No agent ${g.agent} in this household: nothing was granted.`, page: 'permissions' };
-  const what = `${who(g.agent)} may use ${cap(g.piece)}${g.paths.includes('*') ? '' : ` (only ${g.paths.join(', ')})`}`;
+  const what = `${who(g.agent)} may use ${cap(g.piece)}${g.paths.includes('*') ? '' : ` for ${g.paths.join(', ')}`}`;
   // Checked before it's spent, so a grant the runtime would refuse doesn't use up the owner's yes.
   let cur;
   try { cur = st.get(GRANTS, GRANTS_KEY); } catch (e) { return { ok: false, message: `The runtime couldn't read its grants (${String(e.message || e).slice(0, 160)}): nothing was granted.`, page: 'permissions' }; }
@@ -75,7 +82,7 @@ function grantApproved(env, st, c, fields) {
   if (spent) return { ok: false, message: `Not granted: the approval couldn't be spent (${spent.slice(0, 200)}).`, page: 'permissions' };
   try {
     const r = addGrant(st, g);
-    return { ok: true, message: r.changed ? `${what} now.` : `${what}: ${r.why}.`, page: `permissions/${g.agent}` };
+    return { ok: true, message: r.changed ? `${what} now.` : cur?.doc ? `${what} already.` : `${what}: there are no grants yet, so every agent may use every piece.`, page: `permissions/${g.agent}` };
   } catch (e) {
     return { ok: false, message: `Allowed, but the runtime couldn't write the grant (${String(e.message || e).slice(0, 160)}): set it on Permissions.`, page: 'permissions' };
   }

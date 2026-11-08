@@ -64,7 +64,7 @@ test('an Allow applies the grant: the approval spent, the agent added, everyone 
 
 test('only some paths: the agent gets just those, and they add up', () => {
   const { env, st } = setup({ allowed: { 'a-00000001': { target: 'tasks:mark:run', agent: 'art' }, 'a-00000002': { target: 'tasks:mark:people/*', agent: 'art' } } });
-  assert.equal(approve(env, { id: 'a-00000001', agent: 'art', target: 'tasks:mark:run' }).message, 'Mark may use Tasks (only run) now.');
+  assert.equal(approve(env, { id: 'a-00000001', agent: 'art', target: 'tasks:mark:run' }).message, 'Mark may use Tasks for run now.');
   assert.equal(approve(env, { id: 'a-00000002', agent: 'art', target: 'tasks:mark:people/*' }).ok, true);
   assert.deepEqual(grantsOf(st).pieces.tasks.mark, ['run', 'people/*']);
   assert.equal(decide(grantsOf(st), { agent: 'mark', piece: 'tasks', path: 'secrets' }).allow, false);
@@ -115,7 +115,7 @@ test('no grants yet: every agent may use every piece already, and no document is
   const { env, st } = setup({ doc: null, allowed: { 'a-0000beef': { target: 'tasks:mark', agent: 'art' } } });
   const r = approve(env, { id: 'a-0000beef', agent: 'art', target: 'tasks:mark' });
   assert.equal(r.ok, true);
-  assert.match(r.message, /no grants yet/);
+  assert.match(r.message, /no grants yet, so every agent may use every piece/);
   assert.equal(st.get(GRANTS, KEY), null);
 });
 
@@ -151,4 +151,11 @@ test('Permissions says, per agent, which pieces it can use, in plain words; each
   // A member who owns some agents doesn't get the household's permissions.
   assert.equal(page(env, { path: 'permissions/mark', caller: { kind: 'owner', who: 'loren', agents: ['mark'] } }).title, 'Not found');
   assert.deepEqual(usableBy(null, 'mark'), null);
+});
+
+test('an Allow for what the agent already has says so in names, and spends the approval', () => {
+  const { env, spent } = setup({ allowed: { 'a-0000beef': { target: 'clock:mark', agent: 'art' } } });
+  const r = approve(env, { id: 'a-0000beef', agent: 'art', target: 'clock:mark' });
+  assert.deepEqual([r.ok, r.message], [true, 'Mark may use Clock already.']);
+  assert.deepEqual(spent, ['a-0000beef']);
 });
