@@ -21,7 +21,7 @@ test('relay and relays CLI forward through the authenticated piece API and prese
   const dir = scratch('relay-cli-');
   const token = join(dir, 'token'); writeFileSync(token, 'test-house-token');
   const run = (args) => new Promise((resolve) => {
-    const child = spawn(process.execPath, [join(import.meta.dirname, '..', 'src', 'cli.mjs'), ...args], { env: { ...process.env, LOOM_RUNTIME_PIECE: 'runtime', LOOM_URL: `http://127.0.0.1:${server.address().port}/mcp`, LOOM_TOKEN_FILE: token } });
+    const child = spawn(process.execPath, [join(import.meta.dirname, '..', 'src', 'cli.mjs'), ...args], { env: { ...process.env, LOOM_BODY_CONVERSATION: '', LOOM_RUNTIME_PIECE: 'runtime', LOOM_URL: `http://127.0.0.1:${server.address().port}/mcp`, LOOM_TOKEN_FILE: token } });
     let stdout = '', stderr = '';
     child.stdout.on('data', (d) => { stdout += d; }); child.stderr.on('data', (d) => { stderr += d; });
     child.on('close', (exit) => resolve({ exit, stdout, stderr }));
