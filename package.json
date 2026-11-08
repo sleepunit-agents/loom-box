@@ -47,6 +47,11 @@
         "default": "5"
       },
       {
+        "name": "LOOM_RUNTIME_SEAT_HOUSES",
+        "label": "Houses an agent may have at once for anyone but its owner",
+        "default": "4"
+      },
+      {
         "name": "LOOM_RUNTIME_WARM_IDLE_S",
         "label": "Seconds a body whose turn is over stays warm",
         "default": "600"

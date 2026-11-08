@@ -158,6 +158,34 @@ export function seatRoom(env, agent, seat) {
   return seatCapProblem(env, s, agent, seat);
 }
 
+/**
+ * At the cap (seatRoom), the agent's houses for other seats that hold no body at all are asked to stop now, rather
+ * than idling out their host's 600 s: what waits gets a house sooner. Only a running house whose host reports, fresh,
+ * that every body it had has ended, and that nothing is asked of it. Returns the houses asked down.
+ */
+export function releaseEmptySeatHouses(env, agent, seat, nowMs = Date.now()) {
+  // Under the hosts lock: no request joins a record between its look here and its house's stop.
+  try { return hostLocked(env, () => releaseLocked(env, agent, seat, nowMs)); } catch { return []; }
+}
+function releaseLocked(env, agent, seat, nowMs) {
+  let s;
+  try { s = load(env); } catch { return []; }
+  const empty = [];
+  for (const other of seatsOf(env, agent)) {
+    if (other === OWNER_SEAT || other === seat) continue;
+    const h = loadHost(env, agent, other);
+    if (!h.house || s.houses[h.house]?.state !== 'running' || !freshRec(h, h.house, nowMs) || h.draining) continue;
+    if (Object.values(h.report.bodies ?? {}).some((b) => b.status !== 'ended')) continue;
+    if (Object.keys(h.req ?? {}).length || Object.keys(h.stop ?? {}).length || Object.keys(h.inbox ?? {}).length) continue;
+    empty.push(h.house);
+  }
+  if (!empty.length) return [];
+  try {
+    update(env, (st) => { for (const id of empty) { const x = st.houses[id]; if (x?.state === 'running') { x.state = 'stopping'; x.updated = new Date(nowMs).toISOString(); x.log = 'stopped early: its agent\'s houses for other people were at the cap, and it held no body'; } } });
+  } catch { return []; }
+  return empty;
+}
+
 /** The record of the seat whose house (the agent's, or one draining) is `house`, with its seat; null when none is. */
 function recordOfHouse(env, agent, house) {
   for (const seat of seatsOf(env, agent)) {
@@ -399,7 +427,7 @@ export class HouseRunner {
         // Never past the cap, and never into another seat's house: the body waits (delivery.mjs asks seatRoom first;
         // this is the same check, for a start that raced past it).
         const full = seatRoom(this.env, agent, seat);
-        if (full) throw seatFull(full);
+        if (full) { releaseEmptySeatHouses(this.env, agent, seat, now); throw seatFull(full); }
         const s = load(this.env);
         const at = bodyBox(s, agent, this.harness, this.env);
         if (!at.box) throw new RunnerError(at.reason);

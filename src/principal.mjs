@@ -27,6 +27,7 @@ import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { membersOf, ownersOf } from './owners.mjs';
+import { setting } from './piece.mjs';
 
 export const STATEMENT_TTL_S = 5 * 60;   // README: 5 minutes
 const PERSON = /^[a-z0-9]+(-[a-z0-9]+)*$/;
@@ -155,7 +156,7 @@ export function otherSeatHouses(s, agent, seat) {
 
 /** The cap on an agent's houses for other people (LOOM_RUNTIME_SEAT_HOUSES, default 4). */
 export const SEAT_HOUSES = 4;
-export const seatCap = (env) => { const n = Number(env?.LOOM_RUNTIME_SEAT_HOUSES); return env?.LOOM_RUNTIME_SEAT_HOUSES !== undefined && env.LOOM_RUNTIME_SEAT_HOUSES !== '' && Number.isInteger(n) && n >= 0 && n <= 64 ? n : SEAT_HOUSES; };
+export const seatCap = (env) => { const v = setting(env ?? {}, 'SEAT_HOUSES'); const n = Number(v); return v !== undefined && Number.isInteger(n) && n >= 1 && n <= 64 ? n : SEAT_HOUSES; };
 /** Why a house for `seat` can't be had at the cap, or null. The owner's is never capped. */
 export function seatCapProblem(env, s, agent, seat) {
   if (seat === OWNER_SEAT) return null;

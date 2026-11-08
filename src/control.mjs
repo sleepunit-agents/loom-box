@@ -404,7 +404,10 @@ export function list(env, caller) {
     .filter((h) => sees(caller, h.agent))
     .sort((x, y) => Number(y.id.slice(2)) - Number(x.id.slice(2)))
     .slice(0, 50)
-    .map(houseView);
+    .map(houseView)
+    // Whose work each body host's house is for (t-1952) is the owner's to read: a body in one of them never learns who
+    // steers its agent's other conversations, nor their ids.
+    .map((h) => (caller.kind === 'agent' && 'seat' in h ? (({ seat: _s, ...rest }) => rest)(h) : h));
   // Boxes are the household's: its owner sees them all, with their grants; anyone else, the live ones that may host their agents.
   const mine = caller.kind === 'agent' ? [caller.agent] : Array.isArray(caller.agents) ? caller.agents : null;
   const boxes = Object.entries(s.boxes)

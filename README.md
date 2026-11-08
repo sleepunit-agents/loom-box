@@ -424,7 +424,7 @@ one container, so walling conversations apart inside a house isn't possible; wal
   unknown principal is never shared: two conversations nobody can name are no more one principal than two strangers.
   The owner's seat keeps the record it always had (`delivery/hosts/<agent>.json`), so his warm house is kept across the
   change; each other seat has `delivery/hosts/<agent>@<seat>.json` and its own house. A body host's house says its
-  seat (`seat` in `loom box list`, "for p-loren" in its text, and "body host, for loren" on the Boxes page).
+  seat (`seat` in `loom box list --json`, "for loren" in its text and on the Boxes page; the owner's says nothing).
 - **The proof is bound to the house.** `send`, `principal`, a body's `place` and the relay's return address all take
   the run's key and session as before, and now also refuse a caller whose house (core names it, from the house's
   token) isn't the house of the body holding that conversation. A key or session id carried out of its house proves
@@ -440,11 +440,14 @@ one container, so walling conversations apart inside a house isn't possible; wal
   house never inherits a session someone else steered. No other conversation's session ever moves. A guest venue's rules
   still drop a session that wasn't a guest venue's (`sameRules`). A relay's answer that waits for the requesting turn
   to end (`untilIdle`) doesn't interrupt that turn: the move comes when it's over.
-- **Cost.** Houses for other people are capped per agent: `LOOM_RUNTIME_SEAT_HOUSES` (default 4) live houses for seats
-  other than the owner's, counted in the same state write that makes a house (two starts at once can't both pass it).
-  At the cap a conversation that needs another house waits (`queued`, saying so) for one to idle out, keeping its slot,
-  and is started by the tick once one has; it never shares a house. The owner's house is never held by the
-  cap. Every house idles out as before (a warm body after 600 s, its house 600 s after its last body), its seat's
+- **Cost.** Houses for other people are capped per agent: `LOOM_RUNTIME_SEAT_HOUSES` (default 4, at least 1) live
+  houses for seats other than the owner's and the asking seat's own (a seat's draining house and its new one count as
+  one), counted in the same state write that makes a house (two starts at once can't both pass it). At the cap a
+  conversation that needs another house waits (`queued`, saying so), keeping its slot; any other seat's house that
+  holds no body is asked to stop at once rather than idling out its 600 s, and the tick starts what waits once there's
+  room. It never shares a house. The owner's own seat is never held by the cap; but a conversation of his that heard
+  something unplaced (another agent's answer, a wake with no word, history from before principals were kept) is a
+  `u-` seat and counts, until he resets it (`principal --reset`). Every house idles out as before (a warm body after 600 s, its house 600 s after its last body), its seat's
   record is swept once its house is over, and all of an agent's houses run the same image (one build per repo tree,
   so more houses make no more images: t-1933).
 - **What follows the house**: its Codex homes and run dirs (inside its container: t-1924), its key files, its harness
@@ -454,12 +457,15 @@ one container, so walling conversations apart inside a house isn't possible; wal
   houses (an agent token is the agent's; core doesn't scope it by principal); the runtime's `trace` and `send-status`
   answer any of the agent's houses about any of its conversations (mechanism only: run ids, body refs, outcomes, never
   a key, a session's files or a message's words); and the box's model login dir is one read-write dir every house of
-  that agent on that box mounts. None of them is a run key or a session.
+  that agent on that box mounts. None of them is a run key or a session. (Which seat each house is for is the owner's
+  to read: `list` from an agent's house leaves `seat` out.)
 - **Local bodies** (loom's machine, t-1830) have no houses and share the runtime account's keys dir, so they do the
   owner's work only, fail closed: a local conversation gets a body there only while its principal is the owner, or
   all it ever heard is the clock's local wakes with no word from anyone (marked `localWake`: they're set on loom's
   machine). Anything else (another person, a relay, a sender nobody names, history from before principals were kept)
-  has its body ended and its start refused, saying why, until the owner vouches for it (`principal --reset`).
+  has its body ended and its start refused, saying why, until the owner vouches for it (`principal --reset`, once
+  what someone else wrote is no longer waiting there: what's queued is heard again). A refused start goes down the
+  usual retry ladder, so it shows on the conversation's record as failed starts.
 
 ## Model choice
 

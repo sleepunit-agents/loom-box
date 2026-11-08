@@ -82,7 +82,7 @@ import { fileURLToPath } from 'node:url';
 import { accountsFrom, accountsOfRecord } from './accounts.mjs';
 import { endBody, readBody, resumeBody, startBody } from './bodies.mjs';
 import { CoreError, coreFrom } from './core.mjs';
-import { HouseRunner, seatRoom, sweepSeats, sweepTransfers } from './houserunner.mjs';
+import { HouseRunner, releaseEmptySeatHouses, seatRoom, sweepSeats, sweepTransfers } from './houserunner.mjs';
 import { venueKind as kindOf, resolveFor } from './models.mjs';
 import { pieceName, setting } from './piece.mjs';
 import { dropSession, packSession, restoreFiles } from './sessions.mjs';
@@ -1040,8 +1040,10 @@ function plan(env, cv, d, mem) {
   if (busy.length >= limits.busy) return wait(`every body is busy (${busy.length} of ${limits.busy} mid-turn)`);
   // A house for its principal (t-1952): at the cap on the agent's houses for other people, it waits; never shares one.
   if (!c.local) {
-    const full = seatRoom(env, c.agent, seatOf(principalOf(env, c), cv));
-    if (full) return wait(full);
+    const seat = seatOf(principalOf(env, c), cv);
+    const full = seatRoom(env, c.agent, seat);
+    // Houses that hold no body are let go at once, so the wait is for a house at work, not one idling out.
+    if (full) { releaseEmptySeatHouses(env, c.agent, seat, now); return wait(full); }
   }
   if (busy.length + idle.length >= limits.busy) {
     // Over the limit with a warm idle body: it makes room (the least recently active), its conversation saved.
@@ -1091,7 +1093,8 @@ function localForeign(env, c) {
   const p = principalOf(env, c);
   if (p.owner === true) return false;
   const a = c.actsFor ?? {};
-  return !(a.localWake === true && !a.unknown && !a.owner && !(a.people ?? []).length && !(a.owners ?? []).length && !(p.people ?? []).length);
+  // The clock's local wakes, or the owner's reset (his word that what it heard before is his): nothing else since.
+  return !((a.localWake === true || typeof a.reset === 'string') && !a.unknown && !a.owner && !(a.people ?? []).length && !(a.owners ?? []).length && !(p.people ?? []).length);
 }
 
 /** Whether a working body's rules don't cover what's queued for it (rulesFor: grantFor, members). A post-failure note
@@ -1375,9 +1378,9 @@ async function execute(env, op, d, mem) {
   if (op.type === 'loop-note') return loopNote(env, op, d);
   if (op.type === 'stuck') return stopStuck(env, op, d);
   if (op.type === 'resume-warm') {
-    // Its own warm body, its turn over: its session is sealed into its slot first (so a resume that fails leaves no
-    // transcript in the clear), and what it was given goes back on the queue; the next plan resumes from that slot,
-    // or starts fresh when there's none.
+    // Its own warm body, its turn over (or, mid-turn, a body whose principal has moved house: t-1952): its session is
+    // sealed into its slot first (so a resume that fails leaves no transcript in the clear), and what it was given goes
+    // back on the queue; the next plan resumes from that slot (where carriesSession lets it), or starts fresh.
     let saved = { slot: null, pending: [] };
     try { saved = await retire(env, op.cv, op.body, d, true); } catch (e) { d.warn(`ending ${op.body}: ${e.message}`); }
     locked(env, () => {

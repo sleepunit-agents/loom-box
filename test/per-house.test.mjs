@@ -67,6 +67,17 @@ test('a body in one principal\'s house can\'t speak, ask its principal, or ask i
   assert.equal(who.body.statement, undefined, 'no statement of the owner\'s for her house');
   const place = await api(w.env, fx, { caller: fromLoren, path: 'run', body: { argv: ['place', '--conversation', J], key: stolen.key, session: stolen.session } });
   assert.notEqual(place.body.exit, 0);
+  assert.match(JSON.stringify(place.body), /only the body holding/);
+  // From his own house the same proof answers where it is: it's the house that was refused, nothing else.
+  const placeOwn = await api(w.env, fx, { caller: { kind: 'agent', agent: 'art', house: 'h-1' }, path: 'run', body: { argv: ['place', '--conversation', J], key: stolen.key, session: stolen.session } });
+  assert.equal(placeOwn.body.exit, 0, JSON.stringify(placeOwn.body));
+  // Nor does a body learn from the house listing whose work its agent's other houses are for.
+  setAgent(w.env, fx, { agent: 'art', repo: 'https://example.com/art.git' });
+  update(w.env, (s) => { s.houses['h-2'] = { id: 'h-2', agent: 'art', kind: 'body-host', seat: 'p-loren', state: 'running', task: 'loom-runtime body-host --piece box --host-key x' }; });
+  const listed = await api(w.env, fx, { caller: fromLoren, path: 'list', body: {} });
+  assert.equal(JSON.stringify(listed.body.houses).includes('p-loren'), false);
+  const owners = await api(w.env, fx, { caller: { kind: 'owner' }, path: 'list', body: {} });
+  assert.equal(owners.body.houses.find((h) => h.id === 'h-2').seat, 'p-loren', 'the owner reads it');
   // The relay's return address (relay.mjs, originOf) takes the same proof: her house never claims his conversation.
   const { originOf } = await import('../src/relay.mjs');
   assert.throws(() => originOf(w.env, fromLoren, J, { key: stolen.key, session: stolen.session }), /held by a body in your house/);
@@ -158,6 +169,28 @@ test('a principal that changes reseats the body in the right house: never fed wh
   assert.equal(w.runner.seats[carried[1]], `u-${O}`);
 });
 
+test('a relay\'s answer into a person\'s conversation waits for the turn, then reaches a fresh body in the conversation\'s own house', async () => {
+  const w = world();
+  household(w.env);
+  w.runner.houses = new Proxy({}, { get: () => 'h-1' });
+  const L = cvOf('art', 'slack', 'dm:LR');
+  await deliver(w.env, w.msg('dm:LR', 'ask mark about it', person('loren')), w.o);
+  const first = loadConv(w.env, L).body;
+  // Mark's answer, returned to the turn that asked (relay.mjs; untilIdle): not fed mid-turn, nothing reseated yet.
+  await deliver(w.env, w.msg('dm:LR', 'mark: it is fine', { from: { kind: 'agent', id: 'mark' } }), { ...w.o, deferPeer: true });
+  assert.equal(loadConv(w.env, L).body, first);
+  assert.equal(w.log.some((l) => l[0] === 'feed'), false);
+  w.runner.finish(first);
+  await tick(w.env, w.o);
+  const second = loadConv(w.env, L).body;
+  assert.notEqual(second, first);
+  assert.equal(w.runner.seats[second.split(':')[1]], `u-${L}`);
+  // Loren's session stays in her house; the answer isn't lost: the fresh body has it.
+  const s = w.log.find((l) => l[0] === 'start' && l[1] === second.split(':')[1]);
+  assert.ok(s, 'a fresh body, not her session');
+  assert.match(s[2], /it is fine/);
+});
+
 test('the session carry rule: only its own seat, or from the owner\'s into the conversation\'s own house', async () => {
   const { carriesSession } = await import('../src/principal.mjs');
   const cv = 'cv-00000000000e';
@@ -231,6 +264,12 @@ test('a local body (loom\'s machine) is the owner\'s work only: a person other t
   assert.equal(seatMoved(env, c), true, 'someone else wrote');
   c.actsFor = { owner: false, people: [], unknown: true };
   assert.equal(seatMoved(env, c), true, 'unknown is foreign: fail closed');
+  // The owner's reset vouches for it (principal.mjs, resetActsFor): his machine's again, until someone else writes.
+  const { resetActsFor } = await import('../src/principal.mjs');
+  resetActsFor(env, c, '2026-11-08T00:00:00Z');
+  assert.equal(seatMoved(env, c), false, 'reset: the owner\'s');
+  c.actsFor.people = ['loren'];
+  assert.equal(seatMoved(env, c), true);
 });
 
 test('houses for other people are capped per agent: at the cap a body waits (the owner\'s never does), and starts once one idles out', async () => {
@@ -302,6 +341,20 @@ test('in houses: each seat gets its own house, and a house\'s host is handed onl
     hostIn(house);
     return p;
   };
+  // At the cap, the start that finds it full is a wait (seatFull), not a failure: at warm()'s own look, and at up()'s
+  // write when a start raced past that look.
+  const capEnv = { ...env, LOOM_RUNTIME_SEAT_HOUSES: '1' };
+  update(env, (s) => { s.houses['h-50'] = { id: 'h-50', agent: 'art', kind: 'body-host', seat: 'p-zed', state: 'running', task: 'loom-runtime body-host --piece box --host-key x' }; });
+  const capped = new HouseRunner(capEnv, 'claude', { poll: 10, sealer, claimMs: 500, warmMs: 500 });
+  await assert.rejects(capped.warm('art', 'p-amy'), (e) => e.seatFull === true && /the cap is 1/.test(e.message));
+  const raced = new HouseRunner(capEnv, 'claude', { poll: 10, sealer, claimMs: 500, warmMs: 500, up: () => { throw Object.assign(new Error('art already has 1 house at work for other people (the cap is 1, LOOM_RUNTIME_SEAT_HOUSES): it waits for one to idle out'), { status: 409, seatFull: true }); } });
+  update(env, (s) => { delete s.houses['h-50']; });
+  await assert.rejects(raced.warm('art', 'p-amy'), (e) => e.seatFull === true);
+  // And a start the runtime's plan didn't hold: its error is that wait too (the real up(), the cap counted in its write).
+  update(env, (s) => { s.houses['h-50'] = { id: 'h-50', agent: 'art', kind: 'body-host', seat: 'p-zed', state: 'running', task: 'loom-runtime body-host --piece box --host-key x' }; });
+  const { up: realUp } = await import('../src/control.mjs');
+  assert.throws(() => realUp(capEnv, fx, { kind: 'owner' }, { agent: 'art', task: 'loom-runtime body-host --piece box --host-key 00' }, { kind: 'body-host', seat: 'p-amy' }), (e) => e.seatFull === true);
+  update(env, (s) => { delete s.houses['h-50']; });
   const a = await startIn('owner', 'cv-00000000000a', 'h-1');
   const b = await startIn('p-loren', 'cv-00000000000b', 'h-2');
   assert.deepEqual([a.house, a.seat, b.house, b.seat], ['h-1', 'owner', 'h-2', 'p-loren']);
@@ -321,10 +374,17 @@ test('in houses: each seat gets its own house, and a house\'s host is handed onl
   await until(() => hr.status(ref(a)) === 'working' && hr.status(ref(b)) === 'working');
   // A third seat at a cap of one other house: refused at the house, never seated in hers.
   env.LOOM_RUNTIME_SEAT_HOUSES = '1';
-  await assert.rejects(startBody(env, { agent: 'art', venue: 'slack', brief: 'x', seat: 'u-cv-00000000000c' }, { runner: () => hr, accounts, bodyEnv: { LOOM_BODY_KEY: 'k', LOOM_BODY_CONVERSATION: 'cv-00000000000c' } }), /the cap is 1/);
+  await assert.rejects(startBody(env, { agent: 'art', venue: 'slack', brief: 'x', seat: 'u-cv-00000000000c' }, { runner: () => hr, accounts, bodyEnv: { LOOM_BODY_KEY: 'k', LOOM_BODY_CONVERSATION: 'cv-00000000000c' } }), (e) => e.seatFull === true && /the cap is 1/.test(e.message));
   assert.equal(load(env).houses['h-3'], undefined);
   hr.end(ref(a)); hr.end(ref(b));
   await Promise.all(Object.values(houses).map((h) => h.done));
+  // At the cap, a house of another seat that holds no body is let go at once (its host reports every body ended).
+  const { releaseEmptySeatHouses } = await import('../src/houserunner.mjs');
+  await until(() => Object.values(hostOf(env, 'art', 'p-loren').report?.bodies ?? {}).every((x) => x.status === 'ended'));
+  update(env, (s) => { for (const h of ['h-1', 'h-2']) s.houses[h].state = 'running'; });   // as its box reports it (no box here)
+  assert.deepEqual(releaseEmptySeatHouses(env, 'art', 'u-cv-00000000000c'), ['h-2']);
+  assert.equal(load(env).houses['h-2'].state, 'stopping');
+  assert.deepEqual(releaseEmptySeatHouses(env, 'art', 'p-loren'), [], 'never the asking seat\'s own, never the owner\'s');
   // Her house over, her seat's record goes; the owner's stays.
   update(env, (s) => { s.houses['h-2'].state = 'stopped'; });
   sweepSeats(env);
