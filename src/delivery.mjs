@@ -183,6 +183,26 @@ export function listConvs(env) {
   try { return readdirSync(convDir(env)).filter((n) => /^cv-[0-9a-f]{12}\.json$/.test(n)).sort().map((n) => readJson(join(convDir(env), n))).filter((c) => c && CV.test(c.conversation ?? '')); } catch { return []; }
 }
 
+/**
+ * Runs left open on a conversation whose body is gone (t-1958): its record names no body, or one whose end went
+ * through, while its current run has no end, so relay.mjs counts it at work forever. Read only: what the day's sweep
+ * would close. bodyState is the run's body as this machine has it: 'ended', 'gone' (no record here) or 'live'.
+ */
+export function staleRuns(env) {
+  const out = [];
+  for (const c of listConvs(env)) {
+    const r = c.run ? (c.runLog ?? []).findLast((x) => x.run === c.run) : null;
+    if (!r || Number.isFinite(r.end)) continue;
+    const ref = r.body ?? c.body;
+    let rec = null;
+    try { rec = ref ? readBody(env, ref) : null; } catch { rec = null; }
+    const bodyState = !rec ? 'gone' : rec.ended ? 'ended' : 'live';
+    if (c.body && bodyState === 'live') continue;
+    out.push({ conversation: c.conversation, agent: c.agent, venue: c.venue, place: c.label ?? c.place, run: c.run, since: new Date(r.at).toISOString(), body: ref ?? null, bodyState, onRecord: !!c.body });
+  }
+  return out;
+}
+
 /** Every change to delivery's state, under one lock: never while a harness starts (that's outside it). */
 const locked = (env, f) => withLock(deliveryDir(env), 'lock', f, 'delivery', num(env.LOOM_RUNTIME_LOCK_WAIT_MS, 10_000));
 /** The clock's hand-over of a wake's principal (cli.mjs, principal --wake), under delivery's own lock and wait. */
@@ -1306,6 +1326,25 @@ function closeRun(env, c, d, now) {
   return true;
 }
 
+/**
+ * Its body was ended and taken off its record (a reseat, a warm resume, an eviction, a retirement): the run it held is
+ * closed, so the conversation isn't counted at work (relay.mjs, atWork) with no body to finish it (t-1958). Only once
+ * its end went through (its record says ended) and its harness says its turn is over (idle or ended): a record's
+ * `ended` is only that a stop was asked (a house's host carries it out later), and a body whose end failed or can't be
+ * told may still be mid-turn and calling, so its run stays open (#99's review; t-1958's).
+ */
+function closeEnded(env, c, ref, d, now) {
+  const r = (c.runLog ?? []).findLast((x) => x.run === c.run);
+  if (!r || Number.isFinite(r.end) || (r.body && r.body !== ref)) return;
+  let st;
+  try {
+    const rec = readBody(env, ref);
+    if (!rec.ended) return;
+    st = d.runner(rec.harness, rec.local).status(bodyOf(ref, rec));
+  } catch { return; }
+  if (st === 'idle' || st === 'ended') r.end = now;
+}
+
 /** The conversation's current run, over and refused for a usage limit, not yet handled (quotaOp): or null. */
 const refusedRun = (c) => (c.body ? (c.runLog ?? []).findLast((x) => x.run === c.run && Number.isFinite(x.end) && x.turn?.limited && !x.quotaDone) ?? null : null);
 
@@ -1401,7 +1440,7 @@ async function execute(env, op, d, mem) {
     locked(env, () => {
       const c = loadConv(env, op.cv);
       if (!c) return;
-      if (c.body === op.body) { c.body = undefined; c.idleSince = undefined; }
+      if (c.body === op.body) { c.body = undefined; c.idleSince = undefined; closeEnded(env, c, op.body, d, d.now().getTime()); }
       if (saved.slot) c.slot = { ...saved.slot, rules: c.bodyRules ?? { guest: false } }; else delete c.slot;
       requeue(c, [...saved.pending, ...op.msgs]);
       if (ours(c, op)) delete c.starting;
@@ -1418,7 +1457,7 @@ async function execute(env, op, d, mem) {
       rmSync(slotFile(env, op.cv), { force: true });
       const c = loadConv(env, op.cv);
       if (!c) return;
-      if (c.body === op.body) { c.body = undefined; c.idleSince = undefined; delete c.bodyRules; delete c.resetPending; }
+      if (c.body === op.body) { c.body = undefined; c.idleSince = undefined; delete c.bodyRules; delete c.resetPending; closeEnded(env, c, op.body, d, d.now().getTime()); }
       delete c.slot;
       if (ours(c, op)) delete c.starting;
       requeue(c, saved.pending);
@@ -1432,7 +1471,7 @@ async function execute(env, op, d, mem) {
     locked(env, () => {
       const c = loadConv(env, op.cv);
       if (!c) return;
-      if (c.body === op.body) { c.body = undefined; c.idleSince = undefined; }
+      if (c.body === op.body) { c.body = undefined; c.idleSince = undefined; closeEnded(env, c, op.body, d, d.now().getTime()); }
       if (ours(c, op)) delete c.starting;
       if (saved.slot) c.slot = { ...saved.slot, rules: c.bodyRules ?? { guest: false } }; else if (c.body === undefined) delete c.slot;
       // What its inbox still held goes to its next body (shuttle's drop: pending becomes a fresh batch).
