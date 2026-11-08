@@ -273,6 +273,7 @@ function cleanReport(r) {
       pending: Array.isArray(b.pending) ? b.pending.filter((k) => typeof k === 'string' && k.length <= 64).slice(0, 64) : [],
       // A Comms thread's body's tool steps (activity.mjs), checked here as core will check them.
       ...(Array.isArray(b.cards) ? { cards: cleanCards(b.cards) } : {}),
+      ...(typeof b.final === 'string' ? { final: b.final.slice(0, 40000) } : {}),
       // How its turn went, once over (runners.mjs, turn): a host before t-1763 says nothing.
       ...(b.turn && typeof b.turn === 'object' ? { turn: { failed: b.turn.failed === true, worked: typeof b.turn.worked === 'boolean' ? b.turn.worked : null, ...(typeof b.turn.error === 'string' && b.turn.error ? { error: b.turn.error.slice(0, 200) } : {}),
         // Refused for a usage limit, and when its account has room again (t-1907).
@@ -321,6 +322,11 @@ export function bodySync(env, caller, body, o = {}) {
       delete x.bootHash;
     }
     const { bodies, done, caps } = cleanReport(body?.report);
+    for (const b of Object.values(bodies)) if (typeof b.final === 'string') {
+      // A host reports over its authenticated channel; words are sealed before they reach disk.
+      try { b.finalSealed = sealer.seal(Buffer.from(b.final)).toString('base64'); } catch { /* retry next sync */ }
+      delete b.final;
+    }
     // An id this house already gave one request is never another's (a second claim of the same body is refused).
     x.claimed ??= {};
     for (const [rid, d] of Object.entries(done)) {
@@ -564,6 +570,10 @@ export class HouseRunner {
   slotOf(body) { const s = this.entry(body)?.session; return s ? { harness: this.harness, session: s } : null; }
   /** How its turn went, as its house's host reports it: null from a host that doesn't say. */
   turn(body) { return this.entry(body)?.turn ?? null; }
+  final(body) {
+    const s = this.entry(body)?.finalSealed;
+    return s ? this.sealer.open(Buffer.from(s, 'base64')).toString('utf-8') : null;
+  }
   /** Its activity cards, as its host last reported them (only a Comms thread's body has any). */
   activity(body) { return this.entry(body)?.cards ?? []; }
 

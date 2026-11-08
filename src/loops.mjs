@@ -91,7 +91,8 @@ const quote = (s, n = 120) => { const t = String(s).replace(/\s+/g, ' ').trim();
  * first (since the owner last resumed it). `relays`: the relay log's rows (relay.mjs), for a relay conversation
  * (`peer`: who relays to `agent` there).
  */
-export function detectLoop({ runs = [], relays = [], agent, peer, now }) {
+export function detectLoop({ runs = [], relays = [], agent, peer, now, spawnDepth = 0 }) {
+  if (spawnDepth > 8) return { pattern: 'spawn-chain', reason: 'a spawn chain reached 8 generations' };
   // A relay this agent sent while a run was going (to the end of it, and a few seconds on) is what that run said.
   const mine = relays.filter((x) => x.from === agent);
   const done = runs.filter((r) => Number.isFinite(r.end)).map((r) => ({ ...r, relayed: mine.filter((x) => x.at >= r.at && x.at <= r.end + RELAY_SLACK_MS).length }));

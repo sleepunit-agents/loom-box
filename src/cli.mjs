@@ -513,6 +513,38 @@ async function main(argv, env) {
       if (!answer.ok) process.exitCode = 1;
       return;
     }
+    case 'spawn': {
+      const { spawnCall, spawnTool } = await import('./spawn.mjs');
+      if (rest[0] === 'tool') {
+        const r = await spawnTool(env, rest.slice(1), await readStdin());
+        out(r); if (r.isError) process.exitCode = 1; return;
+      }
+      const action = ['wait', 'result', 'say'].includes(rest[0]) ? rest[0] : 'start';
+      const cv = ownConversation(env);
+      const body = !!(env.HOUSE_ID || env.LOOM_BODY_KEY || env.LOOM_BODY_CONVERSATION);
+      const remote = !!(env.LOOM_URL && env.LOOM_TOKEN_FILE);
+      if (body && !cv) throw new Fail('spawn: cannot identify this body\'s conversation');
+      let agent = flag(rest, '--agent');
+      if (!agent || agent === 'self') agent = (body || remote) ? undefined : defaultAgent(env);
+      const callerAgent = !remote && body ? (await import('./delivery.mjs')).loadConv(env, cv)?.agent : agent;
+      const q = { action: action === 'wait' ? 'result' : action, agent, ...(cv ? { conversation: cv, ...bodyProof(env, cv) } : {}),
+        ...(action === 'start' ? { brief: await textOf(rest, '--brief'), prefer: flag(rest, '--prefer'), title: flag(rest, '--title') } : { handle: rest[1] }),
+        ...(action === 'say' ? { text: await textOf(rest, '--text') } : {}) };
+      const call = () => remote ? pieceCall(env)('spawn', q) : spawnCall(env, body ? { kind: 'agent', agent: callerAgent } : { kind: 'owner' }, q, { detach: true });
+      const timeout = Number(flag(rest, '--timeout') ?? 600);
+      if (!Number.isFinite(timeout) || timeout < 0 || timeout > 86400) throw new Fail('spawn: timeout is 0–86400 seconds');
+      const end = Date.now() + timeout * 1000;
+      for (;;) {
+        const r = await call();
+        if (action !== 'wait' || r.state !== 'pending' || Date.now() >= end) {
+          if ((action === 'wait' || action === 'result') && r.state === 'done') process.stdout.write(r.report + '\n');
+          else out(r);
+          if (action === 'wait' && r.state !== 'done') process.exitCode = r.state === 'pending' ? 3 : 1;
+          return;
+        }
+        await sleep(1000);
+      }
+    }
     case 'principal': {
       // On whose behalf a body acts (principal.mjs, t-1943). --verify and --wake read and write this machine's runtime
       // state only, never through the piece API: a house has no signing key (so nothing verifies there) and can't

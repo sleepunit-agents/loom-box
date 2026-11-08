@@ -98,6 +98,7 @@ import { CODEX_WONT, codexDeny, runnerFor } from './runners.mjs';
 import { raiseAlert } from './alerthook.mjs';
 import { changed as changedCards } from './activity.mjs';
 import { keepKey } from './bodyhost.mjs';
+import { spawnCap } from './spawn.mjs';
 import { readRelays } from './relay.mjs';
 import { OWNER_SEAT, carriesSession, mint, noteSender, resetSigned, principalOf, putWakeFor, resetActsFor, seatOf, takeWakeFor, verify } from './principal.mjs';
 
@@ -175,7 +176,7 @@ function writeJson(path, v) {
 const readJson = (p) => { try { return JSON.parse(readFileSync(p, 'utf-8')); } catch { return null; } };
 
 export const loadConv = (env, cv) => (CV.test(cv ?? '') ? readJson(join(convDir(env), `${cv}.json`)) : null);
-const saveConv = (env, c) => {
+export const saveConv = (env, c) => {
   if (!CV.test(c?.conversation ?? '')) fail('not a conversation id', 500);
   writeJson(join(convDir(env), `${c.conversation}.json`), c);
 };
@@ -292,6 +293,7 @@ function addNotice(env, notice, nowMs) {
 async function giveUp(env, c, reason, tries, d) {
   const at = d.now().toISOString();
   const said = `couldn't start a body after ${tries} tries: ${reason}`;
+  if (c.spawn) locked(env, () => { const fresh = loadConv(env, c.conversation); if (fresh?.spawn) { fresh.spawn.failed = said; saveConv(env, fresh); } });
   try {
     const { seq } = await d.core.turn({ agent: c.agent, venue: c.venue, place: c.place, at, from: { kind: 'agent', id: c.agent }, kind: 'note', run: newRun(), outcome: 'failed', ...(c.label !== undefined ? { label: c.label } : {}) });
     try { await d.core.audit({ conversation: c.conversation, seq, text: said }); } catch (e) { d.warn(`the failed note on ${c.conversation} stands without its reason: ${e.message}`); }
@@ -757,7 +759,23 @@ async function deliverOnce(env, raw, o) {
         // The runtime's own daily review (review.mjs, source: this piece, which core sets) is the owner's schedule.
         const own = wake && m.source === pieceName(env) && m.place === 'review';
         const wakeFor = own ? 'owner' : wake ? takeWakeFor(deliveryDir(env), m.agent, m.place, m.id, d.now().getTime()) : undefined;
-        noteSender(env, c, m, { wakeFor });
+        const lineage = o.spawnInit?.metadata ?? o.spawnSender;
+        if (lineage?.origin) {
+          const parent = loadConv(env, lineage.origin);
+          if (!parent || parent.resetPending || seatMoved(env, parent) || parent.actsFor?.reset !== (lineage.parentReset ?? undefined) || JSON.stringify(principalOf(env, parent)) !== JSON.stringify(lineage.principal) ||
+            (o.spawnInit && (parent.body !== o.spawnInit.parentBody || parent.run !== o.spawnInit.parentRun))) throw new DeliveryError('spawn: the asking conversation changed', 403);
+        }
+        if (o.spawnReturn) {
+          const source = loadConv(env, o.spawnReturn.source);
+          if (!source?.spawn || source.resetPending || source.actsFor?.reset !== undefined || c.actsFor?.reset !== o.spawnReturn.targetReset ||
+            JSON.stringify(principalOf(env, source)) !== JSON.stringify(o.spawnSender.principal) || (source.spawn.reportRun ?? source.run) !== o.spawnReturn.run) throw new DeliveryError('spawn: return lineage changed', 403);
+        }
+        if (o.spawnSender && (c.resetPending || (c.spawn && c.actsFor?.reset !== undefined) || (o.spawnSender.targetReset !== undefined && c.actsFor?.reset !== o.spawnSender.targetReset) || JSON.stringify(principalOf(env, c)) !== JSON.stringify(o.spawnSender.principal))) throw new DeliveryError('spawn: the destination principal changed', 403);
+        if (o.spawnInit && !c.spawn && c.runs === 0) {
+          c.spawn = { ...o.spawnInit.metadata, brief: d.sealer.seal(Buffer.from(m.text)).toString('base64') };
+          c.actsFor = o.spawnInit.actsFor;
+          c.kind = 'agent';
+        } else if (!o.spawnSender) noteSender(env, c, m, { wakeFor });
         c.queue.push({ key, id: m.id, at: m.at, from: m.from, kind: m.kind, ...(local ? { local: true } : {}), ...(o.deferPeer === true && m.from.kind === 'agent' ? { untilIdle: true } : {}), ...(tier ? { tier } : {}), ...(owner ? { owner: true } : {}), ...(tierUnread ? { tierUnread: true } : {}), ...(sealed ? { sealed } : { mem: true }) });
       }
       c.last = d.now().toISOString();
@@ -911,6 +929,7 @@ function startBrief(c, msgs, run, sends, rules = { sections: [] }) {
     ...(returnHow(c) ? [returnHow(c)] : []),
     ...(sends ? [how] : []),
     ...(sends === 'post' ? [relay] : []),
+    ...(c.spawn ? [`This is a spawned job. Your final response is automatically returned to the asking conversation${c.spawn.origin ? ` (${c.spawn.origin}, run ${c.spawn.origin_run})` : ''}. Put your report in your final response.`] : []),
     OWNER_STEPS,
   ].join('\n');
   const tail = `\n${render(msgs)}`;
@@ -1063,6 +1082,8 @@ function plan(env, cv, d, mem) {
     return { cv, type: 'loop-note', reason: loop.reason };
   }
   const { busy, idle } = census(env, c.agent, d, now);
+  if (c.spawn && listConvs(env).filter((x) => x.agent === c.agent && x.spawn && x.conversation !== cv &&
+    (isStarting(x, now) || (x.body && statusOf(env, x, d) === 'working'))).length >= spawnCap(env)) return wait('spawn cap: waiting for another spawn to finish');
   const limits = limitsOf(env);
   if (st === 'idle') {
     // Its own body, warm, its turn over: resumed in the same session, if the agent has a slot free. (Resumed in its
@@ -1298,6 +1319,7 @@ function logRun(c, r) { c.runLog = [...(Array.isArray(c.runLog) ? c.runLog : [])
 
 /** A body started (or resumed) for these messages: its run begins (the one before it, over, if it wasn't yet). */
 function openRun(c, run, msgs, now, body) {
+  if (c.spawn) { delete c.spawn.report; delete c.spawn.failed; delete c.spawn.returned; }
   for (const r of c.runLog ?? []) if (!Number.isFinite(r.end)) r.end = now;
   const relays = msgs.filter((m) => m.from?.kind === 'agent' && /^r-[0-9a-f]{8}$/.test(m.id ?? '')).map((m) => m.id);
   // Which body ran it, and how it came (a fresh start or a resumed session): for its trace (trace.mjs, t-1895).
@@ -1318,6 +1340,14 @@ function closeRun(env, c, d, now) {
   const r = (c.runLog ?? []).findLast((x) => x.run === c.run);
   if (!r || Number.isFinite(r.end)) return false;
   r.end = now;
+  if (c.spawn && !c.spawn.report && !c.queue?.length) {
+    try {
+      const rec = readBody(env, c.body);
+      const text = d.runner(rec.harness, rec.local).final?.(bodyOf(c.body, rec));
+      if (typeof text === 'string' && text.trim()) { c.spawn.report = d.sealer.seal(Buffer.from(text.slice(0, MAX_TEXT))).toString('base64'); c.spawn.reportRun = r.run; }
+      else c.spawn.failed = 'The turn ended without a final report';
+    } catch (e) { c.spawn.failed = `Could not collect final report: ${e.message}`; }
+  }
   try {
     const rec = readBody(env, c.body);
     const t = cleanTurn(d.runner(rec.harness, rec.local).turn?.(bodyOf(c.body, rec)));
@@ -1342,7 +1372,10 @@ function closeEnded(env, c, ref, d, now) {
     if (!rec.ended) return;
     st = d.runner(rec.harness, rec.local).status(bodyOf(ref, rec));
   } catch { return; }
-  if (st === 'idle' || st === 'ended') r.end = now;
+  if (st === 'idle' || st === 'ended') {
+    if (c.spawn) { const body = c.body; c.body = ref; closeRun(env, c, d, now); c.body = body; }
+    else r.end = now;
+  }
 }
 
 /** The conversation's current run, over and refused for a usage limit, not yet handled (quotaOp): or null. */
@@ -1498,6 +1531,15 @@ async function execute(env, op, d, mem) {
     const sends = posts(v0) ? 'post' : recordsOnly(v0) ? 'record' : null;
     // Its rules (policy.mjs): what it's told and what it may use. Any that can't be had is no body (fail closed).
     rules = await rulesFor(c0, msgs.filter((x) => !isNote(x)), rulesDeps(d, v0, c0), { platform: posts(v0), core: coreAdapted(v0), principal: principalOf(env, c0), ownerSpoke: c0.actsFor?.owner === true });
+    if (c0.spawn?.ruleSource) {
+      const source = c0.spawn.ruleSource;
+      const venue = await venueOf(d, source.venue);
+      const inherited = await rulesFor(source, source.persons.map((slug) => ({ from: { kind: 'person', slug } })), rulesDeps(d, venue, source), {
+        platform: posts(venue), core: coreAdapted(venue), principal: principalOf(env, c0), ownerSpoke: c0.actsFor?.owner === true, narrowing: c0.spawn.floor });
+      const floor = c0.spawn.floor ?? {};
+      rules = { ...inherited, guest: inherited.guest || floor.guest === true, deny: [...new Set([...(rules.deny ?? []), ...(inherited.deny ?? []), ...(floor.deny ?? [])])], sections: [...inherited.sections, ...rules.sections] };
+      rules.key = createHash('sha256').update(JSON.stringify([rules.key, rules.guest, rules.deny, rules.sections])).digest('hex').slice(0, 16);
+    }
     // Whose house it runs in (t-1952): its principal's, as everything it was given was noted before this plan. Its own
     // slot goes with it: a session is this conversation's own, and what's walled off is every other conversation's.
     if (!c0.local) rules = { ...rules, seat: seatOf(principalOf(env, c0), op.cv) };
@@ -1534,7 +1576,7 @@ async function execute(env, op, d, mem) {
     const bodyEnv = d.bodyEnv(runKey, op.cv);
     if (lb?.path) bodyEnv.PATH = lb.path;
     const bodyDeps = { runner: (h) => d.runner(h, local), accounts: d.accounts, now: d.now, fetchImpl: d.fetchImpl, bodyEnv };
-    const base = { agent: c0.agent, venue: c0.venue, venueKind: c0.kind, cwd: local ? lb.cwd : d.cwd, deny: rules.deny, guest: rules.guest, ...(local ? { local: true } : {}), ...(rules.seat ? { seat: rules.seat } : {}) };
+    const base = { agent: c0.agent, venue: c0.venue, venueKind: c0.kind, prefer: c0.spawn?.prefer ? [c0.spawn.prefer] : [], cwd: local ? lb.cwd : d.cwd, deny: rules.deny, guest: rules.guest, ...(local ? { local: true } : {}), ...(rules.seat ? { seat: rules.seat } : {}) };
     // Out of quota (t-1907): which session this run continues, on which harness. Its home slot, when the harness it
     // switched away from has room again; its own slot, when that one's harness has room; else a fresh body elsewhere.
     // A deny list Codex can't keep (a tool within a server, a built-in: runners.mjs, codexDeny) keeps this body off
@@ -1592,7 +1634,7 @@ async function execute(env, op, d, mem) {
       // A local body speaks with its run's key as a house's body does: from the keys dir (bodyhost.mjs, keyFile), as
       // `claude --bg` gives every session its daemon's environment, not this launch's (t-1830).
       if (local) keepKey(env, op.cv, runKey);
-      c.bodyRules = { guest: rules.guest, key: rules.key, ...(rules.seat ? { seat: rules.seat } : {}), ...(rules.members?.length ? { members: rules.members, membersAt: new Date(now()).toISOString() } : {}), ...(rules.grantFor ? { grantFor: rules.grantFor } : {}), ...(rules.words ? { words: rules.words, persons: rules.persons, notes: rules.notes ?? [] } : {}) };
+      c.bodyRules = { guest: rules.guest, key: rules.key, deny: rules.deny, readers: rules.readers, ...(rules.seat ? { seat: rules.seat } : {}), ...(rules.members?.length ? { members: rules.members, membersAt: new Date(now()).toISOString() } : {}), ...(rules.grantFor ? { grantFor: rules.grantFor } : {}), ...(rules.words ? { words: rules.words, persons: rules.persons, notes: rules.notes ?? [] } : {}) };
       ack(c, op.msgs);
       delete c.retryAt; delete c.startFails; delete c.retryReason; delete c.startStatus;
       c.sendKey = keyHash(runKey).toString('hex');
@@ -2075,6 +2117,8 @@ export async function tick(env, o = {}, only, mem = new Map()) {
   for (const c of listConvs(env)) if (c.presence) { try { await presencePass(env, c, d, now); } catch (e) { d.warn(`presence for ${c.conversation}: ${e.message}`); } }
   for (const c of listConvs(env)) if (c.venue === COMMS_VENUE && c.body && !c.starting) { try { await activityPass(env, c, d); } catch (e) { d.warn(`activity for ${c.conversation}: ${e.message}`); } }
   for (const c of listConvs(env)) if (c.queue?.length) await drain(env, c.conversation, d);
+  await spawnComms(env, d);
+  await returnSpawns(env, d, o);
   for (const c of listConvs(env)) if (c.startStatus) await startupStatusPass(env, c.conversation, d);
 }
 
@@ -2560,4 +2604,51 @@ function refused(env, cv, ref, out, where, reason, d) {
     saveConv(env, c);
   });
   d.warn(`${cv}: ${out} refused for good (${reason}): nothing queued`);
+}
+
+// Durable outbox: a stable delivery id makes a retry after a crash idempotent.
+export async function returnSpawns(env, d = depsOf(env), o = {}) {
+  for (const c of listConvs(env)) {
+    if (!c.spawn || c.spawn.returned || !c.spawn.origin || (!c.spawn.report && !c.spawn.failed)) continue;
+    const back = loadConv(env, c.spawn.origin);
+    if (!back || back.agent !== c.agent || back.resetPending || c.resetPending || c.actsFor?.reset !== undefined || back.actsFor?.reset !== c.spawn.parentReset || JSON.stringify(principalOf(env, back)) !== JSON.stringify(c.spawn.principal) || JSON.stringify(principalOf(env, c)) !== JSON.stringify(c.spawn.principal)) continue;
+    try {
+      const report = c.spawn.report ? d.sealer.open(Buffer.from(c.spawn.report, 'base64')).toString('utf-8') : c.spawn.failed;
+      const r = await deliver(env, { source: 'runtime', id: `spawn-return-${c.conversation}-${c.spawn.reportRun ?? c.run}`, agent: c.agent, venue: back.venue, place: back.place,
+        from: { kind: 'agent', id: c.agent }, kind: 'message', at: c.spawn.created,
+        text: `Spawn ${c.label ?? c.conversation} (${c.conversation}), asked from run ${c.spawn.origin_run}:\n${report}` }, { ...o, ...d, deferPeer: true, spawnSender: { principal: c.spawn.principal }, spawnReturn: { source: c.conversation, run: c.spawn.reportRun ?? c.run, targetReset: c.spawn.parentReset } });
+      if (!r.status) locked(env, () => { const fresh = loadConv(env, c.conversation); fresh.spawn.returned = true; saveConv(env, fresh); });
+    } catch (e) { d.warn(`spawn return: ${e.message}`); }
+  }
+}
+
+// Comms is a view of the same conversation, never a second body or a second authority.
+export async function spawnComms(env, d = depsOf(env)) {
+  for (const c of listConvs(env)) {
+    if (!c.spawn) continue;
+    try {
+      if (c.spawn.report && c.spawn.recordedRun !== c.spawn.reportRun) {
+        const report = d.sealer.open(Buffer.from(c.spawn.report, 'base64')).toString('utf-8');
+        const end = c.runLog?.findLast((r) => r.run === c.spawn.reportRun)?.end;
+        const t = await d.core.turn({ key: `runtime:spawn-final-${c.conversation}-${c.spawn.reportRun}`, agent: c.agent, venue: c.venue, place: c.place,
+          at: new Date(end ?? Date.parse(c.spawn.created)).toISOString(), from: { kind: 'agent', id: c.agent }, kind: 'reply', run: c.spawn.reportRun, label: c.label });
+        try { await d.core.audit({ conversation: c.conversation, seq: t.seq, text: report }); } catch (e) { if (e.status !== 409) throw e; }
+        locked(env, () => { const fresh = loadConv(env, c.conversation); fresh.spawn.recordedRun = c.spawn.reportRun; saveConv(env, fresh); });
+      }
+      if (!c.spawn.thread && c.spawn.brief) {
+        const r = await d.core.comms({ op: 'spawn', agent: c.agent, conversation: c.conversation, parent: c.spawn.origin, run: c.spawn.origin_run, text: d.sealer.open(Buffer.from(c.spawn.brief, 'base64')).toString('utf-8') });
+        if (r.ok && /^th:[a-z2-7]{10}$/.test(r.id ?? '')) {
+          c.spawn.thread = r.id;
+          locked(env, () => { const fresh = loadConv(env, c.conversation); fresh.spawn.thread = r.id; delete fresh.spawn.brief; saveConv(env, fresh); });
+        }
+      }
+      if (!c.spawn.thread) continue;
+      const working = !!c.body && statusOf(env, c, d) === 'working';
+      if (c.spawn.report && c.spawn.shownRun !== c.spawn.reportRun) {
+        const r = await d.core.comms({ op: 'post', agent: c.agent, place: c.spawn.thread, run: c.spawn.reportRun, ref: `spawn-${c.spawn.reportRun}`, text: d.sealer.open(Buffer.from(c.spawn.report, 'base64')).toString('utf-8') });
+        if (r.ok) locked(env, () => { const fresh = loadConv(env, c.conversation); fresh.spawn.shownRun = c.spawn.reportRun; saveConv(env, fresh); });
+      }
+      await d.core.comms({ op: 'status', agent: c.agent, place: c.spawn.thread, status: working ? 'working' : 'done', run: c.run });
+    } catch (e) { d.warn(`spawn Comms: ${e.message}`); }
+  }
 }

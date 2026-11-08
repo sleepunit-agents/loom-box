@@ -196,7 +196,7 @@ test('6. a turn write whose answer was lost: its retry posts the same key and ge
 });
 
 test('7. the runtime declares the relay venue (kind agent) in its loom block', async () => {
-  assert.deepEqual(pkg.loom.venues, { relay: { label: 'Relay', kind: 'agent' } });
+  assert.deepEqual(pkg.loom.venues, { relay: { label: 'Relay', kind: 'agent' }, spawn: { label: 'Spawn', kind: 'agent' } });
   const dist = join(process.env.LOOM_DIST || join(process.env.HOME, 'Code', 'loom', 'dist'), 'cli', 'pieces-managed.js');
   if (existsSync(dist)) {
     const m = await import(dist);

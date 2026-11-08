@@ -1452,6 +1452,10 @@ export function api(env, effects, { caller, path, body }) {
     }
     // On whose behalf a body acts (principal.mjs, t-1943): proven as send is, answered with a signed statement a piece
     // checks on loom's machine. Never the owner by default.
+    if (path === 'spawn') {
+      if (caller.kind !== 'agent') fail('spawn through the API is a body\'s', 403);
+      return import('./spawn.mjs').then(async (m) => ({ status: 200, body: await m.spawnCall(env, caller, b, { detach: true }) })).catch(apiError);
+    }
     if (path === 'principal') {
       if (caller.kind !== 'agent') fail('principal is a body\'s, as its own agent', 403);
       return import('./delivery.mjs').then((m) => { const r = m.bodyPrincipal(env, { conversation: b.conversation, key: b.key, session: typeof b.session === 'string' ? b.session : undefined }, { caller }); return { status: r.ok ? 200 : 409, body: r }; }, apiError);

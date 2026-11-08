@@ -154,6 +154,10 @@
       "relay": {
         "label": "Relay",
         "kind": "agent"
+      },
+      "spawn": {
+        "label": "Spawn",
+        "kind": "agent"
       }
     },
     "mcp_tools": {
@@ -224,6 +228,47 @@
         "argv": [
           "loom-runtime",
           "trace",
+          "tool"
+        ]
+      },
+      "spawn": {
+        "description": "Start a fresh body of yourself with a brief. Its final report returns here. Principal and house rules carry over. Use action say to steer it, result to fetch its report. If the asking conversation is ambiguous, use loom runtime spawn from your shell.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "description": "start (default), say or result"
+            },
+            "brief": {
+              "type": "string",
+              "description": "The job, up to 40000 characters"
+            },
+            "prefer": {
+              "type": "string",
+              "description": "Preferred model"
+            },
+            "title": {
+              "type": "string",
+              "description": "Thread title"
+            },
+            "conversation": {
+              "type": "string",
+              "description": "Your current conversation"
+            },
+            "handle": {
+              "type": "string",
+              "description": "Handle from start, for say or result"
+            },
+            "text": {
+              "type": "string",
+              "description": "Follow-up for say"
+            }
+          }
+        },
+        "argv": [
+          "loom-runtime",
+          "spawn",
           "tool"
         ]
       }

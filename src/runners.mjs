@@ -246,6 +246,12 @@ export class ClaudeRunner {
     return out;
   }
 
+  final(body) {
+    const f = this.transcriptOf(body);
+    const last = f ? lines(f).findLast((e) => e.type === 'assistant' && Array.isArray(e.message?.content) && e.message.content.some((p) => p.type === 'text')) : null;
+    return last?.message.content.filter((p) => p.type === 'text').map((p) => p.text).join('\n') ?? null;
+  }
+
   /** Its session's transcript, the newest of that name under projects; null when there's none. */
   transcriptOf(body) {
     const session = this.slotOf(body)?.session;
@@ -598,6 +604,10 @@ export class CodexRunner {
       Object.assign(out, { failed: true, limited: true, ...(out.error ? {} : { error: `its provider refused it (${refused.code})` }), ...(until ? { resets: until } : {}) });
     }
     return out;
+  }
+
+  final(body) {
+    return this.events(body.id).findLast((e) => e.type === 'item.completed' && e.item?.type === 'agent_message')?.item.text ?? null;
   }
 
   slotOf(body) {

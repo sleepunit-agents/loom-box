@@ -116,7 +116,11 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
       const turn = status === 'idle' || status === 'ended' ? b.turn : null;
       // A Comms thread's body: its tool steps, the newest 100, read from its harness's own record (activity.mjs).
       const cards = b.activity ? (() => { try { return (r.activity?.({ id, ...(b.slot ? { slot: b.slot } : {}) }) ?? []).slice(-100); } catch { return []; } })() : null;
-      bodies[id] = { harness: b.harness, status, ...(slot?.session ? { session: slot.session } : {}), feedable: !!r.inbox, pending, ...(turn ? { turn } : {}), ...(cards ? { cards } : {}) };
+      let final;
+      if (status === 'idle' || status === 'ended') {
+        try { final = r.final?.({ id, ...(b.slot ? { slot: b.slot } : {}) })?.slice(0, 40000); } catch { /* retry next sync */ }
+      }
+      bodies[id] = { harness: b.harness, status, ...(slot?.session ? { session: slot.session } : {}), feedable: !!r.inbox, pending, ...(turn ? { turn } : {}), ...(typeof final === 'string' ? { final } : {}), ...(cards ? { cards } : {}) };
     }
     await reportUsage(turnsOver);
     const packed = {};
