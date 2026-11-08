@@ -1695,7 +1695,10 @@ async function execute(env, op, d, mem) {
         const c = loadConv(env, op.cv);
         if (!c) return true;
         if (ours(c, op)) delete c.starting;
-        outcome(c, keys, { body: 'failed', reason: `every model account ${c.agent} may use is out of quota` }, now());
+        const resets = e.out.filter((x) => x.account && Number.isFinite(x.until) && x.until * 1000 > now()).map((x) => x.until);
+        outcome(c, keys, { body: 'failed', code: 'quota',
+          reason: `every model account ${c.agent} may use here is out of quota${cantWhy ? `; ${cantWhy}` : ''}`,
+          ...(resets.length ? { retryAfter: new Date(Math.min(...resets) * 1000).toISOString() } : {}) }, now());
         const was = !!c.allOut;
         c.allOut = { at: now() };
         delete c.quota;
