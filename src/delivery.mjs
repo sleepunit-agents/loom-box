@@ -891,6 +891,7 @@ function startBrief(c, msgs, run, sends, rules = { sections: [] }) {
     ...(returnHow(c) ? [returnHow(c)] : []),
     ...(sends ? [how] : []),
     ...(sends === 'post' ? [relay] : []),
+    OWNER_STEPS,
   ].join('\n');
   const tail = `\n${render(msgs)}`;
   if (!rules.sections.length) return `${head}\n${tail}`;
@@ -907,6 +908,14 @@ function startBrief(c, msgs, run, sends, rules = { sections: [] }) {
 const returnHow = (c) => (c.venue === 'relay' ? '' : c.local
   ? `To have a relay's answer come back here, give the relay tool conversation: "${c.conversation}" (it comes back here only while no other conversation of yours is at work; otherwise to the relay conversation).`
   : `To have a relay's answer come back here, relay from your shell with \`loom runtime relay --to <agent> --say <text>\` (it proves this conversation is yours). The relay tool with conversation: "${c.conversation}" brings it back only while no other conversation of yours is at work.`);
+
+/**
+ * What a body asks the owner, when loom can do the step itself on his yes (t-1970, Jonathan: "if it's a permissions thing,
+ * it should just do it when I say yes/no without having me do it"): the yes/no question, never a chore for him.
+ */
+export const OWNER_STEPS = 'When you need your owner\'s say on something loom can do for him, ask the yes or no question and let his answer do it: never ask him to go and do a step himself. '
+  + 'Access to a piece for an agent (yours, or another agent\'s, asked on a relay): never grant it yourself; ask with `approvals request --kind grant --target <piece>:<agent> --ask "Give <Agent> access to <Piece>?" --why … --if-yes … --if-no …`, '
+  + 'and put that approval in your digest\'s needs_owner `waits_on`: his Allow grants it, his Deny refuses it.';
 
 /** What a resumed body is given: the new messages, and its new run. */
 const resumeBrief = (c, msgs, run) => `(${c.venue}: ${c.label ?? c.place}. This run is ${run}: call identity with {conversation: "${c.conversation}", run: "${run}"} again.${returnHow(c) ? ` ${returnHow(c)}` : ''})\n\n${render(msgs)}`;

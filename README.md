@@ -306,6 +306,16 @@ its own list, as before; there are no relay pairs then, so every relay asks the 
     loom runtime grants seed [--dry-run]     each piece's own *_AGENTS list imported (others: every agent), and the relay pairs
     loom runtime grants list | set <piece> <agents|*> [--paths p,p] | paired <from> <to>
 
+**A Yes grants it** (t-1970). An agent that needs a piece asks with a `grant` approval (`approvals request --kind grant
+--target tasks:mark`) and waits on it in its Needs you. Right after a household owner's Allow, loom core posts
+`grant-approved` here as that owner, with the approval's id, agent and target (read from the approvals piece): the
+runtime spends it (`loom approvals use … --kind grant --as <the agent that asked>`: allowed, for exactly that target,
+once) and only then adds that agent to the piece's grant, everyone else's kept. A member's call, an agent's tab, or no
+caller grants nothing and spends nothing; with no grants yet nothing is written (every agent may use every piece
+already). Every body's brief says so: ask the yes or no question, never send the owner to do a step himself.
+The Permissions page has each agent's own page too, `permissions/<agent>` ("What Mark can use"), the pieces it can
+and can't use in words; loom's launcher and each agent's window link there.
+
 **Relay** (agent-runtime.md, "Agent-to-agent relay"; `src/relay.mjs`): the runtime offers core an MCP tool, `relay`
 (`mcp_tools` in its loom block), so an agent's session has it only while the runtime is installed. Core runs
 `loom-runtime relay tool --agent <a>` with the arguments on stdin (`{to, say, why?, reply_to?, conversation?, from?, approval?}`). A

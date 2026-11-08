@@ -15,7 +15,8 @@ import { stateAccounts } from './accounts.mjs';
 import { COMMS_VENUE, HARNESS_WORDS, answerLoop, deliveryNotices, loopAsks, readFallbacks, whenWords, workingConversations } from './delivery.mjs';
 import { loomStore } from './store.mjs';
 import { asks as gateAsks, answer as gateAnswer, gatesPage, mergePeople, status as gatesStatus, proposals as gateProposals, PROPOSALS as PROPOSALS_COLLECTION } from './gates.mjs';
-import { GRANTS, KEY as GRANTS_KEY, GrantsError, grantsProblem, householdOf, setPiece, setRelay } from './grants.mjs';
+import { GRANTS, KEY as GRANTS_KEY, GrantsError, addGrant, grantPathsOk, grantsProblem, householdOf, setPiece, setRelay, usableBy } from './grants.mjs';
+import { spawnSync } from 'node:child_process';
 import { relayNotices } from './relay.mjs';
 import { nowAgentPage, nowManifest, nowPage } from './nowboard.mjs';
 import { boxPagePath, checkDark, watchAsks, watchNotices, watchOf, watchRows } from './watch.mjs';
@@ -31,6 +32,55 @@ export function permsStore(env) {
   if (env?.LOOM_RUNTIME_TEST_STORE && typeof env.LOOM_RUNTIME_TEST_STORE === 'object') return env.LOOM_RUNTIME_TEST_STORE;
   return env?.LOOM_PIECE_NAME ? loomStore(env) : null;
 }
+/**
+ * Spend a `grant` approval for exactly this target, as the body of the agent that asked (`--as`): '' when spent, else
+ * why not. The approvals piece checks it's allowed, for this kind and target, not overruled, and spends it once.
+ */
+function spendGrant(env, aid, target, agent) {
+  if (env?.LOOM_RUNTIME_TEST_APPROVALS && typeof env.LOOM_RUNTIME_TEST_APPROVALS === 'object') return env.LOOM_RUNTIME_TEST_APPROVALS.spend(aid, target, agent);
+  const r = spawnSync(env.LOOM_BIN || 'loom', ['approvals', 'use', aid, '--kind', 'grant', '--target', target, '--as', JSON.stringify({ kind: 'agent', agent })],
+    { env, encoding: 'utf-8', timeout: 30_000 });
+  if (r.error) return `the approvals piece didn't run (${r.error.message})`;
+  return r.status === 0 ? '' : ((r.stderr || r.stdout || '').trim().slice(-300) || `exit ${r.status}`);
+}
+
+/** A grant approval's target, <piece>:<agent>[:<path>,<path>], as {piece, agent, paths}; else null (approvals' grant_of). */
+export function grantTarget(t) {
+  const m = /^([a-z][a-z0-9-]{0,39}):([a-z][a-z0-9-]{0,39})(?::([^:\s]{1,600}))?$/.exec(typeof t === 'string' ? t : '');
+  if (!m) return null;
+  return { piece: m[1], agent: m[2], paths: m[3] ? m[3].split(',') : ['*'] };
+}
+
+/**
+ * The owner's Allow on a `grant` approval, applied (t-1970): loom core posts this as the household owner right after the
+ * Allow, with the approval's id, its agent (who asked) and its target. Only the household owner's call does anything;
+ * the approval is spent first (allowed, for exactly that target), and only then is the grant written: the agent added
+ * to the piece's grant, everyone else's kept. Never a grant without an allowed approval behind it.
+ */
+function grantApproved(env, st, c, fields) {
+  if (!(c && c.kind === 'owner' && (c.agents === undefined || c.agents === '*'))) return { ok: false, message: 'Access to a piece is the household owner\'s to give.', page: 'permissions' };
+  const id = String(fields.id ?? '');
+  const asker = String(fields.agent ?? '');
+  const target = String(fields.target ?? '');
+  const g = grantTarget(target);
+  if (!/^a-[0-9a-f]{8}$/.test(id) || !AGENT_ID.test(asker) || !g || !grantPathsOk(g.paths)) return { ok: false, message: 'That isn\'t a grant approval.', page: 'permissions' };
+  const agents = householdOf(env)?.agents ?? [];
+  if (!agents.includes(g.agent)) return { ok: false, message: `No agent ${g.agent} in this household: nothing was granted.`, page: 'permissions' };
+  const what = `${who(g.agent)} may use ${cap(g.piece)}${g.paths.includes('*') ? '' : ` (only ${g.paths.join(', ')})`}`;
+  // Checked before it's spent, so a grant the runtime would refuse doesn't use up the owner's yes.
+  let cur;
+  try { cur = st.get(GRANTS, GRANTS_KEY); } catch (e) { return { ok: false, message: `The runtime couldn't read its grants (${String(e.message || e).slice(0, 160)}): nothing was granted.`, page: 'permissions' }; }
+  if (cur?.doc && grantsProblem(cur.doc)) return { ok: false, message: 'The runtime\'s grants can\'t be read: fix them on Permissions first. Nothing was granted.', page: 'permissions' };
+  const spent = spendGrant(env, id, target, asker);
+  if (spent) return { ok: false, message: `Not granted: the approval couldn't be spent (${spent.slice(0, 200)}).`, page: 'permissions' };
+  try {
+    const r = addGrant(st, g);
+    return { ok: true, message: r.changed ? `${what} now.` : `${what}: ${r.why}.`, page: `permissions/${g.agent}` };
+  } catch (e) {
+    return { ok: false, message: `Allowed, but the runtime couldn't write the grant (${String(e.message || e).slice(0, 160)}): set it on Permissions.`, page: 'permissions' };
+  }
+}
+
 const permsCore = (env) => (env?.LOOM_RUNTIME_TEST_CORE && typeof env.LOOM_RUNTIME_TEST_CORE === 'object' ? env.LOOM_RUNTIME_TEST_CORE : coreFrom(env, { timeoutMs: 8_000 }));
 
 const OWNER = { kind: 'owner' };
@@ -231,6 +281,14 @@ function permissionsPage(env) {
       { type: 'text', tone: 'muted', text: 'Switched on, an agent relays to the other without asking (the relay tool). Otherwise it asks you first: an approval on your Inbox, spent once.' },
     ] });
   }
+  // Each agent's view (t-1970): what it can use, piece by piece, one click from here and from its own window.
+  if (agents.length) {
+    sections.push({ id: 'agents', title: 'What each agent can use', blocks: [{ type: 'panel', rows: agents.map((a) => {
+      const u = g ? usableBy(g.doc, a) : null;
+      const n = u ? u.filter((x) => x.paths.length).length : null;
+      return { label: `What ${who(a)} can use`, agent: a, value: u === null ? 'Every piece (no grants yet)' : n ? `${n} piece${n === 1 ? '' : 's'}` : 'No pieces', page: `permissions/${a}` };
+    }) }] });
+  }
   let held = {};
   let waiting = {};
   try {
@@ -242,6 +300,27 @@ function permissionsPage(env) {
     ? { type: 'panel', rows: Object.keys(held).sort().map((a) => { const n = waiting[a] ?? 0; return { label: `${who(a)}'s people`, agent: a, value: n ? `${n} waiting for you` : 'Nothing waiting', tone: n ? 'warn' : 'ok', page: `gates/${a}` }; }) }
     : { type: 'text', tone: 'muted', text: 'The runtime holds no gates yet: `loom shuttle gates export --json | loom runtime gates import`.' }] });
   return { title: 'Permissions', intro: 'Which agent may use which piece, who may relay to whom, and who each person is to each agent.', sections };
+}
+
+/** One agent's permissions in plain words (t-1970): each piece it can use and how much, then the ones it can't. */
+function agentPermissionsPage(env, agent) {
+  const st = permsStore(env);
+  if (!st) return { title: 'Permissions', sections: [{ id: 'none', blocks: [{ type: 'text', tone: 'muted', text: 'The runtime reads its permissions from loom\'s store when loom runs it.' }] }] };
+  if (!(householdOf(env)?.agents ?? []).includes(agent)) return { title: 'Not found', sections: [] };
+  const g = st.get(GRANTS, GRANTS_KEY);
+  const title = `What ${who(agent)} can use`;
+  const back = { type: 'text', tone: 'muted', text: 'To change one, open Pieces on Permissions. When an agent asks for a piece, your Allow on its ask grants it.' };
+  if (!g) return { title, sections: [{ id: 'pieces', blocks: [{ type: 'callout', tone: 'warn', title: 'Every piece', text: `No grants yet, so ${who(agent)} may use every piece, as each piece's own agent list allows.` }, back] }] };
+  if (grantsProblem(g.doc)) return { title, sections: [{ id: 'pieces', blocks: [{ type: 'callout', tone: 'bad', title: 'Can\'t be read', text: 'The grants can\'t be read, so every agent\'s piece call is refused until they\'re fixed on Permissions.' }] }] };
+  const u = usableBy(g.doc, agent);
+  const yes = u.filter((x) => x.paths.length);
+  const no = u.filter((x) => !x.paths.length);
+  return { title, intro: `The pieces ${who(agent)} may call, as the runtime decides before each call.`, sections: [
+    { id: 'can', title: 'Can use', blocks: [yes.length ? { type: 'panel', rows: yes.map((x) => ({ label: cap(x.piece), value: x.paths.includes('*') ? 'All of it' : pathsWords(x.paths).replace(/^only/, 'Only'), tone: 'ok' })) }
+      : { type: 'text', tone: 'muted', text: `${who(agent)} can't use any piece.` }] },
+    ...(no.length ? [{ id: 'cannot', title: 'Can\'t use', blocks: [{ type: 'panel', rows: no.map((x) => ({ label: cap(x.piece), value: 'Not granted', tone: 'muted' })) }] }] : []),
+    { id: 'how', blocks: [back] },
+  ] };
 }
 
 const NOTICE_WINDOW_MS = 24 * 3600_000;
@@ -1191,6 +1270,7 @@ export function page(env, { path, caller: c }, nowMs = Date.now()) {
   if (typeof path === 'string' && BOX_PAGE.test(path)) return boxPage(env, path.slice(4), nowMs, caller);
   if (path === 'agents') return agentsPage(env);
   if (path === 'permissions') return permissionsPage(env);
+  if (typeof path === 'string' && /^permissions\/[a-z][a-z0-9-]{0,39}$/.test(path)) return agentPermissionsPage(env, path.slice(12));
   if (path === 'now') {
     let usage = [];
     try { usage = stateAccounts(env).usage(); } catch { usage = []; }
@@ -1341,9 +1421,10 @@ export function act(env, effects, { action, fields: raw = {}, caller: c }, publi
         const what = flag === 'gpu' ? 'the box\'s GPU' : 'containers of their own';
         return { ok: true, message: `${who(r.agent)}'s houses ${fields.on === 'on' ? 'may' : 'may not'} have ${what} from their next start.`, page: '' };
       }
-      case 'gates-allow': case 'gates-deny': case 'gates-merge': case 'grants-set': case 'relay-set': case 'relay-pair': {
+      case 'gates-allow': case 'gates-deny': case 'gates-merge': case 'grants-set': case 'relay-set': case 'relay-pair': case 'grant-approved': {
         const st = permsStore(env);
         if (!st) return { ok: false, message: 'The runtime reads its permissions from loom\'s store when loom runs it.' };
+        if (action === 'grant-approved') return grantApproved(env, st, c, fields);
         if (action === 'relay-pair') {
           // One pair's switch: a relay from agent to `to` without asking, on or off; the agent's other pairs kept.
           const g = st.get(GRANTS, GRANTS_KEY);
