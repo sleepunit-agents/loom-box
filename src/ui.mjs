@@ -44,6 +44,7 @@ function spendGrant(env, aid, target, agent) {
   const { LOOM_STORE_GRANT: _mine, ...rest } = env;
   const r = spawnSync(env.LOOM_BIN || 'loom', ['approvals', 'use', aid, '--kind', 'grant', '--target', target, '--as', JSON.stringify({ kind: 'agent', agent })],
     { env: rest, encoding: 'utf-8', timeout: 6_000 });
+  if (r.error?.code === 'ETIMEDOUT') return 'the approvals piece didn\'t answer in time, so it may be spent already';
   if (r.error) return `the approvals piece didn't run (${r.error.message})`;
   return r.status === 0 ? '' : ((r.stderr || r.stdout || '').trim().slice(-300) || `exit ${r.status}`);
 }
