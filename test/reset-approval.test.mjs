@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { act } from '../src/ui.mjs';
-import { askOwnerReset, deliver, deliveryDir, loadConv, resetPrincipal, seatMoved } from '../src/delivery.mjs';
+import { askOwnerReset, deliver, deliveryDir, loadConv, resetPrincipal, seatMoved, shownRows } from '../src/delivery.mjs';
 import { putWakeFor, resetSigned } from '../src/principal.mjs';
 import { cvOf, fakeRunner, world } from './delivery-world.mjs';
 import { scratch } from './scratch.mjs';
@@ -147,25 +147,35 @@ test('only what was waiting when he was asked counts as his; a person who wrote 
   assert.deepEqual(ap.spent, [], 'the owner\'s yes isn\'t spent');
 });
 
-test('a wake the clock said is someone else\'s stays theirs through a reset; the terminal reset counts the rest as the card does', () => {
+test('only the rows shown on the card he allowed count as his: a relay not on it stays unknown; the terminal counts none', () => {
   const { w } = setup();
   const cv = 'cv-00000000000e';
-  const c = { conversation: cv, agent: 'art', venue: 'wake', place: 'alert:t', local: true, actsFor: { owner: false, people: [], unknown: true },
-    queue: [{ key: 'k1', from: { kind: 'schedule' }, kind: 'wake', wakeFor: '-' }, { key: 'k2', from: { kind: 'schedule' }, kind: 'wake', wakeFor: 'loren' },
-      { key: 'k3', from: { kind: 'agent', id: 'mark' }, kind: 'message' }] };
   const dir = join(deliveryDir(w.env), 'conversations');
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, `${cv}.json`), JSON.stringify(c));
-  assert.equal(resetPrincipal(w.env, cv).ok, true);
-  const a = loadConv(w.env, cv).actsFor;
-  assert.equal(a.owner, true, 'the unnamed ones waiting: his');
-  assert.deepEqual(a.people, ['loren'], 'Loren\'s wake: hers');
-  // Through the card: only what was waiting when it was filed (k1); k3 came after, unplaced: unknown again.
-  writeFileSync(join(dir, `${cv}.json`), JSON.stringify({ ...c, queue: [c.queue[0], c.queue[2]], resetAsk: { at: 'x', queued: ['k1'], approval: 'a-00000001' } }));
+  const k1 = { key: 'k1', from: { kind: 'schedule' }, kind: 'wake', wakeFor: '-', at: '2026-11-08T10:00:00Z' };
+  const k2 = { key: 'k2', from: { kind: 'schedule' }, kind: 'wake', wakeFor: 'loren' };
+  const relay = { key: 'k3', from: { kind: 'agent', id: 'mark' }, kind: 'message', at: '2026-11-08T10:01:00Z' };
+  const c = { conversation: cv, agent: 'art', venue: 'wake', place: 'alert:t', local: true, actsFor: { owner: false, people: [], unknown: true }, queue: [k1, k2, relay] };
+  // What a card lists: the unplaced wake and the relay, in words; never Loren's wake.
+  assert.deepEqual(shownRows(c.queue).map((r) => r.key), ['k1', 'k3']);
+  assert.match(shownRows(c.queue)[1].words, /^a relay from Mark/);
+  // The card showed only k1: k1 is his, the relay (not shown) leaves it unknown, Loren's wake is hers.
+  // (Loren's wake was noted as hers when it queued: then she's named, and no reset counts it as his.)
+  writeFileSync(join(dir, `${cv}.json`), JSON.stringify({ ...c, actsFor: { ...c.actsFor, people: ['loren'] }, resetAsk: { at: 'x', queued: ['k1'], approval: 'a-00000001' } }));
+  assert.equal(resetPrincipal(w.env, cv, { agent: 'art', approval: 'a-00000001' }).ok, false, 'Loren is named: not only his to count');
+  writeFileSync(join(dir, `${cv}.json`), JSON.stringify({ ...c, queue: [k1, relay], resetAsk: { at: 'x', queued: ['k1'], approval: 'a-00000001' } }));
   assert.equal(resetPrincipal(w.env, cv, { agent: 'art', approval: 'a-00000001' }).ok, true);
-  const b = loadConv(w.env, cv).actsFor;
-  assert.equal(b.unknown, true);
-  assert.equal(loadConv(w.env, cv).resetAsk, undefined);
+  const a = loadConv(w.env, cv).actsFor;
+  assert.equal(a.owner, true, 'the shown wake: his');
+  assert.equal(a.unknown, true, 'the relay not on the card: unknown');
+  // Shown on the card: the relay is his too.
+  writeFileSync(join(dir, `${cv}.json`), JSON.stringify({ ...c, queue: [k1, relay], resetAsk: { at: 'x', queued: ['k1', 'k3'], approval: 'a-00000001' } }));
+  assert.equal(resetPrincipal(w.env, cv, { agent: 'art', approval: 'a-00000001' }).ok, true);
+  assert.equal(loadConv(w.env, cv).actsFor.unknown, false);
+  // Typed at a terminal: nothing waiting is counted (as before): the waiting wake leaves it unknown.
+  writeFileSync(join(dir, `${cv}.json`), JSON.stringify({ ...c, queue: [k1] }));
+  assert.equal(resetPrincipal(w.env, cv).ok, true);
+  assert.equal(loadConv(w.env, cv).actsFor.unknown, true);
 });
 
 test('two drains of one conversation file one card: reserved before it is filed', async () => {
@@ -307,4 +317,38 @@ test('no answer in time from the approvals piece keeps the reservation: never a 
   assert.equal(askOwnerReset(env, c, () => {}), null);
   assert.ok(loadConv(env, cv).resetAsk, 'kept: it may be filed');
   assert.equal(askOwnerReset(env, c, () => {}), null);
+  // Ten minutes on with no card behind it: tried again (approvals answers the same card for the same target).
+  const stale = loadConv(env, cv);
+  stale.resetAsk.at = new Date(Date.now() - 11 * 60_000).toISOString();
+  writeFileSync(join(dir, `${cv}.json`), JSON.stringify(stale));
+  const ok = join(env.HOME, 'ok-loom');
+  writeFileSync(ok, `#!${process.execPath}\nconsole.log('a-0000abcd: asked the owner');\n`);
+  chmodSync(ok, 0o755);
+  assert.equal(askOwnerReset({ ...env, LOOM_BIN: ok }, c, () => {}), 'a-0000abcd');
+});
+
+test('the reset re-checks under its own lock: a card that changed, or someone who wrote, after the check resets nothing', () => {
+  const { w } = setup();
+  const cv = 'cv-000000000014';
+  const dir = join(deliveryDir(w.env), 'conversations');
+  mkdirSync(dir, { recursive: true });
+  const c = { conversation: cv, agent: 'art', venue: 'wake', place: 'alert:r2', local: true, actsFor: { owner: false, people: [], unknown: true }, queue: [],
+    resetAsk: { at: 'x', queued: [], approval: 'a-00000002' } };
+  writeFileSync(join(dir, `${cv}.json`), JSON.stringify(c));
+  assert.equal(resetPrincipal(w.env, cv, { agent: 'art', approval: 'a-00000001' }).ok, false);
+  writeFileSync(join(dir, `${cv}.json`), JSON.stringify({ ...c, actsFor: { ...c.actsFor, people: ['loren'] }, resetAsk: { ...c.resetAsk, approval: 'a-00000001' } }));
+  assert.equal(resetPrincipal(w.env, cv, { agent: 'art', approval: 'a-00000001' }).ok, false);
+  assert.equal(resetPrincipal(w.env, cv, { agent: 'mark', approval: 'a-00000001' }).ok, false);
+  assert.equal(loadConv(w.env, cv).actsFor.reset, undefined, 'nothing reset');
+});
+
+test('reset-approved is never a body\'s: refused from a body\'s environment before anything is spent', async () => {
+  const { w, ap, lwake } = setup();
+  await deliver(w.env, lwake('alert:b', 'disk', null), w.o);
+  const cv = cvOf('art', 'wake', 'alert:b');
+  ap.allowed['a-00000001'] = { target: `art:${cv}`, agent: 'art' };
+  for (const k of ['HOUSE_ID', 'LOOM_BODY_KEY', 'LOOM_BODY_CONVERSATION']) {
+    assert.equal(allow({ ...w.env, [k]: 'x' }, { id: 'a-00000001', agent: 'art', target: `art:${cv}` }).ok, false, k);
+  }
+  assert.deepEqual(ap.spent, []);
 });

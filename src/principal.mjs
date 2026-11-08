@@ -67,13 +67,11 @@ export function resetActsFor(env, c, at, { dir, by, counted = [] } = {}) {
   // and vouches for nothing more.
   if (dir && by) { c.actsFor.resetBy = by; c.actsFor.resetSig = b64u(sign(signingKey(dir), resetPayload(c, at, by))); }
   // Waiting messages are noted again, as at the first message: a person's as theirs, a wake as whom the clock said
-  // (t-1975: kept on its queue row). Those the owner counted as his (`counted`: what was waiting when he said so) and
-  // that no one is named in (an unplaced voice, a wake with no word) are his; anything else waiting is noted as ever.
+  // (t-1975: kept on its queue row). Only those the owner was shown on the card he allowed (`counted`, their keys:
+  // delivery.mjs shownRows, never a person's, never a wake the clock named someone for) count as his; anything else
+  // waiting, a relay from an agent included, is noted as ever.
   for (const q of c.queue ?? []) {
-    // A wake's row says what the clock said (`wakeFor`, '-' for no word); one queued before rows kept it says nothing,
-    // so it isn't counted (it may have been someone else's): noted unknown, as ever.
-    const unnamed = q.from?.kind === 'schedule' ? q.wakeFor === '-' : q.from?.kind !== 'person';
-    if (unnamed && counted.includes(q.key)) { c.actsFor.owner = true; continue; }
+    if (counted.includes(q.key) && q.from?.kind !== 'person') { c.actsFor.owner = true; continue; }
     noteOne(env, c.actsFor, { ...q, agent: c.agent }, q.wakeFor);
   }
   return c.actsFor;

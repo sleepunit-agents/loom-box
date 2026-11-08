@@ -116,6 +116,9 @@ function spendApproval(env, aid, kind, target, agent, { onBehalf } = {}) {
  * principal --reset` does at a terminal.
  */
 function resetApproved(env, c, fields) {
+  // Never from a body (t-1975): loom core posts this from its own process; a house's or a local body's environment, as
+  // the runtime set it, is refused here, as the typed `principal --reset` refuses it (cli.mjs).
+  if (env.HOUSE_ID || env.LOOM_BODY_KEY || env.LOOM_BODY_CONVERSATION) return { ok: false, message: 'Whose work a conversation is, is the household owner\'s to say, never a body\'s.', page: '' };
   if (!(c && c.kind === 'owner' && (c.agents === undefined || c.agents === '*'))) return { ok: false, message: 'Whose work a conversation is, is the household owner\'s to say.', page: '' };
   const id = String(fields.id ?? '');
   const asker = String(fields.agent ?? '');
