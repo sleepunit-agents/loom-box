@@ -47,7 +47,7 @@ test('join with no terminal still asks loom (an agent runs it with none); only -
   const cli = join(import.meta.dirname, '..', 'src', 'cli.mjs');
   const run = (args) => new Promise((resolve) => {
     const p = spawn(process.execPath, [cli, 'join', `http://127.0.0.1:${srv.address().port}`, '--name', 'one', ...args],
-      { env: { ...process.env, HOME: home, LOOM_BOX_HOME: join(home, 'state') }, stdio: ['pipe', 'pipe', 'pipe'] });
+      { env: { ...process.env, LOOM_RUNTIME_PIECE: 'box', HOME: home, LOOM_BOX_HOME: join(home, 'state') }, stdio: ['pipe', 'pipe', 'pipe'] });
     let err = '';
     p.stderr.on('data', (d) => { err += d; });
     p.stdin.end('');
