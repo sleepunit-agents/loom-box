@@ -60,13 +60,20 @@ export function noteSender(env, c, m, { wakeFor } = {}) {
  * The owner's word that a conversation is his from here (loom's machine only): what it heard before is set aside.
  * What still waits in its queue, the body hasn't heard yet: that's noted again, as at the first message.
  */
-export function resetActsFor(env, c, at, { dir, by } = {}) {
+export function resetActsFor(env, c, at, { dir, by, counted = [] } = {}) {
   c.actsFor = { owner: false, people: [], unknown: false, reset: at };
   // Who made it, signed with the runtime's key (t-1952): only a signed reset vouches a local conversation for a body
   // on loom's machine (delivery.mjs, localForeign). An unsigned one (from before, or a test's) sets the record aside
   // and vouches for nothing more.
   if (dir && by) { c.actsFor.resetBy = by; c.actsFor.resetSig = b64u(sign(signingKey(dir), resetPayload(c, at, by))); }
-  for (const q of c.queue ?? []) noteOne(env, c.actsFor, { ...q, agent: c.agent }, undefined);
+  // Waiting messages are noted again, as at the first message: a person's as theirs, a wake as whom the clock said
+  // (t-1975: kept on its queue row). Only those the owner was shown on the card he allowed (`counted`, their keys:
+  // delivery.mjs shownRows, never a person's, never a wake the clock named someone for) count as his; anything else
+  // waiting, a relay from an agent included, is noted as ever.
+  for (const q of c.queue ?? []) {
+    if (counted.includes(q.key) && q.from?.kind !== 'person') { c.actsFor.owner = true; continue; }
+    noteOne(env, c.actsFor, { ...q, agent: c.agent }, q.wakeFor);
+  }
   return c.actsFor;
 }
 

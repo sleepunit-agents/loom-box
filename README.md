@@ -493,6 +493,28 @@ one container, so walling conversations apart inside a house isn't possible; wal
   conversation's slot and ending the body that heard what came before; an unsigned reset vouches for nothing; once
   what someone else wrote is no longer waiting there: what's queued is heard again). A refused start goes down the
   usual retry ladder, so it shows on the conversation's record as failed starts.
+- **Asked on loom's page** (t-1975; Jonathan: "It needs to have the site ask me"). The typed reset is the fallback:
+  where it was the only way back, a local conversation refused a body, the runtime asks the owner itself, with a
+  `principal-reset` approval (loom-approvals, target `<agent>:<cv>`): "Count this conversation as your work from now
+  on?", its details naming the conversation (its label, as plain words, and id) and listing each waiting message it
+  counts. While the card is out, the conversation's messages wait for his answer (at most a day) instead of failing. Only where no person but the owner is named in it (an unplaced voice, a wake with no word
+  from the clock, history from before), once per conversation (`resetAsk`, reserved under the lock before the card is
+  filed, with the keys of what was waiting then); a clear refusal to file is logged and the reservation let go, and
+  one with no answer in time is kept for ten minutes, then tried again (approvals hands back the same card if it was
+  filed). `reset-approved` is refused from a body's environment (`HOUSE_ID`, `LOOM_BODY_KEY`, `LOOM_BODY_CONVERSATION`). A
+  conversation walled off in a house of its own isn't asked about: it still runs. Right after the household owner's
+  Allow, loom core posts `reset-approved` here as him, with the approval's id, agent and target (read back from the
+  approvals piece). The runtime checks the conversation is that agent's and that no other person has written there
+  since, spends the approval (`loom approvals use … --kind principal-reset --as <agent> --on-behalf owner`: allowed,
+  for exactly that conversation, once, without the runtime's store grant) and only then resets it as `--reset` does,
+  signed as the owner's (`actsFor.resetApproval` names the approval). Deny never reaches here, and approvals never
+  asks about it again. A member, an agent, an agent's tab, or no caller is refused, and nothing is spent.
+- **What a reset counts.** Waiting messages are noted again as they come: a person's as theirs, a wake as whom the
+  clock said (kept on its queue row, `wakeFor`). The card lists each waiting message no person is named in (a relay
+  from an agent, a wake with no word from the clock, a sender loom can't name; at most 12), and only those exact
+  messages, by key, count as the owner's on his Allow: anything not on the card, a relay included, is noted as ever.
+  Typed at a terminal, nothing waiting is counted (as before). Every body's brief says so: never hand the owner a
+  command to type; file the approval.
 
 ## Model choice
 

@@ -100,6 +100,8 @@ import { changed as changedCards } from './activity.mjs';
 import { keepKey } from './bodyhost.mjs';
 import { spawnCap } from './spawn.mjs';
 import { readRelays } from './relay.mjs';
+import { householdOwners, membersOf, ownersOf } from './owners.mjs';
+import { approvalsFake, approvalsRun, approvalsRunAsync, approvalsWhy } from './approvals-call.mjs';
 import { OWNER_SEAT, carriesSession, mint, noteSender, resetSigned, principalOf, putWakeFor, resetActsFor, seatOf, takeWakeFor, verify } from './principal.mjs';
 
 const DAY_MS = 86_400_000;
@@ -776,7 +778,8 @@ async function deliverOnce(env, raw, o) {
           c.actsFor = o.spawnInit.actsFor;
           c.kind = 'agent';
         } else if (!o.spawnSender) noteSender(env, c, m, { wakeFor });
-        c.queue.push({ key, id: m.id, at: m.at, from: m.from, kind: m.kind, ...(local ? { local: true } : {}), ...(o.deferPeer === true && m.from.kind === 'agent' ? { untilIdle: true } : {}), ...(tier ? { tier } : {}), ...(owner ? { owner: true } : {}), ...(tierUnread ? { tierUnread: true } : {}), ...(sealed ? { sealed } : { mem: true }) });
+        // Whom the clock said a wake is for stays with it while it waits (t-1975): a reset re-notes it as that, never more.
+        c.queue.push({ key, id: m.id, at: m.at, from: m.from, kind: m.kind, ...(wake ? { wakeFor: wakeFor ?? '-' } : {}), ...(local ? { local: true } : {}), ...(o.deferPeer === true && m.from.kind === 'agent' ? { untilIdle: true } : {}), ...(tier ? { tier } : {}), ...(owner ? { owner: true } : {}), ...(tierUnread ? { tierUnread: true } : {}), ...(sealed ? { sealed } : { mem: true }) });
       }
       c.last = d.now().toISOString();
       saveConv(env, c);
@@ -952,9 +955,11 @@ const returnHow = (c) => (c.venue === 'relay' ? '' : c.local
  * What a body asks the owner, when loom can do the step itself on his yes (t-1970, Jonathan: "if it's a permissions thing,
  * it should just do it when I say yes/no without having me do it"): the yes/no question, never a chore for him.
  */
-export const OWNER_STEPS = 'When you need your owner\'s say on something loom can do for him, ask the yes or no question and let his answer do it: never ask him to go and do a step himself. '
+export const OWNER_STEPS = 'When you need your owner\'s say on something loom can do for him, ask the yes or no question and let his answer do it: never ask him to go and do a step himself, and never hand him a command to type (t-1975: he answers on loom\'s page, not at a terminal). '
   + 'Access to a piece for an agent (yours, or another agent\'s, asked on a relay): never grant it yourself; ask with `approvals request --kind grant --target <piece>:<agent> --ask "Give <Agent> access to <Piece>?" --why … --if-yes … --if-no …`, '
-  + 'and put that approval in your digest\'s needs_owner `waits_on`: his Allow grants it, his Deny refuses it.';
+  + 'and put that approval in your digest\'s needs_owner `waits_on`: his Allow grants it, his Deny refuses it. '
+  + 'Your own pending wakes that loom can\'t say are his work (set before it kept whom each was for): if you know they are, `wake ask-vouch <w-id>…` puts them on one card for him; never for one a person asked for. '
+  + 'A conversation of yours refused a body on loom\'s machine as no one\'s: the runtime asks him itself.';
 
 /** What a resumed body is given: the new messages, and its new run. */
 const resumeBrief = (c, msgs, run) => `(${c.venue}: ${c.label ?? c.place}. This run is ${run}: call identity with {conversation: "${c.conversation}", run: "${run}"} again.${returnHow(c) ? ` ${returnHow(c)}` : ''})\n\n${render(msgs)}`;
@@ -1020,6 +1025,10 @@ function plan(env, cv, d, mem) {
     if (isStarting(c, now)) return wait('its body is starting');
     abandon(c, now);
   }
+  // A local conversation its owner is being asked about (t-1975): what it holds waits for his answer, never down the
+  // retry ladder to failure, so the messages his card lists are still there when his Allow counts them.
+  // At most a day (as a parked body waits): then it goes the usual way, refused and failed, and the card stays.
+  if (c.local && c.resetAsk && !c.body && now - Date.parse(c.resetAsk.at) < 24 * 3600_000 && localForeign(env, c)) return wait(`its owner is asked on loom's page whether it's his${c.resetAsk.approval ? ` (${c.resetAsk.approval})` : ''}`);
   const take = () => { const q = c.queue; c.queue = []; delete c.waiting; return q; };
   // What a start or resume takes off the queue is kept with its marker until it's done: a process that dies holding it
   // (the runtime restarted under it) leaves it to go back on the queue (abandon), never only in that process's memory.
@@ -1549,8 +1558,15 @@ async function execute(env, op, d, mem) {
     // slot goes with it: a session is this conversation's own, and what's walled off is every other conversation's.
     if (!c0.local) rules = { ...rules, seat: seatOf(principalOf(env, c0), op.cv) };
     // A body on loom's machine does its owner's work only (t-1830): it shares the runtime account's keys dir and its
-    // signing key, so a conversation someone else has written into gets no body there at all (fail closed).
-    else if (localForeign(env, c0)) throw new DeliveryError('a body on loom\'s machine does only its owner\'s work, and this conversation is someone else\'s now', 403);
+    // signing key, so a conversation someone else has written into gets no body there at all (fail closed). Its owner
+    // is asked on loom's page whether it's his, when no one else is named in it (t-1975).
+    else if (localForeign(env, c0)) {
+      const asked = (await askOwnerReset(env, c0, d.warn, op.msgs)) || loadConv(env, op.cv)?.resetAsk?.approval;
+      const err = new DeliveryError(`a body on loom's machine does only its owner's work, and this conversation is someone else's now${asked ? `: its owner is asked on loom's page whether it's his (${asked})` : ''}`, 403);
+      // A card is out: its messages wait for his answer (as at a seat's cap), never failed while he decides.
+      if (asked) err.held = true;
+      throw err;
+    }
     const was = op.slot?.rules ?? {};
     // ...and a session only follows the conversation into a house no one else's bodies would read it in (principal.mjs,
     // carriesSession): never into a person's house that runs their other conversations.
@@ -1692,7 +1708,7 @@ async function execute(env, op, d, mem) {
     for (const p of restored) rmSync(p, { recursive: true, force: true });
     // The agent's houses for other people were at the cap when its house was asked for (t-1952; a start that raced
     // past plan's look): it waits, as plan would have made it, and its slot (or home) stays. Never a lost session.
-    if (e?.seatFull) {
+    if (e?.seatFull || e?.held) {
       locked(env, () => {
         const c = loadConv(env, op.cv);
         if (!c) return;
@@ -2333,13 +2349,155 @@ export function bodyPrincipal(env, { conversation, key, session }, o = {}) {
   return { ok: true, agent: c.agent, conversation: c.conversation, ...p, statement: mint(deliveryDir(env), { agent: c.agent, conversation: c.conversation, principal: p }, d.now().getTime()) };
 }
 
-/** The owner's reset of a conversation's principal (principal.mjs, resetActsFor): {ok, conversation} or {ok: false, reason}. */
-export function resetPrincipal(env, conversation) {
-  if (!CV.test(conversation ?? '')) return { ok: false, reason: '--conversation is a conversation id' };
+/**
+ * The waiting messages a reset card lists (t-1975): each one no person is named in, described in words ("a relay from
+ * Mark", "a wake with no word from the clock", "a message from a sender loom can't name"), at most 12. Only these are
+ * what the owner's Allow counts as his (resetActsFor `counted`, by key); a person's message is theirs, never listed.
+ */
+const SHOWN_ROOM = 650;
+/** Who the runtime files, spends and withdraws a reset card as, the same every time. */
+export const runtimeAs = (agent) => JSON.stringify({ kind: 'agent', agent, house: 'loom\'s runtime' });
+export function shownRows(rows) {
+  const out = [];
+  let used = 0;
+  for (const q of rows ?? []) {
+    if (!q?.key || q.from?.kind === 'person') continue;
+    if (q.from?.kind === 'schedule' && q.wakeFor !== '-') continue;   // the clock's word names whom, or a row from before
+    const words = q.from?.kind === 'schedule' ? 'a wake with no word from the clock'
+      : q.from?.kind === 'agent' && /^[a-z][a-z0-9-]{0,39}$/.test(q.from.id ?? '') ? `a relay from ${cap(q.from.id)}` : 'a message from a sender loom can\'t name';
+    const w = `${words} (${String(q.at ?? '').slice(0, 16).replace('T', ' ')})`;
+    // Every row listed fits on the card whole (approvals' 1000 for details, less the conversation's own line): one that
+    // wouldn't isn't listed, so it isn't counted either.
+    if (out.length >= 12 || used + w.length + 2 > SHOWN_ROOM) break;
+    used += w.length + 2;
+    out.push({ key: q.key, words: w });
+  }
+  return out;
+}
+
+/**
+ * Whether the household owner may count this conversation as his (t-1975): the agent is his (no member names it, so
+ * its owners are the household's, and "the owner" a reset signs is him) and no other person is named in it.
+ */
+export function householdOwns(env, c) {
+  const members = membersOf(env);
+  const hh = householdOwners(members);
+  const owners = ownersOf(members, c?.agent);
+  if (!hh.length || owners.length !== hh.length || !owners.every((x) => hh.includes(x))) return false;
+  return !(principalOf(env, c).people ?? []).length;
+}
+
+/**
+ * The card's check before the owner's yes is spent (ui.mjs, reset-approved), read under the lock: that agent's
+ * conversation, still asked about by exactly this card, and still only the household owner's to count. '' or why not.
+ */
+export function resetCardProblem(env, conversation, { agent, approval }) {
   return locked(env, () => {
     const c = loadConv(env, conversation);
+    if (!c || c.agent !== agent) return `${cap(agent)} has no conversation ${conversation} here`;
+    if (c.resetAsk?.approval !== approval) return 'that card is out of date (the conversation was reset since, or asked about again)';
+    if (!householdOwns(env, c)) return 'someone else has written there since you were asked, so it isn\'t only yours to count';
+    return '';
+  });
+}
+
+/**
+ * Ask the owner on loom's page whether a local conversation refused a body is his (t-1975, Jonathan: "It needs to have
+ * the site ask me"): where his typed `principal --reset` was the only way back. A `principal-reset` approval
+ * (loom-approvals), "Count this conversation as your work from now on?", filed by the runtime for the conversation's
+ * agent on the owner's behalf, listing its label. His Allow is applied here (`reset-approved`, ui.mjs); his Deny changes
+ * nothing, and approvals never asks about it again. Only where no person but the owner is named in it (an unplaced
+ * voice, a wake with no word, history from before), and once per conversation (`resetAsk`, reserved under the lock
+ * before the card is filed, so two drains never file two). Best effort: a failure is logged and the reservation let go.
+ */
+export const RESET_ASK_RETRY_MS = 10 * 60_000;
+export async function askOwnerReset(env, c, warn = (m) => console.warn(m), taken = []) {
+  const p = principalOf(env, c);
+  if (p.owner || !householdOwns(env, c) || !CV.test(c.conversation ?? '')) return null;
+  const at = new Date().toISOString();
+  // Reserved first: whoever reserves files; the queue as it stands is what the card asks about (resetPrincipal).
+  const mine = locked(env, () => {
+    const cur = loadConv(env, c.conversation);
+    // A reservation with no card behind it after RESET_ASK_RETRY_MS (its filing timed out, and may not have happened)
+    // is taken again: approvals hands back the same card for the same target if it was filed after all.
+    if (!cur || (cur.resetAsk && (cur.resetAsk.approval || Date.now() - Date.parse(cur.resetAsk.at) < RESET_ASK_RETRY_MS))) return null;
+    // What it asks about: what's waiting, and what this refused start had taken from the queue (it goes back there). The
+    // card lists each one (shownRows); only those listed are what his Allow counts as his (`queued`: their keys). A
+    // retry keeps what the first filing listed: approvals hands back that same card, with that first list on it.
+    if (cur.resetAsk) { cur.resetAsk = { ...cur.resetAsk, at }; saveConv(env, cur); return cur; }
+    const rows = [...(cur.queue ?? []), ...taken.filter((x) => !(cur.queue ?? []).some((q) => q.key === x.key))];
+    const shown = shownRows(rows);
+    cur.resetAsk = { at, queued: shown.map((r) => r.key), shown: shown.map((r) => r.words) };
+    saveConv(env, cur);
+    return cur;
+  });
+  if (!mine) return null;
+  const release = () => locked(env, () => { const cur = loadConv(env, c.conversation); if (cur?.resetAsk?.at === at && !cur.resetAsk.approval) { delete cur.resetAsk; saveConv(env, cur); } });
+  try {
+    // The label as words only: no control, format or bidi characters, no line or clause breaks it could fake the card's with.
+    const label = String(c.label ?? c.place ?? c.conversation).normalize('NFKC').replace(/[\p{C}\p{Zl}\p{Zp}]/gu, ' ').replace(/[;:"“”]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80);
+    const target = `${c.agent}:${c.conversation}`;
+    const why = `${cap(c.agent)}'s work in it can't run on loom's machine while loom can't say it's yours.`;
+    const shown = mine.resetAsk.shown ?? [];
+    const details = `The conversation: “${label}” (${c.conversation}). No other person is named in it. Waiting there, and counted as yours if you allow: ${shown.length ? shown.join('; ') : 'nothing'}. Anything that arrives after this is noted as ever.`;
+    const argv = ['approvals', 'request', '--kind', 'principal-reset', '--target', target,
+      '--ask', 'Count this conversation as your work from now on?', '--why', why,
+      '--if-yes', 'It counts as yours.', '--if-no', 'Nothing changes.', '--details', details,
+      '--as', runtimeAs(c.agent), '--on-behalf', 'owner'];
+    const fx = approvalsFake(env);
+    let aid;
+    if (fx) aid = fx.request?.(target, { why, details });
+    else {
+      const r = await approvalsRunAsync(env, argv.slice(1));
+      aid = r.status === 0 ? /^(a-[0-9a-f]{8}):/.exec(r.stdout || '')?.[1] : undefined;
+      if (!aid) {
+        warn(`couldn't ask the owner whether ${c.conversation} is his: ${approvalsWhy(r).slice(-200)}`);
+        // Filed but unreadable (exit 0), or no answer in time (it may be filed): the reservation stays, so no second
+        // card. Only a clear refusal (a non-zero exit) lets it go.
+        if (!r.error && typeof r.status === 'number' && r.status !== 0) release();
+        return null;
+      }
+    }
+    if (!/^a-[0-9a-f]{8}$/.test(aid ?? '')) { if (!fx) release(); return null; }
+    locked(env, () => { const cur = loadConv(env, c.conversation); if (cur?.resetAsk?.at === at) { cur.resetAsk.approval = aid; saveConv(env, cur); } });
+    return aid;
+  } catch (e) {
+    warn(`couldn't ask the owner whether ${c.conversation} is his: ${e.message}`);
+    release();
+    return null;
+  }
+}
+
+/** A principal-reset card the runtime filed, taken back unanswered (approvals' withdraw): best effort, logged. */
+function withdrawCard(env, agent, aid) {
+  try {
+    const fx = approvalsFake(env);
+    if (fx) return void fx.withdraw?.(aid);
+    const r = approvalsRun(env, ['withdraw', aid, '--as', runtimeAs(agent)]);
+    if (r.error || r.status !== 0) console.warn(`couldn't withdraw ${aid}: ${approvalsWhy(r).slice(-200)}`);
+  } catch (e) { console.warn(`couldn't withdraw ${aid}: ${e.message}`); }
+}
+
+/** The owner's reset of a conversation's principal (principal.mjs, resetActsFor): {ok, conversation} or {ok: false, reason}. */
+export function resetPrincipal(env, conversation, { agent, approval } = {}) {
+  if (!CV.test(conversation ?? '')) return { ok: false, reason: '--conversation is a conversation id' };
+  let stale;
+  const out = locked(env, () => {
+    const c = loadConv(env, conversation);
     if (!c) return { ok: false, reason: `no conversation ${conversation} here` };
-    resetActsFor(env, c, new Date().toISOString(), { dir: deliveryDir(env), by: 'owner' });
+    // From an approval (t-1975): the agent it was asked for is the conversation's own, this card is the one it was
+    // asked about by, and it's still only the household owner's; or nothing is reset (checked again under this lock).
+    if (agent !== undefined && c.agent !== agent) return { ok: false, reason: `${conversation} isn't ${agent}'s` };
+    if (approval && (c.resetAsk?.approval !== approval || !householdOwns(env, c))) return { ok: false, reason: 'it changed while you answered (someone wrote there, or it was asked about again)' };
+    // Typed at a terminal while a card waits: that card is out of date, taken back after the lock (best effort).
+    if (!approval && c.resetAsk?.approval) stale = c.resetAsk.approval;
+    // What he counted as his: exactly the waiting messages the card he allowed listed, by key. Typed at a terminal:
+    // nothing waiting is counted (as before t-1975): it's noted as it comes, and the owner's word covers what came before.
+    const counted = approval ? (c.resetAsk?.queued ?? []) : [];
+    resetActsFor(env, c, new Date().toISOString(), { dir: deliveryDir(env), by: 'owner', counted });
+    // Asked and answered: a later unknown turn may ask again.
+    delete c.resetAsk;
+    if (approval) c.actsFor.resetApproval = approval;
     // What it heard before is set aside, and so is any session that heard it (t-1952): its slot and home go, and a
     // body holding it now is ended before it hears anything more, so no body resumes a transcript someone else steered.
     rmSync(slotFile(env, conversation), { force: true });
@@ -2348,8 +2506,11 @@ export function resetPrincipal(env, conversation) {
     // The run that heard what came before speaks no more: its key is gone now, not when its body is ended.
     if (c.body) { c.resetPending = true; delete c.sendKey; }
     saveConv(env, c);
-    return { ok: true, conversation };
+    // Still no one's on loom's machine (something unplaced arrived after he was asked): said, so his Allow isn't "done".
+    return { ok: true, conversation, ...(c.local && localForeign(env, c) ? { stillForeign: true } : {}) };
   });
+  if (stale) withdrawCard(env, out.agent ?? loadConv(env, conversation)?.agent, stale);
+  return out;
 }
 
 /**
