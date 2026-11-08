@@ -37,6 +37,7 @@ export function permsStore(env) {
  * why not. The approvals piece checks it's allowed, for this kind and target, not overruled, and spends it once.
  */
 function spendGrant(env, aid, target, agent) {
+  // `loom approvals`: the piece by the name it installs as (also the relay's spend, relay.mjs), as bodies type it.
   if (env?.LOOM_RUNTIME_TEST_APPROVALS && typeof env.LOOM_RUNTIME_TEST_APPROVALS === 'object') return env.LOOM_RUNTIME_TEST_APPROVALS.spend(aid, target, agent);
   // Well inside loom's 15 s for the whole action, which also holds a store read before it and a read and write after:
   // a slow spend is cut short here rather than taking that time from the grant's write.
@@ -46,7 +47,9 @@ function spendGrant(env, aid, target, agent) {
     { env: rest, encoding: 'utf-8', timeout: 6_000 });
   if (r.error?.code === 'ETIMEDOUT') return 'the approvals piece didn\'t answer in time, so it may be spent already';
   if (r.error) return `the approvals piece didn't run (${r.error.message})`;
-  return r.status === 0 ? '' : ((r.stderr || r.stdout || '').trim().slice(-300) || `exit ${r.status}`);
+  // Spent is exactly what approvals says when it spent one (`<id>: used`), never just an exit 0 from something else.
+  if (r.status === 0 && (r.stdout || '').trim() === `${aid}: used`) return '';
+  return ((r.stderr || r.stdout || '').trim().slice(-300) || `exit ${r.status}`);
 }
 
 /**
@@ -93,10 +96,10 @@ function grantApproved(env, st, c, fields) {
   if (spent) return { ok: false, message: `Not granted: the approval couldn't be spent (${spent.slice(0, 200)}).`, page: 'permissions' };
   try {
     const r = addGrant(st, g);
-    if (r.none) return { ok: false, message: `Allowed, but the runtime's grants were gone when it came to write: nothing was granted. Set it on Permissions.`, page: 'permissions' };
+    if (r.none) return { ok: false, message: 'the runtime\'s grants were gone when it came to write, so nothing was granted.', page: 'permissions' };
     return { ok: true, message: r.changed ? `${what} now.` : `${what} already.`, page: `permissions/${g.agent}` };
   } catch (e) {
-    return { ok: false, message: `Allowed, but the runtime couldn't write the grant (${String(e.message || e).slice(0, 160)}): set it on Permissions.`, page: 'permissions' };
+    return { ok: false, message: `the runtime couldn't write the grant (${String(e.message || e).slice(0, 160)}).`, page: 'permissions' };
   }
 }
 

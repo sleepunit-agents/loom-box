@@ -176,13 +176,25 @@ test('what would be refused is refused before the spend; a store that refuses th
   ro.get = b.st.get.bind(b.st);
   const r2 = approve({ ...b.env, LOOM_RUNTIME_TEST_STORE: ro }, { id: 'a-0000beef', agent: 'art', target: 'tasks:mark' });
   assert.equal(r2.ok, false);
-  assert.match(r2.message, /couldn't write the grant.*set it on Permissions/);
+  assert.match(r2.message, /couldn't write the grant/);
 });
 
 test('an unreadable grants document: each agent\'s row says so, not a count', () => {
   const { env } = setup({ doc: { v: 2, pieces: { tasks: { art: ['*'] } }, relay: {} } });
   const rows = page(env, { path: 'permissions' }).sections.find((s) => s.id === 'agents').blocks[0].rows;
   assert.ok(rows.every((r) => r.tone === 'bad'));
+});
+
+test('an exit 0 that isn\'t approvals saying it spent it is no spend: nothing granted', async () => {
+  const { chmodSync } = await import('node:fs');
+  const { env, st } = setup({ allowed: {} });
+  delete env.LOOM_RUNTIME_TEST_APPROVALS;
+  const bin = join(env.HOME, 'fake-loom-help');
+  writeFileSync(bin, `#!${process.execPath}\nconsole.log('usage: loom <piece> ...');\n`);
+  chmodSync(bin, 0o755);
+  const r = approve({ ...env, LOOM_BIN: bin }, { id: 'a-0000beef', agent: 'art', target: 'tasks:mark' });
+  assert.equal(r.ok, false);
+  assert.deepEqual(grantsOf(st).pieces.tasks, { art: ['*'] });
 });
 
 test('the real spend: `loom approvals use ID --kind grant --target T --as {kind: agent, agent}`, without the runtime\'s store grant', async () => {
