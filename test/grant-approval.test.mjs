@@ -160,3 +160,27 @@ test('an Allow for what the agent already has says so in names, and spends the a
   assert.deepEqual([r.ok, r.message], [true, 'Mark may use Clock already.']);
   assert.deepEqual(spent, ['a-0000beef']);
 });
+
+test('what would be refused is refused before the spend; a store that refuses the write says so, and where to set it', () => {
+  // 50 paths already: one more is past the limit, so nothing is spent.
+  const many = Array.from({ length: 50 }, (_, i) => `p${i}`);
+  const a = setup({ doc: { v: 1, pieces: { tasks: { mark: many } }, relay: {} }, allowed: { 'a-0000beef': { target: 'tasks:mark:extra', agent: 'art' } } });
+  const r = approve(a.env, { id: 'a-0000beef', agent: 'art', target: 'tasks:mark:extra' });
+  assert.equal(r.ok, false);
+  assert.match(r.message, /Nothing was granted/);
+  assert.deepEqual(a.spent, []);
+  // A store that won't take the write (not the owner's grant): spent by then, and said plainly.
+  const b = setup({ allowed: { 'a-0000beef': { target: 'tasks:mark', agent: 'art' } } });
+  const ro = memStore({ writable: () => false });
+  ro.put = () => { throw new Error('only the owner writes grants'); };
+  ro.get = b.st.get.bind(b.st);
+  const r2 = approve({ ...b.env, LOOM_RUNTIME_TEST_STORE: ro }, { id: 'a-0000beef', agent: 'art', target: 'tasks:mark' });
+  assert.equal(r2.ok, false);
+  assert.match(r2.message, /couldn't write the grant.*set it on Permissions/);
+});
+
+test('an unreadable grants document: each agent\'s row says so, not a count', () => {
+  const { env } = setup({ doc: { v: 2, pieces: { tasks: { art: ['*'] } }, relay: {} } });
+  const rows = page(env, { path: 'permissions' }).sections.find((s) => s.id === 'agents').blocks[0].rows;
+  assert.ok(rows.every((r) => r.tone === 'bad'));
+});

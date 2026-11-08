@@ -183,16 +183,16 @@ export function setPiece(store, { piece, agents, paths = ['*'] }) {
 }
 
 /**
- * One agent added to one piece's grant, everyone else's kept (t-1970: the owner's Allow on a `grant` approval). With no
+ * One agent added to one piece's grant, everyone else's kept (`dryRun`: checked, not written) (t-1970: the owner's Allow on a `grant` approval). With no
  * grants document yet there's nothing to add to: every agent may already use every piece, and writing one now would
  * take every other piece away from every agent. So: {changed: false, why} there, and where the agent already has it.
  */
-export function addGrant(store, { piece, agent, paths = ['*'] }) {
+export function addGrant(store, { piece, agent, paths = ['*'] }, { dryRun = false } = {}) {
   if (!PIECE.test(piece ?? '')) throw new GrantsError('that isn\'t a piece\'s name');
   if (!AGENT.test(agent ?? '')) throw new GrantsError('that isn\'t an agent\'s name');
   if (!grantPathsOk(paths)) throw new GrantsError('paths are *, a path, or a prefix ending in /*');
   const cur = store.get(GRANTS, KEY);
-  if (!cur?.doc) return { changed: false, why: 'no grants yet: every agent may use every piece' };
+  if (!cur?.doc) return { changed: false, none: true, why: 'no grants yet: every agent may use every piece' };
   const doc = structuredClone(cur.doc);
   const g = Object.hasOwn(doc.pieces ?? {}, piece) ? { ...doc.pieces[piece] } : {};
   const have = [...(Object.hasOwn(g, agent) ? g[agent] : []), ...(Object.hasOwn(g, '*') ? g['*'] : [])];
@@ -202,6 +202,7 @@ export function addGrant(store, { piece, agent, paths = ['*'] }) {
   doc.pieces = { ...(doc.pieces ?? {}), [piece]: g };
   const why = grantsProblem(doc);
   if (why) throw new GrantsError(why);
+  if (dryRun) return { changed: true, dryRun: true };
   return { changed: true, rev: store.put(GRANTS, KEY, doc, cur.rev) };
 }
 
