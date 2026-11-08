@@ -2643,6 +2643,15 @@ export async function spawnComms(env, d = depsOf(env)) {
         }
       }
       if (!c.spawn.thread) continue;
+      if (c.spawn.origin && !c.spawn.linked) {
+        const parent = loadConv(env, c.spawn.origin);
+        if (parent?.agent === c.agent) {
+          const t = await d.core.turn({ key: `runtime:spawn-link-${c.conversation}`, agent: c.agent, venue: parent.venue, place: parent.place,
+            at: c.spawn.created, from: { kind: 'agent', id: c.agent }, kind: 'note', run: c.spawn.origin_run });
+          try { await d.core.audit({ conversation: parent.conversation, seq: t.seq, text: `Spawned [${c.label ?? 'job'}](/comms/${c.spawn.thread.slice(3)}) (${c.conversation}), from run ${c.spawn.origin_run}.` }); } catch (e) { if (e.status !== 409) throw e; }
+          locked(env, () => { const fresh = loadConv(env, c.conversation); fresh.spawn.linked = true; saveConv(env, fresh); });
+        }
+      }
       const working = !!c.body && statusOf(env, c, d) === 'working';
       if (c.spawn.report && c.spawn.shownRun !== c.spawn.reportRun) {
         const r = await d.core.comms({ op: 'post', agent: c.agent, place: c.spawn.thread, run: c.spawn.reportRun, ref: `spawn-${c.spawn.reportRun}`, text: d.sealer.open(Buffer.from(c.spawn.report, 'base64')).toString('utf-8') });
