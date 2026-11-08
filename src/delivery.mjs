@@ -99,7 +99,7 @@ import { raiseAlert } from './alerthook.mjs';
 import { changed as changedCards } from './activity.mjs';
 import { keepKey } from './bodyhost.mjs';
 import { readRelays } from './relay.mjs';
-import { OWNER_SEAT, carriesSession, mint, noteSender, principalOf, putWakeFor, resetActsFor, seatOf, takeWakeFor, verify } from './principal.mjs';
+import { OWNER_SEAT, carriesSession, mint, noteSender, resetSigned, principalOf, putWakeFor, resetActsFor, seatOf, takeWakeFor, verify } from './principal.mjs';
 
 const DAY_MS = 86_400_000;
 export const MAX_TEXT = 40_000;
@@ -737,7 +737,7 @@ async function deliverOnce(env, raw, o) {
         // The runtime's own daily review (review.mjs, source: this piece, which core sets) is the owner's schedule.
         const own = wake && m.source === pieceName(env) && m.place === 'review';
         const wakeFor = own ? 'owner' : wake ? takeWakeFor(deliveryDir(env), m.agent, m.place, m.id, d.now().getTime()) : undefined;
-        noteSender(env, c, m, { wakeFor, localWake: wake && local });
+        noteSender(env, c, m, { wakeFor });
         c.queue.push({ key, id: m.id, at: m.at, from: m.from, kind: m.kind, ...(local ? { local: true } : {}), ...(o.deferPeer === true && m.from.kind === 'agent' ? { untilIdle: true } : {}), ...(tier ? { tier } : {}), ...(owner ? { owner: true } : {}), ...(tierUnread ? { tierUnread: true } : {}), ...(sealed ? { sealed } : { mem: true }) });
       }
       c.last = d.now().toISOString();
@@ -977,6 +977,9 @@ function plan(env, cv, d, mem) {
   // (the runtime restarted under it) leaves it to go back on the queue (abandon), never only in that process's memory.
   const begin = (op) => { c.starting = { ...mark(now), ...(op.msgs?.length ? { msgs: op.msgs } : {}) }; saveConv(env, c); return { cv, mark: c.starting.op, ...op }; };
   const st = statusOf(env, c, d);
+  // The owner reset it (resetPrincipal): the body that heard what came before ends, its session not kept.
+  if (c.resetPending && (st === 'working' || st === 'idle')) return begin({ type: 'reseat', body: c.body });
+  if (c.resetPending && st === 'none') delete c.resetPending;
   if (st === 'working') {
     // A guest's message never reaches a body that isn't a guest venue's (its tools aren't narrowed, its brief has no
     // floor): that body is ended, its session not kept, and a body under a guest venue's rules starts for it.
@@ -994,8 +997,11 @@ function plan(env, cv, d, mem) {
     const rec = readBody(env, c.body);
     const runner = d.runner(rec.harness, rec.local);
     const left = [];
+    // A body whose house is no longer its conversation's (t-1952) is fed nothing there, not even the runtime's own note.
+    const moved = seatMoved(env, c);
     for (const x of c.queue) {
       if (x.untilIdle) { left.push({ x, reason: 'relay replies wait for the requesting turn to finish' }); continue; }
+      if (moved) { left.push({ x, reason: 'its conversation moves house when this turn is over' }); continue; }
       if (x.tierUnread && !c.bodyRules?.guest) { left.push({ x, reason: 'its sender\'s tier couldn\'t be read' }); continue; }
       const text = open(d, x, mem);
       const r = text === null ? { fed: false, reason: 'its text is gone' } : runner.feed(bodyOf(c.body, rec), { id: x.key, text: render([{ ...x, text }]) });
@@ -1084,17 +1090,17 @@ export function seatMoved(env, c) {
 
 /**
  * Whether a local conversation (loom's machine, t-1830) is anyone's but its owner's: it is, fail closed, unless its
- * principal is the owner, or all it ever heard is local wakes the clock fired with no word from anyone (principal.mjs,
- * noteSender `localWake`: such a wake is set on loom's machine). Anything else (a person who isn't the owner, a relay,
- * a sender nobody names, history from before principals were kept) makes it no work for a body that shares the
- * runtime account's keys. The owner can vouch for one with `loom runtime principal --reset`.
+ * principal is the owner (the clock's explicit word for each local wake it fires, `--wake --for owner`; the owner's
+ * own Reply), or the owner's signed reset with nothing heard since. Anything else (a person who isn't the owner, a
+ * relay, a sender nobody names, a wake whose hand-over failed, history from before principals were kept) makes it no
+ * work for a body that shares the runtime account's keys.
  */
 function localForeign(env, c) {
   const p = principalOf(env, c);
   if (p.owner === true) return false;
   const a = c.actsFor ?? {};
-  // The clock's local wakes, or the owner's reset (his word that what it heard before is his): nothing else since.
-  return !((a.localWake === true || typeof a.reset === 'string') && !a.unknown && !a.owner && !(a.people ?? []).length && !(a.owners ?? []).length && !(p.people ?? []).length);
+  // The owner's signed reset (his word that what it heard before is his), and nothing else since.
+  return !(resetSigned(deliveryDir(env), c) && !a.unknown && !a.owner && !(a.people ?? []).length && !(a.owners ?? []).length && !(p.people ?? []).length);
 }
 
 /** Whether a working body's rules don't cover what's queued for it (rulesFor: grantFor, members). A post-failure note
@@ -1403,7 +1409,7 @@ async function execute(env, op, d, mem) {
       rmSync(slotFile(env, op.cv), { force: true });
       const c = loadConv(env, op.cv);
       if (!c) return;
-      if (c.body === op.body) { c.body = undefined; c.idleSince = undefined; delete c.bodyRules; }
+      if (c.body === op.body) { c.body = undefined; c.idleSince = undefined; delete c.bodyRules; delete c.resetPending; }
       delete c.slot;
       if (ours(c, op)) delete c.starting;
       requeue(c, saved.pending);
@@ -2226,7 +2232,13 @@ export function resetPrincipal(env, conversation) {
   return locked(env, () => {
     const c = loadConv(env, conversation);
     if (!c) return { ok: false, reason: `no conversation ${conversation} here` };
-    resetActsFor(env, c, new Date().toISOString());
+    resetActsFor(env, c, new Date().toISOString(), { dir: deliveryDir(env), by: 'owner' });
+    // What it heard before is set aside, and so is any session that heard it (t-1952): its slot and home go, and a
+    // body holding it now is ended before it hears anything more, so no body resumes a transcript someone else steered.
+    rmSync(slotFile(env, conversation), { force: true });
+    rmSync(homeFile(env, conversation), { force: true });
+    delete c.slot; delete c.home; delete c.fallback;
+    if (c.body) c.resetPending = true;
     saveConv(env, c);
     return { ok: true, conversation };
   });

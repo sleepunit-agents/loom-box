@@ -3,6 +3,8 @@
 // art-chain-check, hours). The tick sees it waiting (`claude agents --json`: status waiting, waitingFor a permission
 // prompt), and after LOOM_RUNTIME_STUCK_AFTER minutes (default 10), counted from when it first saw it waiting, stops
 // it (its session kept in its slot), notes it on the task its label names, tells the owner, and says it once.
+import { putWakeFor } from '../src/principal.mjs';
+import { deliveryDir as dDir } from '../src/delivery.mjs';
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -27,7 +29,8 @@ function setup(extra = {}) {
   w.o.alert = (_e, a) => alerts.push(a);
   const comments = [];
   w.o.comment = (task, text) => { comments.push([task, text]); return true; };
-  const lwake = (place, text, label) => w.msg(place, text, { venue: 'wake', from: { kind: 'schedule' }, kind: 'wake', source: 'clock', local: true, label });
+  // As the clock fires a local wake: it says whom it's for first (set on loom's machine: the owner's; t-1952).
+  const lwake = (place, text, label) => { const m = w.msg(place, text, { venue: 'wake', from: { kind: 'schedule' }, kind: 'wake', source: 'clock', local: true, label }); putWakeFor(dDir(w.env), { agent: m.agent, place: m.place, id: m.id, for: 'owner' }); return m; };
   const conv = (place) => loadConv(w.env, cvOf('art', 'wake', place));
   const idOf = (place) => conv(place).body.split(':')[1];
   const ended = (id) => localLog.some((l) => l[0] === 'end' && l[1] === id);

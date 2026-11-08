@@ -593,7 +593,9 @@ describe('a body the record lost track of still counts', () => {
       const a = await conv('th:a');
       const b = await conv('th:b');
       lose(b);
-      assert.equal(originOf(w.env, who, a), null);
+      // A caller in no house is refused a house body's conversation outright (t-1952); one in the house gets none.
+      if (who.house) assert.equal(originOf(w.env, who, a), null);
+      else assert.throws(() => originOf(w.env, who, a), /held by a body in your house/);
       if (who.house) assert.equal(originOf(w.env, who), null, 'nor is a single one inferred');
     });
   }

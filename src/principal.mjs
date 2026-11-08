@@ -45,15 +45,14 @@ export const ownersFor = (env, agent) => ownersOf(membersOf(env), agent);
  * saw, and a body resumes their session or their digests. Messages already waiting in its queue are noted first (the
  * body will hear them). Only the owner clears it (`loom runtime principal --reset`, resetActsFor).
  */
-export function noteSender(env, c, m, { wakeFor, localWake = false } = {}) {
+export function noteSender(env, c, m, { wakeFor } = {}) {
   if (!c.actsFor) {
     c.actsFor = { owner: false, people: [], unknown: (c.runs ?? 0) > 0 || (c.runLog ?? []).length > 0 };
     for (const q of c.queue ?? []) noteOne(env, c.actsFor, { ...q, agent: c.agent }, undefined);
   }
-  // A local wake (t-1830) the clock fired with no word on whom it's for: set on loom's machine (no house's wake is ever
-  // delivered local), so it's marked as exactly that, `localWake`, never as the owner's and never as a stranger's.
-  // Only the runtime's local-body check reads it (delivery.mjs, localForeign); the principal stays unnamed.
-  if (localWake && m.from?.kind === 'schedule' && wakeFor === undefined) { c.actsFor.localWake = true; return c.actsFor; }
+  // A local wake (t-1830) is no exception: the clock says whom every wake it fires is for (`--wake --for`, its explicit
+  // word: `owner` for one set on loom's machine), and a wake with no word (its hand-over failed, or expired) is unknown,
+  // as anywhere (fail closed; the clock logs `principal-fail`).
   return noteOne(env, c.actsFor, m, wakeFor);
 }
 
@@ -61,10 +60,26 @@ export function noteSender(env, c, m, { wakeFor, localWake = false } = {}) {
  * The owner's word that a conversation is his from here (loom's machine only): what it heard before is set aside.
  * What still waits in its queue, the body hasn't heard yet: that's noted again, as at the first message.
  */
-export function resetActsFor(env, c, at) {
+export function resetActsFor(env, c, at, { dir, by } = {}) {
   c.actsFor = { owner: false, people: [], unknown: false, reset: at };
+  // Who made it, signed with the runtime's key (t-1952): only a signed reset vouches a local conversation for a body
+  // on loom's machine (delivery.mjs, localForeign). An unsigned one (from before, or a test's) sets the record aside
+  // and vouches for nothing more.
+  if (dir && by) { c.actsFor.resetBy = by; c.actsFor.resetSig = b64u(sign(signingKey(dir), resetPayload(c, at, by))); }
   for (const q of c.queue ?? []) noteOne(env, c.actsFor, { ...q, agent: c.agent }, undefined);
   return c.actsFor;
+}
+
+const resetPayload = (c, at, by) => JSON.stringify(['reset', 1, c.agent, c.conversation, at, by]);
+/** Whether a conversation's reset was the owner's, made here: signed with this runtime's key, for it, by the owner. */
+export function resetSigned(dir, c) {
+  const a = c?.actsFor;
+  if (typeof a?.reset !== 'string' || a.resetBy !== 'owner' || typeof a.resetSig !== 'string') return false;
+  const key = signingKey(dir, { make: false });
+  if (!key) return false;
+  const want = sign(key, resetPayload(c, a.reset, a.resetBy));
+  const got = Buffer.from(a.resetSig, 'base64url');
+  return got.length === want.length && timingSafeEqual(got, want);
 }
 
 function noteOne(env, a, m, wakeFor) {
@@ -160,9 +175,10 @@ export const seatCap = (env) => { const v = setting(env ?? {}, 'SEAT_HOUSES'); c
 /** Why a house for `seat` can't be had at the cap, or null. The owner's is never capped. */
 export function seatCapProblem(env, s, agent, seat) {
   if (seat === OWNER_SEAT) return null;
-  const others = otherSeatHouses(s, agent, seat);
+  // Counted by seat: a seat's draining house and its new one are one seat's.
+  const seats = new Set(otherSeatHouses(s, agent, seat).map((h) => h.seat)).size;
   const cap = seatCap(env);
-  return others.length >= cap ? `${agent} already has ${others.length} house${others.length === 1 ? '' : 's'} at work for other people (the cap is ${cap}, LOOM_RUNTIME_SEAT_HOUSES): it waits for one to idle out` : null;
+  return seats >= cap ? `${agent} already has ${seats} house${seats === 1 ? '' : 's'} at work for other people (the cap is ${cap}, LOOM_RUNTIME_SEAT_HOUSES): it waits for one to idle out` : null;
 }
 
 // ─── Statements ─────────────────────────────────────────────────────────────

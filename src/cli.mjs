@@ -505,7 +505,9 @@ async function main(argv, env) {
       if (rest.includes('--reset')) {
         // The owner's, on loom's machine: this conversation is his from here (it ran before the runtime kept who
         // steered it, or heard someone he vouches for). Never through the piece API.
-        if (env.LOOM_URL && env.LOOM_TOKEN_FILE && env.HOUSE_ID) throw new Fail('principal --reset is the owner\'s, on loom\'s machine');
+        // Never a body's, wherever it runs: a house's, or a local one's on this machine (its run's key and conversation
+        // are in its environment). t-1952: the reset it makes is signed as the owner's.
+        if ((env.LOOM_URL && env.LOOM_TOKEN_FILE && env.HOUSE_ID) || env.HOUSE_ID || env.LOOM_BODY_KEY || env.LOOM_BODY_CONVERSATION) throw new Fail('principal --reset is the owner\'s, on loom\'s machine, never a body\'s');
         const r = resetPrincipal(env, flag(rest, '--conversation'));
         out(r);
         if (!r.ok) process.exitCode = 1;

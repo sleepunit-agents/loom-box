@@ -4,7 +4,7 @@
 // waits instead of sharing one.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { api, setAgent } from '../src/control.mjs';
 import { startBody } from '../src/bodies.mjs';
@@ -16,7 +16,7 @@ import { seatOf } from '../src/principal.mjs';
 import { ageSealer } from '../src/sealed.mjs';
 import { load, update } from '../src/state.mjs';
 import { scratch } from './scratch.mjs';
-import { cvOf, hasAge, sleep, until, world } from './delivery-world.mjs';
+import { cvOf, hasAge, here, sleep, until, world } from './delivery-world.mjs';
 import { staticAccounts } from '../src/accounts.mjs';
 
 /** A household whose owner is jonathan (owners.mjs): his word is the owner's. */
@@ -89,7 +89,9 @@ test('a body in one principal\'s house can\'t speak, ask its principal, or ask i
   assert.equal(holdsRun(w.env, J, stolen, { ...w.o, caller: { kind: 'agent', agent: 'art' } }), false);
   assert.equal(holdsRun(w.env, J, stolen, { ...w.o, caller: fromLoren }), false);
   assert.equal(holdsRun(w.env, J, stolen, { ...w.o, caller: { kind: 'agent', agent: 'art', house: 'h-1' } }), true);
-  assert.notEqual(originOf(w.env, { kind: 'agent', agent: 'art' }, J, { key: stolen.key, session: stolen.session })?.conversation, J);
+  // Refused outright, however many conversations are at work: a houseless caller holds no house body's conversation.
+  assert.throws(() => originOf(w.env, { kind: 'agent', agent: 'art' }, J, { key: stolen.key, session: stolen.session }), /held by a body in your house/);
+  assert.throws(() => originOf(w.env, { kind: 'agent', agent: 'art' }, L, {}), /held by a body in your house/);
 
   // His own body, in his house, with the same proof: answered.
   const own = await api(w.env, fx, { caller: { kind: 'agent', agent: 'art', house: 'h-1' }, path: 'principal', body: stolen });
@@ -240,6 +242,100 @@ test('a resume that meets the cap at its house waits, its slot kept; up() counts
   assert.throws(() => up(env, fx, { kind: 'owner' }, { agent: 'art', task }, { kind: 'body-host', seat: 'Bad Seat' }), /seat is owner/);
 });
 
+test('the owner\'s reset: refused to a body, signed, and the session that heard what came before is dropped', async () => {
+  const w = world();
+  household(w.env);
+  const { resetPrincipal } = await import('../src/delivery.mjs');
+  const { resetSigned } = await import('../src/principal.mjs');
+  const { deliveryDir } = await import('../src/delivery.mjs');
+  const L = cvOf('art', 'slack', 'dm:RS');
+  await deliver(w.env, w.msg('dm:RS', 'one', person('loren')), w.o);
+  const first = loadConv(w.env, L).body;
+  w.runner.finish(first);
+  await tick(w.env, w.o);
+  w.clock.advance(11 * 60_000);
+  await tick(w.env, w.o);
+  await deliver(w.env, w.msg('dm:RS', 'two', person('loren')), w.o);
+  assert.ok(loadConv(w.env, L).body);
+  assert.equal(resetPrincipal(w.env, L).ok, true);
+  const c = loadConv(w.env, L);
+  assert.equal(resetSigned(deliveryDir(w.env), c), true);
+  assert.equal(c.actsFor.resetBy, 'owner');
+  assert.equal(c.slot, undefined);
+  assert.equal(c.resetPending, true);
+  // The body that heard Loren is ended before the owner's next message, and nothing resumes her session.
+  const n = w.log.length;
+  await deliver(w.env, w.msg('dm:RS', 'mine now', person('jonathan')), w.o);
+  assert.ok(w.log.slice(n).some((l) => l[0] === 'end'));
+  assert.equal(w.log.slice(n).some((l) => l[0] === 'feed' || l[0] === 'resume'), false);
+  assert.equal(w.runner.seats[loadConv(w.env, L).body.split(':')[1]], 'owner');
+  assert.equal(loadConv(w.env, L).resetPending, undefined);
+  // The CLI refuses a reset from any body's environment (a house's, or a local body's run key or conversation).
+  const { spawnSync } = await import('node:child_process');
+  const cli = join(here, '..', 'src', 'cli.mjs');
+  for (const extra of [{ LOOM_BODY_KEY: 'k' }, { LOOM_BODY_CONVERSATION: L }, { HOUSE_ID: 'h-1' }]) {
+    const r = spawnSync(process.execPath, [cli, 'principal', '--reset', '--conversation', L], { env: { PATH: process.env.PATH, HOME: w.env.HOME, LOOM_BOX_DATA: w.env.LOOM_BOX_DATA, ...extra }, encoding: 'utf-8' });
+    assert.notEqual(r.status, 0, JSON.stringify(extra));
+    assert.match(r.stdout + r.stderr, /never a body's/);
+  }
+});
+
+test('down: an agent stops a body host\'s house only from one of the same seat; no answer names a seat but the owner\'s', async () => {
+  const w = world();
+  setAgent(w.env, fx, { agent: 'art', repo: 'https://example.com/art.git' });
+  const task = 'loom-runtime body-host --piece box --host-key x';
+  update(w.env, (s) => {
+    s.houses['h-1'] = { id: 'h-1', agent: 'art', kind: 'body-host', seat: 'owner', state: 'running', task };
+    s.houses['h-2'] = { id: 'h-2', agent: 'art', kind: 'body-host', seat: 'p-loren', state: 'running', task };
+    s.houses['h-3'] = { id: 'h-3', agent: 'art', kind: 'body-host', seat: 'p-loren', state: 'running', task };
+  });
+  const as = (house) => ({ kind: 'agent', agent: 'art', house });
+  const r1 = await api(w.env, fx, { caller: as('h-2'), path: 'down', body: { id: 'h-1' } });
+  assert.equal(r1.status, 404, 'her house never stops his');
+  assert.equal(load(w.env).houses['h-1'].state, 'running');
+  const r2 = await api(w.env, fx, { caller: as('h-2'), path: 'down', body: { id: 'h-3' } });
+  assert.equal(r2.status, 200);
+  assert.equal('seat' in r2.body, false, 'the answer names no seat');
+  const r3 = await api(w.env, fx, { caller: { kind: 'owner' }, path: 'down', body: { id: 'h-1' } });
+  assert.equal(r3.status, 200);
+});
+
+test('a body seated before this change (its rules name no seat) is in the owner\'s house: someone else\'s conversation moves', async () => {
+  const { seatMoved } = await import('../src/delivery.mjs');
+  const env = household(world().env);
+  const old = (actsFor) => ({ conversation: 'cv-00000000001a', agent: 'art', body: 'claude:h-1-x', bodyRules: { guest: false }, actsFor });
+  assert.equal(seatMoved(env, old({ owner: false, people: ['loren'], unknown: false })), true, 'Loren\'s: out of the owner\'s house');
+  assert.equal(seatMoved(env, old({ owner: false, people: [], unknown: true })), true, 'unknown: out');
+  assert.equal(seatMoved(env, old({ owner: true, owners: ['jonathan'], people: [], unknown: false })), false, 'his: stays');
+});
+
+test('the cap counts seats, not houses: a seat\'s draining house and its new one are one', async () => {
+  const { seatCapProblem } = await import('../src/principal.mjs');
+  const task = 'loom-runtime body-host --piece box --host-key x';
+  const s = { houses: {
+    'h-1': { agent: 'art', kind: 'body-host', seat: 'p-a', state: 'running', task },
+    'h-2': { agent: 'art', kind: 'body-host', seat: 'p-a', state: 'running', task },
+  } };
+  assert.equal(seatCapProblem({ LOOM_RUNTIME_SEAT_HOUSES: '2' }, s, 'art', 'p-c'), null);
+  s.houses['h-3'] = { agent: 'art', kind: 'body-host', seat: 'p-b', state: 'running', task };
+  assert.match(seatCapProblem({ LOOM_RUNTIME_SEAT_HOUSES: '2' }, s, 'art', 'p-c'), /2 houses at work/);
+});
+
+test('the cap\'s release never stops a house just handed to a start', async () => {
+  const { releaseEmptySeatHouses } = await import('../src/houserunner.mjs');
+  const w = world();
+  setAgent(w.env, fx, { agent: 'art', repo: 'https://example.com/art.git' });
+  const dir = join(w.env.LOOM_BOX_DATA, 'delivery', 'hosts');
+  mkdirSync(dir, { recursive: true });
+  update(w.env, (s) => { s.houses['h-5'] = { id: 'h-5', agent: 'art', kind: 'body-host', seat: 'p-y', state: 'running', task: 'loom-runtime body-host --piece box --host-key x' }; });
+  const now = Date.now();
+  const rec = { agent: 'art', seat: 'p-y', house: 'h-5', report: { at: now, house: 'h-5', bodies: {}, done: {} }, req: {}, stop: {}, inbox: {} };
+  writeFileSync(join(dir, 'art@p-y.json'), JSON.stringify({ ...rec, handedAt: now }));
+  assert.deepEqual(releaseEmptySeatHouses(w.env, 'art', 'p-x', now), [], 'handed out: kept');
+  writeFileSync(join(dir, 'art@p-y.json'), JSON.stringify(rec));
+  assert.deepEqual(releaseEmptySeatHouses(w.env, 'art', 'p-x', now), ['h-5'], 'empty and not handed out: let go');
+});
+
 test('a seat record whose house was just asked for is never swept; one whose house is over is', () => {
   const w = world();
   setAgent(w.env, fx, { agent: 'art', repo: 'https://example.com/art.git' });
@@ -256,18 +352,28 @@ test('a seat record whose house was just asked for is never swept; one whose hou
 test('a local body (loom\'s machine) is the owner\'s work only: a person other than the owner writing there gets no body', async () => {
   const { seatMoved } = await import('../src/delivery.mjs');
   const env = household(world().env);
-  const c = { conversation: 'cv-00000000000d', agent: 'art', local: true, body: 'claude:x0000001', actsFor: { owner: false, people: [], unknown: false, localWake: true } };
-  assert.equal(seatMoved(env, c), false, 'only the clock\'s local wakes: the owner\'s machine\'s');
-  c.actsFor = { owner: true, owners: ['jonathan'], people: [], unknown: false, localWake: true };
+  const c = { conversation: 'cv-00000000000d', agent: 'art', local: true, body: 'claude:x0000001', actsFor: { owner: true, owners: [], people: [], unknown: false } };
+  assert.equal(seatMoved(env, c), false, 'a wake the clock said is the owner\'s');
+  c.actsFor = { owner: true, owners: ['jonathan'], people: [], unknown: false };
   assert.equal(seatMoved(env, c), false, 'and his Reply');
+  c.actsFor = { owner: false, people: [], unknown: true };
+  assert.equal(seatMoved(env, c), true, 'a wake with no word from the clock: unknown, foreign');
+  c.actsFor = { owner: true, owners: ['jonathan'], people: [], unknown: false };
   c.actsFor.people = ['loren'];
   assert.equal(seatMoved(env, c), true, 'someone else wrote');
   c.actsFor = { owner: false, people: [], unknown: true };
   assert.equal(seatMoved(env, c), true, 'unknown is foreign: fail closed');
-  // The owner's reset vouches for it (principal.mjs, resetActsFor): his machine's again, until someone else writes.
+  // The owner's reset vouches for it only signed, as the runtime makes it on his word (resetPrincipal): a reset
+  // string anyone wrote vouches for nothing.
   const { resetActsFor } = await import('../src/principal.mjs');
-  resetActsFor(env, c, '2026-11-08T00:00:00Z');
-  assert.equal(seatMoved(env, c), false, 'reset: the owner\'s');
+  const { deliveryDir } = await import('../src/delivery.mjs');
+  c.actsFor = { owner: false, people: [], unknown: false, reset: '2026-11-08T00:00:00Z' };
+  assert.equal(seatMoved(env, c), true, 'an unsigned reset: foreign');
+  resetActsFor(env, c, '2026-11-08T00:00:00Z', { dir: deliveryDir(env), by: 'owner' });
+  assert.equal(seatMoved(env, c), false, 'signed: the owner\'s');
+  c.actsFor.reset = '2026-11-09T00:00:00Z';
+  assert.equal(seatMoved(env, c), true, 'a signature is for its own reset only');
+  resetActsFor(env, c, '2026-11-08T00:00:00Z', { dir: deliveryDir(env), by: 'owner' });
   c.actsFor.people = ['loren'];
   assert.equal(seatMoved(env, c), true);
 });
@@ -382,6 +488,8 @@ test('in houses: each seat gets its own house, and a house\'s host is handed onl
   const { releaseEmptySeatHouses } = await import('../src/houserunner.mjs');
   await until(() => Object.values(hostOf(env, 'art', 'p-loren').report?.bodies ?? {}).every((x) => x.status === 'ended'));
   update(env, (s) => { for (const h of ['h-1', 'h-2']) s.houses[h].state = 'running'; });   // as its box reports it (no box here)
+  // (Its warm() hand-out was a while ago: as the record would read after a minute.)
+  { const f = join(env.LOOM_BOX_DATA, 'delivery', 'hosts', 'art@p-loren.json'); const x = JSON.parse(readFileSync(f, 'utf-8')); delete x.handedAt; writeFileSync(f, JSON.stringify(x)); }
   assert.deepEqual(releaseEmptySeatHouses(env, 'art', 'u-cv-00000000000c'), ['h-2']);
   assert.equal(load(env).houses['h-2'].state, 'stopping');
   assert.deepEqual(releaseEmptySeatHouses(env, 'art', 'p-loren'), [], 'never the asking seat\'s own, never the owner\'s');

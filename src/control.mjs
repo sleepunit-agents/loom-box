@@ -176,9 +176,10 @@ function mayHostValue(v) {
  */
 export const shownTask = (t) => (typeof t === 'string' ? t.replace(/(--host-key )[0-9a-f]+/g, '$1…') : t);
 
-function houseView(h) {
-  const { tokenLabel: _t, ...rest } = h;
-  return { ...rest, task: shownTask(rest.task) };
+/** A house as an answer shows it: never its token's label, and whose work it's for (t-1952: `seat`) only to an owner. */
+function houseView(h, { seat = false } = {}) {
+  const { tokenLabel: _t, seat: st, ...rest } = h;
+  return { ...rest, task: shownTask(rest.task), ...(seat && st !== undefined ? { seat: st } : {}) };
 }
 
 // ------------------------------------------------------------- the owner's
@@ -388,6 +389,13 @@ export function down(env, effects, caller, { id }) {
   return update(env, (s) => {
     const h = s.houses[id];
     if (!h || !sees(caller, h.agent)) fail(`no house ${id}`, 404);
+    // A body host's house is taken down by the owner (or the runtime), and by an agent only from a house of the same
+    // seat (t-1952): a body in one principal's house never stops another principal's.
+    if (caller.kind === 'agent' && isHostHouse(h, s)) {
+      const mine = s.houses[caller.house];
+      const seatOf = (x) => (typeof x?.seat === 'string' ? x.seat : OWNER_SEAT);
+      if (!mine || !isHostHouse(mine, s) || seatOf(mine) !== seatOf(h)) fail(`no house ${id}`, 404);
+    }
     if (h.service && LIVE.has(h.state)) fail(`${id} is the ${h.service} service's house: take the service down (service-down) or move it`, 409);
     if (TERMINAL.has(h.state)) return houseView(h);
     if (h.state === 'wanted') h.state = 'stopped';
@@ -404,10 +412,9 @@ export function list(env, caller) {
     .filter((h) => sees(caller, h.agent))
     .sort((x, y) => Number(y.id.slice(2)) - Number(x.id.slice(2)))
     .slice(0, 50)
-    .map(houseView)
     // Whose work each body host's house is for (t-1952) is the owner's to read: a body in one of them never learns who
     // steers its agent's other conversations, nor their ids.
-    .map((h) => (caller.kind === 'agent' && 'seat' in h ? (({ seat: _s, ...rest }) => rest)(h) : h));
+    .map((h) => houseView(h, { seat: caller.kind === 'owner' }));
   // Boxes are the household's: its owner sees them all, with their grants; anyone else, the live ones that may host their agents.
   const mine = caller.kind === 'agent' ? [caller.agent] : Array.isArray(caller.agents) ? caller.agents : null;
   const boxes = Object.entries(s.boxes)

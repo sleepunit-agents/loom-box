@@ -177,6 +177,8 @@ function releaseLocked(env, agent, seat, nowMs) {
     if (!h.house || s.houses[h.house]?.state !== 'running' || !freshRec(h, h.house, nowMs) || h.draining) continue;
     if (Object.values(h.report.bodies ?? {}).some((b) => b.status !== 'ended')) continue;
     if (Object.keys(h.req ?? {}).length || Object.keys(h.stop ?? {}).length || Object.keys(h.inbox ?? {}).length) continue;
+    // Just handed to a start (warm, then launch's request): not empty, it's about to have a body.
+    if (Number.isFinite(h.handedAt) && nowMs - h.handedAt < CLAIM_MS) continue;
     empty.push(h.house);
   }
   if (!empty.length) return [];
@@ -422,7 +424,11 @@ export class HouseRunner {
       let takes = !!h.house && houseTakes(this.env, h.house);
       // An older image than the agent's current build: drained, and the next body goes to a fresh house (t-1764).
       if (takes && this.drain(agent, h.house, seat)) takes = false;
-      else if (fresh(h, now) && takes) return h.house;
+      else if (fresh(h, now) && takes) {
+        // Handed out (its launch writes the request next): marked, so the cap's release never stops it in between.
+        hostLocked(this.env, () => { const x = loadHost(this.env, agent, seat); if (x.house === h.house) { x.handedAt = now; writeJson(hostFile(this.env, agent, seat), x); } });
+        return h.house;
+      }
       if (!takes) {
         // Never past the cap, and never into another seat's house: the body waits (delivery.mjs asks seatRoom first;
         // this is the same check, for a start that raced past it).
