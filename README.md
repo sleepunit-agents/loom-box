@@ -260,7 +260,7 @@ loom runtime body end claude:99553cf9  |  loom runtime body list
 
 Anything addressed to an agent arrives through core's `deliver`, which runs this piece's `delivery` offer (`loom-runtime deliver`, the body on stdin). The turn goes to core first and its text to the audit log. Then the conversation's body is reached within 2 s: `fed`, `resumed`, `started`, `queued` or `failed`.
 
-- **A body is a session in its agent's own warm house.** Delivery asks for the agent's house (`up`) with the task `loom-runtime body-host --piece <name> --host-key <boot key>`. The house runs it, and the body host there wakes the bodies with the house's own harness, login, repo, cwd, secrets and agent token. The house file's command must run that task. Nothing of the runtime's environment goes along, only each body's run key, `LOOM_BODY_KEY`.
+- **A body is a session in its agent's own warm house, its principal's** (one house per steering principal: Permissions, t-1952). Delivery asks for that house (`up`) with the task `loom-runtime body-host --piece <name> --host-key <boot key>`. The house runs it, and the body host there wakes the bodies with the house's own harness, login, repo, cwd, secrets and agent token. The house file's command must run that task. Nothing of the runtime's environment goes along, only each body's run key, `LOOM_BODY_KEY`.
 - **The body host's own key:** `body-sync` takes only the body host's key, never a body's credentials. The task's boot key is good for one use: the host's first sync trades it for its own key, which it holds in memory. Bodies get neither key, nor the task.
 - **Placement** is the same rule the accounts and the claim use (`mayHost` and `mayUseLogin`, [docs/model-accounts.md](docs/model-accounts.md)). The box must be one that may host the agent, logged in to the body's harness, owned by the agent's owner (a loan hosts the agent but doesn't lend the login), with that login granted to the agent. The house must declare the harness in its house file's `"harnesses"`, or it gets no login and its body fails saying so. With no such box, the body is `failed` and says why.
 - **Once only:** each turn carries core's idempotency key, `<source>:<id>` (loom#426). A retry after a lost answer gets the same turn back, and a key that belongs to another turn is refused. The same `(source, id)` arriving with a different message is refused (409), and one still being made answers 503 with `retryAfter`.
@@ -408,9 +408,47 @@ message a body does (`src/principal.mjs`):
   its digests), or heard a relay or a sender no one names, asks from then on; messages already waiting in its queue
   count as heard. The owner can vouch for one on loom's machine: `loom runtime principal --reset --conversation cv`
   sets aside what it heard before (his Comms threads and lanes from before this change, say).
-- **The limit**, as for `send` (Threat model): an agent's bodies share its house, so one that sets out to pose as a
-  sibling can read the sibling's run key and session and get its statement. On loom's machine, the signing key is the
-  runtime's account's, which a local body shares.
+- **Houses follow it** (t-1952, below): a body runs in its principal's house, so it can't read the run key or session
+  of a conversation someone else steers. On loom's machine, the signing key is the runtime's account's, which a local
+  body shares.
+
+### One house per steering principal (t-1952)
+
+The owner's ruling, 2026-11-07: bodies doing his work run in his house; bodies doing anyone else's (Loren, Daniel, a
+Discord or Slack guest, someone unnamed) run in a separate house for that principal. A house's bodies are one uid in
+one container, so walling conversations apart inside a house isn't possible; walling principals apart is.
+
+- **The house key** is agent + body host + *seat*, the seat being the conversation's principal now
+  (`principal.mjs`, `seatOf`): `owner` when every voice was the owner's; `p-<slug>` for one non-owner person; and
+  `u-<conversation>` for anything else (unknown, several people, a relay from another agent, nothing heard). An
+  unknown principal is never shared: two conversations nobody can name are no more one principal than two strangers.
+  The owner's seat keeps the record it always had (`delivery/hosts/<agent>.json`), so his warm house is kept across the
+  change; each other seat has `delivery/hosts/<agent>@<seat>.json` and its own house. A body host's house says its
+  seat (`seat`, on `loom box list` and the Boxes page).
+- **The proof is bound to the house.** `send`, `principal`, a body's `place` and the relay's return address all take
+  the run's key and session as before, and now also refuse a caller whose house (core names it, from the house's
+  token) isn't the house of the body holding that conversation. A key or session id carried out of its house proves
+  nothing from another, nor from no house.
+- **A principal that changes moves the body.** Each body's rules record its seat. When the next message would change
+  it (Loren writes into the owner's group, a second person into Loren's DM, the owner resets a conversation that was
+  someone else's and writes), the body is never fed where it is: it's ended there, its session packed into its slot,
+  and the conversation resumes in the right house with that message. The conversation's own session goes with it
+  (it's that conversation's history, which its new principal is party to); no other conversation's ever does. A guest
+  venue's rules still drop a session that wasn't a guest venue's (`sameRules`). A relay's answer that waits for the
+  requesting turn to end (`untilIdle`) doesn't interrupt that turn: the move comes when it's over.
+- **Cost.** Houses for other people are capped per agent: `LOOM_RUNTIME_SEAT_HOUSES` (default 4) live houses for seats
+  other than the owner's. At the cap a conversation that needs another house waits (`queued`, saying so) for one to
+  idle out, and is started by the tick once one has; it never shares a house. The owner's house is never held by the
+  cap. Every house idles out as before (a warm body after 600 s, its house 600 s after its last body), its seat's
+  record is swept once its house is over, and all of an agent's houses run the same image (one build per repo tree,
+  so more houses make no more images: t-1933).
+- **What follows the house**: its Codex homes and run dirs (inside its container: t-1924), its key files, its harness
+  sessions and its per-house state dir. Secrets are the agent's house config's, the same for every seat: a non-owner's
+  house gets exactly what one house got before this, no more.
+- **What doesn't**: the agent's own loom token reaches the agent's memory, knowledge and conversations from any of its
+  houses (an agent token is the agent's; core doesn't scope it by principal), and the box's model login dir is one
+  read-write dir every house of that agent on that box mounts. Neither is a run key or session.
+- **Local bodies** (loom's machine, t-1830) have no houses: they're only the owner's wakes, and run as before.
 
 ## Model choice
 
@@ -567,7 +605,7 @@ A box never reads loom's stores, and loom never reaches into a box. The box poll
 - **A body host's boot key is shown to nobody.** A house's task carries it (`--host-key`), and only the box that claims the house gets it whole: `list`, `down` and the page show `--host-key …`. It's good for one use anyway, traded on the host's first sync.
 - **A body can't fetch secrets.** A house's token is an ordinary `agent:<name>` token. It reaches MCP and the CLI as that agent, and the secrets piece won't hand a value to a body. Only the box fetched them, for the house.
 - **A box only runs containers.** The agent's code runs inside its container, which is rootless podman with no host home, no box env and only its own dirs and secrets. The agent's Containerfile builds under podman too. So a house can't read the box's credential, the box's files, or (on loom's own machine) the household. Nested containers widen what the container may do inside its own user namespace, which is why the owner has to allow them per agent.
-- **Inside one house, a body's run key and session only keep an agent's own bodies apart, not walled off.** A house's bodies are one agent, one uid, in one container. Each conversation's key is a 0600 file only that uid can read, and a body names its harness session when it sends. The runtime refuses a send whose session isn't the one holding the conversation, so a body's mistake (naming a sibling's conversation) is refused even though it can read that key file. But a body that sets out to pose as a sibling can: it can read the sibling's key file and the sibling's session id (the harness's job files), and set `CLAUDE_CODE_SESSION_ID` itself, as it could already read any process's environment in its house. This is the same agent's own conversations, never another agent's: a send is checked against the house's agent token first. The same holds for `principal`: such a body can get a sibling conversation's statement, and with it act as that conversation's principal (the owner's, if the sibling is his) toward approvals and the clock; isolating bodies within a house is its own work. A harness whose runner reports no session (Codex today: each body is its own process, with its own `LOOM_BODY_KEY`) is checked by its key alone.
+- **One house per steering principal (t-1952).** A house's bodies are one agent, one uid, in one container, so inside a house a body's run key and session only keep that house's bodies apart, not walled off: a body that sets out to pose as a sibling in its house can read the sibling's key file and session id and set `CLAUDE_CODE_SESSION_ID` itself. So a house holds one principal's conversations only (the owner's; one person's; or one unknown conversation's, alone), and a body moves house when its conversation's principal does (Permissions, "One house per steering principal"). What a sibling can pose as is a conversation of the same principal, toward approvals and the clock the same principal it already acts for. And the runtime refuses `send`, `principal`, `place` and a relay's return address from any house but the one holding the conversation's body, so a key or session id carried out of its house (a guest's house to the owner's, or back) proves nothing. A send is checked against the house's agent token first: never another agent's. A harness whose runner reports no session (Codex today: each body is its own process, with its own `LOOM_BODY_KEY`) is checked by its key and its house.
 - **Revocation doesn't fail open.** A revoke that fails (loom's token file busy) is queued and retried on every box poll until it goes, and a revoked box's name can't be reused until its old credential is gone.
 - State on the control plane: `~/.config/loom-box/state.json` (0600, in a 0700 dir; `LOOM_BOX_HOME` moves it), and each service's saved state as its own gzipped tarball in `blobs/` beside it (up to 48 MB, moved in parts; only its size and hash are in state.json). On a box: `box.json` and `credential` (0600) in the same dir, and repo mirrors and house dirs under `~/.local/share/loom-box` (`LOOM_BOX_DATA`).
 

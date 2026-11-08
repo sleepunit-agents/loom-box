@@ -38,7 +38,7 @@ export async function runFor(env, caller, argv, store = loomStore(env), core = c
   if (a === 'place') {
     const args = argv.slice(1);
     if (args.length !== 2 || args[0] !== '--conversation' || !/^cv-[0-9a-f]{12}$/.test(args[1])) return no('place --conversation cv-… (this body\'s own)', 2);
-    const r = await placeOf(env, args[1], proof, caller.agent);
+    const r = await placeOf(env, args[1], proof, caller.agent, caller);
     return r.ok ? ok(`${JSON.stringify(r.place)}\n`) : no(r.reason);
   }
   const tail = a === 'propose-person' ? [b, ...rest].filter((x) => x !== undefined) : a === 'gates' && b === 'propose' ? rest : null;
@@ -63,11 +63,11 @@ export async function runFor(env, caller, argv, store = loomStore(env), core = c
  * works for now (principal.mjs), and `ownerSpoke` whether the owner ever spoke there (principalOf names a lone non-owner
  * even then): a tool scoped by a person checks both name that same one and that the owner never spoke.
  */
-export async function placeOf(env, cv, proof = {}, agent = undefined) {
+export async function placeOf(env, cv, proof = {}, agent = undefined, caller = undefined) {
   const d = await import('./delivery.mjs');
   const { principalOf } = await import('./principal.mjs');
   const c = d.loadConv(env, cv);
-  if (!c || (agent !== undefined && c.agent !== agent) || !d.holdsRun(env, cv, proof)) return { ok: false, reason: `place: only the body holding ${cv} in its current run asks where it is` };
+  if (!c || (agent !== undefined && c.agent !== agent) || !d.holdsRun(env, cv, proof, { caller })) return { ok: false, reason: `place: only the body holding ${cv} in its current run asks where it is` };
   const p = principalOf(env, c);
   return { ok: true, place: { conversation: c.conversation, agent: c.agent, venue: c.venue, place: c.place, ...(c.label !== undefined ? { label: c.label } : {}), members: c.bodyRules?.members ?? [], ...(c.bodyRules?.membersAt ? { membersAt: c.bodyRules.membersAt } : {}), principal: { for: p.for, owner: p.owner, ownerSpoke: c.actsFor?.owner === true, ...(p.unknown ? { unknown: true } : {}) } } };
 }

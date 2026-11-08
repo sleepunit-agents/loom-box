@@ -19,8 +19,10 @@
 //      (`--wake`, loom's machine only). It's taken as the wake's message is queued, so a wake set by a body working
 //      for someone else stays theirs.
 //
-// The limit (as `send`'s, README "Threat model"): one agent's bodies share its house, so a body that sets out to pose
-// as a sibling can read that sibling's run key and session and get its statement. Isolating them is the house's job.
+// Houses (t-1952): one per steering principal. A body runs in the house of whom its conversation acts for (seatOf):
+// the owner's work in the agent's one owner house, a person's in that person's own, an unknown principal's in a house
+// of that conversation alone. So a body can't read the run key or session of a conversation steered by someone else:
+// they're files in another container. A principal that changes moves the body (delivery.mjs, plan: reseat).
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -105,6 +107,24 @@ export function principalOf(env, c) {
     return { for: spoke.length === 1 ? spoke[0] : spoke.length === 0 && owners.length === 1 ? owners[0] : null, owner: true, people: [] };
   }
   return { for: null, owner: false, people: [] };
+}
+
+// ─── Seats: whose house a body runs in (t-1952) ────────────────────────────
+
+/** A house's seat: `owner`, `p-<person>` (one non-owner person's) or `u-<conversation>` (an unknown principal's). */
+export const SEAT = /^(owner|p-[a-z0-9]+(-[a-z0-9]+)*|u-cv-[0-9a-f]{12})$/;
+export const OWNER_SEAT = 'owner';
+
+/**
+ * Whose house a conversation's body runs in, by its principal (principalOf): the owner's only when every voice was the
+ * owner's; one non-owner person's, theirs; anything else (unknown, several people, nothing heard) is a house of this
+ * conversation alone, never shared: two unknowns are no more one principal than two strangers are.
+ */
+export function seatOf(p, conversation) {
+  if (p?.owner === true) return OWNER_SEAT;
+  if (typeof p?.for === 'string' && PERSON.test(p.for) && p.for.length <= 40) return `p-${p.for}`;
+  if (!/^cv-[0-9a-f]{12}$/.test(conversation ?? '')) throw new Error('an unknown principal\'s seat is its conversation\'s');
+  return `u-${conversation}`;
 }
 
 // ─── Statements ─────────────────────────────────────────────────────────────

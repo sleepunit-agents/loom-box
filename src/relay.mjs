@@ -166,7 +166,7 @@ export function originOf(env, caller, id, proof = {}) {
     // A relay conversation is never a return address: its place is the peer it's with, and an answer from another
     // agent there would be recorded under the wrong peer and dodge that pair's ping-pong check.
     if (!held(c)) return null;
-    if (proof.key && holdsRun(env, id, proof)) return c;
+    if (proof.key && holdsRun(env, id, proof, { caller })) return c;
     // Unproven, it's the asker's only when no other conversation of this agent is at work: any such body could be the
     // one claiming it (a guest venue's into the owner's thread, or the owner's thread's into a guest venue, where the
     // answer would be read by guests; a sibling thread; a DM with someone else).

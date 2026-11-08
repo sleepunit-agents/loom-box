@@ -6,6 +6,7 @@
 // It is not a scheduler. A house goes where it's told (a box), or to the one
 // permitted box that has what it needs, or to the agent's primary. If that
 // doesn't name exactly one box, it says why and starts nothing.
+import { OWNER_SEAT, SEAT } from './principal.mjs';
 import { ownCommit } from './version.mjs';
 import { pieceName } from './piece.mjs';
 import { randomBytes } from 'node:crypto';
@@ -344,6 +345,9 @@ const actor = (caller) => (caller.kind === 'agent' ? caller.agent : typeof calle
  */
 export function up(env, effects, caller, { agent, box, needs, task, session, slot }, own = {}) {
   const hostHouse = own.kind === 'body-host';
+  // Whose work a body host's house is for (t-1952; principal.mjs, seatOf): the owner's, a person's, or one unknown
+  // conversation's. The runtime's own say, like its kind; shown on the house, for the owner's listing.
+  const seat = hostHouse && typeof own.seat === 'string' && SEAT.test(own.seat) ? own.seat : null;
   let a;
   if (caller.kind === 'agent') {
     if (agent && agent !== caller.agent) fail(`this token is ${caller.agent}'s; it can only ask for its own house`, 403);
@@ -371,7 +375,7 @@ export function up(env, effects, caller, { agent, box, needs, task, session, slo
     const where = placeHouse(s, a, { box: box || undefined, needs: n }, env);
     const id = nextHouseId(s);
     const at = now(effects);
-    s.houses[id] = { id, agent: a, box: where, task: t, needs: n, state: 'wanted', created: at, updated: at, by: actor(caller), ...(sess ? { session: true } : {}), ...(sl ? { slot: sl } : {}), ...(hostHouse ? { kind: 'body-host' } : {}) };
+    s.houses[id] = { id, agent: a, box: where, task: t, needs: n, state: 'wanted', created: at, updated: at, by: actor(caller), ...(sess ? { session: true } : {}), ...(sl ? { slot: sl } : {}), ...(hostHouse ? { kind: 'body-host', seat: seat ?? OWNER_SEAT } : {}) };
     return { id, agent: a, box: where, boxName: boxLabelOf(s, where), state: 'wanted', ...(sess ? { session: true } : {}), ...(sl ? { slot: sl } : {}) };
   });
 }

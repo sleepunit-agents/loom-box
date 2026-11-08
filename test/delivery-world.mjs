@@ -34,6 +34,10 @@ export function fakeRunner(log, root, harness = 'claude', { inboxDir } = {}) {
   const tfile = (s) => join(roots.sess, `${s}.jsonl`);
   const r = {
     harness, roots, inbox: inboxDir ? inbox(inboxDir) : null, failStart: null, failResume: null, envs: {}, denies: {}, dead: new Set(), delay: 0,
+    // Whose house each body was seated in (t-1952): the seat delivery gave. `houses` (seat -> house id), when a test
+    // sets it, makes this runner report its bodies as in those houses, as a house's runner does.
+    seats: {}, houses: null,
+    where(o) { const seat = o.seat ?? 'owner'; return r.houses ? { seat, house: r.houses[seat] ?? 'h-99' } : {}; },
     start(o) {
       if (r.failStart) throw new RunnerError(r.failStart);
       if (r.delay) { const ms = r.delay; r.delay = 0; return new Promise((res) => setTimeout(res, ms)).then(() => r.start(o)); }
@@ -43,9 +47,10 @@ export function fakeRunner(log, root, harness = 'claude', { inboxDir } = {}) {
       log.push(['start', id, o.brief]);
       r.envs[id] = o.env;
       r.denies[id] = o.deny ?? [];
+      r.seats[id] = o.seat;
       state[id] = 'working';
       r.inbox?.open(id, {});
-      return { id, harness, model: o.model, slot: { harness, session: session[id] } };
+      return { id, harness, model: o.model, slot: { harness, session: session[id] }, ...r.where(o) };
     },
     resume(slot, o) {
       if (r.failResume) throw new RunnerError(r.failResume);
@@ -54,9 +59,10 @@ export function fakeRunner(log, root, harness = 'claude', { inboxDir } = {}) {
       log.push(['resume', id, slot.session, existsSync(tfile(slot.session)) ? readFileSync(tfile(slot.session), 'utf-8') : null, o.brief]);
       r.envs[id] = o.env;
       r.denies[id] = o.deny ?? [];
+      r.seats[id] = o.seat;
       state[id] = 'working';
       r.inbox?.open(id, {});
-      return { id, harness, model: o.model, slot };
+      return { id, harness, model: o.model, slot, ...r.where(o) };
     },
     feed(b, m) {
       if (state[b.id] !== 'working') return { fed: false, reason: 'its turn is over: resume it' };
@@ -200,6 +206,8 @@ export function houseWorld({ sealer, claimMs = 5000, warmMs = 5000 } = {}) {
   const D = scratch('rt-r2-house-');
   const env = { PATH: process.env.PATH, HOME: D, LOOM_HOME: join(D, 'loomhome'), LOOM_BOX_LOCAL_NAME: 'one', LOOM_BOX_HOME: join(D, 'state'), LOOM_BOX_DATA: join(D, 'data'), LOOM_RUNTIME_SCORECARDS: 'off' };
   mkdirSync(env.LOOM_HOME, { recursive: true });
+  // Jonathan owns the household: his word is the owner's, so his conversations' bodies are in the owner's house (t-1952).
+  writeFileSync(join(env.LOOM_HOME, 'household.json'), JSON.stringify({ members: [{ person: 'jonathan', agents: '*' }] }));
   // The runtime's own key, as body-sync (through api()) opens what HouseRunner sealed.
   sealer ??= ageSealer(env, join(env.LOOM_BOX_DATA, 'delivery'));
   setAgent(env, { now: () => new Date() }, { agent: 'art', repo: 'https://example.com/art.git' });
