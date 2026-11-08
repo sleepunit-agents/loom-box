@@ -43,6 +43,12 @@ if (args[0] === 'run' && args.includes('--entrypoint')) {
   rmSync(tmp, { recursive: true, force: true });
   process.exit(r.status ?? 1);
 }
+// rmi: refused for an image config.json's inUse names (a container uses it), as podman without --force does.
+if (args[0] === 'rmi') {
+  if ((cfg().inUse ?? []).includes(args[1])) { console.error(`image used by a container: ${args[1]}`); process.exit(2); }
+  writeFileSync(join(D, 'rmis'), `${(existsSync(join(D, 'rmis')) ? readFileSync(join(D, 'rmis'), 'utf-8') : '')}${args[1]}\n`);
+  process.exit(0);
+}
 switch (`${args[0]} ${args[1] ?? ''}`) {
   case 'image exists': process.exit(existsSync(join(D, 'images', safe(args[2]))) ? 0 : 1);
   case 'info --format': console.log('true'); process.exit(0);
