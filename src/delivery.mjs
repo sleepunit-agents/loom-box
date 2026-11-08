@@ -737,7 +737,7 @@ async function deliverOnce(env, raw, o) {
         // The runtime's own daily review (review.mjs, source: this piece, which core sets) is the owner's schedule.
         const own = wake && m.source === pieceName(env) && m.place === 'review';
         const wakeFor = own ? 'owner' : wake ? takeWakeFor(deliveryDir(env), m.agent, m.place, m.id, d.now().getTime()) : undefined;
-        noteSender(env, c, m, { wakeFor });
+        noteSender(env, c, m, { wakeFor, localWake: wake && local });
         c.queue.push({ key, id: m.id, at: m.at, from: m.from, kind: m.kind, ...(local ? { local: true } : {}), ...(o.deferPeer === true && m.from.kind === 'agent' ? { untilIdle: true } : {}), ...(tier ? { tier } : {}), ...(owner ? { owner: true } : {}), ...(tierUnread ? { tierUnread: true } : {}), ...(sealed ? { sealed } : { mem: true }) });
       }
       c.last = d.now().toISOString();
@@ -1081,11 +1081,18 @@ export function seatMoved(env, c) {
 }
 
 /**
- * Whether a local conversation (loom's machine, t-1830) has heard a person other than its agent's owner. Its wakes
- * are set on loom's machine (no house's wake is ever delivered local), and a person joins it only by writing there:
- * the owner's Reply is his; anyone else's makes it no work for a body that shares the runtime account's keys.
+ * Whether a local conversation (loom's machine, t-1830) is anyone's but its owner's: it is, fail closed, unless its
+ * principal is the owner, or all it ever heard is local wakes the clock fired with no word from anyone (principal.mjs,
+ * noteSender `localWake`: such a wake is set on loom's machine). Anything else (a person who isn't the owner, a relay,
+ * a sender nobody names, history from before principals were kept) makes it no work for a body that shares the
+ * runtime account's keys. The owner can vouch for one with `loom runtime principal --reset`.
  */
-const localForeign = (env, c) => (principalOf(env, c).people ?? []).length > 0;
+function localForeign(env, c) {
+  const p = principalOf(env, c);
+  if (p.owner === true) return false;
+  const a = c.actsFor ?? {};
+  return !(a.localWake === true && !a.unknown && !a.owner && !(a.people ?? []).length && !(a.owners ?? []).length && !(p.people ?? []).length);
+}
 
 /** Whether a working body's rules don't cover what's queued for it (rulesFor: grantFor, members). A post-failure note
  * is the runtime's own, never a sender's, and a relay reply that waits for the turn to end isn't fed to it: neither

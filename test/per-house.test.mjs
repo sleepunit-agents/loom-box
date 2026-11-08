@@ -111,7 +111,7 @@ test('a principal that changes reseats the body in the right house: never fed wh
   assert.match(after.find((l) => l[0] === 'start')[2], /merge mine too/);
   assert.equal(loadConv(w.env, J).slot, undefined);
 
-  // The owner says it's his again (--reset), and writes: back to his house, the same way.
+  // The owner says it's his again (--reset), and writes: back to his house, fresh (her session isn't his house's).
   w.runner.finish(second);
   assert.equal(resetPrincipal(w.env, J).ok, true);
   const m = w.log.length;
@@ -120,6 +120,7 @@ test('a principal that changes reseats the body in the right house: never fed wh
   assert.notEqual(third, second);
   assert.equal(w.runner.seats[third.split(':')[1]], 'owner');
   assert.equal(w.log.slice(m).some((l) => l[0] === 'feed'), false, 'nothing fed in her house');
+  assert.equal(w.log.slice(m).some((l) => l[0] === 'resume'), false, 'her session never resumes in his house');
 
   // A slot from one seat isn't resumed in a person's: an evicted owner's body leaves a slot; then Loren writes.
   const K = cvOf('art', 'slack', 'group:K');
@@ -135,17 +136,40 @@ test('a principal that changes reseats the body in the right house: never fed wh
   assert.equal(w.log.slice(k).some((l) => l[0] === 'resume'), false, 'the owner\'s session never resumes in her house');
   assert.equal(w.runner.seats[loadConv(w.env, K).body.split(':')[1]], 'p-loren');
 
-  // Into a house of the conversation's own (a second person: unknown), its session does follow: no one else is there.
+  // A session a person steered goes nowhere but her house: not into the conversation's own unknown house (a second
+  // person wrote), so Loren's context never reaches Daniel's work.
   const M = cvOf('art', 'slack', 'group:M');
   await deliver(w.env, w.msg('group:M', 'one', person('loren')), w.o);
-  const lb = loadConv(w.env, M).body;
-  assert.equal(w.runner.seats[lb.split(':')[1]], 'p-loren');
+  assert.equal(w.runner.seats[loadConv(w.env, M).body.split(':')[1]], 'p-loren');
   const j = w.log.length;
   await deliver(w.env, w.msg('group:M', 'two', person('daniel')), w.o);
-  const moved = w.log.slice(j).find((l) => l[0] === 'resume');
-  assert.ok(moved, 'resumed, in its own house');
-  assert.equal(w.runner.seats[moved[1]], `u-${M}`);
-  assert.match(moved[4], /two/);
+  assert.equal(w.log.slice(j).some((l) => l[0] === 'resume'), false, 'dropped, not carried');
+  const fresh = w.log.slice(j).find((l) => l[0] === 'start');
+  assert.equal(w.runner.seats[fresh[1]], `u-${M}`);
+  assert.match(fresh[2], /two/);
+
+  // The owner's session may narrow into the conversation's own house (another agent's answer to his thread): carried.
+  const O = cvOf('art', 'slack', 'group:O');
+  await deliver(w.env, w.msg('group:O', 'ask mark', person('jonathan')), w.o);
+  const i = w.log.length;
+  await deliver(w.env, w.msg('group:O', 'mark says yes', { from: { kind: 'agent', id: 'mark' } }), w.o);
+  const carried = w.log.slice(i).find((l) => l[0] === 'resume');
+  assert.ok(carried, 'his session follows into a house of its own');
+  assert.equal(w.runner.seats[carried[1]], `u-${O}`);
+});
+
+test('the session carry rule: only its own seat, or from the owner\'s into the conversation\'s own house', async () => {
+  const { carriesSession } = await import('../src/principal.mjs');
+  const cv = 'cv-00000000000e';
+  assert.equal(carriesSession('owner', 'owner', cv), true);
+  assert.equal(carriesSession(undefined, 'owner', cv), true, 'none recorded is the owner\'s');
+  assert.equal(carriesSession('p-loren', 'p-loren', cv), true);
+  assert.equal(carriesSession('owner', `u-${cv}`, cv), true);
+  assert.equal(carriesSession('owner', 'p-loren', cv), false, 'never into a person\'s house');
+  assert.equal(carriesSession('p-loren', `u-${cv}`, cv), false, 'never out of one');
+  assert.equal(carriesSession('p-loren', 'owner', cv), false, 'his house never inherits a session someone else steered');
+  assert.equal(carriesSession(`u-${cv}`, 'owner', cv), false);
+  assert.equal(carriesSession('owner', 'u-cv-00000000000f', cv), false, 'another conversation\'s house is no house of its own');
 });
 
 test('a resume that meets the cap at its house waits, its slot kept; up() counts the cap in the write that makes a house', async () => {
@@ -199,10 +223,14 @@ test('a seat record whose house was just asked for is never swept; one whose hou
 test('a local body (loom\'s machine) is the owner\'s work only: a person other than the owner writing there gets no body', async () => {
   const { seatMoved } = await import('../src/delivery.mjs');
   const env = household(world().env);
-  const c = { conversation: 'cv-00000000000d', agent: 'art', local: true, body: 'claude:x0000001', actsFor: { owner: true, owners: ['jonathan'], people: [], unknown: true } };
-  assert.equal(seatMoved(env, c), false, 'a local wake with no word from the clock is still the owner\'s machine\'s');
+  const c = { conversation: 'cv-00000000000d', agent: 'art', local: true, body: 'claude:x0000001', actsFor: { owner: false, people: [], unknown: false, localWake: true } };
+  assert.equal(seatMoved(env, c), false, 'only the clock\'s local wakes: the owner\'s machine\'s');
+  c.actsFor = { owner: true, owners: ['jonathan'], people: [], unknown: false, localWake: true };
+  assert.equal(seatMoved(env, c), false, 'and his Reply');
   c.actsFor.people = ['loren'];
-  assert.equal(seatMoved(env, c), true);
+  assert.equal(seatMoved(env, c), true, 'someone else wrote');
+  c.actsFor = { owner: false, people: [], unknown: true };
+  assert.equal(seatMoved(env, c), true, 'unknown is foreign: fail closed');
 });
 
 test('houses for other people are capped per agent: at the cap a body waits (the owner\'s never does), and starts once one idles out', async () => {

@@ -44,11 +44,15 @@ export const ownersFor = (env, agent) => ownersOf(membersOf(env), agent);
  * saw, and a body resumes their session or their digests. Messages already waiting in its queue are noted first (the
  * body will hear them). Only the owner clears it (`loom runtime principal --reset`, resetActsFor).
  */
-export function noteSender(env, c, m, { wakeFor } = {}) {
+export function noteSender(env, c, m, { wakeFor, localWake = false } = {}) {
   if (!c.actsFor) {
     c.actsFor = { owner: false, people: [], unknown: (c.runs ?? 0) > 0 || (c.runLog ?? []).length > 0 };
     for (const q of c.queue ?? []) noteOne(env, c.actsFor, { ...q, agent: c.agent }, undefined);
   }
+  // A local wake (t-1830) the clock fired with no word on whom it's for: set on loom's machine (no house's wake is ever
+  // delivered local), so it's marked as exactly that, `localWake`, never as the owner's and never as a stranger's.
+  // Only the runtime's local-body check reads it (delivery.mjs, localForeign); the principal stays unnamed.
+  if (localWake && m.from?.kind === 'schedule' && wakeFor === undefined) { c.actsFor.localWake = true; return c.actsFor; }
   return noteOne(env, c.actsFor, m, wakeFor);
 }
 
@@ -128,16 +132,17 @@ export function seatOf(p, conversation) {
 }
 
 /**
- * Whether a conversation's own session (its slot) may follow it from seat `was` to seat `now`: only into a house no
- * other principal's bodies share in a way that matters. The same seat; the conversation's own unknown house (no one
- * else is in it); or the owner's (he reads every conversation of his agent already, and his reset is his word). Never
- * into one person's house: that house runs that person's other conversations, whose bodies could read the transcript
- * (what was said before they wrote, the files the body read). Then the session is dropped and the body starts fresh.
+ * Whether a conversation's own session (its slot) may follow it from seat `was` to seat `now`: resumed only in the
+ * seat it began in, or moved from the owner's seat into this conversation's own unknown house (no one else's bodies
+ * are there; a relay's answer into his thread lands that way). Never into a person's house (it runs their other
+ * conversations, whose bodies could read the transcript), and never out of one: a session a person steered goes
+ * nowhere but their house, so one person's context never reaches another's work, and the owner's house never
+ * inherits a session someone else steered. Otherwise the session is dropped and a fresh body reads the digests.
  */
 export function carriesSession(was, now, conversation) {
   const w = was ?? OWNER_SEAT;
   const n = now ?? OWNER_SEAT;
-  return w === n || n === OWNER_SEAT || n === `u-${conversation}`;
+  return w === n || (w === OWNER_SEAT && n === `u-${conversation}`);
 }
 
 /** The houses for seats other than the owner's, at work for an agent in state `s`, but `seat`'s own. */

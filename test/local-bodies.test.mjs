@@ -45,6 +45,21 @@ describe('local bodies', () => {
     assert.equal(localLog.filter((l) => l[0] === 'start' || l[0] === 'resume').length, 1, 'and none starts there for it');
   });
 
+  test('fail closed: a local conversation is the owner\'s, or only the clock\'s local wakes, or it gets no body here', async () => {
+    const { w, localLog, lwake, conv } = setup();
+    // A relay (another agent) into a local conversation: unknown, so no body on loom's machine.
+    await deliver(w.env, lwake('alert:y', 'one'), w.o);
+    const first = conv('alert:y').body;
+    assert.equal(conv('alert:y').actsFor.localWake, true);
+    const b = await deliver(w.env, w.msg('alert:y', 'from mark', { venue: 'wake', from: { kind: 'agent', id: 'mark' } }), w.o);
+    assert.notEqual(b.body, 'fed');
+    assert.ok(localLog.some((l) => l[0] === 'end' && l[1] === first.split(':')[1]));
+    // A local conversation with history from before principals were kept: unknown, refused, until the owner vouches.
+    const { seatMoved } = await import('../src/delivery.mjs');
+    assert.equal(seatMoved(w.env, { conversation: 'cv-00000000000a', agent: 'art', local: true, body: 'claude:x', actsFor: { owner: false, people: [], unknown: true, localWake: true } }), true);
+    assert.equal(seatMoved(w.env, { conversation: 'cv-00000000000a', agent: 'art', local: true, body: 'claude:x', actsFor: { owner: false, people: [], unknown: false, localWake: true } }), false);
+  });
+
   test('the setting: agents and an absolute cwd, or none', () => {
     assert.deepEqual(localBodiesOf({ LOOM_RUNTIME_LOCAL_BODIES: LOCAL }), { agents: ['art'], cwd: '/home/art/Art', from: 'clock', claude: '/home/art/.local/bin/claude', args: ['--dangerously-skip-permissions'], path: '/home/art/Art/bin:/usr/bin' });
     for (const bad of [undefined, '', 'nope', '[]', '{"agents":["art"]}', '{"agents":[],"cwd":"/x"}', '{"agents":["art"],"cwd":"rel"}']) {

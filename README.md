@@ -433,10 +433,11 @@ one container, so walling conversations apart inside a house isn't possible; wal
   it (Loren writes into the owner's group, a second person into Loren's DM, the owner resets a conversation that was
   someone else's and writes), the body is never fed where it is: it's ended there (mid-turn too: a second voice in a
   conversation cuts the turn it's in), and the conversation goes on in the right house with that message. Its own
-  session (its slot) goes with it only into a house nobody else's bodies would read it in (`carriesSession`): the
-  same seat, the conversation's own unknown house, or the owner's. Into a person's house, which runs that person's
-  other conversations too, it's dropped and the body starts fresh from the digests: a group member who wrote one line
-  was never party to what the body read before. No other conversation's session ever moves. A guest venue's rules
+  session (its slot) is resumed only in the seat it began in, or moved from the owner's seat into the conversation's
+  own unknown house, where no one else's bodies are (`carriesSession`; another agent's answer to his thread lands that
+  way). Every other move drops it and the body starts fresh from the digests: never into a person's house (it runs
+  their other conversations), never out of one (one person's context never reaches another's work), and the owner's
+  house never inherits a session someone else steered. No other conversation's session ever moves. A guest venue's rules
   still drop a session that wasn't a guest venue's (`sameRules`). A relay's answer that waits for the requesting turn
   to end (`untilIdle`) doesn't interrupt that turn: the move comes when it's over.
 - **Cost.** Houses for other people are capped per agent: `LOOM_RUNTIME_SEAT_HOUSES` (default 4) live houses for seats
@@ -455,9 +456,10 @@ one container, so walling conversations apart inside a house isn't possible; wal
   a key, a session's files or a message's words); and the box's model login dir is one read-write dir every house of
   that agent on that box mounts. None of them is a run key or a session.
 - **Local bodies** (loom's machine, t-1830) have no houses and share the runtime account's keys dir, so they do the
-  owner's work only: a local conversation that a person other than the owner has written into has its body ended and
-  gets none there (its start is refused, saying why). Its wakes are set on loom's machine, so a wake there with no
-  word from the clock isn't a stranger's.
+  owner's work only, fail closed: a local conversation gets a body there only while its principal is the owner, or
+  all it ever heard is the clock's local wakes with no word from anyone (marked `localWake`: they're set on loom's
+  machine). Anything else (another person, a relay, a sender nobody names, history from before principals were kept)
+  has its body ended and its start refused, saying why, until the owner vouches for it (`principal --reset`).
 
 ## Model choice
 
