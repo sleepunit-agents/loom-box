@@ -183,11 +183,11 @@ export function boards(env, nowS = Date.now() / 1000) {
 
 function adapterStatuses(env) {
   const out = {};
-  const home = env.LOOM_HOME || join(env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'loom');
+  const home = env.LOOM_HOME || join(env.XDG_CONFIG_HOME || join(env.HOME || homedir(), '.config'), 'loom');
   for (const venue of ['discord', 'slack']) {
     if (!existsSync(join(home, 'pieces', venue, 'piece.json'))) continue;
     try {
-      const d = JSON.parse(execFileSync('loom', [venue, 'status', '--json'], { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] }));
+      const d = JSON.parse(execFileSync(env.LOOM_BIN || 'loom', [venue, 'status', '--json'], { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] }));
       if (d.mode === 'live' && Array.isArray(d.agents)) out[venue] = d;
     } catch { /* Missing or unavailable: the old board remains authoritative. */ }
   }
