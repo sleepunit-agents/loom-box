@@ -101,7 +101,7 @@ import { keepKey } from './bodyhost.mjs';
 import { spawnCap } from './spawn.mjs';
 import { readRelays } from './relay.mjs';
 import { householdOwners, membersOf, ownersOf } from './owners.mjs';
-import { approvalsFake, approvalsRun, approvalsWhy } from './approvals-call.mjs';
+import { approvalsFake, approvalsRun, approvalsRunAsync, approvalsWhy } from './approvals-call.mjs';
 import { OWNER_SEAT, carriesSession, mint, noteSender, resetSigned, principalOf, putWakeFor, resetActsFor, seatOf, takeWakeFor, verify } from './principal.mjs';
 
 const DAY_MS = 86_400_000;
@@ -1025,6 +1025,10 @@ function plan(env, cv, d, mem) {
     if (isStarting(c, now)) return wait('its body is starting');
     abandon(c, now);
   }
+  // A local conversation its owner is being asked about (t-1975): what it holds waits for his answer, never down the
+  // retry ladder to failure, so the messages his card lists are still there when his Allow counts them.
+  // At most a day (as a parked body waits): then it goes the usual way, refused and failed, and the card stays.
+  if (c.local && c.resetAsk && !c.body && now - Date.parse(c.resetAsk.at) < 24 * 3600_000 && localForeign(env, c)) return wait(`its owner is asked on loom's page whether it's his${c.resetAsk.approval ? ` (${c.resetAsk.approval})` : ''}`);
   const take = () => { const q = c.queue; c.queue = []; delete c.waiting; return q; };
   // What a start or resume takes off the queue is kept with its marker until it's done: a process that dies holding it
   // (the runtime restarted under it) leaves it to go back on the queue (abandon), never only in that process's memory.
@@ -1552,8 +1556,11 @@ async function execute(env, op, d, mem) {
     // signing key, so a conversation someone else has written into gets no body there at all (fail closed). Its owner
     // is asked on loom's page whether it's his, when no one else is named in it (t-1975).
     else if (localForeign(env, c0)) {
-      const asked = askOwnerReset(env, c0, d.warn, op.msgs) || loadConv(env, op.cv)?.resetAsk?.approval;
-      throw new DeliveryError(`a body on loom's machine does only its owner's work, and this conversation is someone else's now${asked ? `: its owner is asked on loom's page whether it's his (${asked})` : ''}`, 403);
+      const asked = (await askOwnerReset(env, c0, d.warn, op.msgs)) || loadConv(env, op.cv)?.resetAsk?.approval;
+      const err = new DeliveryError(`a body on loom's machine does only its owner's work, and this conversation is someone else's now${asked ? `: its owner is asked on loom's page whether it's his (${asked})` : ''}`, 403);
+      // A card is out: its messages wait for his answer (as at a seat's cap), never failed while he decides.
+      if (asked) err.held = true;
+      throw err;
     }
     const was = op.slot?.rules ?? {};
     // ...and a session only follows the conversation into a house no one else's bodies would read it in (principal.mjs,
@@ -1696,7 +1703,7 @@ async function execute(env, op, d, mem) {
     for (const p of restored) rmSync(p, { recursive: true, force: true });
     // The agent's houses for other people were at the cap when its house was asked for (t-1952; a start that raced
     // past plan's look): it waits, as plan would have made it, and its slot (or home) stays. Never a lost session.
-    if (e?.seatFull) {
+    if (e?.seatFull || e?.held) {
       locked(env, () => {
         const c = loadConv(env, op.cv);
         if (!c) return;
@@ -2342,15 +2349,23 @@ export function bodyPrincipal(env, { conversation, key, session }, o = {}) {
  * Mark", "a wake with no word from the clock", "a message from a sender loom can't name"), at most 12. Only these are
  * what the owner's Allow counts as his (resetActsFor `counted`, by key); a person's message is theirs, never listed.
  */
+const SHOWN_ROOM = 650;
+/** Who the runtime files, spends and withdraws a reset card as, the same every time. */
+export const runtimeAs = (agent) => JSON.stringify({ kind: 'agent', agent, house: 'loom\'s runtime' });
 export function shownRows(rows) {
   const out = [];
+  let used = 0;
   for (const q of rows ?? []) {
     if (!q?.key || q.from?.kind === 'person') continue;
     if (q.from?.kind === 'schedule' && q.wakeFor !== '-') continue;   // the clock's word names whom, or a row from before
     const words = q.from?.kind === 'schedule' ? 'a wake with no word from the clock'
       : q.from?.kind === 'agent' && /^[a-z][a-z0-9-]{0,39}$/.test(q.from.id ?? '') ? `a relay from ${cap(q.from.id)}` : 'a message from a sender loom can\'t name';
-    out.push({ key: q.key, words: `${words} (${String(q.at ?? '').slice(0, 16).replace('T', ' ')})` });
-    if (out.length >= 12) break;
+    const w = `${words} (${String(q.at ?? '').slice(0, 16).replace('T', ' ')})`;
+    // Every row listed fits on the card whole (approvals' 1000 for details, less the conversation's own line): one that
+    // wouldn't isn't listed, so it isn't counted either.
+    if (out.length >= 12 || used + w.length + 2 > SHOWN_ROOM) break;
+    used += w.length + 2;
+    out.push({ key: q.key, words: w });
   }
   return out;
 }
@@ -2391,7 +2406,7 @@ export function resetCardProblem(env, conversation, { agent, approval }) {
  * before the card is filed, so two drains never file two). Best effort: a failure is logged and the reservation let go.
  */
 export const RESET_ASK_RETRY_MS = 10 * 60_000;
-export function askOwnerReset(env, c, warn = (m) => console.warn(m), taken = []) {
+export async function askOwnerReset(env, c, warn = (m) => console.warn(m), taken = []) {
   const p = principalOf(env, c);
   if (p.owner || !householdOwns(env, c) || !CV.test(c.conversation ?? '')) return null;
   const at = new Date().toISOString();
@@ -2402,29 +2417,33 @@ export function askOwnerReset(env, c, warn = (m) => console.warn(m), taken = [])
     // is taken again: approvals hands back the same card for the same target if it was filed after all.
     if (!cur || (cur.resetAsk && (cur.resetAsk.approval || Date.now() - Date.parse(cur.resetAsk.at) < RESET_ASK_RETRY_MS))) return null;
     // What it asks about: what's waiting, and what this refused start had taken from the queue (it goes back there). The
-    // card lists each one (shownRows); only those listed are what his Allow counts as his (`queued`: their keys).
+    // card lists each one (shownRows); only those listed are what his Allow counts as his (`queued`: their keys). A
+    // retry keeps what the first filing listed: approvals hands back that same card, with that first list on it.
+    if (cur.resetAsk) { cur.resetAsk = { ...cur.resetAsk, at }; saveConv(env, cur); return cur; }
     const rows = [...(cur.queue ?? []), ...taken.filter((x) => !(cur.queue ?? []).some((q) => q.key === x.key))];
-    cur.resetAsk = { at, queued: shownRows(rows).map((r) => r.key), shown: shownRows(rows).map((r) => r.words) };
+    const shown = shownRows(rows);
+    cur.resetAsk = { at, queued: shown.map((r) => r.key), shown: shown.map((r) => r.words) };
     saveConv(env, cur);
     return cur;
   });
   if (!mine) return null;
   const release = () => locked(env, () => { const cur = loadConv(env, c.conversation); if (cur?.resetAsk?.at === at && !cur.resetAsk.approval) { delete cur.resetAsk; saveConv(env, cur); } });
   try {
-    const label = String(c.label ?? c.place ?? c.conversation).replace(/\s+/g, ' ').slice(0, 120);
+    // The label as words only: no control, format or bidi characters, no line or clause breaks it could fake the card's with.
+    const label = String(c.label ?? c.place ?? c.conversation).normalize('NFKC').replace(/[\p{C}\p{Zl}\p{Zp}]/gu, ' ').replace(/[;:"“”]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80);
     const target = `${c.agent}:${c.conversation}`;
     const why = `${cap(c.agent)}'s work in it can't run on loom's machine while loom can't say it's yours.`;
     const shown = mine.resetAsk.shown ?? [];
-    const details = `The conversation: ${label} (${c.conversation}). No other person is named in it. Waiting there, and counted as yours if you allow: ${shown.length ? shown.join('; ') : 'nothing'}. Anything that arrives after this is noted as ever.`.slice(0, 1000);
+    const details = `The conversation: “${label}” (${c.conversation}). No other person is named in it. Waiting there, and counted as yours if you allow: ${shown.length ? shown.join('; ') : 'nothing'}. Anything that arrives after this is noted as ever.`;
     const argv = ['approvals', 'request', '--kind', 'principal-reset', '--target', target,
       '--ask', 'Count this conversation as your work from now on?', '--why', why,
       '--if-yes', 'It counts as yours.', '--if-no', 'Nothing changes.', '--details', details,
-      '--as', JSON.stringify({ kind: 'agent', agent: c.agent, house: 'loom\'s runtime' }), '--on-behalf', 'owner'];
+      '--as', runtimeAs(c.agent), '--on-behalf', 'owner'];
     const fx = approvalsFake(env);
     let aid;
     if (fx) aid = fx.request?.(target, { why, details });
     else {
-      const r = approvalsRun(env, argv.slice(1));
+      const r = await approvalsRunAsync(env, argv.slice(1));
       aid = r.status === 0 ? /^(a-[0-9a-f]{8}):/.exec(r.stdout || '')?.[1] : undefined;
       if (!aid) {
         warn(`couldn't ask the owner whether ${c.conversation} is his: ${approvalsWhy(r).slice(-200)}`);
@@ -2449,7 +2468,7 @@ function withdrawCard(env, agent, aid) {
   try {
     const fx = approvalsFake(env);
     if (fx) return void fx.withdraw?.(aid);
-    const r = approvalsRun(env, ['withdraw', aid, '--as', JSON.stringify({ kind: 'agent', agent })]);
+    const r = approvalsRun(env, ['withdraw', aid, '--as', runtimeAs(agent)]);
     if (r.error || r.status !== 0) console.warn(`couldn't withdraw ${aid}: ${approvalsWhy(r).slice(-200)}`);
   } catch (e) { console.warn(`couldn't withdraw ${aid}: ${e.message}`); }
 }

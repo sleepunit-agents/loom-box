@@ -14,7 +14,7 @@ import { addBox, assertBoxOwner, resolveBox, isBoxOwner, boxLabelOf, boxOfCall, 
 import { LOGIN_HARNESSES } from './logins.mjs';
 import { ownCommit, swapCommand } from './version.mjs';
 import { stateAccounts } from './accounts.mjs';
-import { COMMS_VENUE, HARNESS_WORDS, answerLoop, deliveryNotices, loadConv, loopAsks, readFallbacks, resetCardProblem, resetPrincipal, whenWords, workingConversations } from './delivery.mjs';
+import { COMMS_VENUE, HARNESS_WORDS, answerLoop, deliveryNotices, loadConv, loopAsks, readFallbacks, resetCardProblem, resetPrincipal, runtimeAs, whenWords, workingConversations } from './delivery.mjs';
 import { loomStore } from './store.mjs';
 import { asks as gateAsks, answer as gateAnswer, gatesPage, mergePeople, status as gatesStatus, proposals as gateProposals, PROPOSALS as PROPOSALS_COLLECTION } from './gates.mjs';
 import { GRANTS, KEY as GRANTS_KEY, GrantsError, addGrant, grantPathsOk, grantsProblem, householdOf, setPiece, setRelay, usableBy } from './grants.mjs';
@@ -102,7 +102,9 @@ function spendApproval(env, aid, kind, target, agent, { onBehalf } = {}) {
   // `loom approvals`: the piece by the name it installs as (also the relay's spend, relay.mjs), as bodies type it.
   const fx = approvalsFake(env);
   if (fx) return fx.spend(aid, target, agent, kind);
-  const r = approvalsRun(env, ['use', aid, '--kind', kind, '--target', target, '--as', JSON.stringify({ kind: 'agent', agent }), ...(onBehalf ? ['--on-behalf', onBehalf] : [])]);
+  // A reset is spent as the runtime filed it (runtimeAs); a grant as the agent, as t-1970 pinned.
+  const as = kind === 'principal-reset' ? runtimeAs(agent) : JSON.stringify({ kind: 'agent', agent });
+  const r = approvalsRun(env, ['use', aid, '--kind', kind, '--target', target, '--as', as, ...(onBehalf ? ['--on-behalf', onBehalf] : [])]);
   // Spent is exactly what approvals says when it spent one (`<id>: used`), never just an exit 0 from something else.
   if (!r.error && r.status === 0 && (r.stdout || '').trim() === `${aid}: used`) return '';
   return approvalsWhy(r);

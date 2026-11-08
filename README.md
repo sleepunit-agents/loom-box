@@ -496,7 +496,8 @@ one container, so walling conversations apart inside a house isn't possible; wal
 - **Asked on loom's page** (t-1975; Jonathan: "It needs to have the site ask me"). The typed reset is the fallback:
   where it was the only way back, a local conversation refused a body, the runtime asks the owner itself, with a
   `principal-reset` approval (loom-approvals, target `<agent>:<cv>`): "Count this conversation as your work from now
-  on?", listing its label. Only where no person but the owner is named in it (an unplaced voice, a wake with no word
+  on?", its details naming the conversation (its label, as plain words, and id) and listing each waiting message it
+  counts. While the card is out, the conversation's messages wait for his answer (at most a day) instead of failing. Only where no person but the owner is named in it (an unplaced voice, a wake with no word
   from the clock, history from before), once per conversation (`resetAsk`, reserved under the lock before the card is
   filed, with the keys of what was waiting then); a clear refusal to file is logged and the reservation let go, and
   one with no answer in time is kept for ten minutes, then tried again (approvals hands back the same card if it was
