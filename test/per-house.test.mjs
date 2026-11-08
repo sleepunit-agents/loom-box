@@ -545,3 +545,26 @@ test('in houses: each seat gets its own house, and a house\'s host is handed onl
   assert.equal(existsSync(join(env.LOOM_BOX_DATA, 'delivery', 'hosts', 'art@p-loren.json')), false);
   assert.equal(existsSync(join(env.LOOM_BOX_DATA, 'delivery', 'hosts', 'art.json')), true);
 });
+
+// t-1974: the household's own wakes keep the owner's trust. The clock hands over whom each wake is for as it fires
+// (`principal --wake`); the runtime seats its body by that, and by nothing else.
+test('a lane wake fires with owner; a wake set from a Loren conversation fires for Loren; an unsigned wake stays unknown', async () => {
+  const { handOverWake } = await import('../src/delivery.mjs');
+  const w = world();
+  household(w.env);
+  w.runner.houses = { owner: 'h-1', 'p-loren': 'h-2' };
+  const wake = (place, id) => w.msg(place, 'the lane\'s words', { id, venue: 'wake', kind: 'wake', from: { kind: 'schedule' }, label: place });
+  handOverWake(w.env, { agent: 'art', place: 'lane:plan-night', id: 'w-aaaaaa', for: 'owner' });
+  handOverWake(w.env, { agent: 'art', place: 'wake:w-bbbbbb', id: 'w-bbbbbb', for: 'loren' });
+  handOverWake(w.env, { agent: 'art', place: 'wake:w-cccccc', id: 'w-cccccc', for: '-' });
+  for (const [place, id] of [['lane:plan-night', 'w-aaaaaa'], ['wake:w-bbbbbb', 'w-bbbbbb'], ['wake:w-cccccc', 'w-cccccc'], ['wake:w-dddddd', 'w-dddddd']]) {
+    await deliver(w.env, wake(place, id), w.o);
+  }
+  const seat = (place) => { const c = loadConv(w.env, cvOf('art', 'wake', place)); return [c.bodyRules?.seat, w.runner.seats[c.body.split(':')[1]]]; };
+  assert.deepEqual(seat('lane:plan-night'), ['owner', 'owner'], 'the owner\'s lane, in his house');
+  assert.deepEqual(seat('wake:w-bbbbbb'), ['p-loren', 'p-loren'], 'Loren\'s, in hers');
+  const cvC = cvOf('art', 'wake', 'wake:w-cccccc');
+  const cvD = cvOf('art', 'wake', 'wake:w-dddddd');
+  assert.deepEqual(seat('wake:w-cccccc'), [`u-${cvC}`, `u-${cvC}`], 'the clock\'s unknown: a house of its own');
+  assert.deepEqual(seat('wake:w-dddddd'), [`u-${cvD}`, `u-${cvD}`], 'no hand-over at all (unsigned): unknown, never the owner\'s');
+});
