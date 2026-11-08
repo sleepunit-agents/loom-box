@@ -111,12 +111,13 @@ test('nothing spent for what the runtime would refuse: a stranger, bad paths, a 
   assert.deepEqual(spent, []);
 });
 
-test('no grants yet: every agent may use every piece already, and no document is written (it would take every other piece away)', () => {
-  const { env, st } = setup({ doc: null, allowed: { 'a-0000beef': { target: 'tasks:mark', agent: 'art' } } });
+test('no grants yet: nothing written, nothing spent, and it says the piece\'s own list decides (a document would take every other piece away)', () => {
+  const { env, st, spent } = setup({ doc: null, allowed: { 'a-0000beef': { target: 'tasks:mark', agent: 'art' } } });
   const r = approve(env, { id: 'a-0000beef', agent: 'art', target: 'tasks:mark' });
-  assert.equal(r.ok, true);
-  assert.match(r.message, /no grants yet, so every agent may use every piece/);
+  assert.equal(r.ok, false);
+  assert.match(r.message, /no grants yet, so Tasks decides by its own agent list/);
   assert.equal(st.get(GRANTS, KEY), null);
+  assert.deepEqual(spent, []);
 });
 
 test('already granted (every agent, or this one): says so and changes nothing', () => {

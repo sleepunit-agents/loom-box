@@ -40,8 +40,10 @@ function spendGrant(env, aid, target, agent) {
   if (env?.LOOM_RUNTIME_TEST_APPROVALS && typeof env.LOOM_RUNTIME_TEST_APPROVALS === 'object') return env.LOOM_RUNTIME_TEST_APPROVALS.spend(aid, target, agent);
   // Well inside loom's 15 s for the whole action: a spend that's slow is refused here, before it's spent, rather than
   // the action being killed between the spend and the grant's write.
+  // Never with the store grant loom minted for this action: that's the runtime's, for its own collections.
+  const { LOOM_STORE_GRANT: _mine, ...rest } = env;
   const r = spawnSync(env.LOOM_BIN || 'loom', ['approvals', 'use', aid, '--kind', 'grant', '--target', target, '--as', JSON.stringify({ kind: 'agent', agent })],
-    { env, encoding: 'utf-8', timeout: 6_000 });
+    { env: rest, encoding: 'utf-8', timeout: 6_000 });
   if (r.error) return `the approvals piece didn't run (${r.error.message})`;
   return r.status === 0 ? '' : ((r.stderr || r.stdout || '').trim().slice(-300) || `exit ${r.status}`);
 }
@@ -77,12 +79,15 @@ function grantApproved(env, st, c, fields) {
   // Checked before it's spent, so a grant the runtime would refuse doesn't use up the owner's yes.
   let cur;
   try { cur = st.get(GRANTS, GRANTS_KEY); } catch (e) { return { ok: false, message: `The runtime couldn't read its grants (${String(e.message || e).slice(0, 160)}): nothing was granted.`, page: 'permissions' }; }
-  if (cur?.doc && grantsProblem(cur.doc)) return { ok: false, message: 'The runtime\'s grants can\'t be read: fix them on Permissions first. Nothing was granted.', page: 'permissions' };
+  // No grants yet: the runtime already allows every call, and it's the piece's own agent list that decides. Writing a
+  // document now would take every other piece from every agent, so nothing is written, nothing spent, and it says so.
+  if (!cur?.doc) return { ok: false, message: `Nothing changed: the runtime has no grants yet, so ${cap(g.piece)} decides by its own agent list. Add ${who(g.agent)} in ${cap(g.piece)}'s settings, or seed the grants (loom runtime grants seed) and allow it again.`, page: 'permissions' };
+  if (grantsProblem(cur.doc)) return { ok: false, message: 'The runtime\'s grants can\'t be read: fix them on Permissions first. Nothing was granted.', page: 'permissions' };
   const spent = spendGrant(env, id, target, asker);
   if (spent) return { ok: false, message: `Not granted: the approval couldn't be spent (${spent.slice(0, 200)}).`, page: 'permissions' };
   try {
     const r = addGrant(st, g);
-    return { ok: true, message: r.changed ? `${what} now.` : cur?.doc ? `${what} already.` : `${what}: there are no grants yet, so every agent may use every piece.`, page: `permissions/${g.agent}` };
+    return { ok: true, message: r.changed ? `${what} now.` : `${what} already.`, page: `permissions/${g.agent}` };
   } catch (e) {
     return { ok: false, message: `Allowed, but the runtime couldn't write the grant (${String(e.message || e).slice(0, 160)}): set it on Permissions.`, page: 'permissions' };
   }
