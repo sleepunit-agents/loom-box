@@ -493,6 +493,23 @@ one container, so walling conversations apart inside a house isn't possible; wal
   conversation's slot and ending the body that heard what came before; an unsigned reset vouches for nothing; once
   what someone else wrote is no longer waiting there: what's queued is heard again). A refused start goes down the
   usual retry ladder, so it shows on the conversation's record as failed starts.
+- **Asked on loom's page** (t-1975; Jonathan: "It needs to have the site ask me"). The typed reset is the fallback:
+  where it was the only way back, a local conversation refused a body, the runtime asks the owner itself, with a
+  `principal-reset` approval (loom-approvals, target `<agent>:<cv>`): "Count this conversation as your work from now
+  on?", listing its label. Only where no person but the owner is named in it (an unplaced voice, a wake with no word
+  from the clock, history from before), once per conversation (`resetAsk`, reserved under the lock before the card is
+  filed, with the keys of what was waiting then); a failure to file is logged and the reservation let go. A
+  conversation walled off in a house of its own isn't asked about: it still runs. Right after the household owner's
+  Allow, loom core posts `reset-approved` here as him, with the approval's id, agent and target (read back from the
+  approvals piece). The runtime checks the conversation is that agent's and that no other person has written there
+  since, spends the approval (`loom approvals use … --kind principal-reset --as <agent> --on-behalf owner`: allowed,
+  for exactly that conversation, once, without the runtime's store grant) and only then resets it as `--reset` does,
+  signed as the owner's (`actsFor.resetApproval` names the approval). Deny never reaches here, and approvals never
+  asks about it again. A member, an agent, an agent's tab, or no caller is refused, and nothing is spent.
+- **What a reset counts.** Waiting messages are noted again as they come: a person's as theirs, a wake as whom the
+  clock said (kept on its queue row, `wakeFor`). Those no one is named in count as the owner's when he counted them:
+  what was waiting when the card was filed (an Allow), or when he typed the reset (the terminal). Every body's brief
+  says so: never hand the owner a command to type; file the approval.
 
 ## Model choice
 

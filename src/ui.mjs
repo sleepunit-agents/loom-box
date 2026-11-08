@@ -2,6 +2,8 @@
 // boxes, what each has and may host, the houses asked for, and the owner's
 // controls. Data only; loom renders it. Every action is the owner's (the page
 // is), and a box's credential is shown once, in the message after adding it.
+import { principalOf } from './principal.mjs';
+import { approvalsFake, approvalsRun, approvalsWhy } from './approvals-call.mjs';
 import { appendFileSync, existsSync, readFileSync, statfsSync } from 'node:fs';
 import { uptime } from 'node:os';
 import { join } from 'node:path';
@@ -12,7 +14,7 @@ import { addBox, assertBoxOwner, resolveBox, isBoxOwner, boxLabelOf, boxOfCall, 
 import { LOGIN_HARNESSES } from './logins.mjs';
 import { ownCommit, swapCommand } from './version.mjs';
 import { stateAccounts } from './accounts.mjs';
-import { COMMS_VENUE, HARNESS_WORDS, answerLoop, deliveryNotices, loopAsks, readFallbacks, whenWords, workingConversations } from './delivery.mjs';
+import { COMMS_VENUE, HARNESS_WORDS, answerLoop, deliveryNotices, loadConv, loopAsks, readFallbacks, resetCardProblem, resetPrincipal, whenWords, workingConversations } from './delivery.mjs';
 import { loomStore } from './store.mjs';
 import { asks as gateAsks, answer as gateAnswer, gatesPage, mergePeople, status as gatesStatus, proposals as gateProposals, PROPOSALS as PROPOSALS_COLLECTION } from './gates.mjs';
 import { GRANTS, KEY as GRANTS_KEY, GrantsError, addGrant, grantPathsOk, grantsProblem, householdOf, setPiece, setRelay, usableBy } from './grants.mjs';
@@ -37,19 +39,7 @@ export function permsStore(env) {
  * why not. The approvals piece checks it's allowed, for this kind and target, not overruled, and spends it once.
  */
 function spendGrant(env, aid, target, agent) {
-  // `loom approvals`: the piece by the name it installs as (also the relay's spend, relay.mjs), as bodies type it.
-  if (env?.LOOM_RUNTIME_TEST_APPROVALS && typeof env.LOOM_RUNTIME_TEST_APPROVALS === 'object') return env.LOOM_RUNTIME_TEST_APPROVALS.spend(aid, target, agent);
-  // Well inside loom's 15 s for the whole action, which also holds a store read before it and a read and write after:
-  // a slow spend is cut short here rather than taking that time from the grant's write.
-  // Never with the store grant loom minted for this action: that's the runtime's, for its own collections.
-  const { LOOM_STORE_GRANT: _mine, ...rest } = env;
-  const r = spawnSync(env.LOOM_BIN || 'loom', ['approvals', 'use', aid, '--kind', 'grant', '--target', target, '--as', JSON.stringify({ kind: 'agent', agent })],
-    { env: rest, encoding: 'utf-8', timeout: 6_000 });
-  if (r.error?.code === 'ETIMEDOUT') return 'the approvals piece didn\'t answer in time, so it may be spent already';
-  if (r.error) return `the approvals piece didn't run (${r.error.message})`;
-  // Spent is exactly what approvals says when it spent one (`<id>: used`), never just an exit 0 from something else.
-  if (r.status === 0 && (r.stdout || '').trim() === `${aid}: used`) return '';
-  return ((r.stderr || r.stdout || '').trim().slice(-300) || `exit ${r.status}`);
+  return spendApproval(env, aid, 'grant', target, agent);
 }
 
 /**
@@ -101,6 +91,50 @@ function grantApproved(env, st, c, fields) {
   } catch (e) {
     return { ok: false, message: `the runtime couldn't write the grant (${String(e.message || e).slice(0, 160)}).`, page: 'permissions' };
   }
+}
+
+/**
+ * Spend an approval the owner's Allow applies, as the runtime, for the agent that asked: '' when spent, else why not.
+ * The approvals piece checks it's allowed, for exactly this kind and target, not overruled, and spends it once. A grant
+ * leaves whom unsaid (t-1970: approvals' unstated spend); a reset says the owner (t-1975, `onBehalf`).
+ */
+function spendApproval(env, aid, kind, target, agent, { onBehalf } = {}) {
+  // `loom approvals`: the piece by the name it installs as (also the relay's spend, relay.mjs), as bodies type it.
+  const fx = approvalsFake(env);
+  if (fx) return fx.spend(aid, target, agent, kind);
+  const r = approvalsRun(env, ['use', aid, '--kind', kind, '--target', target, '--as', JSON.stringify({ kind: 'agent', agent }), ...(onBehalf ? ['--on-behalf', onBehalf] : [])]);
+  // Spent is exactly what approvals says when it spent one (`<id>: used`), never just an exit 0 from something else.
+  if (!r.error && r.status === 0 && (r.stdout || '').trim() === `${aid}: used`) return '';
+  return approvalsWhy(r);
+}
+
+/**
+ * The owner's Allow on a `principal-reset` approval, applied (t-1975): loom core posts this as the household owner right
+ * after the Allow, with the approval's id, its agent and target (`<agent>:<cv>`, read back from the approvals piece).
+ * Only the household owner's call does anything; the conversation must be that agent's, here; the approval is spent
+ * (allowed, for exactly that conversation, once) and only then is it reset, signed as the owner's, as `loom runtime
+ * principal --reset` does at a terminal.
+ */
+function resetApproved(env, c, fields) {
+  if (!(c && c.kind === 'owner' && (c.agents === undefined || c.agents === '*'))) return { ok: false, message: 'Whose work a conversation is, is the household owner\'s to say.', page: '' };
+  const id = String(fields.id ?? '');
+  const asker = String(fields.agent ?? '');
+  const target = typeof fields.target === 'string' ? fields.target : '';
+  const m = /^([a-z][a-z0-9-]{0,39}):(cv-[0-9a-f]{12})$/.exec(target);
+  if (!/^a-[0-9a-f]{8}$/.test(id) || !m || asker !== m[1]) return { ok: false, message: 'That isn\'t a conversation to count as yours.', page: '' };
+  const conv = loadConv(env, m[2]);
+  // Checked under the delivery lock before the owner's yes is spent (and again by resetPrincipal after it).
+  const why = resetCardProblem(env, m[2], { agent: m[1], approval: id });
+  if (why) return { ok: false, message: `Nothing changed: ${why}.`, page: '' };
+  const spent = spendApproval(env, id, 'principal-reset', target, asker, { onBehalf: 'owner' });
+  if (spent) return { ok: false, message: `Nothing changed: the approval couldn't be spent (${spent.slice(0, 200)}).`, page: '' };
+  const r = resetPrincipal(env, m[2], { agent: m[1], approval: id });
+  if (!r.ok) return { ok: false, message: `The approval was spent, but the conversation wasn't reset: ${r.reason}.`, page: '' };
+  const label = conv.label ?? conv.place ?? m[2];
+  // Counted as his: what was waiting when he was asked. Something unplaced that arrived since keeps it no one's, and
+  // its next refusal asks him again (with what's waiting then): said, never a plain "done".
+  if (r.stillForeign) return { ok: true, message: `${label} counts as your work up to when you were asked; something loom can't place has arrived there since, so you'll be asked about that next.`, page: '' };
+  return { ok: true, message: `${label} counts as your work now: ${who(m[1])} starts afresh there.`, page: '' };
 }
 
 const permsCore = (env) => (env?.LOOM_RUNTIME_TEST_CORE && typeof env.LOOM_RUNTIME_TEST_CORE === 'object' ? env.LOOM_RUNTIME_TEST_CORE : coreFrom(env, { timeoutMs: 8_000 }));
@@ -1446,6 +1480,7 @@ export function act(env, effects, { action, fields: raw = {}, caller: c }, publi
         const what = flag === 'gpu' ? 'the box\'s GPU' : 'containers of their own';
         return { ok: true, message: `${who(r.agent)}'s houses ${fields.on === 'on' ? 'may' : 'may not'} have ${what} from their next start.`, page: '' };
       }
+      case 'reset-approved': return resetApproved(env, c, fields);
       case 'gates-allow': case 'gates-deny': case 'gates-merge': case 'grants-set': case 'relay-set': case 'relay-pair': case 'grant-approved': {
         const st = permsStore(env);
         if (!st) return { ok: false, message: 'The runtime reads its permissions from loom\'s store when loom runs it.' };
