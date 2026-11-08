@@ -305,7 +305,29 @@ function image(env, h, house, repo, logFd) {
   if (pod(env, ['image', 'exists', tag]).status === 0) return tag;
   const b = pod(env, ['build', '-t', tag, '-f', cf, ctx], { stdio: ['ignore', logFd, logFd] });
   if (b.status !== 0) throw new BoxError(`the image didn't build (exit ${b.status}); see the house log`);
+  try { pruneImages(env, h.agent); } catch { /* a cleanup that fails isn't the build's */ }
   return tag;
+}
+
+/** How many of an agent's house images a box keeps when it builds a new one: that one, and the one before it. */
+export const KEEP_HOUSE_IMAGES = 2;
+
+/**
+ * After a build, an agent's older house images go, all but its newest KEEP_HOUSE_IMAGES (t-1933). Every change to a
+ * house's build context makes a new ~4 GB image (its tag is the context's git tree), and nothing else removes the old
+ * ones: on loom's box they filled the disk in days. `podman rmi` without --force refuses an image a container uses, so
+ * a house still running on an old image keeps it. The tags it removed.
+ */
+export function pruneImages(env, agent) {
+  const r = pod(env, ['images', '--format', '{{.Repository}}:{{.Tag}} {{.CreatedAt}}', '--filter', `reference=localhost/loom-house-${agent}`], { timeout: 60_000 });
+  if (r.status !== 0) return [];
+  const mine = new RegExp(`^((?:localhost/)?loom-house-${agent}:[0-9a-f]{20}) (\\d{4}-\\d\\d-\\d\\d) (\\d\\d:\\d\\d:\\d\\d)(?:\\.\\d+)? ([+-]\\d\\d)(\\d\\d)`);
+  const imgs = r.stdout.split('\n').map((l) => mine.exec(l)).filter(Boolean)
+    .map((m) => ({ tag: m[1], at: Date.parse(`${m[2]}T${m[3]}${m[4]}:${m[5]}`) }))
+    .sort((a, b) => b.at - a.at);
+  const gone = [];
+  for (const { tag } of imgs.slice(KEEP_HOUSE_IMAGES)) if (pod(env, ['rmi', tag], { timeout: 120_000 }).status === 0) gone.push(tag);
+  return gone;
 }
 
 /**

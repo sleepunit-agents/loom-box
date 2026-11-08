@@ -21,6 +21,7 @@ import { fileURLToPath } from 'node:url';
 import { MAX_STATE_BYTES, api } from '../src/control.mjs';
 import { PART_RAW, partsOf } from '../src/blobs.mjs';
 import { randomBytes } from 'node:crypto';
+import { pruneImages } from '../src/box.mjs';
 import { joinLoom, runner } from '../src/box.mjs';
 import { HouseFileError, NESTED_ARGS, parseHouseFile } from '../src/house.mjs';
 import { scratch } from './scratch.mjs';
@@ -561,4 +562,17 @@ test('a sentinel token in the box\'s credential files never shows in any argv, e
   if (existsSync(hd)) for (const id of readdirSync(hd)) for (const f of readdirSync(join(hd, id))) { try { everything.push(readFileSync(join(hd, id, f), 'utf-8')); } catch { /* a dir */ } }
   for (const x of everything) assert.equal(x.includes(SENTINEL), false, x.slice(0, 200));
   assert.equal(everything.join('\n').includes('SENTINEL'), false);
+});
+
+test('a build leaves an agent its two newest house images: older ones go, unless a container uses them', () => {
+  const t = (n) => `localhost/loom-house-art:${String(n).repeat(20)}`;
+  podmanCfg({
+    // podman prints CreatedAt in the box's zone: 02:00 CST is 08:00Z, so 3 is the second newest.
+    images: [`${t(2)} 2026-11-07 09:00:00 +0000 UTC`, `${t(1)} 2026-11-08 09:00:00 +0000 UTC`, `${t(3)} 2026-11-08 02:00:00 -0600 CST`,
+      `${t(4)} 2026-11-06 09:00:00 +0000 UTC`, `${t(5)} 2026-11-05 09:00:00 +0000 UTC`,
+      `localhost/loom-house-mark:${'6'.repeat(20)} 2026-11-01 09:00:00 +0000 UTC`, 'localhost/loom-grader:1 2026-11-01 09:00:00 +0000 UTC'],
+    inUse: [t(5)],
+  });
+  assert.deepEqual(pruneImages(env, 'art'), [t(2), t(4)]);
+  assert.deepEqual(readFileSync(join(fake, 'rmis'), 'utf-8').trim().split('\n'), [t(2), t(4)]);
 });
