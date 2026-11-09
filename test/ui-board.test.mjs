@@ -143,3 +143,28 @@ test("the Houses tab names each house by what it is (its service, its wake), no 
     { label: 'Memory', value: '94 GB' }, { label: 'GPU', value: 'NVIDIA GeForce RTX 5090' }, { label: 'Runtime', value: 'podman' },
   ]);
 });
+
+test('collection rows and headlines agree that physically ended houses are finishing, not running',()=>{
+  const {env,fx}=setup();const box={kind:'piece',subject:'one'};
+  for(let i=0;i<2;i++){
+    const h=api(env,fx,{caller:{kind:'agent',agent:'art'},path:'up',body:{task:'work'}}).body;
+    api(env,fx,{caller:box,path:'claim',body:{id:h.id}});api(env,fx,{caller:box,path:'report',body:{id:h.id,state:'running'}});
+    if(i===0)api(env,fx,{caller:box,path:'collection-status',body:{id:h.id,phase:'state'}});
+  }
+  const board=section(page(env,{path:''}),'status').blocks[0];
+  assert.match(board.text,/1 house running/);assert.match(board.detail,/1 house finishing/);
+  const stats=section(page(env,{path:''}),'status').blocks.find(b=>b.type==='stats').items;
+  assert.match(stats.find(i=>i.label==='Houses').detail,/1 house finishing/);
+  const local=section(page(env,{path:'box/one'}),'status').blocks[0];assert.match(local.text,/1 house running/);assert.match(local.text,/1 house finishing/);
+  const scoped=page({...env,LOOM_SCOPE:'art'},{path:''}),health=section(scoped,'houses').blocks[0];
+  assert.match(health.text,/1 house running/);assert.match(health.detail,/1 house finishing/);
+  assert.equal(health.tone,'warn');assert.match(JSON.stringify(scoped),/Saving state/);
+  const rows=section(scoped,'houses').blocks.find(b=>b.type==='panel').rows;
+  assert.equal(rows.find(r=>r.value==='Saving state').act,undefined,'there is no process left to stop');
+  assert.equal(rows.find(r=>r.value==='Running').act.action,'down','working houses retain their Stop control');
+  const limited=page(env,{path:'',caller:{kind:'owner',who:'loren',agents:['art']}});
+  const items=section(limited,'houses').blocks[0].items;
+  assert.equal(items.find(i=>i.badge==='saving state').meta,'Saving state');
+  assert.equal(items.find(i=>i.badge==='saving state').act,undefined);
+  assert.equal(items.find(i=>i.badge==='running').act.action,'down');
+});
