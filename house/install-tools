@@ -86,6 +86,14 @@ piece approvals approvals
 
 # Both agent entrypoints import the same stop/acknowledgement implementation.
 ln -sfn "$KIT/house/loom_host_process.py" "$BIN/loom_host_process.py"
+# Repo entrypoints and planning scripts are not in ~/.local/bin. Python does not search PATH for modules.
+PYTHON_SITE=$(python3 -c 'import site,sys; sys.exit(1) if site.ENABLE_USER_SITE is not True else None; print(site.getusersitepackages())')
+case "$PYTHON_SITE" in
+  "$HOME"/*) ;;
+  *) echo "house: Python's user module directory must be inside HOME" >&2; exit 1 ;;
+esac
+mkdir -p "$PYTHON_SITE"
+ln -sfn "$KIT/house/loom_host_process.py" "$PYTHON_SITE/loom_host_process.py"
 
 put loom-runtime <<EOF
 #!/bin/sh
