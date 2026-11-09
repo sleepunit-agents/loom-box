@@ -31,7 +31,7 @@ const unchanged = (saved, current) => current && !current.resetPending && same(s
  * a receipt; rename alone isn't a power-loss durability guarantee. Locks never span I/O.
  * post must implement stable-ref idempotency, including identical-payload checking.
  */
-export function continuationOutbox({ dir, sealer, now = Date.now }) {
+export function continuationOutbox({ dir, sealer, now = Date.now, lifetimeMs = null }) {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const path = (id) => join(dir, `${id}.sealed`);
   const read = (id) => {
@@ -52,6 +52,24 @@ export function continuationOutbox({ dir, sealer, now = Date.now }) {
     if (typeof handle !== 'string' || !/^cont-[0-9a-f]{64}$/.test(handle)) deny('unknown continuation capability');
     return `grant-${digest(handle)}`;
   };
+  // All authority clock observations are serialized and durable, including rollback.
+  const observe = () => {
+    const time = now(), previous = read('clock');
+    if (!Number.isSafeInteger(time) || time < 0) deny('continuation clock is uncertain');
+    if (previous && time < previous.highwater) deny('continuation clock moved backwards');
+    save('clock', { highwater: time });
+    return time;
+  };
+  const active = (id, g, time) => {
+    if (g.version !== 2) deny('legacy continuation requires a new authenticated grant');
+    if (g.expired || time >= g.expiresAt) {
+      g.expired = true; save(id, g); deny('continuation expired');
+    }
+  };
+  const expireRow = (r) => {
+    r.state = r.attempts > 0 ? 'indeterminate' : 'expired';
+    r.reason = r.attempts > 0 ? 'acceptance requires fenced reconciliation' : 'continuation expired before any attempt';
+  };
   const receipt = (r) => ({ ref: r.ref, state: r.state, attempts: r.attempts, ...(r.reason ? { reason: r.reason } : {}), ...(r.posted ? { posted: true } : {}) });
   return {
     sourceConversation(handle) {
@@ -62,8 +80,13 @@ export function continuationOutbox({ dir, sealer, now = Date.now }) {
     issue(provenSource) {
       const source = snapshot(provenSource);
       const handle = `cont-${randomBytes(32).toString('hex')}`;
-      locked(() => save(grantId(handle), { source, issued: now(), binding: null }));
-      return { handle };
+      return locked(() => {
+        if (!Number.isSafeInteger(lifetimeMs) || lifetimeMs <= 0) deny('continuation deadline policy is not configured');
+        const issuedAt = observe(), expiresAt = issuedAt + lifetimeMs;
+        if (!Number.isSafeInteger(expiresAt)) deny('invalid continuation deadline policy');
+        save(grantId(handle), { version: 2, source, issuedAt, expiresAt, expired: false, binding: null });
+        return { handle, expiresAt };
+      });
     },
     // Called by authenticated clock admission, not by a body. Exact retries are
     // harmless; a capability cannot be rebound to a different firing or child run.
@@ -76,6 +99,8 @@ export function continuationOutbox({ dir, sealer, now = Date.now }) {
         if (child.agent !== g.source.agent || !same(child.principal, g.source.principal)) deny('continuation principal differs');
         const binding = { wake: clockBinding.wake, delivery: clockBinding.delivery, child };
         if (g.binding && !same(g.binding, binding)) deny('continuation capability is already bound');
+        if (g.binding) return { bound: true }; // Existing admission can recover receipts after cutoff.
+        active(id, g, observe());
         g.binding = binding; save(id, g);
         return { bound: true };
       });
@@ -93,7 +118,8 @@ export function continuationOutbox({ dir, sealer, now = Date.now }) {
           if (prior.hash !== digest(text)) throw new StateError('report id already used for different text', 409);
           return receipt(prior);
         }
-        const row = { ref, grant: gid, child, on, text, hash: digest(text), state: 'pending', attempts: 0, next: now() };
+        const time = observe(); active(gid, g, time);
+        const row = { version: 2, expiresAt: g.expiresAt, ref, grant: gid, child, on, text, hash: digest(text), state: 'pending', attempts: 0, next: now() };
         save(rid, row);
         return receipt(row);
       });
@@ -112,11 +138,21 @@ export function continuationOutbox({ dir, sealer, now = Date.now }) {
         const id = name.slice(0, -7);
         const row = locked(() => {
           const r = read(id);
-          if (!r || r.state !== 'pending' || r.next > now()) return null;
+          if (!r || r.state !== 'pending') return null;
           const g = read(r.grant);
+          let time;
+          try { time = observe(); } catch { return null; } // Hold; no write attempt during clock uncertainty.
+          if (g?.version !== 2 || r.version !== 2) {
+            r.state = r.attempts > 0 ? 'indeterminate' : 'expired'; r.reason = 'legacy continuation held; no implicit renewal'; save(id, r); return null;
+          }
+          if (r.expiresAt !== g.expiresAt) { r.state = 'indeterminate'; r.reason = 'deadline commitment differs'; save(id, r); return null; }
+          if (g.expired || time >= g.expiresAt) {
+            g.expired = true; save(r.grant, g); expireRow(r); save(id, r); return null;
+          }
+          if (r.next > time) return null;
           const source = g && current(g.source.conversation), child = current(r.child.conversation);
           if (!g || !unchanged(g.source, source) || !unchanged(r.child, child) || child.run !== r.child.run) {
-            r.state = 'failed'; r.reason = 'continuation authority was reset or changed'; save(id, r); return null;
+            r.state = r.attempts > 0 ? 'indeterminate' : 'failed'; r.reason = 'continuation authority was reset or changed'; save(id, r); return null;
           }
           r.attempts += 1;
           r.next = now() + Math.min(3600000, 1000 * 2 ** Math.min(r.attempts, 12));
@@ -125,7 +161,7 @@ export function continuationOutbox({ dir, sealer, now = Date.now }) {
         });
         if (!row) continue;
         let result;
-        try { result = await post({ ref: row.ref, text: row.text, target: row.target, agent: row.agent, conversation: row.conversation, run: row.child.run, on: row.on ?? null }); }
+        try { result = await post({ ref: row.ref, text: row.text, target: row.target, agent: row.agent, conversation: row.conversation, run: row.child.run, on: row.on ?? null, expiresAt: row.expiresAt }); }
         catch (e) {
           // Transport loss, throttling and request timeout can recover. A payload
           // conflict or other permanent client refusal cannot recover by replay.
@@ -135,9 +171,9 @@ export function continuationOutbox({ dir, sealer, now = Date.now }) {
         } // A crash/timeout after acceptance retries the same ref.
         locked(() => {
           const r = read(id);
-          if (r.state !== 'pending') return;
+          if (!['pending', 'indeterminate', 'expired'].includes(r.state)) return;
           if (result?.ok && result.posted === true) { r.state = 'delivered'; r.posted = true; delete r.reason; }
-          else if (result?.permanent) { r.state = 'failed'; r.reason = String(result.reason ?? 'destination refused report').slice(0, 300); }
+          else if (result?.permanent) { r.state = 'indeterminate'; r.reason = String(result.reason ?? 'destination refused report').slice(0, 300); }
           // An accepted/pending response alone never means delivered.
           save(id, r);
         });

@@ -1,8 +1,13 @@
-# Shared continuation deadline protocol — proposed, not implemented
+# Shared continuation deadline protocol — staged implementation
 
 This is the next implementation contract for runtime148/core675/clock24.
-There is no collector, deadline enforcement or bounded-retention claim in those
-heads today. Keep all three drafts held. Native145 and history676 are separately
+The runtime now implements sealed version2 issuance/binding/enqueue/drain deadlines,
+clock highwater and expired/indeterminate states. Production issuance deliberately
+refuses without a trusted policy: only tests inject `continuationLifetimeMs` into
+internal delivery dependencies. No body field or environment setting chooses it.
+The proposed30day maximum below remains inactive pending review. There is no
+collector or end-to-end deadline guarantee: core enforcement/reconciliation,
+clock inspection and native admission recheck remain unfinished. Keep all drafts held. Native145 and history676 are separately
 owned; integrate only their completed handoffs.
 
 ## Authority and wire format

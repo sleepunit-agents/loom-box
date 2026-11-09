@@ -85,7 +85,7 @@ test('delivery tick drains admitted reports only through core and seals run/on p
   await tick(w.env, o);
   const sent = calls.filter(p => p.ref === enqueued.ref);
   assert.equal(sent.length, 1);
-  assert.deepEqual(sent[0], { op: 'post', place: loadConv(w.env, source.conversation).place, agent: 'art', ref: enqueued.ref, text: 'actual tick report', run: loadConv(w.env, child.conversation).run });
+  assert.deepEqual(sent[0], { op: 'post', place: loadConv(w.env, source.conversation).place, agent: 'art', ref: enqueued.ref, text: 'actual tick report', run: loadConv(w.env, child.conversation).run, expiresAt: grant.expiresAt });
   assert.equal(continuationCall(w.env, { ...q, action: 'status' }, w.o).state, 'delivered');
   await tick(w.env, o);
   assert.equal(calls.filter(p => p.ref === enqueued.ref).length, 1);
@@ -94,6 +94,6 @@ test('delivery tick drains admitted reports only through core and seals run/on p
   assert.equal(continuationCall(w.env, { ...q, action: 'status', id: 'non-core' }, w.o).state, 'pending');
   w.clock.advance(3600001);
   await tick(w.env, { ...o, venues: () => ({ loom: { kind: 'live', send: ['must-not-run'] } }) });
-  assert.equal(continuationCall(w.env, { ...q, action: 'status', id: 'non-core' }, w.o).state, 'failed');
+  assert.equal(continuationCall(w.env, { ...q, action: 'status', id: 'non-core' }, w.o).state, 'indeterminate');
   assert.equal(calls.filter(p => p.ref?.startsWith('continuation-')).length, 1);
 });

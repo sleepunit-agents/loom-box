@@ -1,3 +1,8 @@
+> Staged cutoff work: production issuance currently fails closed until a trusted
+> lifetime policy is wired after review. Version2 expiry/highwater states are tested
+> internally; core deadline enforcement and fenced reconciliation, clock inspection,
+> and queued/native admission checks remain shipping gates. No collection is enabled.
+
 # Continuation report delivery (draft integration)
 
 The runtime issues an opaque capability only after the current holder proves its
@@ -17,7 +22,7 @@ The child proves its own current holder to enqueue/read receipts. A report id
 with different text is a conflict. The child supplies no target or snapshot.
 `loom runtime continuation issue` returns a handle; `enqueue --handle cont-…
 --id final` reads text from stdin (or `--text`); `status --handle cont-… --id final`
-returns pending, delivered or failed. Each takes `--conversation cv-…` or uses
+returns pending, delivered, failed, expired or indeterminate. Each takes `--conversation cv-…` or uses
 its body's current conversation. The CLI carries its key and harness session in
 the authenticated API body, never in argv. HTTP holder refusals remain failures.
 
@@ -29,12 +34,12 @@ It never borrows the source holder's key. All payload fields stay stable across
 retries, even if the source changes holder or the child switches harness.
 
 Only core's adapter is enabled: other adapters lack the required idempotency
-contract and fail permanently without executing their send command. Core's
+contract and stop without executing their send command; an attempted row retains an indeterminate disposition. Core's
 companion PR675 binds ref to agent/place/text/run/normalized on in one transaction
 with the encrypted reply. An exact retry returns the original sequence; another
 payload receives HTTP409. A confirmed nonempty core receipt is delivered;
 accepted/pending alone is not. HTTP4xx are permanent except 408/425/429; transport
-loss and 5xx retry. Explicit permanent adapter refusals also stop.
+loss and 5xx retry. Explicit permanent adapter refusals also stop. Since a previous acceptance may be unknown, stopping an attempted row records indeterminate rather than asserting non-delivery.
 
 Every outbox mutation seals its record, fsyncs a private temporary file, renames
 it and fsyncs its directory. The next retry time is persisted before network I/O.

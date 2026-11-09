@@ -2657,14 +2657,14 @@ export function continuationSnapshot(env, conversation) {
 // the registry afresh, but never rebuild payload fields from a newer body/run.
 export async function drainContinuations(env, o = {}) {
   const d = depsOf(env, o);
-  const outbox = continuationOutbox({ dir: join(deliveryDir(env), 'continuations'), sealer: d.sealer, now: () => d.now().getTime() });
+  const outbox = continuationOutbox({ dir: join(deliveryDir(env), 'continuations'), sealer: d.sealer, now: () => d.now().getTime(), lifetimeMs: o.continuationLifetimeMs });
   await outbox.drain({ current: (cv) => continuationSnapshot(env, cv), post: async (p) => {
     // A registry outage is transient; venueOf intentionally swallows that
     // distinction for ordinary sends, so do not use it for durable reports.
     const venue = (await d.venues())?.[p.target.venue];
     if (!coreAdapted(venue)) return { permanent: true, reason: 'continuation destination has no core idempotency contract' };
     const answer = await d.core.comms({ op: 'post', place: p.target.place, agent: p.agent, ref: p.ref,
-      text: p.text, run: p.run, ...(p.on ? { on: p.on } : {}) });
+      text: p.text, run: p.run, expiresAt: p.expiresAt, ...(p.on ? { on: p.on } : {}) });
     return answer?.ok === true && typeof answer.id === 'string' && answer.id.length > 0 ? { ok: true, posted: true } : answer;
   } });
 }
@@ -2677,7 +2677,7 @@ export function continuationCall(env, { action, conversation, key, session, hand
     throw new StateError('only its own agent may use a continuation', 403);
   const problem = holderProblem(env, d, c, { key, session }, 'uses a continuation', o.caller);
   if (problem) throw new StateError(problem, 403);
-  const outbox = continuationOutbox({ dir: join(deliveryDir(env), 'continuations'), sealer: d.sealer, now: () => d.now().getTime() });
+  const outbox = continuationOutbox({ dir: join(deliveryDir(env), 'continuations'), sealer: d.sealer, now: () => d.now().getTime(), lifetimeMs: o.continuationLifetimeMs });
   const child = continuationSnapshot(env, conversation);
   if (action === 'issue') return outbox.issue(child);
   if (action !== 'enqueue' && action !== 'status') throw new StateError('unknown continuation action', 400);

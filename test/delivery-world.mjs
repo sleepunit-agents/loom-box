@@ -161,7 +161,7 @@ export function world(extra = {}, { inboxDir } = {}) {
   const clock = { now: () => new Date(t), advance: (ms) => { t += ms; } };
   const core = fakeCore(log, clock.now);
   const o = {
-    core, runner: () => runner, sealer: testSealer, now: clock.now, warn: () => {},
+    continuationLifetimeMs: 86400000, core, runner: () => runner, sealer: testSealer, now: clock.now, warn: () => {},
     accounts: staticAccounts({ accounts: [{ name: 'max', provider: 'anthropic', harness: 'claude', kind: 'login', agents: ['art', 'mark', 'pip'], credentials: [{ kind: 'login', status: 'valid' }], usage: {} }] }),
     venues: () => ({ slack: { kind: 'live', send: [process.execPath, join(here, 'fake-send.mjs')] }, relay: { kind: 'agent' }, loom: { kind: 'live', piece: 'loom', adapter: 'core' } }),
     // Who may do what (policy.mjs): no policy, gates that name no one, an adapter that describes every place as an
