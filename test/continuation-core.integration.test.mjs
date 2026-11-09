@@ -74,6 +74,7 @@ for (const disposition of ['live', 'archive', 'delete', 'delete-crash', 'not-acc
   t.after(() => second.kill('SIGKILL'));
   let secondErr = ''; second.stderr.on('data', b => secondErr += b);
   assert.equal((await once(second, 'exit'))[0], 0, secondErr);
+  assert.equal(payloads.length, 2, 'fresh runtime must reconcile uncertain acceptance after cutoff');
   assert.equal(payloads[0].op, 'post');
   assert.equal(payloads[1].op, 'reconcile');
   assert.deepEqual({ ...payloads[1], op: 'post' }, payloads[0]);

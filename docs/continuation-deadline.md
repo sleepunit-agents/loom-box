@@ -172,3 +172,33 @@ holder issue correctly refuses without trusted policy, and the four core lost-re
 benches still use historical fake time against real core cutoff. Adapt them through
 a test-only trusted policy/time seam; do not enable policy in production or relax
 cutoff. Runtime fenced reconciliation and actual SIGKILL crossing cutoff remain next.
+
+## Actual cutoff crash proof (2026-11-09)
+
+The opt-in core companion bench now SIGKILLs a runtime drain process after
+adapter acceptance but before receipt, or before forwarding to core. A new
+process beyond the shared cutoff sends only `reconcile`, with every other
+payload field unchanged. Live/archive receipts become delivered; fenced
+non-acceptance expires; deleted targets remain indeterminate through another
+fresh-process lookup. The deletion crash also kills/restarts core between
+message removal and cleanup completion. Database row counts verify no recreated
+reply. Core fixture time is controlled only in its test process via parent IPC;
+no production time or policy switch exists.
+
+The clock companion bench retains actual managed production enqueue/status
+executables, real encryption and authenticated core/clock routing. Production
+issue is asserted to refuse the unconfigured deadline policy; only the trusted
+test parent supplies a policy for its grant. Harness/managed delivery bridge
+and stubbed systemd calls remain explicit test seams.
+
+Five fresh-interpreter legacy tests read real age-encrypted old-schema fixtures
+(unbound, bound, pending, attempted, delivered). None gains a deadline or makes
+a network call. Pending expires, attempted stays indeterminate, delivered stays
+delivered. This is durable schema-upgrade proof, not execution of a historical
+runtime binary.
+
+Native owner handoff is now complete at merged runtime145 fc786c5d97d278b3da95cee526551226166fefb0
+(note:work/codex-native-history-live-18724473b3). Continuation integration still
+needs to consume that completed interface and prove its own native launch path;
+the companion fake runner cannot stand in for that proof. Production issuance,
+collection, merge and installation remain held for this draft.
