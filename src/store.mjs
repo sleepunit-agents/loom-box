@@ -14,11 +14,12 @@ export class StoreError extends Error {
 export function loomStore(env = process.env, { run = spawnSync, piece = pieceName(env) } = {}) {
   const loom = env.LOOM_BIN || 'loom';
   const call = (args, input) => {
+    if (env.HOUSE_ID) throw new StoreError('the runtime store lives on loom, not in a house; use the runtime API');
     const r = run(loom, ['store', piece, ...args], { env, encoding: 'utf-8', input, timeout: 20_000, stdio: ['pipe', 'pipe', 'pipe'] });
     if (r.error) throw new StoreError(`loom store: can't run ${loom}: ${r.error.message}`);
     return r;
   };
-  const why = (r) => (r.stderr || '').trim().split('\n').pop()?.replace(/^loom store: /, '').slice(0, 300) || `exit ${r.status}`;
+  const why = (r) => (r.stderr || '').trim().split('\n').find((line) => line.trim() && !/^[{}\[\]]$/.test(line.trim()))?.replace(/^loom store: /, '').slice(0, 300) || `exit ${r.status}`;
   return {
     get(collection, key) {
       const r = call(['get', collection, key]);

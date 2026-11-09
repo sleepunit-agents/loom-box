@@ -1,6 +1,7 @@
 // The runtime's `run` path for an agent's bodies (loom docs/extensions.md, "The API": POST /api/runtime/run {argv}):
 // `gates people` (its own agent's gates, {doc, rev}) and `gates propose …` / `propose-person …` (one person for the
 // owner to allow). A body only ever reaches its own agent's: the agent is the caller's, never an argument.
+import { grantsFor, GRANTS, KEY } from './grants.mjs';
 import { loomStore } from './store.mjs';
 import { annotate, gatesOf, propose, proposeFlags } from './gates.mjs';
 import { coreFrom } from './core.mjs';
@@ -31,6 +32,10 @@ export async function runFor(env, caller, argv, store = loomStore(env), core = c
       throw e;
     }
   }
+  if (a === 'grants' && b === 'list' && (rest.length === 0 || (rest.length === 1 && rest[0] === '--json'))) {
+    try { return ok(`${JSON.stringify(grantsFor(store.get(GRANTS, KEY)?.doc, caller.agent))}\n`); }
+    catch (e) { return no(e.message); }
+  }
   if (a === 'gates' && b === 'people' && rest.length === 0) return ok(`${JSON.stringify(gatesOf(store, caller.agent))}\n`);
   // A body's own place (t-1745): the conversation it proves it holds (its run's key and harness session, as `send` and
   // a relay prove it), and where that is: its venue, place and label, and the people in it as its rules took them
@@ -50,7 +55,7 @@ export async function runFor(env, caller, argv, store = loomStore(env), core = c
     if (r.ok) await annotate(store, core, caller.agent, r.pid);
     return r.ok ? ok(`${r.message}\n`) : no(`propose-person: ${r.message}`);
   }
-  return no('the runtime answers a body: place --conversation cv-… | relay --to A --say T [--why W] [--reply-to r-…] [--from discord:#x] [--approval a-…] [--conversation cv-…] | relays [--thread r-…] | gates people | gates propose --slug S --entry JSON [--why W] [--then-relay-say T --then-relay-via slack]', 2);
+  return no('the runtime answers a body: place --conversation cv-… | relay --to A --say T [--why W] [--reply-to r-…] [--from discord:#x] [--approval a-…] [--conversation cv-…] | relays [--thread r-…] | grants list [--json] | gates people | gates propose --slug S --entry JSON [--why W] [--then-relay-say T --then-relay-via slack]', 2);
 }
 
 /**

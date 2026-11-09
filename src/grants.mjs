@@ -241,3 +241,17 @@ export function setRelay(store, { agent, to, agents }) {
 export function householdOf(env) { return readJson(join(loomHome(env), 'household.json')); }
 
 export const grantsExistSync = (p) => existsSync(p);
+
+/** The effective grants a body may inspect: its own paths and outgoing relay pairs. */
+export function grantsFor(doc, agent) {
+  if (!AGENT.test(agent ?? '')) throw new Error('grants list needs the authenticated agent');
+  if (doc == null) return { agent, configured: false, pieces: {}, relay: [] };
+  const why = grantsProblem(doc);
+  if (why) throw new Error(`the runtime's grants cannot be read (${why})`);
+  const pieces = {};
+  for (const [piece, by] of Object.entries(doc.pieces)) {
+    const paths = [...new Set([...(Object.hasOwn(by, agent) ? by[agent] : []), ...(Object.hasOwn(by, '*') ? by['*'] : [])])];
+    if (paths.length) pieces[piece] = paths;
+  }
+  return { agent, configured: true, pieces, relay: [...(doc.relay?.[agent] ?? [])] };
+}

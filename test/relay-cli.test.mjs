@@ -65,3 +65,28 @@ test('place CLI forwards its own conversation and proof in the call\'s body, and
   assert.equal(none.exit, 2);
   assert.equal(calls.length, 1, 'no conversation: nothing asked');
 });
+
+test('a house grants CLI reads the authenticated runtime, never its empty local store', async (t) => {
+  const calls = [];
+  const server = createServer(async (req, res) => {
+    let body = ''; for await (const part of req) body += part;
+    calls.push({ path: req.url, authorization: req.headers.authorization, body: JSON.parse(body) });
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({ exit: 0, stdout: '{"agent":"art","configured":true,"pieces":{"tasks":["run"]},"relay":[]}\n', stderr: '' }));
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  t.after(() => server.close());
+  const dir = scratch('grants-cli-');
+  const token = join(dir, 'token'); writeFileSync(token, 'test-house-token');
+  const result = await new Promise((resolve) => {
+    const child = spawn(process.execPath, [join(import.meta.dirname, '..', 'src', 'cli.mjs'), 'grants', 'list', '--json'], {
+      env: { ...process.env, HOUSE_ID: 'h-test', LOOM_RUNTIME_PIECE: 'runtime', LOOM_URL: `http://127.0.0.1:${server.address().port}/mcp`, LOOM_TOKEN_FILE: token },
+    });
+    let stdout = '', stderr = '';
+    child.stdout.on('data', (d) => { stdout += d; }); child.stderr.on('data', (d) => { stderr += d; });
+    child.on('close', (exit) => resolve({ exit, stdout, stderr }));
+  });
+  assert.equal(result.exit, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).pieces.tasks[0], 'run');
+  assert.deepEqual(calls, [{ path: '/api/runtime/run', authorization: 'Bearer test-house-token', body: { argv: ['grants', 'list', '--json'] } }]);
+});
