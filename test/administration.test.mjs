@@ -1,10 +1,10 @@
 // No administrative command or real approval is executed by these tests.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { chmodSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { requestAdministration, administrationApproval, advanceAdministration, administrationStatus, queueAdministration, endAdministration, listAdministration, administrationApprovals, ADMINISTRATION_KIND } from '../src/administration.mjs';
+import { requestAdministration, administrationApproval, advanceAdministration, administrationStatus, queueAdministration, endAdministration, listAdministration, administrationWork, claimAdministration, admitAdministration, completeAdministrationCommand, administrationResult, administrationApprovals, ADMINISTRATION_KIND } from '../src/administration.mjs';
 import { deliver, loadConv, saveConv, tick } from '../src/delivery.mjs';
 import { load, update } from '../src/state.mjs';
 import { world } from './delivery-world.mjs';
@@ -340,9 +340,10 @@ test('another member cannot inventory private scoped work and offline admitted w
   assert.deepEqual(listAdministration(w.env, { kind: 'agent', agent: 'art' }, 'one', w.o), []);
   const otherPage = page(w.env, { path: 'box/one', caller: { kind: 'owner', who: 'another-member' } }, w.clock.now().getTime());
   assert.equal(otherPage.sections.some(s => s.id === 'administration'), false);
-  // Model only the admission receipt, not a process or administrative effect.
-  const journal = w.journal(); journal.operations[op.id].state = 'admitted';
-  writeFileSync(join(w.env.LOOM_BOX_DATA, 'administration/journal.json'), JSON.stringify(journal), { mode: 0o600 });
+  // Actual controller admission receipt, without starting a process.
+  const q = { operation: op.id, worker: administrativeWorker() };
+  const claim = claimAdministration(w.env, boxCaller, q, w.o);
+  assert.equal(admitAdministration(w.env, boxCaller, { ...q, ticket: claim.ticket }, w.o).authorized, true);
   const result = act(w.env, { now: w.clock.now }, { caller: owner, action: 'administration-revoke', fields: { scope: w.scope.id } });
   assert.equal(result.ok, true); assert.match(result.message, /stop request/);
   assert.equal(w.journal().operations[op.id].state, 'stop-requested');
@@ -350,4 +351,143 @@ test('another member cannot inventory private scoped work and offline admitted w
   const section = view.sections.find(s => s.id === 'administration');
   assert.match(JSON.stringify(section), /outcomes outstanding/);
   assert.match(JSON.stringify(section), /offline/);
+});
+
+const administrativeWorker = () => ({ host: 'fixture-machine', pid: 1234, birth: '5678',
+  boot: '01234567-89ab-cdef-0123-456789abcdef', uid: 1000, gid: 1000 });
+const boxCaller = { kind: 'piece', subject: 'one' };
+
+test('administrative polling is not admission, and retry claims preserve the exact worker and secret ticket', async () => {
+  const w = await setup(); await w.activate(); const op = w.queue(), worker = administrativeWorker();
+  assert.equal(administrationWork(w.env, boxCaller, w.o)[0].state, 'queued');
+  assert.equal(w.journal().operations[op.id].claim, undefined);
+  const q = { operation: op.id, worker };
+  const first = claimAdministration(w.env, boxCaller, q, w.o);
+  assert.equal(first.claimed, true); assert.deepEqual(first.payload.argv, w.command().argv);
+  const retry = claimAdministration(w.env, boxCaller, q, w.o);
+  assert.equal(retry.ticket, first.ticket);
+  assert.equal(JSON.stringify(w.journal()).includes(first.ticket), false);
+  assert.throws(() => claimAdministration(w.env, boxCaller, { ...q, worker: { ...worker, birth: '5679' } }, w.o), /another worker/);
+  for (const caller of [{ kind: 'agent', agent: 'art' }, { kind: 'owner', who: 'owner' }, { kind: 'piece', subject: 'unregistered' }]) {
+    assert.throws(() => administrationWork(w.env, caller, w.o), /enrolled workload box/);
+  }
+  const receipt = admitAdministration(w.env, boxCaller, { ...q, ticket: first.ticket }, w.o);
+  assert.equal(receipt.authorized, true); assert.equal(receipt.first, true);
+  w.clock.advance(1000);
+  const again = admitAdministration(w.env, boxCaller, { ...q, ticket: first.ticket }, w.o);
+  assert.equal(again.first, false); assert.equal(again.receipt.admittedAt, receipt.receipt.admittedAt);
+  assert.equal(again.receipt.until, receipt.receipt.until);
+  assert.equal(again.receipt.remainingMs, receipt.receipt.remainingMs - 1000);
+  assert.equal(claimAdministration(w.env, boxCaller, q, w.o).claimed, false);
+});
+
+test('administrative admission rechecks expiry, revocation, principal, and exact physical identity', async () => {
+  for (const change of ['expiry', 'revoke', 'principal', 'host']) {
+    const w = await setup(); await w.activate(); const op = w.queue(), worker = administrativeWorker();
+    const q = { operation: op.id, worker };
+    const claimed = claimAdministration(w.env, boxCaller, q, w.o);
+    assert.throws(() => admitAdministration(w.env, boxCaller, { ...q, ticket: 'wrong' }, w.o), /durable claim/);
+    if (change === 'expiry') w.clock.advance(3600_000);
+    if (change === 'revoke') endAdministration(w.env, { kind: 'owner', who: 'owner' }, { scope: w.scope.id }, w.o);
+    if (change === 'principal') { const c = loadConv(w.env, w.conversation); c.actsFor.unknown = true; saveConv(w.env, c); }
+    if (change === 'host') update(w.env, s => { s.boxes.one.administration.host = 'another-machine'; });
+    const result = admitAdministration(w.env, boxCaller, { ...q, ticket: claimed.ticket }, w.o);
+    assert.equal(result.authorized, false, change);
+    assert.equal(w.journal().operations[op.id].state, 'cancelled');
+  }
+  const w = await setup(); await w.activate(); const op = w.queue();
+  for (const extra of [{ uid: 0 }, { host: 'another-machine' }, { birth: '' }, { pid: 0 }]) {
+    assert.throws(() => claimAdministration(w.env, boxCaller, { operation: op.id, worker: { ...administrativeWorker(), ...extra } }, w.o), /OS identity/);
+  }
+});
+
+test('expiry while decrypting a command prevents the claim from being returned', async () => {
+  const w = await setup(); await w.activate(); const op = w.queue();
+  let first = true;
+  const options = { ...w.o, sealer: { ...w.o.sealer, open(value) {
+    const result = w.o.sealer.open(value); if (first) { first = false; w.clock.advance(3600_000); } return result;
+  } } };
+  const result = claimAdministration(w.env, boxCaller, { operation: op.id, worker: administrativeWorker() }, options);
+  assert.equal(result.claimed, false);
+  assert.equal(result.payload, undefined); assert.equal(result.ticket, undefined);
+  assert.equal(w.journal().operations[op.id].state, 'cancelled');
+});
+
+test('independent controllers serialize competing worker claims and never transfer ownership after elapsed time', async () => {
+  const w = await setup(); await w.activate(); const op = w.queue();
+  const script = `import{readFileSync}from'node:fs';import{claimAdministration}from${JSON.stringify(new URL('../src/administration.mjs',import.meta.url).href)};import{testSealer}from${JSON.stringify(new URL('./delivery-world.mjs',import.meta.url).href)};const q=JSON.parse(readFileSync(0,'utf8'));try{const r=claimAdministration(q.env,q.caller,q.request,{now:()=>new Date(q.at),sealer:testSealer});console.log(JSON.stringify({ok:true,ticket:r.ticket,worker:r.worker}));}catch{console.log(JSON.stringify({ok:false}));}`;
+  const claim = worker => new Promise((resolve,reject) => {
+    const child = spawn(process.execPath, ['--input-type=module','-e',script], { stdio: ['pipe','pipe','pipe'] });
+    let output = ''; child.stdout.on('data',b=>{output+=b;});
+    child.on('error',reject); child.on('close',code=>{ try { assert.equal(code,0); resolve(JSON.parse(output)); } catch(e){reject(e);} });
+    child.stdin.end(JSON.stringify({env:w.env,caller:boxCaller,request:{operation:op.id,worker},at:w.clock.now().getTime()}));
+  });
+  const outcomes = await Promise.all([claim(administrativeWorker()),claim({...administrativeWorker(),pid:2345})]);
+  assert.equal(outcomes.filter(r=>r.ok).length,1);
+  const winner = outcomes.find(r=>r.ok);
+  const resumed = await claim(winner.worker);
+  assert.equal(resumed.ticket,winner.ticket);
+  w.clock.advance(30*60_000);
+  assert.throws(()=>claimAdministration(w.env,boxCaller,{operation:op.id,worker:{...winner.worker,pid:3456}},w.o),/another worker/);
+  assert.equal(w.journal().operations[op.id].claim.worker.pid,winner.worker.pid);
+});
+
+test('broken claim or admission receipts fail closed on reload', async () => {
+  for (const damage of ['missing-claim','worker','ticket','future']) {
+    const w = await setup(); await w.activate(); const op = w.queue();
+    const q = { operation:op.id,worker:administrativeWorker() };
+    const claimed = claimAdministration(w.env,boxCaller,q,w.o);
+    admitAdministration(w.env,boxCaller,{...q,ticket:claimed.ticket},w.o);
+    const j = w.journal(), r = j.operations[op.id];
+    if(damage==='missing-claim') delete r.claim;
+    if(damage==='worker') r.admission.worker.pid++;
+    if(damage==='ticket') r.admission.ticketHash='0'.repeat(64);
+    if(damage==='future') r.admission.at=j.highWater+1;
+    writeFileSync(join(w.env.LOOM_BOX_DATA,'administration/journal.json'),JSON.stringify(j),{mode:0o600});
+    assert.throws(()=>administrationWork(w.env,boxCaller,w.o),/journal cannot be decoded/);
+  }
+});
+
+test('late sealed results reconcile a lost acknowledgement without changing or replaying the command', async () => {
+  const w = await setup(); await w.activate(); const op = w.queue();
+  const request = { operation:op.id,worker:administrativeWorker() };
+  const claimed = claimAdministration(w.env,boxCaller,request,w.o), q = {...request,ticket:claimed.ticket};
+  admitAdministration(w.env,boxCaller,q,w.o);
+  endAdministration(w.env,{kind:'owner',who:'owner'},{scope:w.scope.id},w.o);
+  const result = {outcome:'exited',exitCode:0,stdout:'private-command-output',stderr:'',truncated:false};
+  const first = completeAdministrationCommand(w.env,boxCaller,{...q,result},w.o);
+  assert.equal(first.state,'finished');
+  assert.equal(JSON.stringify(w.journal()).includes('private-command-output'),false);
+  w.clock.advance(1000);
+  const script = `import{readFileSync}from'node:fs';import{completeAdministrationCommand}from${JSON.stringify(new URL('../src/administration.mjs',import.meta.url).href)};import{testSealer}from${JSON.stringify(new URL('./delivery-world.mjs',import.meta.url).href)};const q=JSON.parse(readFileSync(0,'utf8'));console.log(JSON.stringify(completeAdministrationCommand(q.env,q.caller,q.request,{now:()=>new Date(q.at),sealer:testSealer})));`;
+  const child = spawnSync(process.execPath,['--input-type=module','-e',script],{
+    input:JSON.stringify({env:w.env,caller:boxCaller,request:{...q,result},at:w.clock.now().getTime()}),encoding:'utf8',
+  });
+  assert.equal(child.status,0,child.stderr);
+  assert.deepEqual(JSON.parse(child.stdout),first);
+  assert.throws(()=>completeAdministrationCommand(w.env,boxCaller,{...q,result:{...result,stdout:'different'}},w.o),/another result/);
+  const read = administrationResult(w.env,w.caller,{...w.proof(),operation:op.id},w.o);
+  assert.equal(read.ready,true);assert.equal(read.result.stdout,result.stdout);
+  assert.throws(()=>administrationResult(w.env,{kind:'owner',who:'another-member'},{operation:op.id},w.o),/box’s owner/);
+  assert.equal(claimAdministration(w.env,boxCaller,request,w.o).claimed,false);
+  assert.equal(w.journal().operations[op.id].admission.at,first.result.at);
+});
+
+test('results require their exact admitted worker and explicit bounded outcomes', async () => {
+  const w = await setup(); await w.activate(); const op = w.queue();
+  const request={operation:op.id,worker:administrativeWorker()};
+  const claimed=claimAdministration(w.env,boxCaller,request,w.o),q={...request,ticket:claimed.ticket};
+  const result={outcome:'exited',exitCode:0,stdout:'ok'};
+  assert.throws(()=>completeAdministrationCommand(w.env,boxCaller,{...q,result},w.o),/match its admission/);
+  admitAdministration(w.env,boxCaller,q,w.o);
+  for(const bad of [{outcome:'exited'},{...result,signal:'SIGTERM'},{...result,stdout:'x'.repeat(256*1024+1)},
+    {outcome:'unknown',exitCode:0},{...result,exitCode:-1}]) {
+    assert.throws(()=>completeAdministrationCommand(w.env,boxCaller,{...q,result:bad},w.o),/bounded, explicit/);
+  }
+  assert.throws(()=>completeAdministrationCommand(w.env,boxCaller,{...q,ticket:'wrong',result},w.o),/match its admission/);
+  assert.equal(administrationResult(w.env,w.caller,{...w.proof(),operation:op.id},w.o).ready,false);
+  const unknown=completeAdministrationCommand(w.env,boxCaller,{...q,result:{outcome:'unknown',stderr:'worker outcome unavailable'}},w.o);
+  assert.equal(unknown.state,'unknown');
+  assert.equal(administrationWork(w.env,boxCaller,w.o)[0].state,'unknown');
+  assert.equal(claimAdministration(w.env,boxCaller,request,w.o).claimed,false);
 });

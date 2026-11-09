@@ -195,3 +195,25 @@ The isolated real-CLI/tick fixture also passes the current core page vocabulary
 parser and invokes the generated owner revoke action successfully. This is a
 fixture page/action verification, not proof of a deployed browser interaction or
 physical command stop. Both remain part of the release gates.
+
+Internal controller operations now implement observation, immutable worker
+claim, admission, sealed completion and authorized result retrieval. These are
+not yet exposed as box routes. A claim binds host, PID, boot id, process birth
+and UID/GID; its random ticket is sealed at rest. Another worker cannot acquire
+the command merely because time elapsed. Admission rechecks the active lease,
+current principal and approved box identity. Repeated admission returns the
+original worker-bound receipt, never permission to spawn another process.
+
+The future box worker must persist that receipt and pass through one durable
+physical child gate. It must measure the admission request's elapsed time with
+a monotonic clock and conservatively consume the returned remaining lease time;
+network delay cannot extend access. Expiry and targeted stop still need actual
+process tests. Controller admission alone does not prove physical execution.
+
+Completion accepts only the admitted worker and ticket, even after the lease
+ends. It stores bounded stdout/stderr sealed, exposes only outcome metadata,
+and rejects a retry with different output. A lost completion acknowledgement
+can be reconciled from a fresh controller process. An unknown outcome remains
+explicit and cannot be reclaimed for automatic execution. These controller
+tests run no host commands; worker transport, physical admission and stop,
+output capture/upload, shared tools and provider verification remain gates.

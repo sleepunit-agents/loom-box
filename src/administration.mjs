@@ -43,6 +43,24 @@ function validate(j) {
   for (const [id, r] of Object.entries(j.operations)) {
     if (!/^ado-[0-9a-f]{32}$/.test(id) || r?.id !== id || !j.scopes[r.scope] || !['queued', 'claimed', 'admitted', 'stop-requested', 'cancelled', 'finished', 'failed', 'unknown'].includes(r.state) ||
         !/^[0-9a-f]{64}$/.test(r.payloadHash ?? '') || typeof r.sealed !== 'string' || !instant(r.created) || !Number.isInteger(r.timeoutMs) || r.timeoutMs < 1 || r.timeoutMs > 600_000) broken();
+    if (r.claim) {
+      try { if (!same(workerFor(j.scopes[r.scope], r.claim.worker), r.claim.worker)) broken(); } catch { broken(); }
+      if (!instant(r.claim.at) || r.claim.at < r.created || r.claim.at > j.highWater ||
+          !/^[0-9a-f]{64}$/.test(r.claim.ticketHash ?? '') || typeof r.claim.sealedTicket !== 'string' ||
+          r.claim.sealedTicket.length > 4096) broken();
+    }
+    if (['claimed', 'admitted', 'stop-requested'].includes(r.state) && !r.claim) broken();
+    if (r.admission && (!r.claim || !instant(r.admission.at) || r.admission.at < r.claim.at || r.admission.at > j.highWater ||
+        !same(r.admission.worker, r.claim.worker) || r.admission.ticketHash !== r.claim.ticketHash)) broken();
+    if (['admitted', 'stop-requested'].includes(r.state) && !r.admission) broken();
+    if (r.result && (!r.admission || !instant(r.result.at) || r.result.at < r.admission.at || r.result.at > j.highWater ||
+        !/^[0-9a-f]{64}$/.test(r.result.hash ?? '') || typeof r.result.sealed !== 'string' || r.result.sealed.length > 1024 * 1024)) broken();
+    if (['finished', 'failed'].includes(r.state) && !r.result) broken();
+    if (r.result) {
+      try { commandResult(r.result); } catch { broken(); }
+      const expected = r.result.outcome === 'unknown' ? 'unknown' : r.result.exitCode === 0 ? 'finished' : 'failed';
+      if (r.state !== expected) broken();
+    }
   }
   return j;
 }
@@ -134,7 +152,8 @@ const publicScope = s => ({ id: s.id, agent: s.agent, conversation: s.conversati
   work: s.work, why: s.why, cwd: s.cwd, minutes: s.minutes, state: s.state, created: s.created,
   ...(s.approval ? { approval: s.approval } : {}), ...(s.activation ? { until: s.activation.until } : {}) });
 const publicOperation = r => ({ id: r.id, scope: r.scope, intent: r.intent, payloadHash: r.payloadHash,
-  state: r.state, created: r.created, timeoutMs: r.timeoutMs });
+  state: r.state, created: r.created, timeoutMs: r.timeoutMs,
+  ...(r.result ? { result: { hash: r.result.hash, at: r.result.at, outcome: r.result.outcome, exitCode: r.result.exitCode, signal: r.result.signal } } : {}) });
 
 // The approval page normalizes display text. ASCII JSON escapes preserve the
 // exact strings, including Unicode paths, without a visually different grant.
@@ -381,6 +400,143 @@ export function queueAdministration(env, caller, q, o = {}) {
     j.highWater = committed;
     const r = { id, scope: s.id, intent, payloadHash, sealed, timeoutMs, state: 'queued', created: committed };
     j.operations[id] = r; return publicOperation(r);
+  });
+}
+
+// These are internal controller operations. They are not box API routes until
+// the durable box worker and physical admission tests are implemented.
+function administrativeBox(env, caller, { reporting = false } = {}) {
+  const b = caller?.kind === 'piece' && load(env).boxes[caller.subject];
+  if (!b || b.revoked || b.reportOnly && !reporting) fail('administration requires its enrolled workload box', 403);
+  return caller.subject;
+}
+function workerIdentity(value) {
+  if (!value || !Number.isSafeInteger(value.pid) || value.pid < 1 ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value.boot ?? '') ||
+      !/^[0-9]{1,24}$/.test(value.birth ?? '') ||
+      !Number.isInteger(value.uid) || !Number.isInteger(value.gid)) fail('administration needs an exact worker OS identity', 400);
+  return { pid: value.pid, boot: value.boot, birth: value.birth, host: value.host, uid: value.uid, gid: value.gid };
+}
+function operationFor(j, id, boxId) {
+  const r = j.operations[id], s = r && j.scopes[r.scope];
+  if (!s || s.box !== boxId) fail('no administrative command for this box', 404);
+  return { r, s };
+}
+function workerFor(scope, worker) {
+  const w = workerIdentity(worker);
+  if (w.host !== scope.execution.host || w.uid !== scope.execution.uid || w.gid !== scope.execution.gid) fail('administrative worker has another host or OS identity', 403);
+  return w;
+}
+
+/** Polling is observation, never a command claim or permission to spawn. */
+export function administrationWork(env, caller, o = {}) {
+  const boxId = administrativeBox(env, caller);
+  return transaction(env, o, (j, at) => {
+    for (const s of Object.values(j.scopes)) if (s.box === boxId) refresh(env, j, s, at);
+    return Object.values(j.operations).filter(r => j.scopes[r.scope].box === boxId &&
+      ['queued', 'claimed', 'admitted', 'stop-requested', 'unknown'].includes(r.state)).map(publicOperation);
+  });
+}
+
+/** One immutable worker owns the command claim. A dead or unobserved worker
+ * never grants a different worker the right to replay a possibly effective command. */
+export function claimAdministration(env, caller, q, o = {}) {
+  const boxId = administrativeBox(env, caller), sealer = o.sealer ?? ageSealer(env, deliveryDir(env));
+  return transaction(env, o, (j, at) => {
+    const { r, s } = operationFor(j, q.operation, boxId);
+    const worker = workerFor(s, q.worker);
+    refresh(env, j, s, at);
+    if (r.claim && !same(r.claim.worker, worker)) fail('administrative command already belongs to another worker');
+    if (s.state !== 'active' || !['queued', 'claimed'].includes(r.state)) return { claimed: false, operation: publicOperation(r) };
+    const plain = sealer.open(Buffer.from(r.sealed, 'base64'));
+    if (plain.length > 128 * 1024) fail('administrative payload exceeds its input budget', 503);
+    const payload = JSON.parse(plain.toString('utf8'));
+    if (hash(payload) !== r.payloadHash) fail('administrative payload changed; command remains held', 503);
+    let ticket;
+    if (r.claim) ticket = sealer.open(Buffer.from(r.claim.sealedTicket, 'base64')).toString('utf8');
+    else {
+      ticket = randomBytes(32).toString('hex');
+      r.claim = { worker, at, ticketHash: hash(ticket), sealedTicket: sealer.seal(Buffer.from(ticket)).toString('base64') };
+    }
+    if (!/^[0-9a-f]{64}$/.test(ticket) || hash(ticket) !== r.claim.ticketHash) fail('administrative claim ticket cannot be reconciled', 503);
+    const ready = clock(o);
+    if (ready < at) fail('administration clock moved backwards; command remains held', 503);
+    j.highWater = ready;
+    refresh(env, j, s, ready);
+    if (s.state !== 'active') return { claimed: false, operation: publicOperation(r) };
+    r.state = 'claimed';
+    return { claimed: true, operation: publicOperation(r), worker, ticket, payload, until: s.activation.until };
+  });
+}
+
+/** Commit authorization for the SAME worker, immediately before its physical
+ * child gate. The box must persist this receipt and use its own one-shot gate.
+ * Receiving this receipt again is NOT permission to launch another process. */
+export function admitAdministration(env, caller, q, o = {}) {
+  const boxId = administrativeBox(env, caller);
+  return transaction(env, o, (j, at) => {
+    const { r, s } = operationFor(j, q.operation, boxId);
+    const worker = workerFor(s, q.worker);
+    if (!r.claim || !same(r.claim.worker, worker) || typeof q.ticket !== 'string' || hash(q.ticket) !== r.claim.ticketHash) fail('administrative admission does not match its durable claim', 403);
+    refresh(env, j, s, at);
+    if (s.state !== 'active' || !['claimed', 'admitted'].includes(r.state)) return { authorized: false, operation: publicOperation(r) };
+    const first = !r.admission;
+    r.admission ??= { at, worker, ticketHash: r.claim.ticketHash };
+    r.state = 'admitted';
+    return { authorized: true, first, operation: publicOperation(r),
+      receipt: { operation: r.id, payloadHash: r.payloadHash, worker, admittedAt: r.admission.at,
+        until: s.activation.until, serverAt: at, remainingMs: s.activation.until - at } };
+  });
+}
+
+function commandResult(value) {
+  const { outcome, stdout = '', stderr = '', exitCode = null, signal = null, truncated = false } = value ?? {};
+  if (!['exited', 'unknown'].includes(outcome) || typeof stdout !== 'string' || typeof stderr !== 'string' ||
+      typeof truncated !== 'boolean' || Buffer.byteLength(stdout) + Buffer.byteLength(stderr) > 256 * 1024 ||
+      !(exitCode === null || Number.isInteger(exitCode) && exitCode >= 0 && exitCode <= 255) ||
+      !(signal === null || /^SIG[A-Z0-9]{1,16}$/.test(signal)) ||
+      (outcome === 'exited' ? (exitCode === null) === (signal === null) : exitCode !== null || signal !== null)) fail('administration needs a bounded, explicit command result', 400);
+  const result = { outcome, stdout, stderr, exitCode, signal, truncated };
+  if (Buffer.byteLength(JSON.stringify(result)) > 512 * 1024) fail('administrative result exceeds its encoded budget', 413);
+  return result;
+}
+
+/** Results may arrive after expiry or revocation. This acknowledges observation,
+ * never renewed execution authority. Retry cannot replace an immutable result. */
+export function completeAdministrationCommand(env, caller, q, o = {}) {
+  const boxId = administrativeBox(env, caller, { reporting: true }), result = commandResult(q.result);
+  const sealer = o.sealer ?? ageSealer(env, deliveryDir(env)), resultHash = hash(result);
+  return transaction(env, o, (j, at) => {
+    const { r, s } = operationFor(j, q.operation, boxId), worker = workerFor(s, q.worker);
+    if (!r.admission || !same(r.admission.worker, worker) || typeof q.ticket !== 'string' || hash(q.ticket) !== r.admission.ticketHash) fail('administrative result does not match its admission', 403);
+    if (r.result) {
+      if (r.result.hash !== resultHash) fail('administrative command already has another result');
+      return publicOperation(r);
+    }
+    if (!['admitted', 'stop-requested'].includes(r.state)) fail('administrative command cannot accept a result');
+    const sealed = sealer.seal(Buffer.from(JSON.stringify(result))).toString('base64');
+    const saved = clock(o);
+    if (saved < at) fail('administration clock moved backwards; result remains unacknowledged', 503);
+    j.highWater = saved;
+    r.result = { hash: resultHash, sealed, at: saved, outcome: result.outcome, exitCode: result.exitCode, signal: result.signal };
+    r.state = result.outcome === 'unknown' ? 'unknown' : result.exitCode === 0 ? 'finished' : 'failed';
+    return publicOperation(r);
+  });
+}
+
+export function administrationResult(env, caller, q, o = {}) {
+  const sealer = o.sealer ?? ageSealer(env, deliveryDir(env));
+  return transaction(env, o, j => {
+    const r = j.operations[q.operation], s = r && j.scopes[r.scope];
+    if (!s) fail('no such administrative command', 404);
+    access(env, s, caller, q, o);
+    if (!r.result) return { operation: publicOperation(r), ready: false };
+    const plain = sealer.open(Buffer.from(r.result.sealed, 'base64'));
+    if (plain.length > 512 * 1024) fail('administrative result exceeds its encoded budget', 503);
+    const result = commandResult(JSON.parse(plain.toString('utf8')));
+    if (hash(result) !== r.result.hash || result.outcome !== r.result.outcome || result.exitCode !== r.result.exitCode || result.signal !== r.result.signal)
+      fail('administrative result cannot be reconciled', 503);
+    return { operation: publicOperation(r), ready: true, result };
   });
 }
 
