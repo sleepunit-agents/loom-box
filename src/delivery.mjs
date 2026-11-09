@@ -905,6 +905,22 @@ export function workingConversations(env, d = depsOf(env), now = Date.now()) {
   return out;
 }
 
+/** Complete open delivery jobs. Idle/completed conversations are absent; queued/loop-paused work is waiting.
+ * No labels or message text leave runtime here: core applies conversation membership before enriching a card. */
+export function conversationJobs(env, d = depsOf(env), now = Date.now()) {
+  return listConvs(env).flatMap((c) => {
+    let status;
+    try { status = isStarting(c, now) ? 'working' : statusOf(env, c, d); } catch { return []; }
+    const running = status === 'working';
+    if (!running && !c.paused && !(c.queue ?? []).some((x) => !isNote(x))) return [];
+    const run = (c.runLog ?? []).findLast((x) => x.run === c.run);
+    return [{ agent: c.agent, id: c.conversation, status: running ? 'running' : 'waiting',
+      text: running ? 'Working in a conversation' : 'Waiting to continue', conversation: c.conversation,
+      ...(c.run ? { run: c.run } : {}), ...(c.venue === 'wake' ? { tasks: [...new Set((c.label ?? '').match(/\bt-\d+\b/g) ?? [])] } : {}), ...(c.venue === 'wake' ? { wake: c.place } : {}),
+      ...(Number.isFinite(run?.at) ? { since: new Date(run.at).toISOString() } : {}) }];
+  });
+}
+
 /** The working set as one string: it changes when a body starts or ends, nothing else (the tick's word to core). */
 export const workingPrint = (ws) => ws.map((w) => `${w.agent}:${w.conversation}`).sort().join(',');
 

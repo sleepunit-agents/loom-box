@@ -15,7 +15,7 @@ import { addBox, assertBoxOwner, resolveBox, isBoxOwner, boxLabelOf, boxOfCall, 
 import { LOGIN_HARNESSES } from './logins.mjs';
 import { ownCommit, swapCommand } from './version.mjs';
 import { stateAccounts } from './accounts.mjs';
-import { COMMS_VENUE, HARNESS_WORDS, ownerModelChoice, answerLoop, deliveryNotices, loadConv, loopAsks, readFallbacks, resetCardProblem, resetPrincipal, runtimeAs, whenWords, workingConversations } from './delivery.mjs';
+import { COMMS_VENUE, HARNESS_WORDS, conversationJobs, ownerModelChoice, answerLoop, deliveryNotices, loadConv, loopAsks, readFallbacks, resetCardProblem, resetPrincipal, runtimeAs, whenWords, workingConversations } from './delivery.mjs';
 import { loomStore } from './store.mjs';
 import { asks as gateAsks, answer as gateAnswer, gatesPage, mergePeople, status as gatesStatus, proposals as gateProposals, PROPOSALS as PROPOSALS_COLLECTION } from './gates.mjs';
 import { GRANTS, KEY as GRANTS_KEY, GrantsError, addGrant, grantPathsOk, grantsProblem, householdOf, setPiece, setRelay, usableBy } from './grants.mjs';
@@ -220,8 +220,27 @@ export function manifest(env, nowMs = Date.now(), o = {}) {
   try { checkDark(env, s, nowMs, o.alert ? { alert: o.alert } : {}); } catch { /* next time */ }
   let convs = [];
   try { convs = workingConversations(env); } catch { /* the delivery state unreadable this time: the cards say what else is known */ }
-  const reports = agentReports(s, Date.now(), { ...reportedBusy(s), ...sessionsBusy(join(stateDir(env), 'session-cpu.json')) }, convs, adapterStatuses(env));
+  const busy = { ...reportedBusy(s), ...sessionsBusy(join(stateDir(env), 'session-cpu.json')) };
+  const reports = agentReports(s, Date.now(), busy, convs, adapterStatuses(env));
   for (const [a, doing] of Object.entries(board.agents)) reports[a] = { readings: [], ...reports[a], doing: [...(reports[a]?.doing ?? []), ...doing].slice(0, 8) };
+  for (const { agent, ...job } of conversationJobs(env)) {
+    reports[agent] ??= { readings: [] };
+    (reports[agent].jobs ??= []).push(job);
+  }
+  for (const h of Object.values(s.houses ?? {}).filter((h) => !h.collection && !h.service && !isHostHouse(h, s) && ['running', 'starting', 'wanted'].includes(h.state))) {
+    reports[h.agent] ??= { readings: [] };
+    (reports[h.agent].jobs ??= []).push({ id: h.id, status: h.state === 'running' ? 'running' : 'waiting', text: doingOf(h, s).text, since: h.started ?? h.created });
+  }
+  for (const [agent, r] of Object.entries(s.remotes ?? {})) {
+    if (r.want !== 'up' || r.state !== 'running' || busy[`box:${r.name}`] !== true) continue;
+    reports[agent] ??= { readings: [] };
+    (reports[agent].jobs ??= []).push({ id: `remote:${r.name}`, status: 'running', text: `Working in a box session on ${boxLabelOf(s, r.box)}` });
+  }
+  for (const v of Object.values(s.services ?? {})) {
+    if (v.name !== 'remote' || v.want !== 'up' || s.houses[v.house]?.state !== 'running' || busy[`house:${v.house}`] !== true) continue;
+    reports[v.agent] ??= { readings: [] };
+    (reports[v.agent].jobs ??= []).push({ id: `remote:${v.house}`, status: 'running', text: 'Working in a house session' });
+  }
   try { withFallbacks(reports, readFallbacks(env), env, nowMs); } catch { /* a card without its model line */ }
   const boxes = Object.values(s.boxes).filter((b) => !b.revoked);
   const live = Object.values(s.houses).filter((h) => LIVE.has(h.state));
