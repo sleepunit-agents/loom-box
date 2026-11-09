@@ -26,7 +26,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync, appendFileSync, mkdirSync } from 'node:fs';
 import { delimiter, dirname, join } from 'node:path';
 import { coreFrom } from './core.mjs';
-import { deliver, deliveryDir, holdsRun, listConvs, loadConv } from './delivery.mjs';
+import { deliver, deliveryDir, heldConv, holdsRun, listConvs, loadConv } from './delivery.mjs';
 import { readBody } from './bodies.mjs';
 import { principalOf } from './principal.mjs';
 import { GRANTS, KEY, householdOf, paired } from './grants.mjs';
@@ -242,8 +242,8 @@ export async function relay(env, caller, args, d = depsOf(env), proof = {}) {
     if (!approval) no(`relay: the household doesn't pair ${from} with ${to} (the runtime's Permissions). Ask the owner for this one, in plain words: approvals request --kind relay --target ${target} --what 'relay to ${to}' --ask 'OK for ${cap(from)} to ask ${cap(to)} about <what, no ids>?' --why '<one line>' --if-yes '<what you do>' --if-no '<what you do instead>', then relay again with approval set to its id once it's allowed`);
     if (!APPROVAL_ID.test(approval)) no('relay: approval is an approval id (a-…)');
     // Spent only for whom it was asked (t-1953): the asking conversation's principal, when the caller proved it holds it.
-    // Read again once proved, so whom it's for is the conversation as it stands now, not as originOf first read it.
-    const proven = origin && proof.key && holdsRun(env, origin.conversation, proof, { caller }) ? loadConv(env, origin.conversation) : null;
+    // Whom it's for is read from the very record the proof was checked against, never a later or earlier read.
+    const proven = origin && proof.key ? heldConv(env, origin.conversation, proof, { caller }) : null;
     const why = d.approvals.spend(approval, target, caller, relayPrincipal(env, proven));
     if (why) no(`relay: approval ${approval} isn't allowed for a relay from ${from} to ${to}: ${why}${proven ? '' : '. A relay that hasn\'t proved its conversation acts for someone loom can\'t name: from your shell (in a house, or a body on loom\'s machine), `loom runtime relay` proves it'}`);
   }

@@ -392,6 +392,20 @@ describe('the return address is the asker\'s, proved or unambiguous', () => {
     assert.equal(out.status, 1);
     assert.match(out.stderr, /can't prove it holds cv-0123456789ab/);
     assert.equal(readRelays({ ...env }, Date.now()).length, 0, 'nothing sent');
+    // A real conversation of a body here, with the wrong key: refused at the proof itself.
+    const { w } = relayWorld();
+    const cv = (await deliver(w.env, w.msg('th:local', 'ask mark', { venue: 'loom', source: 'loom' }), w.o)).conversation;
+    assert.ok(loadConv(w.env, cv).body, 'a body holds it');
+    const wrong = { ...process.env, ...w.env, LOOM_BODY_CONVERSATION: cv, LOOM_BODY_KEY: 'k-not-its-key', CLAUDE_CODE_SESSION_ID: 'sess-1' };
+    delete wrong.LOOM_URL; delete wrong.LOOM_TOKEN_FILE;
+    const r2 = await new Promise((resolve) => {
+      const child = spawn(process.execPath, [join(import.meta.dirname, '..', 'src', 'cli.mjs'), 'relay', '--to', 'mark', '--say', 'hi'], { env: wrong });
+      let stderr = ''; child.stderr.on('data', (x) => { stderr += x; });
+      child.on('close', (status) => resolve({ status, stderr }));
+    });
+    assert.equal(r2.status, 1);
+    assert.match(r2.stderr, new RegExp(`can't prove it holds ${cv}`));
+    assert.equal(readRelays(w.env, w.clock.now().getTime()).length, 0, 'nothing sent');
   });
 
   test('the house CLI names its conversation and sends its proof in the call\'s body, never argv', async (t) => {
@@ -447,6 +461,7 @@ describe('a relay approval is spent only for whom it was asked (t-1953)', () => 
     // Several people steered it: no one person, so no one loom can name (fails closed; approvals then refuses).
     const both = (await deliver(w.env, w.msg('dm:group', 'ask fez', { from: { kind: 'person', slug: 'dan' } }), w.o)).conversation;
     await deliver(w.env, w.msg('dm:group', 'me too', { from: { kind: 'person', slug: 'eve' } }), w.o);
+    assert.equal(holdsRun(w.env, both, proofOf(w, both)), true, 'proved: the - is whom it acts for, not a missing proof');
     await assert.rejects(relay(w.env, { agent: 'art' }, { to: 'fez', say: 'five', conversation: both, approval: 'a-00000013' }, d, proofOf(w, both)));
     assert.equal(spent.at(-1).onBehalf, '-');
     assert.equal(spent.length, before + 2);
