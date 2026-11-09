@@ -54,6 +54,11 @@ export function continuationOutbox({ dir, sealer, now = Date.now }) {
   };
   const receipt = (r) => ({ ref: r.ref, state: r.state, attempts: r.attempts, ...(r.reason ? { reason: r.reason } : {}), ...(r.posted ? { posted: true } : {}) });
   return {
+    sourceConversation(handle) {
+      const g = read(grantId(handle));
+      if (!g) deny('unknown continuation capability');
+      return g.source.conversation;
+    },
     issue(provenSource) {
       const source = snapshot(provenSource);
       const handle = `cont-${randomBytes(32).toString('hex')}`;
@@ -93,9 +98,9 @@ export function continuationOutbox({ dir, sealer, now = Date.now }) {
         return receipt(row);
       });
     },
-    status(handle, provenChild, id) {
+    status(handle, provenChild, id, currentSource) {
       const gid = grantId(handle), g = read(gid);
-      if (!g?.binding || !same(g.binding.child, snapshot(provenChild))) deny('not the bound continuation run');
+      if (!g?.binding || !same(g.binding.child, snapshot(provenChild)) || (currentSource !== undefined && !unchanged(g.source, currentSource))) deny('not the bound continuation run');
       const r = read(`report-${digest(`continuation-${digest(`${gid}:${id}`)}`)}`);
       return r ? receipt(r) : null;
     },

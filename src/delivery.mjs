@@ -99,6 +99,7 @@ import { raiseAlert } from './alerthook.mjs';
 import { changed as changedCards } from './activity.mjs';
 import { keepKey } from './bodyhost.mjs';
 import { spawnCap } from './spawn.mjs';
+import { continuationOutbox } from './continuation-outbox.mjs';
 import { readRelays } from './relay.mjs';
 import { householdOwners, membersOf, ownersOf } from './owners.mjs';
 import { approvalsFake, approvalsRun, approvalsRunAsync, approvalsWhy } from './approvals-call.mjs';
@@ -2632,6 +2633,33 @@ function holderProblem(env, d, c, { key, session }, does = 'speaks in it', calle
     return `only the body holding ${c.conversation} ${does} (${session ? 'another session is' : 'no session is named'}: ${c.conversation} is a session of its own)`;
   }
   return null;
+}
+
+// Runtime-owned snapshots only. Neither a body nor the clock supplies these fields.
+export function continuationSnapshot(env, conversation) {
+  const c = loadConv(env, conversation);
+  if (!c) return null;
+  return { conversation: c.conversation, run: c.run, agent: c.agent,
+    principal: principalOf(env, c), reset: c.actsFor?.reset ?? null,
+    resetPending: !!c.resetPending, target: { venue: c.venue, place: c.place } };
+}
+
+// Internal holder boundary; API wiring remains disabled until trusted clock binding
+// and core idempotency are integrated. There is deliberately no body-callable bind.
+export function continuationCall(env, { action, conversation, key, session, handle, id, text }, o = {}) {
+  const d = depsOf(env, o), c = loadConv(env, conversation);
+  if (!c) throw new StateError('no continuation conversation here', 403);
+  if (o.caller && (o.caller.kind !== 'agent' || o.caller.agent !== c.agent))
+    throw new StateError('only its own agent may use a continuation', 403);
+  const problem = holderProblem(env, d, c, { key, session }, 'uses a continuation', o.caller);
+  if (problem) throw new StateError(problem, 403);
+  const outbox = continuationOutbox({ dir: join(deliveryDir(env), 'continuations'), sealer: d.sealer, now: () => d.now().getTime() });
+  const child = continuationSnapshot(env, conversation);
+  if (action === 'issue') return outbox.issue(child);
+  if (action !== 'enqueue' && action !== 'status') throw new StateError('unknown continuation action', 400);
+  const source = continuationSnapshot(env, outbox.sourceConversation(handle));
+  if (action === 'enqueue') return outbox.enqueue(handle, child, source, { id, text });
+  return outbox.status(handle, child, id, source);
 }
 
 /**

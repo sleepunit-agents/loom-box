@@ -1,7 +1,8 @@
 # Continuation report delivery (integration in progress)
 
 This branch supplies an internal capability/outbox state machine. It is deliberately
-not exposed through the API, CLI or clock yet. It does not authorize historical
+exposed through holder-authenticated issue/enqueue/status API routes only.
+No clock binding, drain or CLI is enabled yet; issued grants cannot deliver. It does not authorize historical
 originConversation links, and does not fix originating-thread delivery by itself.
 
 The delivery layer must prove the current source holder with holderProblem (agent,
@@ -39,8 +40,10 @@ pending attempt records its next retry before I/O. Receipts distinguish pending,
 delivered and permanently failed. Transient errors retry after restart; permanent
 adapter refusals stop. Outbox collection/expiry is still an integration decision.
 
-Remaining work before merge or installation: holder-authenticated issuance and
-receipt/enqueue endpoints; exact trusted clock admission and firing binding;
+Holder-authenticated issuance and receipt/enqueue endpoints now construct snapshots
+from runtime state and enforce the normal holder/session/house proof.
+
+Remaining work before merge or installation: exact trusted clock admission and firing binding;
 core stable-ref dedup and negative authorization tests; tick/CLI wiring; actual
 process-kill crash tests against core; full integration and installed live proof.
 This branch must remain draft until those pieces exist together.
