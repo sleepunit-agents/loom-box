@@ -100,7 +100,7 @@ export function continuationOutbox({ dir, sealer, now = Date.now, lifetimeMs = n
         active(id, g, observe());
         if (!Number.isSafeInteger(scheduledAt) || scheduledAt < 0 || scheduledAt >= g.expiresAt)
           deny('continuation must be scheduled before its deadline');
-        if (g.binding) deny('continuation capability is already bound');
+        if (g.binding || g.firing) deny('continuation capability is already bound');
         return { handle, expiresAt: g.expiresAt };
       });
     },
@@ -113,6 +113,10 @@ export function continuationOutbox({ dir, sealer, now = Date.now, lifetimeMs = n
           deny('continuation principal differs');
         if (g.binding) deny('continuation capability is already bound');
         active(id, g, observe());
+        if (!wake.test(firing.wake ?? '') || typeof firing.delivery !== 'string' || !firing.delivery || !cv.test(child?.conversation ?? '')) deny('an exact clock firing is required');
+        const claim = { wake: firing.wake, delivery: firing.delivery, conversation: child.conversation, reset: child.reset, target: child.target };
+        if (g.firing && !same(g.firing, claim)) deny('continuation capability is already bound to another firing');
+        if (!g.firing) { g.firing = structuredClone(claim); save(id, g); }
         return { expiresAt: g.expiresAt };
       });
     },
@@ -126,6 +130,8 @@ export function continuationOutbox({ dir, sealer, now = Date.now, lifetimeMs = n
         if (!g || !unchanged(g.source, currentSource)) deny('continuation source was reset or changed');
         if (g.version === 2 && clockBinding.expiresAt !== g.expiresAt) deny('continuation deadline differs');
         if (child.agent !== g.source.agent || !same(child.principal, g.source.principal)) deny('continuation principal differs');
+        const claim = { wake: clockBinding.wake, delivery: clockBinding.delivery, conversation: child.conversation, reset: child.reset, target: child.target };
+        if (g.firing && !same(g.firing, claim)) deny('continuation capability is already bound to another firing');
         const binding = { wake: clockBinding.wake, delivery: clockBinding.delivery, child };
         if (g.binding && !same(g.binding, binding)) deny('continuation capability is already bound');
         if (g.binding) return { bound: true }; // Existing admission can recover receipts after cutoff.

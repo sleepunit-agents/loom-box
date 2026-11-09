@@ -42,6 +42,12 @@ for (const harness of ['claude', 'codex']) for (const mode of ['lost-receipt', '
         assert.equal(c.continuationAdmissions, undefined);
         return;
       }
+      // Before either child enqueues, a different authenticated firing must not launch.
+      const other = { ...firing, id: 'w-fedcba', place: 'wake:w-fedcba', continuation: { ...firing.continuation, wake: 'w-fedcba' } };
+      handOverWake(h.env, { agent: 'art', place: other.place, id: other.id, for: 'owner' });
+      const duplicate = await deliver(h.env, other, o);
+      assert.equal(loadConv(h.env, duplicate.conversation).body, undefined);
+      assert.equal(h.local.startsEntered, 1, 'one firing claimed before any report binding');
       const prepared = c.starting.prepared;
       assert.equal(c.body, undefined);
       assert.equal(c.continuationAdmissions, undefined);
