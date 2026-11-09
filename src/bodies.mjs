@@ -106,7 +106,7 @@ export async function resumeBody(env, { body: ref, slot, agent, venue, venueKind
   const who = rec?.agent ?? agent;
   const where = rec?.venue ?? venue;
   // A resume keeps the slot's harness; its model is chosen again, among that harness's (quota may have moved).
-  const pick = await resolveFor(env, { agent: who, venue: where, venueKind: rec?.kind ?? venueKind, prefer: [...prefer, ...(rec ? [rec.model] : [])], harness: slot.harness, accounts: d.accounts, now: d.now(), fetchImpl: d.fetchImpl });
+  const pick = await resolveFor(env, { agent: who, venue: where, venueKind: rec?.kind ?? venueKind, prefer: [...prefer, ...(rec ? [rec.model] : [])], harness: slot.harness, conversation: o.bodyEnv?.LOOM_BODY_CONVERSATION, accounts: d.accounts, now: d.now(), fetchImpl: d.fetchImpl });
   const here = !!(local ?? rec?.local);
   const runner = d.runner(slot.harness, here);
   const body = await runner.resume(slot, { agent: who, brief: forRunner(runner, brief(b), cwd), model: pick.model, cwd, env: o.bodyEnv, deny, ...(seat ? { seat } : {}), ...(files ? { files } : {}), ...(where === COMMS_VENUE ? { activity: true } : {}) });
