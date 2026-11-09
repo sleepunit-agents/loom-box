@@ -1819,7 +1819,7 @@ async function routeOf(env, c0, op, rules, d, cant = []) {
   const chosen = choice !== 'auto' && !avoid.includes(choice) && await roomOn(env, c0, choice, d) ? choice : null;
   if (home && (!chosen || home.harness === chosen) && sameRules(home.rules ?? {}, rules) && carriesSession(home.rules?.seat, rules.seat, op.cv) && !avoid.includes(home.harness)
     && !(Number.isFinite(c0.fallback?.until) && now < c0.fallback.until * 1000) && await roomOn(env, c0, home.harness, d)) {
-    return { how: 'resume', file: homeFile(env, op.cv), home: true };
+    return { how: 'resume', file: homeFile(env, op.cv), home: true, ...(chosen ? { choiceReturn: chosen } : {}) };
   }
   if (op.type !== 'resume') return { how: 'start', avoid };
   const h = op.slot?.harness;
@@ -1841,7 +1841,9 @@ async function routeOf(env, c0, op, rules, d, cant = []) {
 function quotaNotes(c0, way) {
   const out = [];
   const note = (text) => out.push({ key: `quota-${randomBytes(6).toString('hex')}`, note: true, kind: 'message', text });
-  if (way.home) {
+  if (way.choiceReturn) {
+    note(`(The runtime: the owner selected ${harnessWords(way.choiceReturn)}. This resumes the conversation's saved session; read its digests for what happened while it answered elsewhere.)`);
+  } else if (way.home) {
     note(`(The runtime: this conversation went on without this session for a while: since ${c0.fallback?.since ?? c0.home?.saved ?? 'then'}, it was answered on ${harnessWords(c0.fallback?.to ?? 'another harness')}, because this harness's account was out of quota. Read conversation({id: "${c0.conversation}"}) (its digests) for what was said meanwhile before you answer.)`);
   } else if (way.chosen) {
     note(`(The runtime: the owner selected ${harnessWords(way.chosen)} for this conversation. Read its digests before continuing.)`);

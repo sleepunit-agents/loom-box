@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { staticAccounts } from '../src/accounts.mjs';
 import { api } from '../src/control.mjs';
 import { deliver, loadConv, ownerModelChoice } from '../src/delivery.mjs';
-import { resolveFor, setModels, setModelChoice } from '../src/models.mjs';
+import { resolveFor, resolveModel, setModels, setModelChoice } from '../src/models.mjs';
 import { update } from '../src/state.mjs';
 import { scratch } from './scratch.mjs';
 import { world, fakeRunner } from './delivery-world.mjs';
@@ -56,6 +56,8 @@ test('changing a thread choice affects its next turn and resumes its saved sessi
   c = loadConv(w.env, r.conversation);
   assert.match(c.body, /^claude:/);
   assert.equal(w.log.filter((x) => x[0] === 'resume').at(-1)[2], `s-${original.split(':')[1]}`);
+  assert.match(w.log.filter((x) => x[0] === 'resume').at(-1)[4], /owner selected Claude/);
+  assert.doesNotMatch(w.log.filter((x) => x[0] === 'resume').at(-1)[4], /because this harness.s account was out of quota/);
 });
 test('the API enforces actual conversation ownership and rejects body or cross-agent mutation', async () => {
   const w = setup();
@@ -79,4 +81,13 @@ test('the agent-window form renders a choice and applies it for that owner only'
   assert.deepEqual(form.fields[0].options.map((o) => o.value), ['auto', 'claude', 'codex']);
   assert.equal(act(env, {}, { action: 'model-choice', fields: { agent: 'art', harness: 'codex' }, caller: { kind: 'owner', agents: ['art'] } }).ok, true);
   assert.equal(act(env, {}, { action: 'model-choice', fields: { agent: 'mark', harness: 'claude' }, caller: { kind: 'owner', agents: ['art'] } }).ok, false);
+});
+
+test('an explicit harness choice is not demoted across harnesses, including resume metadata', () => {
+  const scorecards = MODELS.map((m) => ({ day: '2026-11-01', model: m.id, kind: 'live', measure: 'graded', value: m.harness === 'claude' ? 5 : 1, n: 10 }));
+  const q = { agent: 'art', kind: 'live', models: MODELS, accounts: accounts().list(), scorecards, harnessChoice: 'codex' };
+  assert.equal(resolveModel(q).harness, 'codex');
+  const resumed = resolveModel({ ...q, models: [MODELS[1]], all: MODELS });
+  assert.deepEqual(resumed.preferred, { model: 'gpt', harness: 'codex' });
+  assert.equal(resumed.fallback, undefined);
 });
