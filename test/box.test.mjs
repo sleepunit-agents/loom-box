@@ -21,6 +21,7 @@ import { fileURLToPath } from 'node:url';
 import { MAX_STATE_BYTES, api } from '../src/control.mjs';
 import { PART_RAW, partsOf } from '../src/blobs.mjs';
 import { randomBytes } from 'node:crypto';
+import { houseBadge } from '../src/ui.mjs';
 import { pruneImages } from '../src/box.mjs';
 import { joinLoom, runner } from '../src/box.mjs';
 import { HouseFileError, NESTED_ARGS, parseHouseFile } from '../src/house.mjs';
@@ -357,7 +358,8 @@ test('a box that restarts under a service\'s house sends its state back first', 
   await fresh.tick();
   const saved = ok(api(env, fx, { caller: owner, path: 'saved-state', body: { agent: 'art', name: 'discord' } }));
   assert.equal(saved.from, s.house, 'the restarted box sent the house\'s state before removing it');
-  assert.ok(existsSync(join(fake, 'runs', `loom-house-${s.house}.stop`)), 'stopped first, so it could finish writing');
+  const probes=readdirSync(join(fake,'log')).map(n=>JSON.parse(readFileSync(join(fake,'log',n),'utf8')));
+  assert.ok(probes.some(a=>a[0]==='container'&&a[1]==='exists'&&a[2]===`loom-house-${s.house}`),'physical absence was checked before state collection');
   assert.equal(existsSync(join(env.LOOM_BOX_DATA, 'houses', s.house)), false);
 });
 
@@ -671,4 +673,120 @@ test('a failed stop while its container is still being created retries without o
     writeFileSync(prefix+'.release','');await until(()=>house(h.id).state==='stopped');
     assert.equal(house(h.id).exit,0);
   }finally{writeFileSync(prefix+'.create','');writeFileSync(prefix+'.release','');await until(()=>existsSync(prefix+'.exit')).catch(()=>{});}
+});
+
+
+test('an inspection error during restart preserves a live house until it can be adopted',async()=>{
+  agentRepo(repo);setAgent();podmanCfg({run:'sleep'});const h=up('work');
+  await r.tick();await until(()=>existsSync(join(fake,'runs',`loom-house-${h.id}.pid`)));
+  const old=r.houses.get(h.id);old.child.removeAllListeners('exit');
+  const fresh=runner(env,client,{loomUrl:'http://loom.test/mcp',log:()=>{}});
+  try{
+    podmanCfg({run:'sleep',inspectError:true});await fresh.tick();
+    assert.equal(house(h.id).state,'running','unknown inspection is not a dead container');
+    assert.equal(existsSync(join(fake,'runs',`loom-house-${h.id}.stop`)),false);
+    assert.ok(readdirSync(join(fake,'secrets')).length>0);
+    podmanCfg({run:'sleep'});await fresh.tick();
+    assert.equal(fresh.houses.get(h.id)?.adopted,true);
+    ok(api(env,fx,{caller:owner,path:'down',body:{id:h.id}}));await fresh.tick();
+    await until(()=>house(h.id).state==='stopped');
+  }finally{try{process.kill(-old.child.pid,'SIGKILL');}catch{}}
+});
+
+test('a completed slot retains its only state when upload fails, then retries after a runner restart',async()=>{
+  agentRepo(repo);setAgent();podmanCfg({run:'exit:0'});
+  let fail=true;
+  const flaky={async call(path,body){if(path==='save-state'&&fail)throw Error('temporary upload outage');return client.call(path,body);}};
+  const box=runner(env,flaky,{loomUrl:'http://loom.test/mcp',log:()=>{}});
+  const h=ok(api(env,fx,{caller:owner,path:'up',body:{agent:'art',slot:'upload-recovery',task:'PRIVATE-PROMPT-MUST-NOT-BE-IN-ENDING'}}));
+  await box.tick();
+  await until(()=>existsSync(join(fake,'runs',`loom-house-${h.id}.json`)));
+  await sleep(150);
+  assert.equal(house(h.id).state,'running','no terminal report before the state is safely stored');
+  const cursor=join(env.LOOM_BOX_DATA,'houses',h.id,'state','cursor');
+  assert.ok(existsSync(cursor),'keep the only saved state through upload failure');
+  assert.equal(house(h.id).collection.phase,'state');
+  assert.equal(houseBadge(house(h.id)),'saving state');
+  const receipt=join(env.LOOM_BOX_DATA,'houses',h.id,'ending.json');
+  assert.equal(statSync(receipt).mode&0o777,0o600);
+  assert.equal(readFileSync(receipt,'utf8').includes('PRIVATE-PROMPT-MUST-NOT-BE-IN-ENDING'),false);
+  assert.equal(readFileSync(receipt,'utf8').includes('loom_house_token_aaaaaaaaaaaaaaaa'),false);
+  fail=false;
+  const fresh=runner(env,flaky,{loomUrl:'http://loom.test/mcp',log:()=>{}});
+  await fresh.tick();
+  await until(()=>house(h.id).state==='done');
+  const saved=ok(api(env,fx,{caller:owner,path:'saved-state',body:{agent:'art',name:'upload-recovery',slot:true}}));
+  const contents=spawnSync('tar',['-xzOf','-','./cursor'],{input:Buffer.from(saved.state,'base64'),encoding:'utf8'});
+  assert.equal(contents.stdout,`loom-house-${h.id};`);
+  assert.equal(existsSync(join(env.LOOM_BOX_DATA,'houses',h.id,'ending.json')),false,'the stale active snapshot must not recreate a completed collection');
+  assert.equal(fresh.houses.has(h.id),false);
+});
+
+
+for(const exit of [0,9])test(`losing an attached client adopts the existing physical container and preserves its outcome ${exit}`,async()=>{
+  agentRepo(repo);setAgent();podmanCfg({run:'separate',separateExit:exit});const h=up('work');
+  const prefix=join(fake,'runs',`loom-house-${h.id}`);
+  try{
+    await r.tick();await until(()=>existsSync(prefix+'.ready'));
+    if(exit===9)podmanCfg({run:'separate',separateExit:exit,inspectError:true});
+    process.kill(Number(readFileSync(prefix+'.client.pid','utf8')),'SIGTERM');
+    if(exit===9){
+      await until(()=>r.houses.get(h.id)?.pendingExit);await r.tick();
+      assert.equal(house(h.id).state,'running');assert.equal(r.houses.get(h.id)?.adopted,undefined,'unknown inspection retains the original ownership');
+      podmanCfg({run:'separate',separateExit:exit});await r.tick();
+    }
+    await until(()=>r.houses.get(h.id)?.adopted);
+    assert.equal(house(h.id).state,'running');assert.equal(existsSync(prefix+'.stop'),false);
+    const runs=readdirSync(join(fake,'log')).map(n=>JSON.parse(readFileSync(join(fake,'log',n),'utf8'))).filter(a=>a[0]==='run'&&a.includes(`loom-house-${h.id}`));
+    assert.equal(runs.length,1,'no replacement container or restarted work');
+    ok(api(env,fx,{caller:owner,path:'down',body:{id:h.id}}));await r.tick();
+    await until(()=>existsSync(prefix+'.stopping'));writeFileSync(prefix+'.release','');
+    await until(()=>house(h.id).state==='stopped');assert.equal(house(h.id).exit,exit);
+  }finally{writeFileSync(prefix+'.release','');await until(()=>existsSync(prefix+'.exit')).catch(()=>{});}
+});
+
+test('a lost terminal-report response does not re-upload or discard unacknowledged state',async()=>{
+  agentRepo(repo);setAgent();podmanCfg({run:'exit:0'});let dropped=false,uploads=0;
+  const flaky={async call(path,body){
+    if(path==='save-state')uploads++;
+    const answer=await client.call(path,body);
+    if(path==='report'&&body.state==='done'&&!dropped){dropped=true;throw Error('reply lost after commit');}
+    return answer;
+  }};
+  const box=runner(env,flaky,{loomUrl:'http://loom.test/mcp',log:()=>{}});
+  const h=ok(api(env,fx,{caller:owner,path:'up',body:{agent:'art',slot:'report-recovery',task:'work'}}));
+  await box.tick();await until(()=>dropped);await sleep(50);
+  const cursor=join(env.LOOM_BOX_DATA,'houses',h.id,'state','cursor');assert.ok(existsSync(cursor));
+  const count=uploads;await box.tick();
+  assert.equal(uploads,count,'already acknowledged state is not uploaded into a closed house');
+  assert.equal(existsSync(cursor),false,'cleanup follows authoritative confirmation from the next poll');
+  assert.equal(box.houses.has(h.id),false);
+});
+
+test('a fast container exit is not missed while the initial running report is still awaiting its response',async()=>{
+  agentRepo(repo);setAgent();podmanCfg({run:'exit:0'});
+  const slow={async call(path,body){const answer=await client.call(path,body);if(path==='report'&&body.state==='running')await sleep(300);return answer;}};
+  const box=runner(env,slow,{loomUrl:'http://loom.test/mcp',log:()=>{}});const h=up('quick work');
+  await box.tick();await until(()=>house(h.id).state==='done',1200);
+  assert.equal(box.houses.has(h.id),false);
+});
+
+test('a lost reply after state upload commits is retried without losing the saved slot or its local copy',async()=>{
+  agentRepo(repo);setAgent();podmanCfg({run:'exit:0'});let dropped=false,uploads=0;
+  const flaky={async call(path,body){
+    const answer=await client.call(path,body);
+    if(path==='save-state'){uploads++;if(!dropped&&body.part===body.parts-1){dropped=true;throw Error('upload committed but reply lost');}}
+    return answer;
+  }};
+  const box=runner(env,flaky,{loomUrl:'http://loom.test/mcp',log:()=>{}});
+  const h=ok(api(env,fx,{caller:owner,path:'up',body:{agent:'art',slot:'upload-reply',task:'work'}}));
+  await box.tick();await until(()=>dropped);await sleep(50);
+  assert.equal(house(h.id).state,'running');assert.equal(house(h.id).collection.phase,'state');
+  const dir=join(env.LOOM_BOX_DATA,'houses',h.id);
+  assert.ok(existsSync(join(dir,'state','cursor')));
+  assert.equal(JSON.parse(readFileSync(join(dir,'ending.json'),'utf8')).uploaded,false);
+  assert.equal(ok(api(env,fx,{caller:owner,path:'saved-state',body:{agent:'art',name:'upload-reply',slot:true}})).from,h.id);
+  await box.tick();await until(()=>house(h.id).state==='done');assert.ok(uploads>=2);
+  const saved=ok(api(env,fx,{caller:owner,path:'saved-state',body:{agent:'art',name:'upload-reply',slot:true}}));
+  assert.equal(spawnSync('tar',['-xzOf','-','./cursor'],{input:Buffer.from(saved.state,'base64'),encoding:'utf8'}).stdout,`loom-house-${h.id};`);
 });

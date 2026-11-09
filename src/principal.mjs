@@ -173,7 +173,7 @@ export function otherSeatHouses(s, agent, seat) {
   const LIVE = new Set(['wanted', 'starting', 'running', 'stopping']);
   const of = (h) => (typeof h?.seat === 'string' && SEAT.test(h.seat) ? h.seat : OWNER_SEAT);
   const host = (h) => h.kind === 'body-host' || /^loom-runtime body-host /.test(String(h.task ?? ''));
-  return Object.values(s?.houses ?? {}).filter((h) => h.agent === agent && LIVE.has(h.state) && host(h) && of(h) !== OWNER_SEAT && !/^j-h-[0-9]{1,9}$/.test(of(h)) && of(h) !== seat);
+  return Object.values(s?.houses ?? {}).filter((h) => h.agent === agent && !h.collection && LIVE.has(h.state) && host(h) && of(h) !== OWNER_SEAT && !/^j-h-[0-9]{1,9}$/.test(of(h)) && of(h) !== seat);
 }
 
 /** The cap on an agent's houses for other people (LOOM_RUNTIME_SEAT_HOUSES, default 4). */

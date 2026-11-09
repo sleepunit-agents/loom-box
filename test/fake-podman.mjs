@@ -57,7 +57,7 @@ switch (`${args[0]} ${args[1] ?? ''}`) {
   case 'secret rm': { for (const n of args.slice(2)) rmSync(join(D, 'secrets', n), { force: true }); process.exit(0); }
   case 'secret ls': { console.log(readdirSync(join(D, 'secrets')).join('\n')); process.exit(0); }
   case 'unshare rm': { rmSync(args[3], { recursive: true, force: true }); process.exit(0); }
-  case 'inspect --format': { console.log(alive(args.at(-1)) ? 'true' : 'false'); process.exit(existsSync(join(D, 'runs', `${args.at(-1)}.pid`)) ? 0 : 125); }
+  case 'inspect --format': { if(cfg().inspectError)process.exit(125); console.log(alive(args.at(-1)) ? 'true' : 'false'); process.exit(existsSync(join(D, 'runs', `${args.at(-1)}.pid`)) ? 0 : 125); }
   default: break;
 }
 if (args[0] === 'build') {
@@ -74,7 +74,7 @@ if (args[0] === 'build') {
 }
 if (args[0] === 'wait') {
   const name = args.at(-1);
-  const t = setInterval(() => { if (!alive(name)) { clearInterval(t); console.log('0'); process.exit(0); } }, 50);
+  const t = setInterval(() => { if (!alive(name)) { clearInterval(t); console.log(existsSync(join(D,'runs',name+'.exit'))?readFileSync(join(D,'runs',name+'.exit'),'utf8'):'0'); process.exit(0); } }, 50);
 } else if (args[0] === 'rm' || args[0] === 'stop') {
   const name = args.at(-1);
   writeFileSync(join(D, 'runs', `${name}.${args[0]}`), '');
@@ -111,7 +111,7 @@ if (args[0] === 'wait') {
     const { spawn } = await import('node:child_process');
     const source = `
       const fs=require('node:fs'),path=require('node:path');
-      const [folder,name,state]=process.argv.slice(1);
+      const [folder,name,state,outcome]=process.argv.slice(1);
       const file=suffix=>path.join(folder,'runs',name+suffix);
       let stopping=false;
       process.on('SIGTERM',()=>{stopping=true;fs.writeFileSync(file('.stopping'),'');});
@@ -119,12 +119,12 @@ if (args[0] === 'wait') {
         if(!stopping||!fs.existsSync(file('.release')))return;
         clearInterval(t);
         try { if(state)fs.writeFileSync(path.join(state,'cursor'),'RESCUE-COMPLETED'); }
-        finally { fs.writeFileSync(file('.exit'),'0');process.exit(0); }
+        finally { fs.writeFileSync(file('.exit'),outcome);process.exit(Number(outcome)); }
       },10);
       setTimeout(()=>process.exit(124),10000).unref();
       fs.writeFileSync(file('.ready'),'');
     `;
-    const native=spawn(process.execPath,['-e',source,D,name,stateSrc??''],{detached:true,stdio:'ignore'});
+    const native=spawn(process.execPath,['-e',source,D,name,stateSrc??'',String(cfg().separateExit??0)],{detached:true,stdio:'ignore'});
     writeFileSync(join(D,'runs',name+'.client.pid'),String(process.pid));
     writeFileSync(join(D,'runs',name+'.pid'),String(native.pid));
     process.on('SIGTERM',()=>process.exit(143));

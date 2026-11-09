@@ -15,7 +15,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { gunzipSync } from 'node:zlib';
 import { pieceName } from './piece.mjs';
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, rmSync, statSync, writeFileSync, writeSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, readdirSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from 'node:fs';
 import { arch, cpus, homedir, platform, totalmem } from 'node:os';
 import { join as pathJoin } from 'node:path';
 import { newProof } from './enroll.mjs';
@@ -630,8 +630,8 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
       houses.set(h.id, { child, dir });
       log(`started ${h.id} (${h.agent})`);
       // With the image it runs: the control plane drains a body host's house on an older one (houserunner.mjs).
+      child.once('exit', (code, signal) => ended(h, dir, secretNames, code, signal));
       await client.call('report', { id: h.id, state: 'running', build: tag }).catch((e) => log(`report ${h.id}: ${e.message}`));
-      child.on('exit', (code, signal) => ended(h, dir, secretNames, code, signal));
     } catch (err) {
       clean(h, dir, made);
       log(`${h.id} failed to start: ${err.message}`);
@@ -643,56 +643,117 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
     }
   }
 
-  /** A house is over: a service's state goes back first, then its secrets and dirs, then the report. */
-  async function ended(h, dir, secretNames, code, signal) {
-    const entry = houses.get(h.id);
-    if (!entry || entry.ended) return;
-    // The attached podman client can exit while PID 1 is still rescuing. Its exit never substitutes for stop's acknowledgement.
-    if (entry.stopAt && !entry.stopAck) { entry.pendingExit = [h, dir, secretNames, code, signal]; return; }
-    entry.ended = true;
-    houses.delete(h.id);
-    // A service's state goes back to loom before anything else knows it stopped,
-    // so the next box (a move, or a restart) picks up where this one left off.
-    // (An adopted house's kind isn't known here: loom keeps state only for a service's.)
-    if (h.service || h.slot || entry?.adopted) {
-      const packed = existsSync(pathJoin(dir, 'state')) ? packState(pathJoin(dir, 'state')) : null;
-      if (packed !== null) {
-        await sendState(client, h.id, packed).catch((e) => { if (h.service || h.slot) log(`couldn't save ${h.service ?? h.slot}'s state: ${e.message}`); });
+  const unknownContainers = new Set();
+  const recentlyCollected = new Set();
+  let collectionsScanned = false;
+  /** Inspection errors are not absence; a created container can still be starting. */
+  function physical(id) {
+    const name = containerName(id);
+    const running = pod(env, ['inspect', '--format', '{{.State.Running}}', name]);
+    if (running.status === 0 && running.stdout.trim() === 'true') return { state: 'running' };
+    const exists = pod(env, ['container', 'exists', name]);
+    if (exists.status === 1) return { state: 'gone' };
+    if (exists.status !== 0) return { state: 'unknown' };
+    const full = pod(env, ['inspect', '--format', '{{json .State}}', name]);
+    try {
+      const state = JSON.parse(full.stdout);
+      if (full.status === 0 && state.Running === false && ['exited', 'stopped'].includes(state.Status) && Number.isInteger(state.ExitCode)) return { state: 'stopped', code: state.ExitCode };
+    } catch { /* unreadable is unknown */ }
+    return { state: 'unknown' };
+  }
+  const endingFile = dir => pathJoin(dir, 'ending.json');
+  function keepEnding(e) {
+    const file = endingFile(e.dir), tmp = file + '.tmp';
+    writeFileSync(tmp, JSON.stringify(e.completion), { mode: 0o600 });
+    renameSync(tmp, file);
+  }
+  function secretNamesOf(id) {
+    const ls = pod(env, ['secret', 'ls', '--format', '{{.Name}}']);
+    return (ls.stdout || '').split('\n').filter(n => n.startsWith(`loom-${id}-`)).map(n => n.slice(`loom-${id}-`.length));
+  }
+  /** The only durable receipt contains bookkeeping, never the task, brief, run key or secret values. */
+  async function finish(e, { backendGone = false } = {}) {
+    if (e.finalizing || houses.get(e.completion.id) !== e) return;
+    e.finalizing = true;
+    const d = e.completion;
+    try {
+      keepEnding(e);
+      if (d.stateful === null) throw Error('the control plane has not supplied this house’s state requirements yet');
+      if (!d.uploaded) {
+        if (backendGone) throw Error('the house left the control plane before its state was acknowledged; retaining the local copy');
+        const dir = pathJoin(e.dir, 'state');
+        if (!existsSync(dir)) throw Error('the house state directory is missing; refusing to report successful collection');
+        const packed = packState(dir);
+        if (packed === null) throw Error('the house state could not be packed');
+        await sendState(client, d.id, packed);
+        d.uploaded = true; keepEnding(e);
       }
+      if (!d.reported) {
+        if (!backendGone) await client.call('report', { id: d.id, state: d.state, exit: d.code ?? -1, log: d.log ?? tail(pathJoin(e.dir, 'log')) });
+        d.reported = true; keepEnding(e);
+      }
+      if (d.removeContainer) {
+        const removed = pod(env, ['rm', '-f', containerName(d.id)]);
+        if (removed.status !== 0 && pod(env, ['container', 'exists', containerName(d.id)]).status !== 1) throw Error('container cleanup could not be confirmed');
+      }
+      clean({ id: d.id }, e.dir, d.secretNames);
+      rmSync(endingFile(e.dir), { force: true });
+      if (d.removeDir) rmSync(e.dir, { recursive: true, force: true });
+      recentlyCollected.add(d.id);
+      houses.delete(d.id);
+      log(`${d.id} ${d.state} (exit ${d.code ?? -1})`);
+    } catch (error) {
+      log(`${d.id}: collection is pending; retaining state and ownership (${error.message})`);
+      const phase = d.stateful === null ? 'metadata' : !d.uploaded ? 'state' : !d.reported ? 'report' : 'cleanup';
+      await client.call('collection-status', { id: d.id, phase }).catch(() => {});
     }
-    if (entry?.adopted) pod(env, ['rm', '-f', containerName(h.id)]);
-    clean(h, dir, secretNames);
-    const state = entry?.stopAt ? 'stopped' : code === 0 ? 'done' : 'failed';
-    log(`${h.id} ${state} (${signal ?? `exit ${code}`})`);
-    client.call('report', { id: h.id, state, exit: code ?? -1, log: tail(pathJoin(dir, 'log')) }).catch((e) => log(`report ${h.id}: ${e.message}`));
+    finally { e.finalizing = false; }
+  }
+  /** A launcher exit is observed separately from physical container exit and durable collection. */
+  async function ended(h, dir, secretNames, code, signal, acknowledged = false) {
+    const e = houses.get(h.id);
+    if (!e || e.completion) return;
+    if (e.stopAt && !e.stopAck) { e.pendingExit = [h, dir, secretNames, code, signal, acknowledged]; return; }
+    if (!acknowledged && !e.stopAck) {
+      const seen = physical(h.id);
+      if (seen.state === 'running') { adopt(h.id, h, secretNames); return; }
+      if (seen.state === 'unknown') { e.pendingExit = [h, dir, secretNames, code, signal]; return; }
+      if (seen.state === 'stopped') code = seen.code;
+    }
+    delete e.pendingExit;
+    const stateful = typeof h.stateful === 'boolean' ? h.stateful : (h.service !== undefined || h.slot !== undefined || !e.adopted) ? !!(h.service || h.slot) : null;
+    e.completion = { v: 1, id: h.id, ...(h.agent ? { agent: h.agent } : {}), service: h.service ?? null, slot: h.slot ?? null,
+      stateful, uploaded: stateful === false, reported: false, code,
+      state: h.recoveryState ?? (e.controlStop ? 'stopped' : code === 0 ? 'done' : 'failed'), removeDir: !!h.recoveryMissing,
+      ...(h.recoveryLog ? { log: h.recoveryLog } : {}), secretNames, removeContainer: !!e.adopted };
+    await finish(e);
   }
 
-  /**
-   * A house that's still running from before this box restarted (a deploy, the
-   * runner crashing): watched again, not bounced. `podman wait` says when it
-   * ends, and it ends the way any house does.
-   */
-  function adopt(id) {
+  /** Reattach observation without restarting a live container or its native work. */
+  function adopt(id, h = { id }, secretNames = secretNamesOf(id)) {
+    const old = houses.get(id);
     const dir = pathJoin(dataDir(env), 'houses', id);
-    const ls = pod(env, ['secret', 'ls', '--format', '{{.Name}}']);
-    const secretNames = (ls.stdout || '').split('\n').filter((n) => n.startsWith(`loom-${id}-`)).map((n) => n.slice(`loom-${id}-`.length));
     const child = spawn(podman(env), ['wait', containerName(id)], {
       detached: true, stdio: ['ignore', 'pipe', 'ignore'],
       env: { PATH: env.PATH, HOME: env.HOME, ...(env.XDG_RUNTIME_DIR ? { XDG_RUNTIME_DIR: env.XDG_RUNTIME_DIR } : {}) },
     });
     let out = '';
-    child.stdout.on('data', (d) => { out += d; });
-    houses.set(id, { child, dir, adopted: true });
-    child.on('exit', () => {
-      const code = /^-?\d+/.test(out.trim()) ? Number(out.trim().split('\n').pop()) : null;
-      ended({ id }, dir, secretNames, code, null);
+    child.stdout.on('data', d => { out += d; });
+    const e = { child, dir, adopted: true, ...(old?.stopAt ? { stopAt: old.stopAt } : {}), ...(old?.controlStop ? { controlStop: true } : {}) };
+    houses.set(id, e);
+    child.once('error', () => { if (houses.get(id) === e) e.pendingExit = [h, dir, secretNames, null, null]; });
+    child.once('exit', status => {
+      if (houses.get(id) !== e) return;
+      const valid = status === 0 && /^[0-9]+\s*$/.test(out) && Number(out.trim()) <= 255;
+      ended(h, dir, secretNames, valid ? Number(out.trim()) : null, null, valid);
     });
-    log(`adopted ${id}: still running from before this box restarted`);
+    log(`adopted ${id}: observing its container, not restarting its work`);
   }
 
-  function stop(id) {
+  function stop(id, requested = false) {
     const e = houses.get(id);
-    if (!e || e.stopProcess || e.stopAck) return;
+    if (e && requested) e.controlStop = true;
+    if (!e || e.completion || e.stopProcess || e.stopAck) return;
     e.stopAt ??= Date.now();
     e.stopProcess = true;
     // Stop the container, not its attached client: signalling that client can end its observation before PID 1 finishes rescue.
@@ -817,7 +878,7 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
       if (first) { const hs2 = harnessesNow(true); if (hs2) await client.call('poll', { harnesses: hs2 }).catch((e) => log(`poll: ${e.message}`)); }
     }
     onLogins(want.logins);
-    for (const id of want.stop || []) stop(id);
+    for (const id of want.stop || []) stop(id, true);
     // Polls carry real health, even while a build is held. Only one reconciliation
     // runs at a time: no duplicate claims, concurrent mirror writes or image builds.
     if (closing || work) return want;
@@ -827,35 +888,49 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
   }
 
   async function reconcile(want) {
-    // The control plane thinks these are up here, but this box doesn't have them:
-    // it restarted under them. Say so rather than leave them "running" forever.
-    for (const id of want.active || []) {
+    const active = new Set(want.active ?? []);
+    // A completion can land while this poll is in flight. Keep its tombstone until a later poll observes the terminal state.
+    for (const id of recentlyCollected) if (!active.has(id)) recentlyCollected.delete(id);
+    // An acknowledged physical exit may still owe state or a terminal report after a runner restart.
+    const root = pathJoin(dataDir(env), 'houses');
+    // Discover old receipts once per runner. New receipts are already owned in houses; scanning every historical log on each poll adds avoidable I/O.
+    const receipts = !collectionsScanned && existsSync(root) ? readdirSync(root).filter(n => /^h-[0-9]+$/.test(n)) : [];
+    collectionsScanned = true;
+    for (const id of receipts) {
       if (houses.has(id)) continue;
-      // Still running: watch it again rather than bounce it.
-      const running = pod(env, ['inspect', '--format', '{{.State.Running}}', containerName(id)]);
-      if (running.status === 0 && running.stdout.trim() === 'true') { adopt(id); continue; }
-      // Gone or dead. A service's house keeps what it had: stopped the way a move stops it
-      // (so it can finish writing), and its state sent back before anything
-      // of it goes. The control plane takes it only from a live service house.
-      pod(env, ['stop', '-t', '25', containerName(id)]);
-      const dir = pathJoin(dataDir(env), 'houses', id);
-      const stateDir = pathJoin(dir, 'state');
-      if (existsSync(stateDir)) {
-        const packed = packState(stateDir);
-        if (packed) await sendState(client, id, packed).catch((e) => log(`${id}: its state wasn't kept (${e.message})`));
-      }
-      // Whatever of it is still here goes: its container, its secrets, its dirs.
-      pod(env, ['rm', '-f', containerName(id)]);
-      clean({ id }, dir, []);
-      rmSync(dir, { recursive: true, force: true });
-      const ls = pod(env, ['secret', 'ls', '--format', '{{.Name}}']);
-      const mine = (ls.stdout || '').split('\n').filter((n) => n.startsWith(`loom-${id}-`));
-      if (mine.length) pod(env, ['secret', 'rm', ...mine]);
-      const state = (want.stop || []).includes(id) ? 'stopped' : 'failed';
-      await client.call('report', { id, state, log: 'the box no longer has this house (it restarted while the house was up)' })
-        .catch((e) => log(`report ${id}: ${e.message}`));
+      const dir = pathJoin(root, id);
+      try {
+        const d = JSON.parse(readFileSync(endingFile(dir), 'utf8'));
+        if (d.v !== 1 || d.id !== id || !Array.isArray(d.secretNames) || !d.secretNames.every(n => typeof n === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(n)) || !['done', 'failed', 'stopped'].includes(d.state) || ![true, false, null].includes(d.stateful) || typeof d.uploaded !== 'boolean' || typeof d.reported !== 'boolean' || d.reported && !d.uploaded) continue;
+        const seen = physical(id);
+        if (!['gone', 'stopped'].includes(seen.state)) continue;
+        houses.set(id, { dir, completion: d });
+      } catch { /* no pending collection */ }
     }
-    for (const h of want.start || []) if (!closing && !houses.has(h.id)) await start(h);
+    for (const [id, e] of houses) {
+      if (e.completion) {
+        const info = want.activeInfo?.[id];
+        if (e.completion.stateful === null && typeof info?.stateful === 'boolean') {
+          Object.assign(e.completion, { agent: info.agent, service: info.service, slot: info.slot, stateful: info.stateful, uploaded: !info.stateful }); keepEnding(e);
+        }
+        await finish(e, { backendGone: !active.has(id) });
+      } else if (e.pendingExit && !e.stopAt) await ended(...e.pendingExit);
+    }
+    for (const id of active) {
+      if (houses.has(id) || recentlyCollected.has(id)) continue;
+      const seen = physical(id), h = { id, ...(want.activeInfo?.[id] ?? {}) };
+      if (seen.state === 'running') { unknownContainers.delete(id); adopt(id, h); continue; }
+      if (seen.state === 'unknown') {
+        if (!unknownContainers.has(id)) log(`${id}: container inspection is unknown; preserving its state and retrying`);
+        unknownContainers.add(id); continue;
+      }
+      unknownContainers.delete(id);
+      const dir = pathJoin(dataDir(env), 'houses', id);
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      houses.set(id, { dir, adopted: true, stopAck: true, ...((want.stop ?? []).includes(id) ? { stopAt: Date.now(), controlStop: true } : {}) });
+      await ended({ ...h, recoveryMissing: true, recoveryState: (want.stop ?? []).includes(id) ? 'stopped' : 'failed', recoveryLog: 'the box no longer has this house (it restarted while the house was up)' }, dir, secretNamesOf(id), seen.code ?? null, null, true);
+    }
+    for (const h of want.start || []) if (!closing && !houses.has(h.id) && !recentlyCollected.has(h.id)) await start(h);
     if (closing) return want;
     await checkBuilds(want.bodyHosts);
     await sessions(want.remotes);

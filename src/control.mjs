@@ -546,9 +546,10 @@ function pollState(env, effects, caller, { facts, sessions, harnesses, usage, lo
       }),
       stop: mine.filter((h) => h.state === 'stopping').map((h) => h.id),
       // Its body hosts' houses, running: the box checks their agents' repos for a newer image (build-check).
-      bodyHosts: mine.filter((h) => h.state === 'running' && isHostHouse(h, s)).map((h) => ({ id: h.id, agent: h.agent, known: !!h.build })),
+      bodyHosts: mine.filter((h) => h.state === 'running' && !h.collection && isHostHouse(h, s)).map((h) => ({ id: h.id, agent: h.agent, known: !!h.build })),
       // Taken by this box and not over: one the box doesn't have (it restarted) is lost.
       active: mine.filter((h) => ['starting', 'running', 'stopping'].includes(h.state)).map((h) => h.id),
+      activeInfo: Object.fromEntries(mine.filter((h) => ['starting', 'running', 'stopping'].includes(h.state)).map(h => [h.id, { id: h.id, agent: h.agent, service: h.service ?? null, slot: h.slot ?? null, stateful: !!(h.service || h.slot) }])),
       // Its box sessions: up or down, as the owner wants them.
       remotes: Object.entries(s.remotes ?? {}).filter(([, r]) => r.box === caller.subject)
         .map(([agent, r]) => ({ agent, dir: r.dir, name: r.name, want: r.want, state: r.state })),
@@ -731,6 +732,19 @@ const NEXT = {
   stopping: new Set(['running', 'stopped', 'done', 'failed']),
 };
 
+/** A box reports collection progress without pretending that a stopped process is still doing work. */
+export function collectionStatus(env, effects, caller, { id, phase }) {
+  return update(env, s => {
+    boxOf(s, caller);
+    const h = s.houses[id];
+    if (!h || h.box !== caller.subject) fail(`no house ${id} for this box`, 404);
+    if (!['metadata', 'state', 'report', 'cleanup'].includes(phase)) fail('which collection phase');
+    if (TERMINAL.has(h.state)) fail('the house has already completed collection', 409);
+    h.collection = { phase, at: now(effects) };
+    return { id, collection: h.collection };
+  });
+}
+
 /** The box reports on a house. Ending one revokes its token. */
 export function report(env, effects, caller, { id, state, exit, log, build }) {
   return update(env, (s) => {
@@ -749,6 +763,7 @@ export function report(env, effects, caller, { id, state, exit, log, build }) {
     if (state === 'running') h.started ??= h.updated;
     if (Number.isInteger(exit)) h.exit = exit;
     if (typeof log === 'string') h.log = log.slice(-MAX_LOG);
+    if (TERMINAL.has(h.state)) delete h.collection;
     if (TERMINAL.has(h.state) && h.tokenLabel) revokeOrQueue(s, effects, h.tokenLabel);
     if (TERMINAL.has(h.state) && h.service) serviceHouseEnded(s, h, effects);
     return houseView(h);
@@ -1422,7 +1437,7 @@ const OWNER_ONLY = {
 };
 /** The box's own owner's (assertBoxOwner): its logins and Update now. */
 export const BOX_OWNER_ONLY = { 'login-start': loginStart, 'login-code': loginCode, 'login-cancel': loginCancel, 'box-update-now': boxUpdateNow };
-const BOX_ONLY = { hello, poll, claim, report, 'build-check': buildCheck, 'build-report': buildReport, 'save-state': saveState, 'state-part': statePart, 'remote-report': remoteReport, 'login-report': loginReport };
+const BOX_ONLY = { hello, poll, claim, report, 'collection-status': collectionStatus, 'build-check': buildCheck, 'build-report': buildReport, 'save-state': saveState, 'state-part': statePart, 'remote-report': remoteReport, 'login-report': loginReport };
 
 /** One API call, as loom's piece API hands it over: {caller, path, body} → {status, body}. */
 export function api(env, effects, { caller, path, body }) {

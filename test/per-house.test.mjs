@@ -12,7 +12,7 @@ import { runBodyHost } from '../src/bodyhost.mjs';
 import { deliver, loadConv, resetPrincipal, tick } from '../src/delivery.mjs';
 import { HouseRunner, hostOf, seatRoom, sweepSeats } from '../src/houserunner.mjs';
 import { setModels } from '../src/models.mjs';
-import { seatOf } from '../src/principal.mjs';
+import { seatOf, otherSeatHouses } from '../src/principal.mjs';
 import { ageSealer } from '../src/sealed.mjs';
 import { load, update } from '../src/state.mjs';
 import { scratch } from './scratch.mjs';
@@ -567,4 +567,22 @@ test('a lane wake fires with owner; a wake set from a Loren conversation fires f
   const cvD = cvOf('art', 'wake', 'wake:w-dddddd');
   assert.deepEqual(seat('wake:w-cccccc'), [`u-${cvC}`, `u-${cvC}`], 'the clock\'s unknown: a house of its own');
   assert.deepEqual(seat('wake:w-dddddd'), [`u-${cvD}`, `u-${cvD}`], 'no hand-over at all (unsigned): unknown, never the owner\'s');
+});
+
+
+test('a physically ended house awaiting collection is neither a live body host nor a guest capacity consumer',async()=>{
+  const w=world(),now=Date.now(),dir=join(w.env.LOOM_BOX_DATA,'delivery','hosts');mkdirSync(dir,{recursive:true});
+  update(w.env,s=>{s.houses['h-7']={id:'h-7',agent:'art',kind:'body-host',seat:'j-h-7',state:'running'};});
+  writeFileSync(join(dir,'art@j-h-7.json'),JSON.stringify({house:'h-7',report:{at:now,house:'h-7',bodies:{b0000001:{status:'working',harness:'claude',session:'native-thread'}}},req:{},stop:{},inbox:{}}));
+  const hr=new HouseRunner(w.env,'claude',{sealer:w.o.sealer,now:()=>new Date(now),up(){throw Error('must not allocate a different house');}});
+  const body={id:'h-7-b0000001',agent:'art',house:'h-7',seat:'j-h-7'};
+  assert.equal(hr.status(body),'working');
+  update(w.env,s=>{s.houses['h-7'].collection={phase:'state'};s.houses['h-8']={id:'h-8',agent:'art',kind:'body-host',seat:'p-guest',state:'running',collection:{phase:'state'}};});
+  assert.equal(hr.status(body),'ended','physical collection proves termination, without discarding the last report');assert.equal(hr.alive(body),false);assert.equal(hr.pending(body),false);
+  assert.deepEqual(otherSeatHouses(load(w.env),'art','p-another'),[]);
+  await assert.rejects(hr.warm('art','j-h-7'),/no longer running/);
+  const file=join(dir,'art@j-h-7.json'),record=JSON.parse(readFileSync(file,'utf8'));
+  record.report.at=now-60000;record.report.bodies.b0000001={status:'idle',harness:'claude',session:'native-thread',finalSealed:w.o.sealer.seal(Buffer.from('LAST COMPLETED REPORT')).toString('base64')};
+  writeFileSync(file,JSON.stringify(record));
+  assert.equal(hr.status(body),'ended');assert.equal(hr.final(body),'LAST COMPLETED REPORT','collection preserves the completed report even while state upload waits');
 });

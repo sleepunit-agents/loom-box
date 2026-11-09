@@ -157,8 +157,9 @@ const ago = (iso, nowMs = Date.now()) => {
 };
 const toneOf = (state) => ({ running: 'ok', starting: 'ok', wanted: 'warn', stopping: 'warn', failed: 'bad', lost: 'bad' }[state] ?? 'muted');
 /** A house's badge: its state, or, for a running body host's house on an older image than its agent's, that it's draining. */
-export const houseBadge = (h) => (h.draining && h.state === 'running' ? `draining (${h.draining.reason ?? 'outdated image'})` : h.state);
-const houseTone = (h) => (h.draining && h.state === 'running' ? 'warn' : toneOf(h.state));
+const collectionWords = h => ({ metadata: 'waiting to collect state', state: 'saving state', report: 'finishing', cleanup: 'cleaning up' }[h.collection?.phase]);
+export const houseBadge = (h) => collectionWords(h) ?? (h.draining && h.state === 'running' ? `draining (${h.draining.reason ?? 'outdated image'})` : h.state);
+const houseTone = (h) => h.collection ? 'warn' : (h.draining && h.state === 'running' ? 'warn' : toneOf(h.state));
 const short = (t, n = 80) => (t.length > n ? `${t.slice(0, n - 1)}…` : t);
 const mayHostText = (m) => (m === '*' ? 'anyone' : (m || []).join(', ') || 'no one');
 const dataDir = (env) => env.LOOM_BOX_DATA || join(env.HOME || '', '.local', 'share', 'loom-box');
@@ -676,6 +677,7 @@ function diskUse(env) {
 
 /** A house's state in words: "Running", "Waiting for a box", "Running, draining (outdated image)". */
 export function houseWords(h) {
+  if (collectionWords(h)) return cap(collectionWords(h));
   if (h.draining && h.state === 'running') return `Running, draining (${h.draining.reason ?? 'outdated image'})`;
   return ({ running: 'Running', starting: 'Starting', wanted: 'Waiting for a box', stopping: 'Stopping', stopped: 'Stopped', failed: 'Failed', lost: 'Lost: its box stopped answering' }[h.state]) ?? cap(String(h.state ?? 'unknown'));
 }
