@@ -66,3 +66,24 @@ test('resume prepares its new generation with the same native slot before dispat
   assert.equal(resumed.slot.session, first.slot.session);
   assert.equal(resumed.resumed, first.body);
 });
+
+test('a rejected ownership commit cannot overwrite the body generation after native resume', async () => {
+  const w = world();
+  const first = await startBody(w.env, { agent: 'art', venue: 'slack', brief: 'first' }, w.o);
+  endBody(w.env, first.body, w.o);
+  const before = readBody(w.env, first.body);
+  let nativeReturned = false;
+  await assert.rejects(resumeBody(w.env, { body: first.body, brief: 'stale resume' }, {
+    ...w.o,
+    async launch({ runner, resume, options }) {
+      const native = await runner.resume(resume, options);
+      nativeReturned = true;
+      return native;
+    },
+    commitPrepared() {
+      assert.equal(nativeReturned, true);
+      throw Object.assign(Error('conversation ownership changed'), { nativePending: true });
+    },
+  }), /ownership changed/);
+  assert.deepEqual(readBody(w.env, first.body), before, 'the stale receipt leaves the prior generation intact');
+});

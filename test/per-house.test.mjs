@@ -220,7 +220,7 @@ test('a resume that meets the cap at its house waits, its slot kept; up() counts
   assert.ok(loadConv(w.env, L).slot);
   // Another seat's house came up between plan's look and the house's (houserunner.mjs, warm: seatFull).
   const resume = w.runner.resume;
-  w.runner.resume = () => { throw Object.assign(new Error('art already has 4 houses at work for other people (the cap is 4, LOOM_RUNTIME_SEAT_HOUSES): it waits for one to idle out'), { seatFull: true }); };
+  w.runner.resume = () => { throw Object.assign(new Error('art already has 4 houses at work for other people (the cap is 4, LOOM_RUNTIME_SEAT_HOUSES): it waits for one to idle out'), { seatFull: true, nativeNotStarted: true }); };
   const out = await deliver(w.env, w.msg('dm:L', 'two', person('loren')), w.o);
   assert.equal(out.body, 'queued');
   assert.match(out.reason, /the cap is 4/);

@@ -6,6 +6,7 @@ import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { deliver, deliveryDir, loadConv, tick } from '../src/delivery.mjs';
 import { cvOf, world } from './delivery-world.mjs';
+import { completeLaunch } from '../src/launch-journal.mjs';
 
 for (const owner of ['slow-live', 'registrar-gone']) {
   test(`one native admission while the prior start is unresolved: ${owner}`, async () => {
@@ -49,3 +50,36 @@ for (const owner of ['slow-live', 'registrar-gone']) {
     }
   });
 }
+
+
+test('delivery recovers the prepared native receipt after a lost handoff without replaying work', async () => {
+  const w = world();
+  const cv = cvOf('art', 'slack', 'dm:lost-handoff');
+  let native, admissions = 0;
+  const runner = { ...w.runner, async start(options) {
+    admissions++;
+    native = await w.runner.start(options);
+    throw Error('registrar lost the native handoff');
+  } };
+  const warnings = [];
+  const o = { ...w.o, runner: () => runner, warn: text => warnings.push(text) };
+  const first = await deliver(w.env, w.msg('dm:lost-handoff', 'original work'), o);
+  assert.equal(first.body, 'queued');
+  const prepared = loadConv(w.env, cv).starting.prepared;
+  assert.ok(prepared);
+  assert.equal(loadConv(w.env, cv).body, undefined);
+  completeLaunch(w.env, prepared.id, native, { inputConfirmed: true });
+  w.clock.advance(1001);
+  await tick(w.env, o);
+  const recovered = loadConv(w.env, cv);
+  assert.equal(recovered.body, `${native.harness}:${native.id}`, JSON.stringify({ warnings, starting: recovered.starting, waiting: recovered.waiting }));
+  assert.equal(recovered.run, prepared.snapshot.run);
+  assert.equal(recovered.sendKey, prepared.snapshot.senderHash);
+  assert.equal(recovered.runs, 1);
+  assert.equal(recovered.starting, undefined);
+  assert.equal(admissions, 1);
+  assert.equal(Object.values(recovered.outcomes)[0].body, 'started');
+  await tick(w.env, o);
+  assert.equal(loadConv(w.env, cv).runs, 1);
+  assert.equal(admissions, 1);
+});

@@ -80,7 +80,7 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { accountsFrom, accountsOfRecord } from './accounts.mjs';
-import { endBody, readBody, resumeBody, startBody } from './bodies.mjs';
+import { commitPreparedBody, endBody, readBody, resumeBody, startBody } from './bodies.mjs';
 import { CoreError, coreFrom } from './core.mjs';
 import { stoppingHosts, HouseRunner, releaseEmptySeatHouses, seatRoom, sweepSeats, sweepTransfers } from './houserunner.mjs';
 import { venueKind as kindOf, resolveFor, readModelChoice, setModelChoice } from './models.mjs';
@@ -94,7 +94,9 @@ import { namesFiles } from './briefs.mjs';
 import { AGENT_NAME, StateError, alive, withLock, load } from './state.mjs';
 import { RUNS_KEPT, causeOf, detectLoop, textHash } from './loops.mjs';
 import { STUCK_AFTER_MIN, asData, taskComment, taskOf } from './stuck.mjs';
-import { CODEX_WONT, codexDeny, runnerFor } from './runners.mjs';
+import { CODEX_WONT, codexDeny, configuredNativeRunner, nativeRecoveryConfiguration, nativeRunnerConfiguration, runnerFor } from './runners.mjs';
+import { admitLaunch, cancelReservedLaunch, completeLaunch, launchAttempt, launchWorkerAlive, launchWorkerIdentity, readLaunch, recoverLaunchReceipt, refuseLaunch, reserveLaunch } from './launch-journal.mjs';
+import { superviseNativeLaunch } from './native-launch.mjs';
 import { raiseAlert } from './alerthook.mjs';
 import { changed as changedCards } from './activity.mjs';
 import { keepKey } from './bodyhost.mjs';
@@ -121,8 +123,6 @@ export const MAX_CONTINUITY_DAYS = 14;
 export const CONTINUITY_DAYS = { live: 14, scheduled: 1, agent: 3 };
 /** A send has this long (agent-runtime.md, "Outbound"): all of it, since it runs outside the body's own call. */
 export const SEND_MS = 15_000;
-/** A start or resume that's been "starting" this long, its process gone or not, is given up (a cold house is slow). */
-const STARTING_MS = 240_000;
 const OUTCOME_MS = 3_600_000;
 /** How often a working body's presence is said again to its adapter (and its stop word asked after). */
 export const PRESENCE_MS = 15_000;
@@ -466,6 +466,7 @@ export function depsOf(env, o = {}) {
     runner: o.runner ?? ((h, local) => (local
       ? (locals[h] ??= runnerFor(h, localRunnerEnv(env, localBodiesOf(env))))
       : (houses[h] ??= new HouseRunner(env, h, { sealer: seal, now: o.now })))),
+    injectedRunner: typeof o.runner === 'function',
     sealer: seal,
     now: o.now ?? (() => new Date()),
     accounts: o.accounts ?? accountsFrom(env),
@@ -855,9 +856,21 @@ function statusOf(env, c, d) {
   } catch { return 'unknown'; }
 }
 
-const isStarting = (c, now) => !!c.starting && alive(c.starting.pid) && now - c.starting.since < STARTING_MS;
+const registrarAlive = marker => Number.isSafeInteger(marker?.pid) && marker.pid > 0
+  && (marker.boot && marker.birth ? launchWorkerAlive(marker) !== false : alive(marker.pid));
+const isStarting = c => !!c.starting && (!!c.starting.prepared || c.starting.untracked || c.starting.protocol !== 2 || registrarAlive(c.starting));
 /** A marker of one op's own: only that op clears it (H: an op that outlived its marker can't clear the next one's). */
-const mark = (now) => ({ pid: process.pid, since: now, op: randomBytes(6).toString('hex') });
+const mark = now => {
+  let identity = { pid: process.pid };
+  try { identity = launchWorkerIdentity(); } catch { /* unsupported native admission will refuse before launch */ }
+  return { ...identity, since: now, op: randomBytes(6).toString('hex'), protocol: 2 };
+};
+function claimPreparedRecovery(c, now) {
+  if (!c.starting?.prepared || registrarAlive(c.starting) || c.starting.recoverAfter > now) return null;
+  const original = c.starting;
+  c.starting = { ...original, ...mark(now), op: original.op };
+  return { cv: c.conversation, mark: original.op, type: 'recover-start', msgs: original.msgs ?? [] };
+}
 const ours = (c, op) => !!c?.starting && c.starting.op === op.mark;
 /**
  * A start or resume given up (its process died: the runtime restarted under it, t-1853): what it took off the queue
@@ -1049,6 +1062,8 @@ function plan(env, cv, d, mem) {
     return null;
   };
   if (c.starting) {
+    const recovery = claimPreparedRecovery(c, now);
+    if (recovery) { saveConv(env, c); return recovery; }
     if (isStarting(c, now)) return wait('its body is starting');
     abandon(c, now);
   }
@@ -1558,7 +1573,7 @@ export function commitStartedConversation(env, op, { run, senderHash, bodyRules,
     // `claude --bg` gives every session its daemon's environment, not this launch's (t-1830).
     if (localKey !== undefined) keepKey(env, op.cv, localKey);
     c.bodyRules = bodyRules;
-    ack(c, op.msgs);
+    if (!r.inputUncertain) ack(c, op.msgs);
     delete c.retryAt; delete c.startFails; delete c.retryReason; delete c.startStatus;
     c.sendKey = senderHash;
     c.runs = (c.runs ?? 0) + 1;
@@ -1578,17 +1593,134 @@ export function commitStartedConversation(env, op, { run, senderHash, bodyRules,
     } else if (!c.home) delete c.fallback;
     delete c.allOut;
     delete c.starting;
+    if (r.inputUncertain) {
+      c.retiring = { id: randomBytes(12).toString('hex'), type: 'resume-warm', body: r.body, msgs: op.msgs };
+      const entry = c.runLog.find(x => x.run === run);
+      if (entry) entry.inputUncertain = true;
+    }
     c.idleSince = undefined;
     c.fed = [];
     c.last = new Date(at).toISOString();
-    outcome(c, [...keys, ...pending.map((p) => p.key)], { body: way.how === 'start' ? 'started' : 'resumed' }, at);
+    outcome(c, [...keys, ...pending.map((p) => p.key)], r.inputUncertain
+      ? { body: 'queued', reason: 'collecting the previous native attempt before continuing its uncertain input' }
+      : { body: way.how === 'start' ? 'started' : 'resumed' }, at);
     saveConv(env, c);
     return true;
   });
 }
 
+function releasePreparedObserver(env, op, d, reason) {
+  locked(env, () => {
+    const c = loadConv(env, op.cv);
+    if (!ours(c, op) || !c.starting.prepared) return;
+    c.starting.pid = 0;
+    delete c.starting.boot; delete c.starting.birth;
+    c.starting.recoverAfter = d.now().getTime() + 1000;
+    c.waiting = reason;
+    saveConv(env, c);
+  });
+}
+
+async function recoverPreparedStart(env, op, d) {
+  const c = loadConv(env, op.cv), prepared = c?.starting?.prepared;
+  if (!prepared || !ours(c, op)) return { pending: true };
+  try {
+    let record = readLaunch(env, prepared.id);
+    if (!record || record.intentHash !== prepared.intentHash || record.harness !== prepared.harness) throw Error('the previous native admission receipt cannot be verified');
+    if (record.state === 'reserved') record = cancelReservedLaunch(env, prepared.id).record;
+    if (record.state === 'refused') {
+      locked(env, () => {
+        const current = loadConv(env, op.cv);
+        if (ours(current, op)) { abandon(current, d.now().getTime()); saveConv(env, current); }
+      });
+      return;
+    }
+    if (record.state === 'admitted' && launchWorkerAlive(record.worker) === false) {
+      const runner = prepared.recoveryConfiguration
+        ? configuredNativeRunner(prepared.harness, prepared.recoveryConfiguration, env)
+        : d.runner(prepared.harness, !!prepared.bodySpec.metadata.local);
+      const found = runner.recoverLaunch?.(record.token, { model: prepared.bodySpec.metadata.model, env });
+      if (found?.state === 'ready') record = recoverLaunchReceipt(env, prepared.id, found.body);
+    }
+    if (record.state !== 'ready') {
+      releasePreparedObserver(env, op, d, 'waiting for the previous native start to finish its handoff');
+      return { pending: true };
+    }
+    const native = { ...record.body, ...(record.input !== 'confirmed' ? { inputUncertain: true } : {}) };
+    // Body and conversation commits share the same ownership guard. A recovery
+    // never writes a body generation after another operation has taken over.
+    let r;
+    locked(env, () => {
+      const current = loadConv(env, op.cv);
+      if (!ours(current, op) || current.starting.prepared?.id !== prepared.id) return;
+      r = commitPreparedBody(env, prepared.bodySpec, native, new Date(record.readyAt ?? d.now().getTime()).toISOString());
+      if (prepared.snapshot.way.file) rmSync(prepared.snapshot.way.file, { force: true });
+    });
+    if (!r) return { pending: true };
+    if (commitStartedConversation(env, op, prepared.snapshot, r, [], d.now().getTime())) noteHarness(env, c.agent, r, d);
+    else endAndForget(env, r, d);
+  } catch (error) {
+    d.warn(`recovering ${op.cv}: ${error.message}`);
+    releasePreparedObserver(env, op, d, 'the previous native start is uncertain; recovery is holding its work');
+    return { pending: true };
+  }
+}
+
+function preparedLaunch(env, op, d, context) {
+  return async ({ runner, harness, options, resume, prepared }) => {
+    if (runner.remote) {
+      // The remote protocol is migrated separately. Never mistake this path
+      // for a start proven absent merely because its registrar disappears.
+      locked(env, () => { const c = loadConv(env, op.cv); if (ours(c, op)) { c.starting.untracked = true; saveConv(env, c); } });
+      try { return await (resume ? runner.resume(resume, options) : runner.start(options)); }
+      catch (error) {
+        if (!error.nativeNotStarted && !error.seatFull) error.nativePending = true;
+        throw error;
+      }
+    }
+    launchWorkerIdentity(); // refuse unsupported process identity before admission
+    const configuration = nativeRunnerConfiguration(runner);
+    if (!configuration && !d.injectedRunner) throw Object.assign(Error('the selected native runner cannot be supervised'), { nativeNotStarted: true });
+    const attempt = createHash('sha256').update(op.mark + '\0' + harness).digest('hex').slice(0, 12);
+    const id = launchAttempt(op.cv, attempt);
+    const intent = { harness, options, ...(resume ? { resume } : {}), ...(configuration ? { configuration } : {}) };
+    const intentHash = createHash('sha256').update(JSON.stringify(intent)).digest('hex');
+    reserveLaunch(env, { id, harness, intentHash });
+    locked(env, () => {
+      const c = loadConv(env, op.cv);
+      if (!ours(c, op) || c.control) {
+        cancelReservedLaunch(env, id);
+        throw Object.assign(Error('its native start was cancelled before admission'), { nativeNotStarted: true });
+      }
+      const previous = c.starting.prepared;
+      if (previous && previous.id !== id && readLaunch(env, previous.id)?.state !== 'refused') throw Object.assign(Error('its previous native start remains unresolved'), { nativePending: true });
+      c.starting.prepared = { id, harness, intentHash, bodySpec: prepared,
+        recoveryConfiguration: nativeRecoveryConfiguration(runner), snapshot: context.snapshot() };
+      if (context.local) keepKey(env, op.cv, context.runKey);
+      saveConv(env, c);
+    });
+    if (configuration) return superviseNativeLaunch(env, { id, ...intent });
+    // Explicitly injected adapters use the same journal in this process. Their
+    // known pre-start failures must say so; an arbitrary error is uncertainty.
+    const admission = admitLaunch(env, id);
+    if (!admission.admitted) throw Object.assign(Error('native admission is already owned'), { nativePending: true });
+    try {
+      const input = { ...options, launchToken: admission.record.token };
+      const body = resume ? await runner.resume(resume, input) : await runner.start(input);
+      if (body.inputReady) await body.inputReady;
+      completeLaunch(env, id, body, { inputConfirmed: true });
+      return body;
+    } catch (error) {
+      if (error.nativeNotStarted === true) refuseLaunch(env, id, error.message);
+      else error.nativePending = true;
+      throw error;
+    }
+  };
+}
+
 async function executeOne(env, op, d, mem) {
   const now = () => d.now().getTime();
+  if (op.type === 'recover-start') return recoverPreparedStart(env, op, d);
   if (op.type === 'interrupt') return interruptOp(env, op, d);
   if (op.type === 'loop-note') return loopNote(env, op, d);
   if (op.type === 'stuck') return stopStuck(env, op, d);
@@ -1652,6 +1784,7 @@ async function executeOne(env, op, d, mem) {
   const pending = [];
   let r;
   let rules;
+  let launchSnapshot;
   try {
     const msgs = op.msgs.map((x) => ({ ...x, text: open(d, x, mem) })).filter((x) => x.text !== null);
     if (!msgs.length) throw new DeliveryError('its messages\' text is gone');
@@ -1711,6 +1844,24 @@ async function executeOne(env, op, d, mem) {
     const bodyEnv = d.bodyEnv(runKey, op.cv);
     if (lb?.path) bodyEnv.PATH = lb.path;
     const bodyDeps = { runner: (h) => d.runner(h, local), accounts: d.accounts, now: d.now, fetchImpl: d.fetchImpl, bodyEnv };
+    bodyDeps.commitPrepared = (prepared, native, at) => locked(env, () => {
+      const current = loadConv(env, op.cv);
+      if (!ours(current, op) || (current.starting.prepared && current.starting.prepared.bodySpec.metadata.instance !== prepared.metadata.instance)) {
+        const ref = `${native.harness}:${native.id}`;
+        let existing;
+        try { existing = readBody(env, ref); } catch { /* a new orphan needs its own cleanup record */ }
+        // A stale receipt must never replace a newer incarnation. The common
+        // stale-operation path will decline its bind; cleanup checks instance.
+        if (existing && existing.instance !== prepared.metadata.instance) return { ...prepared.metadata, body: ref, started: at };
+        // With no other generation, register this late writer for the existing
+        // durable discard path. Its files stay until native shutdown is proven.
+      }
+      return commitPreparedBody(env, prepared, native, at);
+    });
+    bodyDeps.launch = preparedLaunch(env, op, d, { local, runKey, snapshot: () => launchSnapshot ??= {
+      run, senderHash: keyHash(runKey).toString('hex'), bodyRules: savedBodyRules(rules, now()),
+      way: { how: way.how, home: !!way.home, ...(way.file ? { file: way.file } : {}) },
+    } });
     const base = { activity: c0.spawn?.interactive === true, agent: c0.agent, venue: c0.venue, venueKind: c0.kind, prefer: c0.spawn?.prefer ? [c0.spawn.prefer] : [], cwd: local ? lb.cwd : d.cwd, deny: rules.deny, guest: rules.guest, ...(local ? { local: true } : {}), ...(rules.seat ? { seat: rules.seat } : {}) };
     // Out of quota (t-1907): which session this run continues, on which harness. Its home slot, when the harness it
     // switched away from has room again; its own slot, when that one's harness has room; else a fresh body elsewhere.
@@ -1751,15 +1902,37 @@ async function executeOne(env, op, d, mem) {
       // A house's body gets its files with the resume (its host puts them back); a local one, here.
       if (!runner.remote) restored = restoreFiles(runner, pack.files);
       r = await resumeBody(env, { ...base, slot, brief: resumeBrief(c0, [...notes, ...msgs], run, sends), ...(runner.remote ? { files: pack.files } : {}) }, bodyDeps);
-      rmSync(way.file, { force: true });
-      // Back home: the fallback's own session isn't kept (what it said is in the digests).
-      if (way.home) rmSync(slotFile(env, op.cv), { force: true });
+      locked(env, () => {
+        if (!ours(loadConv(env, op.cv), op)) return;
+        rmSync(way.file, { force: true });
+        // Back home: only this operation can remove the fallback's own slot.
+        if (way.home) rmSync(slotFile(env, op.cv), { force: true });
+      });
     }
-    const snapshot = { run, senderHash: keyHash(runKey).toString('hex'), bodyRules: savedBodyRules(rules, now()), way: { how: way.how, home: !!way.home } };
+    const snapshot = launchSnapshot ?? { run, senderHash: keyHash(runKey).toString('hex'), bodyRules: savedBodyRules(rules, now()), way: { how: way.how, home: !!way.home } };
     const keep = commitStartedConversation(env, op, snapshot, r, pending, now(), local ? runKey : undefined);
     if (!keep) endAndForget(env, r, d);
     else noteHarness(env, c0.agent, r, d);
   } catch (e) {
+    // Once admission may have happened, any later storage/commit failure must
+    // retain the prepared attempt for recovery rather than replay its input.
+    const prepared = loadConv(env, op.cv)?.starting?.prepared;
+    if (prepared && !e.nativeNotStarted) {
+      try {
+        const receipt = readLaunch(env, prepared.id);
+        if (!receipt || receipt.state !== 'refused') e.nativePending = true;
+      } catch { e.nativePending = true; }
+    }
+    if (e.nativePending) {
+      locked(env, () => {
+        const c = loadConv(env, op.cv);
+        if (!ours(c, op)) return;
+        c.starting.pid = 0; delete c.starting.boot; delete c.starting.birth;
+        c.waiting = 'the previous native start remains uncertain; no replacement has been admitted';
+        saveConv(env, c);
+      });
+      return { pending: true };
+    }
     // No model the agent may use has room (t-1907): said plainly, once, and its messages aren't tried again on the
     // tick (a wait of minutes can't help a window that resets in hours); a slot it would have resumed stays.
     if (e instanceof StateError && e.status === 409 && Array.isArray(e.out) && e.out.some((x) => x.account)) {
@@ -2367,6 +2540,8 @@ export async function tick(env, o = {}, only, mem = new Map()) {
   locked(env, () => {
     for (const c of listConvs(env)) {
       let dirty = false;
+      const recovery = claimPreparedRecovery(c, now);
+      if (recovery) { ops.push(recovery); saveConv(env, c); continue; }
       if (c.starting && !isStarting(c, now)) { abandon(c, now); dirty = true; }
       if (c.retiring) {
         if (!c.starting) {

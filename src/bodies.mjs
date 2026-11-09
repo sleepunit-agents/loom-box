@@ -101,7 +101,8 @@ export async function startBody(env, { agent, brief: b, venue, venueKind, prefer
   const options = { agent, brief: forRunner(runner, text, cwd), model: pick.model, cwd, env: o.bodyEnv, deny, ...(seat ? { seat } : {}), ...((venue === COMMS_VENUE || activity) ? { activity: true } : {}) };
   const prepared = { metadata, why: pick.why, preferred: pick.preferred };
   const body = o.launch ? await o.launch({ runner, harness: pick.harness, options, prepared }) : await runner.start(options);
-  return commitPreparedBody(env, prepared, body, d.now().toISOString());
+  const at = d.now().toISOString();
+  return o.commitPrepared ? o.commitPrepared(prepared, body, at) : commitPreparedBody(env, prepared, body, at);
 }
 
 export function feedBody(env, ref, message, o = {}) {
@@ -135,7 +136,8 @@ export async function resumeBody(env, { body: ref, slot, agent, venue, venueKind
   const options = { agent: who, brief: forRunner(runner, brief(b), cwd), model: pick.model, cwd, env: o.bodyEnv, deny, ...(seat ? { seat } : {}), ...(files ? { files } : {}), ...((where === COMMS_VENUE || activity) ? { activity: true } : {}) };
   const prepared = { metadata, why: pick.why, preferred: pick.preferred };
   const body = o.launch ? await o.launch({ runner, harness: pick.harness, options, resume: slot, prepared }) : await runner.resume(slot, options);
-  return commitPreparedBody(env, prepared, body, d.now().toISOString());
+  const at = d.now().toISOString();
+  return o.commitPrepared ? o.commitPrepared(prepared, body, at) : commitPreparedBody(env, prepared, body, at);
 }
 
 export function endBody(env, ref, o = {}) {

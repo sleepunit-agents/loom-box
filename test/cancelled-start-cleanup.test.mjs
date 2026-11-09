@@ -79,3 +79,26 @@ test('discarding an old incarnation never stops or deletes a reused native job',
   assert.equal(w.log.filter(x => x[0] === 'end').length, 1, 'the stale discard never stops the reused job');
   assert.equal(existsSync(join(deliveryDir(w.env), 'discarding', ref.replace(':', '-') + '.json')), false);
 });
+
+test('a late delivery receipt cannot overwrite or stop a newer native generation already committed', async () => {
+  const w = world();
+  const cv = cvOf('art', 'slack', 'new-generation-before-receipt');
+  const start = w.runner.start.bind(w.runner);
+  let newer;
+  w.runner.start = options => {
+    const native = start(options);
+    const c = loadConv(w.env, cv);
+    c.starting.op = 'newer-owner';
+    saveConv(w.env, c);
+    newer = { body: `${native.harness}:${native.id}`, instance: 'newer-native-generation', harness: native.harness,
+      agent: 'art', venue: 'slack', model: native.model, slot: native.slot, started: w.clock.now().toISOString() };
+    const dir = join(w.env.LOOM_BOX_DATA, 'bodies');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, newer.body.replace(':', '-') + '.json'), JSON.stringify(newer));
+    return native;
+  };
+  await deliver(w.env, w.msg('new-generation-before-receipt', 'old input'), w.o);
+  assert.deepEqual(readBody(w.env, newer.body), newer);
+  assert.equal(w.log.filter(row => row[0] === 'end').length, 0);
+  assert.equal(existsSync(w.runner.transcript(newer.slot.session)), true);
+});

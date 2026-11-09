@@ -39,7 +39,7 @@ export function fakeRunner(log, root, harness = 'claude', { inboxDir } = {}) {
     seats: {}, houses: null,
     where(o) { const seat = o.seat ?? 'owner'; return r.houses ? { seat, house: r.houses[seat] ?? 'h-99' } : {}; },
     start(o) {
-      if (r.failStart) throw new RunnerError(r.failStart);
+      if (r.failStart) throw Object.assign(new RunnerError(r.failStart), { nativeNotStarted: true });
       if (r.delay) { const ms = r.delay; r.delay = 0; return new Promise((res) => setTimeout(res, ms)).then(() => r.start(o)); }
       const id = `${harness[0]}000000${n++}`;
       session[id] = `s-${id}`;
@@ -53,7 +53,7 @@ export function fakeRunner(log, root, harness = 'claude', { inboxDir } = {}) {
       return { id, harness, model: o.model, slot: { harness, session: session[id] }, ...r.where(o) };
     },
     resume(slot, o) {
-      if (r.failResume) throw new RunnerError(r.failResume);
+      if (r.failResume) throw Object.assign(new RunnerError(r.failResume), { nativeNotStarted: true });
       const id = `r000000${n++}`;
       session[id] = slot.session;
       log.push(['resume', id, slot.session, existsSync(tfile(slot.session)) ? readFileSync(tfile(slot.session), 'utf-8') : null, o.brief]);

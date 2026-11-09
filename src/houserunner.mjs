@@ -361,7 +361,7 @@ export function bodySync(env, caller, body, o = {}) {
       for (const [rid, request] of Object.entries(x.req ?? {})) {
         try { const q = JSON.parse(t.open(request.sealed).toString('utf8')); if (/^cv-[0-9a-f]{12}$/.test(q.conversation ?? '')) conversations.add(q.conversation); } catch { /* no text is recovered by guessing */ }
         // A host syncs only between native launch calls: a request absent from done has not run here.
-        if (!done[rid]) done[rid] = { error: 'its house is stopping before this request starts' };
+        if (!done[rid]) done[rid] = { error: 'its house is stopping before this request starts', nativeNotStarted: true };
       }
       x.quiescing.conversations = [...conversations];
       for (const [id, b] of Object.entries(bodies)) {
@@ -558,7 +558,9 @@ export class HouseRunner {
     // Asked of the house warm() gave, only while it's still the agent's house (not drained since): else warm again.
     let house;
     for (;;) {
-      house = await this.warm(o.agent, seat);
+      // No native request exists until warm succeeds and req is published.
+      try { house = await this.warm(o.agent, seat); }
+      catch (error) { error.nativeNotStarted = true; throw error; }
       const asked = hostLocked(this.env, () => {
         const h = loadHost(this.env, o.agent, seat);
         if (h.house !== house) return false;
@@ -588,7 +590,7 @@ export class HouseRunner {
           if (rec) this.forgetStop(o.agent, house, d.id, seat);
           return { id, harness: this.harness, model: o.model, house, seat, ...(resume ? { slot: resume } : {}) };
         }
-        if (d?.error) throw new RunnerError(d.error);
+        if (d?.error) throw Object.assign(new RunnerError(d.error), d.nativeNotStarted === true ? { nativeNotStarted: true } : {});
         if (Date.now() > end) {
           // Given up on: should its house start it late, that body is stopped, never run (bodySync, h.cancel).
           hostLocked(this.env, () => { const h = loadHost(this.env, o.agent, seat); const x = houseRec(h, house); if (x) { (x.cancel ??= {})[rid] = this.now().getTime(); writeJson(hostFile(this.env, o.agent, seat), h); } });

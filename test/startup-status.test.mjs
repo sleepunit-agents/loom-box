@@ -7,9 +7,9 @@ import { world, sleep } from './delivery-world.mjs';
 const message = (w) => w.msg('th:startup', 'hello', { venue: 'loom', source: 'loom' });
 const statuses = (w) => w.core.commsCalls.filter((b) => /^start-/.test(b.status ?? ''));
 
-test('a timeout after the initial queued response pushes its reason and retry time to Comms', async () => {
+test('a pre-admission failure after the initial queued response pushes its reason and retry time to Comms', async () => {
   const w = world();
-  w.runner.start = async () => { await sleep(2150); throw new Error('body host did not start in 60 s'); };
+  w.runner.start = async () => { await sleep(2150); throw Object.assign(new Error('body host did not start in 60 s'), { nativeNotStarted: true }); };
   let drain;
   const out = await deliver(w.env, message(w), { ...w.o, onDrain: (p) => { drain = p; } });
   assert.equal(out.body, 'queued');
