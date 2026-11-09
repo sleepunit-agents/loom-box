@@ -51,6 +51,7 @@ if (args[0] === 'rmi') {
 }
 switch (`${args[0]} ${args[1] ?? ''}`) {
   case 'image exists': process.exit(existsSync(join(D, 'images', safe(args[2]))) ? 0 : 1);
+  case 'container exists': process.exit(alive(args.at(-1)) ? 0 : 1);
   case 'info --format': console.log('true'); process.exit(0);
   case 'secret create': { writeFileSync(join(D, 'secrets', args[3]), stdin(), { mode: 0o600 }); process.exit(0); }
   case 'secret rm': { for (const n of args.slice(2)) rmSync(join(D, 'secrets', n), { force: true }); process.exit(0); }
@@ -78,7 +79,15 @@ if (args[0] === 'wait') {
   const name = args.at(-1);
   writeFileSync(join(D, 'runs', `${name}.${args[0]}`), '');
   const pidf = join(D, 'runs', `${name}.pid`);
+  if (args[0] === 'stop') {
+    const tries=join(D,'runs',name+'.attempts');
+    const attempt=Number(existsSync(tries)?readFileSync(tries,'utf8'):0)+1;writeFileSync(tries,String(attempt));
+    if(attempt<=(cfg().stopFailures??0)||(cfg().run==='separate'&&!existsSync(pidf)))process.exit(125);
+  }
   if (args[0] === 'stop' && existsSync(pidf)) { try { process.kill(Number(readFileSync(pidf, 'utf-8')), 'SIGTERM'); } catch { /* gone */ } }
+  if(args[0]==='stop'&&cfg().run==='separate'){
+    while(alive(name))await new Promise(r=>setTimeout(r,10));
+  }
   process.exit(0);
 } else if (args[0] === 'run') {
   const name = args[args.indexOf('--name') + 1];
@@ -97,6 +106,31 @@ if (args[0] === 'wait') {
     writeFileSync(join(stateSrc, 'cursor'), `${before ?? ''}${name};`);
   }
   writeFileSync(join(D, 'runs', `${name}.json`), JSON.stringify({ args, seen, stdin: args.includes('-i') ? stdin() : null, stateBefore: before }));
+  if (cfg().run === 'separate') {
+    if(cfg().createGate){const end=Date.now()+8000;while(!existsSync(join(D,'runs',name+'.create'))&&Date.now()<end)await new Promise(r=>setTimeout(r,10));}
+    const { spawn } = await import('node:child_process');
+    const source = `
+      const fs=require('node:fs'),path=require('node:path');
+      const [folder,name,state]=process.argv.slice(1);
+      const file=suffix=>path.join(folder,'runs',name+suffix);
+      let stopping=false;
+      process.on('SIGTERM',()=>{stopping=true;fs.writeFileSync(file('.stopping'),'');});
+      const t=setInterval(()=>{
+        if(!stopping||!fs.existsSync(file('.release')))return;
+        clearInterval(t);
+        try { if(state)fs.writeFileSync(path.join(state,'cursor'),'RESCUE-COMPLETED'); }
+        finally { fs.writeFileSync(file('.exit'),'0');process.exit(0); }
+      },10);
+      setTimeout(()=>process.exit(124),10000).unref();
+      fs.writeFileSync(file('.ready'),'');
+    `;
+    const native=spawn(process.execPath,['-e',source,D,name,stateSrc??''],{detached:true,stdio:'ignore'});
+    writeFileSync(join(D,'runs',name+'.client.pid'),String(process.pid));
+    writeFileSync(join(D,'runs',name+'.pid'),String(native.pid));
+    process.on('SIGTERM',()=>process.exit(143));
+    native.on('exit',code=>process.exit(code??125));
+    await new Promise(()=>{});
+  }
   writeFileSync(join(D, 'runs', `${name}.pid`), String(process.pid));
   const how = cfg().run || 'exit:0';
   if (how.startsWith('exit:')) { console.log('the house says hi'); process.exit(Number(how.slice(5))); }
