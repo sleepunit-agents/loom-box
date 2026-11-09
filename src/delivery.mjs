@@ -2050,11 +2050,50 @@ function endAndForget(env, ref, d) {
   try {
     const rec = readBody(env, ref);
     const runner = d.runner(rec.harness, rec.local);
-    const body = bodyOf(ref, rec);
-    const slot = (() => { try { return runner.slotOf(body) ?? rec.slot; } catch { return rec.slot; } })();
-    endBody(env, ref, { runner: d.runner, now: d.now, bodyEnv: d.bodyEnv() });
-    if (!runner.remote) dropSession(runner, slot, body);
+    if (runner.remote) {
+      // The house host acknowledges native exit before dropping its files.
+      endBody(env, ref, { runner: d.runner, now: d.now, bodyEnv: d.bodyEnv() });
+      return;
+    }
+    // A cancelled start has no conversation left to own its cleanup. Keep only
+    // its body reference so a runtime restart cannot strand the native writer.
+    writeJson(discardFile(env, ref), { body: ref });
+    finishDiscard(env, ref, d);
   } catch (e) { d.warn(`ending ${ref}: ${e.message}`); }
+}
+
+const discardDir = env => join(deliveryDir(env), 'discarding');
+const discardFile = (env, ref) => join(discardDir(env), `${ref.replace(':', '-')}.json`);
+
+function finishDiscard(env, ref, d) {
+  const rec = readBody(env, ref); // validates the reference before it names a file
+  const runner = d.runner(rec.harness, rec.local);
+  if (runner.remote) return;
+  const body = bodyOf(ref, rec);
+  if (!rec.ended) endBody(env, ref, { runner: d.runner, now: d.now, bodyEnv: d.bodyEnv() });
+  const stopped = runner.stopped ? runner.stopped(body) === true : ['idle', 'ended'].includes(runner.status(body));
+  if (!stopped) return;
+  const slot = runner.slotOf(body) ?? rec.slot;
+  dropSession(runner, slot, body);
+  rmSync(discardFile(env, ref), { force: true });
+}
+
+function discardPass(env, d) {
+  let entries;
+  try {
+    entries = readdirSync(discardDir(env)).filter(x => x.endsWith('.json'))
+      .map(name => ({ name, value: readJson(join(discardDir(env), name)) }))
+      .filter(x => typeof x.value?.body === 'string')
+      .sort((a, b) => (a.value.checkedAt ?? 0) - (b.value.checkedAt ?? 0)).slice(0, 4);
+  } catch { return; }
+  for (const { name, value } of entries) {
+    const ref = value.body;
+    try {
+      // Rotate uncertain writers too: one bad stop cannot starve later cleanup.
+      writeJson(join(discardDir(env), name), { body: ref, checkedAt: d.now().getTime() });
+      finishDiscard(env, ref, d);
+    } catch (e) { d.warn(`discarding ${ref}: ${e.message}`); }
+  }
 }
 
 /**
@@ -2236,6 +2275,7 @@ async function stopStuck(env, op, d) {
  */
 export async function tick(env, o = {}, only, mem = new Map()) {
   const d = depsOf(env, o);
+  discardPass(env, d);
   if (only) await drain(env, only, d, mem);
   const now = d.now().getTime();
   // Transfers from houses nobody will finish or collect (houserunner.mjs, sweepTransfers).
