@@ -27,6 +27,7 @@ import { sessionsBusy } from './busy.mjs';
 import { bootInfo, SAMPLE_MS, unitSampler } from './watch.mjs';
 import { sampleHealth } from './health.mjs';
 import { harnessStatus, LOGIN_HARNESSES, loginDir, pruneLoginDir, startLogin, sweepCliContainers } from './logins.mjs';
+import { collectNativeHistory } from './native-collection-client.mjs';
 
 /** How often a box asks its harness CLIs whether they're logged in (and at once after a login). */
 export const STATUS_MS = 5 * 60_000;
@@ -552,28 +553,36 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
   /** Everything a house leaves behind but its log. */
   function clean(h, dir, secretNames) {
     if (secretNames.length) pod(env, ['secret', 'rm', ...secretNames.map((n) => podmanSecret(h.id, n))]);
-    for (const d of ['repo', 'state', 'nested']) {
+    for (const d of ['repo', 'state', 'nested', 'native', 'native-snapshot']) {
       const p = pathJoin(dir, d);
       if (!existsSync(p)) continue;
       // Nested storage holds files owned by the container's subordinate ids.
       if (pod(env, ['unshare', 'rm', '-rf', p]).status !== 0) rmSync(p, { recursive: true, force: true });
     }
+    rmSync(pathJoin(dir, 'native-protocol.json'), { force: true });
   }
 
   async function start(h) {
     const dir = pathJoin(dataDir(env), 'houses', h.id);
     rmSync(dir, { recursive: true, force: true });
     mkdirSync(dir, { recursive: true, mode: 0o700 });
+    if (!h.service) mkdirSync(pathJoin(dir, 'native'), { mode: 0o700 });
     let claimed;
     try {
-      claimed = await client.call('claim', { id: h.id });
+      claimed = await client.call('claim', { id: h.id, ...(!h.service ? { nativeHistory: 1 } : {}) });
     } catch (err) {
       log(`couldn't claim ${h.id}: ${err.message}`);
-      rmSync(dir, { recursive: true, force: true });
+      // A lost claim response can have committed remotely. Its private empty
+      // history root is retained for the ordinary physical recovery pass.
       return;
     }
-    let made = [], logFd;
+    let made = [], logFd, containerEntered = false;
     try {
+      if (!h.service && claimed.nativeHistory?.v !== 1) throw new BoxError('the runtime needs durable native collection support before this house starts; update loom runtime');
+      if (claimed.nativeHistory?.v === 1) {
+        h.nativeHistory = { v: 1 };
+        writeFileSync(pathJoin(dir, 'native-protocol.json'), JSON.stringify({ v: 1 }), { mode: 0o600 });
+      }
       logFd = openSync(pathJoin(dir, 'log'), 'a', 0o600);
       const { repo, mirror } = checkout(env, h, dir, claimed.repoAuth);
       const house = specFor(parseHouseFile(readFileSync(inside(repo, h.houseFile || 'house/house.json', 'house file'), 'utf-8')), h.service);
@@ -598,6 +607,7 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
         return [l, loginDir(env, l)];
       })) };
       for (const d of ['state', 'nested']) { dirs[d] = pathJoin(dir, d); mkdirSync(dirs[d], { mode: 0o700 }); }
+      if (h.nativeHistory?.v === 1) dirs.native = pathJoin(dir, 'native');
       if (h.service || h.slot) restoreState(dirs.state, await fetchState(client, h.id, claimed.state));
       // A session house: what attaching to it runs, for `loom box attach` on this box.
       if (h.session) writeFileSync(pathJoin(dir, 'attach.json'), JSON.stringify({ container: containerName(h.id), command: house.attach ?? ['sh'] }), { mode: 0o600 });
@@ -622,17 +632,38 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
         stdio: [house.task === 'stdin' ? 'pipe' : 'ignore', logFd, logFd],
         env: { PATH: env.PATH, HOME: env.HOME, ...(env.XDG_RUNTIME_DIR ? { XDG_RUNTIME_DIR: env.XDG_RUNTIME_DIR } : {}) },
       });
-      closeSync(logFd);
-      logFd = undefined;
-      if (house.task === 'stdin') { child.stdin.on('error', () => {}); child.stdin.end(h.task); }
+      containerEntered = true;
       const secretNames = made;
       made = [];
       houses.set(h.id, { child, dir });
-      log(`started ${h.id} (${h.agent})`);
       // With the image it runs: the control plane drains a body host's house on an older one (houserunner.mjs).
       child.once('exit', (code, signal) => ended(h, dir, secretNames, code, signal));
+      child.once('error', error => {
+        const entry = houses.get(h.id);
+        if (entry && !child.pid && ['ENOENT', 'EACCES', 'ENOEXEC'].includes(error.code)) {
+          entry.nativeNotStarted = true;
+          ended(h, dir, secretNames, -1, null, true);
+        } else ended(h, dir, secretNames, null, null);
+      });
+      closeSync(logFd);
+      logFd = undefined;
+      if (house.task === 'stdin') { child.stdin.on('error', () => {}); child.stdin.end(h.task); }
+      log(`started ${h.id} (${h.agent})`);
+      await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
       await client.call('report', { id: h.id, state: 'running', build: tag }).catch((e) => log(`report ${h.id}: ${e.message}`));
     } catch (err) {
+      if (containerEntered) {
+        // Observation/reporting failure after launch cannot authorize cleanup.
+        log(`${h.id}: retaining launch ownership (${err.message})`);
+        return;
+      }
+      if (claimed.nativeHistory?.v === 1) {
+        const e = { dir, completion: { v: 1, id: h.id, agent: h.agent, service: h.service ?? null, slot: h.slot ?? null,
+          stateful: false, uploaded: true, reported: false, state: 'failed', code: -1,
+          native: true, nativeNotStarted: true, nativeUploaded: false, secretNames: made, removeContainer: false,
+          log: `the box couldn't start it: ${err.message}${tail(pathJoin(dir, 'log')) ? `\n${tail(pathJoin(dir, 'log'))}` : ''}` } };
+        houses.set(h.id, e); await finish(e); return;
+      }
       clean(h, dir, made);
       log(`${h.id} failed to start: ${err.message}`);
       // The build's own output is in the house log: send its end along with why.
@@ -679,6 +710,17 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
     try {
       keepEnding(e);
       if (d.stateful === null) throw Error('the control plane has not supplied this house’s state requirements yet');
+      if (d.native && !d.nativeUploaded) {
+        let receipt;
+        if (d.nativeNotStarted) receipt = await client.call('native-collection', { id: d.id, phase: 'not-started', physical: 'not-started' });
+        else {
+          const seen = physical(d.id);
+          if (!['gone', 'stopped'].includes(seen.state)) throw Error('native history still has a possible physical writer');
+          receipt = await collectNativeHistory({ client, id: d.id, root: pathJoin(e.dir, 'native'), snapshot: pathJoin(e.dir, 'native-snapshot'), physical: seen.state });
+        }
+        if (receipt?.complete !== true) throw Error('native collection was not acknowledged');
+        d.nativeUploaded = true; keepEnding(e);
+      }
       if (!d.uploaded) {
         if (backendGone) throw Error('the house left the control plane before its state was acknowledged; retaining the local copy');
         const dir = pathJoin(e.dir, 'state');
@@ -704,7 +746,7 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
       log(`${d.id} ${d.state} (exit ${d.code ?? -1})`);
     } catch (error) {
       log(`${d.id}: collection is pending; retaining state and ownership (${error.message})`);
-      const phase = d.stateful === null ? 'metadata' : !d.uploaded ? 'state' : !d.reported ? 'report' : 'cleanup';
+      const phase = d.stateful === null ? 'metadata' : d.native && !d.nativeUploaded ? 'native' : !d.uploaded ? 'state' : !d.reported ? 'report' : 'cleanup';
       await client.call('collection-status', { id: d.id, phase }).catch(() => {});
     }
     finally { e.finalizing = false; }
@@ -724,6 +766,9 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
     const stateful = typeof h.stateful === 'boolean' ? h.stateful : (h.service !== undefined || h.slot !== undefined || !e.adopted) ? !!(h.service || h.slot) : null;
     e.completion = { v: 1, id: h.id, ...(h.agent ? { agent: h.agent } : {}), service: h.service ?? null, slot: h.slot ?? null,
       stateful, uploaded: stateful === false, reported: false, code,
+      native: h.nativeHistory?.v === 1 || existsSync(pathJoin(dir, 'native-protocol.json')),
+      ...(e.nativeNotStarted ? { nativeNotStarted: true } : {}),
+      nativeUploaded: false,
       state: h.recoveryState ?? (e.controlStop ? 'stopped' : code === 0 ? 'done' : 'failed'), removeDir: !!h.recoveryMissing,
       ...(h.recoveryLog ? { log: h.recoveryLog } : {}), secretNames, removeContainer: !!e.adopted };
     await finish(e);
@@ -901,7 +946,7 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
       const dir = pathJoin(root, id);
       try {
         const d = JSON.parse(readFileSync(endingFile(dir), 'utf8'));
-        if (d.v !== 1 || d.id !== id || !Array.isArray(d.secretNames) || !d.secretNames.every(n => typeof n === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(n)) || !['done', 'failed', 'stopped'].includes(d.state) || ![true, false, null].includes(d.stateful) || typeof d.uploaded !== 'boolean' || typeof d.reported !== 'boolean' || d.reported && !d.uploaded) continue;
+        if (d.v !== 1 || d.id !== id || !Array.isArray(d.secretNames) || !d.secretNames.every(n => typeof n === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(n)) || !['done', 'failed', 'stopped'].includes(d.state) || ![true, false, null].includes(d.stateful) || typeof d.uploaded !== 'boolean' || typeof d.reported !== 'boolean' || d.reported && !d.uploaded || ['native', 'nativeUploaded', 'nativeNotStarted'].some(k => d[k] !== undefined && typeof d[k] !== 'boolean')) continue;
         const seen = physical(id);
         if (!['gone', 'stopped'].includes(seen.state)) continue;
         houses.set(id, { dir, completion: d });
@@ -910,6 +955,9 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
     for (const [id, e] of houses) {
       if (e.completion) {
         const info = want.activeInfo?.[id];
+        if (info?.nativeHistory?.v === 1 && e.completion.native !== true) {
+          e.completion.native = true; e.completion.nativeUploaded = false; keepEnding(e);
+        }
         if (e.completion.stateful === null && typeof info?.stateful === 'boolean') {
           Object.assign(e.completion, { agent: info.agent, service: info.service, slot: info.slot, stateful: info.stateful, uploaded: !info.stateful }); keepEnding(e);
         }

@@ -34,6 +34,7 @@
 // the bridges piece's inbox hook reads (<inbox dir>/<id8>/pending.jsonl, under flock), so a house whose harness
 // has that hook hears follow-ups mid-turn. With no inbox dir, a body can't be fed.
 import { spawn as nodeSpawn, spawnSync } from 'node:child_process';
+import { nativeHistoryEnv, validateNativeHistoryOptions } from './native-history.mjs';
 import { createHash, randomBytes } from 'node:crypto';
 import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -47,6 +48,7 @@ import { withLock } from './state.mjs';
 import { parse as parseToml, stringify as stringifyToml } from './vendor/smol-toml/index.js';
 
 export class RunnerError extends Error {}
+const neverStarted = message => Object.assign(new RunnerError(message), { nativeNotStarted: true });
 
 /** A harness's session id, as it may appear in a file name: never a path. */
 const SESSION = /^[A-Za-z0-9][A-Za-z0-9._-]{3,127}$/;
@@ -56,6 +58,10 @@ const dirs = (d, all = false) => { try { return readdirSync(d, { withFileTypes: 
 const readJson = (p) => { try { return JSON.parse(readFileSync(p, 'utf-8')); } catch { return null; } };
 const sleepMs = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 const hex8 = () => randomBytes(4).toString('hex');
+const stableLaunchToken = value => {
+  if (!/^[0-9a-f]{24}$/.test(value ?? '')) throw new RunnerError('invalid durable native launch token');
+  return value;
+};
 
 const lines = (p) => { try { return readFileSync(p, 'utf-8').split('\n').flatMap((l) => { try { const v = JSON.parse(l); return v && typeof v === 'object' ? [v] : []; } catch { return []; } }); } catch { return []; } };
 
@@ -164,8 +170,8 @@ export class ClaudeRunner {
     return found ? lastToolUse(found) : { tool: '', what: '' };
   }
 
-  launch({ brief, model, cwd, env, deny = [], resume }) {
-    const token = this.token();
+  launch({ brief, model, cwd, env, deny = [], resume, launchToken }) {
+    const token = launchToken === undefined ? this.token() : stableLaunchToken(launchToken);
     const nl = brief.indexOf('\n');
     const prompt = nl < 0 ? `${brief}\n${ClaudeRunner.TOKEN_LINE.replace('{token}', token)}\n`
       : `${brief.slice(0, nl)}\n${ClaudeRunner.TOKEN_LINE.replace('{token}', token)}\n${brief.slice(nl + 1)}`;
@@ -175,7 +181,10 @@ export class ClaudeRunner {
     const before = new Set((this.agents(clean) ?? []).map((a) => a.id));
     const argv = ['--bg', ...(model ? ['--model', model] : []), ...this.statusLine(), ...this.args, ...(deny.length ? ['--disallowedTools', ...deny] : []), ...(resume ? ['--resume', resume] : [])];
     const r = this.run(this.claude, argv, { cwd, env: clean, input: prompt, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 60_000 });
-    if (r.error || r.status !== 0) throw new RunnerError(`claude --bg didn't start: ${(r.stderr || r.error?.message || '').trim().split('\n').pop() || `exit ${r.status}`}`);
+    if (r.error || r.status !== 0) {
+      const message = `claude --bg didn't start: ${(r.stderr || r.error?.message || '').trim().split('\n').pop() || `exit ${r.status}`}`;
+      throw ['ENOENT', 'EACCES', 'ENOEXEC'].includes(r.error?.code) ? neverStarted(message) : new RunnerError(message);
+    }
     // Claim: a new agent whose job intent carries this launch's token.
     const marker = `(bridge spawn token ${token}:`;
     for (let i = 0; i < this.claimPolls; i++) {
@@ -214,6 +223,18 @@ export class ClaudeRunner {
   }
 
   start(o) { return this.launch(o); }
+  /** Observe a prior admission, without submitting another daemon request or
+   * reopening (and thereby clearing) an inbox that native work may already use. */
+  recoverLaunch(launchToken, { model, env } = {}) {
+    const token = stableLaunchToken(launchToken);
+    const rows = this.agents(env);
+    if (!rows) return { state: 'pending' };
+    const marker = `(bridge spawn token ${token}:`;
+    const found = [...new Map(rows.filter(a => a?.id && (this.job(a.id)?.intent ?? '').includes(marker)).map(a => [a.id, a])).values()];
+    if (found.length !== 1) return { state: 'pending' };
+    const a = found[0], session = a.sessionId ?? this.job(a.id)?.sessionId;
+    return { state: 'ready', body: { id: a.id, harness: 'claude', model, ...(session ? { slot: { harness: 'claude', session } } : {}) } };
+  }
   resume(slot, o) {
     if (slot?.harness !== 'claude' || !slot.session) throw new RunnerError('a Claude body resumes from a Claude slot (its session)');
     return this.launch({ ...o, resume: slot.session });
@@ -415,11 +436,12 @@ export class CodexRunner {
     return { keep, drop };
   }
 
-  launch({ brief, model, cwd, env, deny = [], resume }) {
+  launch({ brief, model, cwd, env, deny = [], resume, launchToken }) {
     const plan = this.plan(deny, cwd, env);
-    if (plan.why) throw new RunnerError(plan.why);
-    const key = this.key();
+    if (plan.why) throw neverStarted(plan.why);
+    const key = launchToken === undefined ? this.key() : stableLaunchToken(launchToken);
     const dir = join(this.runsDir, key);
+    if (launchToken !== undefined && existsSync(dir)) throw new RunnerError('durable Codex launch already exists; recover its original admission');
     // Its run dir names its home before the home is made, under the homes' lock: a sweep never takes a home a body is
     // starting in (t-1924).
     const home = this.homesLocked(() => {
@@ -437,13 +459,20 @@ export class CodexRunner {
     try {
       child = this.spawn(this.codex, argv, { cwd, env: e, stdio: ['pipe', out, err], detached: true });
     } finally { closeSync(out); closeSync(err); }
-    if (!child.pid) throw new RunnerError(`codex didn't start (${this.codex})`);
+    child.on?.('error', () => {});
+    if (!child.pid) throw neverStarted(`codex didn't start (${this.codex})`);
     writeFileSync(join(dir, 'pid'), `${child.pid}\n`, { mode: 0o600 });
     child.stdin.on('error', () => {});
-    child.stdin.end(brief);
+    let inputReady;
+    if (launchToken !== undefined) {
+      inputReady = new Promise((resolve, reject) => {
+        child.stdin.once('error', reject);
+        child.stdin.end(brief, error => error ? reject(error) : resolve());
+      });
+    } else child.stdin.end(brief);
     child.unref();
     this.inbox?.open(key, { venue: 'runtime', chan: key, bridge: 'runtime' });
-    return { id: key, harness: 'codex', model, ...(resume ? { slot: { harness: 'codex', session: resume } } : {}) };
+    return { id: key, harness: 'codex', model, ...(inputReady ? { inputReady } : {}), ...(resume ? { slot: { harness: 'codex', session: resume } } : {}) };
   }
 
   /**
@@ -550,6 +579,33 @@ export class CodexRunner {
   }
 
   start(o) { return this.launch(o); }
+  /** Recover the stable native run without launching. If its registrar died
+   * between spawn and pid registration, inspect the exact private output path
+   * in proc internally. No argv or brief leaves this method. */
+  recoverLaunch(launchToken, { model } = {}) {
+    const key = stableLaunchToken(launchToken), dir = join(this.runsDir, key);
+    if (!existsSync(dir)) return { state: 'pending' };
+    if (!this.alive(key)) {
+      const found = [];
+      for (const pid of dirs('/proc').filter(p => /^\d+$/.test(p))) {
+        try { if (readFileSync(`/proc/${pid}/cmdline`).includes(Buffer.from(dir))) found.push(Number(pid)); } catch { /* exited or inaccessible: no proof */ }
+      }
+      if (found.length > 1) return { state: 'pending' };
+      if (found.length === 1) writeFileSync(join(dir, 'pid'), String(found[0]) + '\n', { mode: 0o600 });
+    }
+    if (!this.alive(key)) {
+      const pid = Number(readJson(join(dir, 'pid')) ?? NaN);
+      let gone = false;
+      if (Number.isInteger(pid) && pid > 0) {
+        try { process.kill(pid, 0); } catch (error) { gone = error.code === 'ESRCH'; }
+      }
+      // Events alone do not establish that an unregistered writer stopped.
+      // A failed proc observation (including access denial) cannot release it.
+      if (!gone || !this.events(key).length) return { state: 'pending' };
+    }
+    const slot = this.slotOf({ id: key });
+    return { state: 'ready', body: { id: key, harness: 'codex', model, ...(slot ? { slot } : {}) } };
+  }
   resume(slot, o) {
     if (slot?.harness !== 'codex' || !slot.session) throw new RunnerError('a Codex body resumes from a Codex slot (its thread)');
     return this.launch({ ...o, resume: slot.session });
@@ -637,15 +693,55 @@ export class CodexRunner {
 /** Where Claude bodies' status lines keep their readings (statusline.mjs): the runner's and `usage statusline`'s. */
 export const usageDirOf = (env = process.env) => env.LOOM_RUNTIME_USAGE_DIR || join(env.HOME || homedir(), '.local', 'state', 'loom-runtime', 'usage');
 
-/** The runner for a harness, from the runtime's settings (LOOM_RUNTIME_CLAUDE, …) and what a test passes in. */
+/** Exact private constructor configuration for the selected launch worker. */
+export function nativeRunnerConfiguration(runner) {
+  if (runner instanceof ClaudeRunner && runner.run === spawnSync) return {
+    claude: runner.claude, jobsDir: runner.jobsDir, projectsDir: runner.roots.projects,
+    args: runner.args, usageDir: runner.usageDir, node: runner.node, claimPolls: runner.claimPolls,
+    ...(runner.inbox ? { inboxDir: runner.inbox.dir } : {}),
+  };
+  if (runner instanceof CodexRunner && runner.spawn === nodeSpawn && runner.run === spawnSync) return {
+    codex: runner.codex, profile: runner.profile, runsDir: runner.runsDir,
+    codexHome: runner.codexHome, sessionsDir: runner.roots.sessions, homesDir: runner.homesDir, systemDir: runner.systemDir,
+    ...(runner.inbox ? { inboxDir: runner.inbox.dir } : {}),
+  };
+  return null;
+}
+
+/** Only the selectors needed to observe an existing native identity. Native
+ * arguments and profile contents do not belong in conversation metadata. */
+export function nativeRecoveryConfiguration(runner) {
+  if (runner instanceof ClaudeRunner) return {
+    claude: runner.claude, jobsDir: runner.jobsDir, projectsDir: runner.roots.projects,
+    ...(runner.inbox ? { inboxDir: runner.inbox.dir } : {}),
+  };
+  if (runner instanceof CodexRunner) return {
+    codex: runner.codex, runsDir: runner.runsDir, codexHome: runner.codexHome,
+    sessionsDir: runner.roots.sessions, homesDir: runner.homesDir, systemDir: runner.systemDir,
+    ...(runner.inbox ? { inboxDir: runner.inbox.dir } : {}),
+  };
+  return null;
+}
+
+/** Private launch-worker input; never a new model routing or permissions path. */
+export function configuredNativeRunner(harness, configuration, env = process.env) {
+  if (!configuration) return runnerFor(harness, env);
+  if (harness === 'claude') return new ClaudeRunner(configuration);
+  if (harness === 'codex') return new CodexRunner(configuration);
+  throw new RunnerError('unsupported native launch configuration');
+}
+
+/** The runner from runtime settings and explicit dependency injection. */
 export function runnerFor(harness, env = process.env, opts = {}) {
+  env = nativeHistoryEnv(harness, env);
+  validateNativeHistoryOptions(harness, env, opts);
   const argv = (v) => { try { const a = JSON.parse(v); return Array.isArray(a) && a.every((x) => typeof x === 'string') ? a : []; } catch { return []; } };
   const inboxDir = env.LOOM_RUNTIME_INBOX_DIR || undefined;
   if (harness === 'claude') {
     return new ClaudeRunner({ claude: env.LOOM_RUNTIME_CLAUDE || 'claude', usageDir: usageDirOf(env), ...(env.LOOM_RUNTIME_CLAUDE_JOBS ? { jobsDir: env.LOOM_RUNTIME_CLAUDE_JOBS } : {}), ...(env.LOOM_RUNTIME_CLAUDE_PROJECTS ? { projectsDir: env.LOOM_RUNTIME_CLAUDE_PROJECTS } : {}), args: argv(env.LOOM_RUNTIME_CLAUDE_ARGS), inboxDir, ...opts });
   }
   if (harness === 'codex') {
-    return new CodexRunner({ codex: env.LOOM_RUNTIME_CODEX || 'codex', profile: env.LOOM_RUNTIME_CODEX_PROFILE || undefined, ...(env.CODEX_HOME ? { codexHome: env.CODEX_HOME } : {}), ...(env.LOOM_RUNTIME_CODEX_RUNS ? { runsDir: env.LOOM_RUNTIME_CODEX_RUNS } : {}), ...(env.LOOM_RUNTIME_CODEX_SESSIONS ? { sessionsDir: env.LOOM_RUNTIME_CODEX_SESSIONS } : {}), inboxDir, ...opts });
+    return new CodexRunner({ codex: env.LOOM_RUNTIME_CODEX || 'codex', profile: env.LOOM_RUNTIME_CODEX_PROFILE || undefined, ...(env.CODEX_HOME ? { codexHome: env.CODEX_HOME } : {}), ...(env.LOOM_RUNTIME_CODEX_RUNS ? { runsDir: env.LOOM_RUNTIME_CODEX_RUNS } : {}), ...(env.LOOM_RUNTIME_CODEX_SESSIONS ? { sessionsDir: env.LOOM_RUNTIME_CODEX_SESSIONS } : {}), ...(env.LOOM_RUNTIME_CODEX_HOMES ? { homesDir: env.LOOM_RUNTIME_CODEX_HOMES } : {}), inboxDir, ...opts });
   }
   throw new RunnerError(`no runner for harness ${JSON.stringify(harness)}`);
 }

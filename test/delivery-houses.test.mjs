@@ -27,6 +27,17 @@ const hasAge = spawnSync('age', ['--version']).status === 0;
 const lines = (f) => (existsSync(f) ? readFileSync(f, 'utf-8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []);
 const until = async (f, ms = 20_000) => { const end = Date.now() + ms; while (!f()) { if (Date.now() > end) throw new Error('timed out'); await new Promise((r) => setTimeout(r, 100)); } };
 
+// Fixture-only lifecycle facts: never dump the conversation, brief, credentials or run key.
+const startFacts = (env, cv, process) => {
+  const c = loadConv(env, cv), h = hostOf(env, 'art', 'p-loren');
+  return JSON.stringify({ hostExit: process.exitCode, hostSignal: process.signalCode,
+    bound: !!c?.body, starting: !!c?.starting,
+    outcomes: Object.values(c?.outcomes ?? {}).map(x => ({ body: x.body, reason: x.reason })),
+    hostHouse: h?.house, capabilities: h?.report?.caps,
+    bodies: Object.values(h?.report?.bodies ?? {}).map(x => ({ harness: x.harness, status: x.status, hasSession: !!x.session })),
+    receipts: Object.values(h?.report?.done ?? {}).map(x => ({ error: x.error, nativeNotStarted: x.nativeNotStarted })) });
+};
+
 /** A house's boot key, from its task (the host traded it for its own key on its first sync). */
 const bootOf = (env, house) => /--host-key ([0-9a-f]{48})/.exec(load(env).houses[house]?.task ?? '')?.[1];
 
@@ -116,14 +127,15 @@ test('a delivered body is a session in its agent\'s own house: placed, woken by 
     // The house: its own environment (its agent's token, its box's harness login), nothing of the runtime's.
     const H = join(D, 'house');
     mkdirSync(join(H, 'work'), { recursive: true });
+    mkdirSync(join(H, 'native'), { mode: 0o700 });
     writeFileSync(join(H, 'token'), `${TOKENS.art}\n`);
-    const houseEnv = { PATH: process.env.PATH, HOME: H, LOOM_URL: loom.url, LOOM_TOKEN_FILE: join(H, 'token'), HOUSE_ID: 'h-1', HOUSE_AGENT: 'art',
+    const houseEnv = { PATH: process.env.PATH, HOME: H, LOOM_URL: loom.url, LOOM_TOKEN_FILE: join(H, 'token'), HOUSE_ID: 'h-1', HOUSE_AGENT: 'art', LOOM_RUNTIME_NATIVE_HISTORY: join(H, 'native'),
       // Its house file declares claude, so the box mounted its login (house.mjs): the login's env says where.
-      CLAUDE_SECURESTORAGE_CONFIG_DIR: join(H, 'login-claude'),
+      CLAUDE_SECURESTORAGE_CONFIG_DIR: join(H, 'login-claude'), CLAUDE_CONFIG_DIR: H,
       FAKE_HARNESS: H, LOOM_RUNTIME_CLAUDE: join(here, 'fake-claude.mjs'), LOOM_RUNTIME_CLAUDE_JOBS: join(H, 'jobs'), LOOM_RUNTIME_ACCOUNTS: 'none' };
     const host = spawn(process.execPath, [cli, 'body-host', '--piece', 'box', '--host-key', bootOf(env, 'h-1'), '--beats', '60'], { env: houseEnv, cwd: join(H, 'work'), stdio: 'ignore' });
     try {
-      await until(() => loadConv(env, a.conversation)?.body);
+      await until(() => loadConv(env, a.conversation)?.body).catch(e => { e.message += `; lifecycle=${startFacts(env, a.conversation, host)}`; throw e; });
       const c = loadConv(env, a.conversation);
       assert.match(c.body, /^claude:h-1-[0-9a-f]{8}$/, 'its id is its house\'s, then its harness\'s');
       assert.equal(readBody(env, c.body).house, 'h-1');
@@ -132,7 +144,8 @@ test('a delivered body is a session in its agent\'s own house: placed, woken by 
       assert.ok(argv.includes('"--bg"'));
       assert.equal(argv.includes('Thursday'), false);
       const [bodyEnv] = lines(join(H, 'env.log'));
-      for (const k of ['ANTHROPIC_API_KEY', 'CLAUDE_CONFIG_DIR', 'FOO_SECRET', 'LOOM_RUNTIME_TOKEN_FILE', 'LOOM_BOX_DATA']) assert.equal(bodyEnv.names.includes(k), false, k);
+      for (const k of ['ANTHROPIC_API_KEY', 'FOO_SECRET', 'LOOM_RUNTIME_TOKEN_FILE', 'LOOM_BOX_DATA']) assert.equal(bodyEnv.names.includes(k), false, k);
+      assert.equal(bodyEnv.claudeConfigDir, H, 'its own Claude configuration, never the control plane configuration');
       assert.ok(bodyEnv.names.includes('LOOM_TOKEN_FILE'), 'its own agent\'s token, the house\'s');
       assert.match(bodyEnv.key, /^[0-9a-f]{48}$/);
       assert.ok(hostOf(env, 'art', 'p-loren').report.bodies[c.body.split(':')[1].replace(/^h-1-/, '')]);
@@ -198,18 +211,19 @@ test('a Codex body in its house answers with `loom runtime send`, naming its Cod
     await until(() => load(env).houses['h-1']);
     const H = join(D, 'house');
     mkdirSync(join(H, 'work'), { recursive: true });
+    mkdirSync(join(H, 'native'), { mode: 0o700 });
     writeFileSync(join(H, 'token'), `${TOKENS.art}\n`);
-    const houseEnv = { PATH: process.env.PATH, HOME: H, LOOM_URL: loom.url, LOOM_TOKEN_FILE: join(H, 'token'), HOUSE_ID: 'h-1', HOUSE_AGENT: 'art',
+    const houseEnv = { PATH: process.env.PATH, HOME: H, LOOM_URL: loom.url, LOOM_TOKEN_FILE: join(H, 'token'), HOUSE_ID: 'h-1', HOUSE_AGENT: 'art', LOOM_RUNTIME_NATIVE_HISTORY: join(H, 'native'),
       LOOM_LOGIN_CODEX: join(H, 'login-codex'),
       FAKE_HARNESS: H, LOOM_RUNTIME_CODEX: join(here, 'fake-codex.mjs'), LOOM_RUNTIME_CODEX_RUNS: join(H, 'codex-runs'), LOOM_RUNTIME_ACCOUNTS: 'none' };
     const host = spawn(process.execPath, [cli, 'body-host', '--piece', 'box', '--host-key', bootOf(env, 'h-1'), '--beats', '60'], { env: houseEnv, cwd: join(H, 'work'), stdio: 'ignore' });
     try {
-      await until(() => loadConv(env, a.conversation)?.body);
+      await until(() => loadConv(env, a.conversation)?.body).catch(e => { e.message += `; lifecycle=${startFacts(env, a.conversation, host)}`; throw e; });
       const c = loadConv(env, a.conversation);
       assert.match(c.body, /^codex:h-1-[0-9a-z]+$/);
       const raw = c.body.split(':')[1].replace(/^h-1-/, '');
       // Its host reports the thread Codex started as the body's session: the one the runtime checks a send against.
-      await until(() => hostOf(env, 'art', 'p-loren').report?.bodies?.[raw]?.session);
+      await until(() => hostOf(env, 'art', 'p-loren').report?.bodies?.[raw]?.session).catch(e => { e.message += `; lifecycle=${startFacts(env, a.conversation, host)}`; throw e; });
       const thread = hostOf(env, 'art', 'p-loren').report.bodies[raw].session;
       // The body answers as a real Codex one does: a command Codex runs carries CODEX_THREAD_ID (codex-cli 0.162.1,
       // 0.164.0), and no Claude session id (CodexRunner scrubs CLAUDE_CODE_*).
@@ -358,7 +372,7 @@ test('a house is who its token says: one that names another house is refused, an
   await Promise.all([artHost, markHost]);
 });
 
-test('a pack for a body whose house isn\'t the agent\'s now asks nothing and waits for nothing', async () => {
+test('missing old house metadata holds its pack without asking the agent\'s new house', async () => {
   const { HouseRunner, hostOf: host } = await import('../src/houserunner.mjs');
   const D = scratch('rt-house-pack-');
   const env = { HOME: D, LOOM_BOX_DATA: join(D, 'data'), LOOM_BOX_HOME: join(D, 'state'), LOOM_BOX_LOCAL_NAME: 'one' };
@@ -368,7 +382,7 @@ test('a pack for a body whose house isn\'t the agent\'s now asks nothing and wai
   // As if it was alive a moment ago, in its old house: the check inside the lock is what stops it.
   hr.alive = () => true;
   const t0 = Date.now();
-  assert.deepEqual(await hr.pack({ id: 'h-1-b0000000', agent: 'art', house: 'h-1', harness: 'claude' }), []);
+  await assert.rejects(hr.pack({ id: 'h-1-b0000000', agent: 'art', house: 'h-1', harness: 'claude' }), /house metadata is unavailable; native ownership remains held/);
   assert.ok(Date.now() - t0 < 1000, 'no wait');
   assert.deepEqual(host(env, 'art').stop, {}, 'and nothing asked of the agent\'s new house');
 });

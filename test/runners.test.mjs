@@ -34,6 +34,56 @@ const rx = (p) => new RegExp(p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
 
 const BRIEF = 'You are Art, in a DM with Loren.\nSECRET-ISH MESSAGE TEXT: what did we decide?';
 
+test('Codex events without native process identity do not prove its writer is absent', () => {
+  const h = harness(), key = 'd'.repeat(24), runsDir = join(h.D, 'runs');
+  const dir = join(runsDir, key);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'events.jsonl'), JSON.stringify({ type: 'thread.started', thread_id: 'thread-1234' }) + '\n');
+  const runner = new CodexRunner({ runsDir, codexHome: realCodexHome(h.D) });
+  assert.deepEqual(runner.recoverLaunch(key), { state: 'pending' }, 'no PID receipt and no observed process remains uncertain');
+});
+
+test('Claude durable token recovers the original job without another daemon submission or lost inbox', () => {
+  const h = harness(), launchToken = 'a'.repeat(24);
+  const options = { claude: join(here, 'fake-claude.mjs'), jobsDir: join(h.D, 'jobs'), inboxDir: h.inbox, sleep: () => {} };
+  const original = new ClaudeRunner(options).start({ brief: BRIEF, cwd: h.D, env: h.env, launchToken });
+  const pending = join(h.inbox, original.id.slice(0, 8), 'pending.jsonl');
+  writeFileSync(pending, 'unread steering must survive\n');
+  const fresh = new ClaudeRunner(options);
+  assert.deepEqual(fresh.recoverLaunch(launchToken, { env: h.env }), { state: 'ready', body: original });
+  assert.equal(h.argv().filter(a => a[0] === '--bg').length, 1);
+  assert.equal(readFileSync(pending, 'utf8'), 'unread steering must survive\n');
+  assert.deepEqual(fresh.recoverLaunch('b'.repeat(24), { env: h.env }), { state: 'pending' }, 'missing job is uncertainty, not permission to submit');
+});
+
+test('Codex durable token recovers the same actual native process after missing PID registration', async () => {
+  const h = harness(), launchToken = 'c'.repeat(24);
+  const options = { codex: join(here, 'fake-codex.mjs'), runsDir: join(h.D, 'runs'), codexHome: realCodexHome(h.D), systemDir: join(h.D, 'etc-codex'), inboxDir: h.inbox };
+  const r = new CodexRunner(options);
+  const body = r.start({ brief: BRIEF, cwd: h.D, env: h.env, launchToken });
+  const pidFile = join(options.runsDir, launchToken, 'pid');
+  const pid = Number(readFileSync(pidFile, 'utf8'));
+  try {
+    await until(() => r.slotOf(body));
+    const pending = join(h.inbox, launchToken.slice(0, 8), 'pending.jsonl');
+    writeFileSync(pending, 'unread steering must survive\n');
+    rmSync(pidFile);
+    const fresh = new CodexRunner(options);
+    const recovered = fresh.recoverLaunch(launchToken);
+    assert.equal(recovered.state, 'ready');
+    assert.equal(recovered.body.id, body.id);
+    assert.equal(recovered.body.slot.session, r.slotOf(body).session);
+    assert.equal(Number(readFileSync(pidFile, 'utf8')), pid);
+    assert.equal(fresh.alive(launchToken), true);
+    assert.equal(readFileSync(pending, 'utf8'), 'unread steering must survive\n');
+    assert.throws(() => fresh.start({ brief: 'another launch', cwd: h.D, env: h.env, launchToken }), /already exists/);
+    assert.equal(h.argv().length, 1);
+  } finally {
+    try { process.kill(-pid, 'SIGINT'); } catch { /* diagnostic already ended */ }
+    await until(() => { try { process.kill(pid, 0); return false; } catch { return true; } });
+  }
+});
+
 test('Codex interruption lets the harness cancel a detached tool and flush its state', async () => {
   const h = harness();
   const r = new CodexRunner({ codex: join(here, 'fake-codex.mjs'), runsDir: join(h.D, 'runs'), codexHome: realCodexHome(h.D), systemDir: join(h.D, 'etc-codex') });

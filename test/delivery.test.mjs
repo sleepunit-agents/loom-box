@@ -430,7 +430,7 @@ test('F. a crash after the turn is written: the retry carries on from that turn,
   } finally { hold.kill(); }
 });
 
-test('H. two plans at once start one body; an op that outlived its marker can\'t clear the next one\'s, and its messages aren\'t lost', async () => {
+test('H. concurrent plans and elapsed markers retain one native admission without losing follow-ups', async () => {
   const w = world();
   const A = cvOf('art', 'slack', 'dm:H');
   const d = depsOf(w.env, w.o);
@@ -441,7 +441,7 @@ test('H. two plans at once start one body; an op that outlived its marker can\'t
   await Promise.all([first, drain(w.env, A, d), drain(w.env, A, d)]);
   await drained;
   assert.equal(w.log.filter((l) => l[0] === 'start').length, 1);
-  // A slow op: its marker expires (a fresh drain takes over with a new message), then it finishes.
+  // Elapsed time cannot grant another native admission while the first lives.
   const B = cvOf('art', 'slack', 'dm:I');
   w.runner.delay = 300;
   let slowDrain;
@@ -449,21 +449,21 @@ test('H. two plans at once start one body; an op that outlived its marker can\'t
   await new Promise((r) => setTimeout(r, 50));
   w.clock.advance(241_000);
   const fast = await deliver(w.env, w.msg('dm:I', 'fast one'), w.o);
-  assert.equal(fast.body, 'started');
-  const owner = loadConv(w.env, B).body;
+  assert.equal(fast.body, 'queued');
   await slow;
   await slowDrain;
-  const c = loadConv(w.env, B);
-  assert.equal(c.body, owner, 'the late op didn\'t take the conversation back');
-  assert.equal(c.starting, undefined);
-  const slowId = w.log.find((l) => l[0] === 'start' && plain(l[2]).endsWith('slow one'))[1];
-  assert.ok(w.log.some((l) => l[0] === 'end' && l[1] === slowId), 'its body was ended');
   await tick(w.env, w.o);
-  // Its message went to the conversation's body, once: given back when its marker expired, so in that body's brief
-  // (t-1853), and not fed to it again when the late op finished.
-  const ownerStart = w.log.find((l) => l[0] === 'start' && l[1] === owner.split(':')[1]);
-  assert.match(plain(ownerStart[2]), /loren: slow one\n[\s\S]*loren: fast one$/, 'its message went to the conversation\'s body');
-  assert.equal(w.log.filter((l) => l[0] === 'feed').length, 0, 'once');
+  const c = loadConv(w.env, B);
+  const starts = w.log.filter((l) => l[0] === 'start' && plain(l[2]).endsWith('slow one'));
+  assert.equal(starts.length, 1);
+  assert.equal(c.body, `claude:${starts[0][1]}`);
+  assert.equal(c.starting, undefined);
+  assert.equal(c.queue.length, 0);
+  assert.equal(w.log.filter((l) => l[0] === 'end').length, 0);
+  const feeds = w.log.filter((l) => l[0] === 'feed');
+  assert.equal(feeds.length, 1, 'the follow-up reaches the original body exactly once');
+  assert.match(plain(feeds[0][2]), /fast one/);
+
 });
 
 test('I. a conversation id from core is checked before it names any path', async () => {
@@ -635,14 +635,15 @@ test('a body that fails to start is the runtime\'s to retry, on its tick, with b
   assert.equal(w.core.turns.filter((t) => t.conversation === cv).length, 1, 'one wake turn: retrying wrote nothing more');
 });
 
-test('a start whose process died (the runtime restarted under it) leaves its messages queued: the tick starts them, once (t-1853)', async () => {
+test('a dead registrar cannot replay an admitted native attempt (t-1853)', async () => {
   const w = world();
   const venues = { ...w.o.venues(), wake: { kind: 'scheduled', piece: 'loom' } };
   // The house is slow to come up: the start is still waiting on it when its process is killed.
-  const hung = { ...w.runner, start: () => new Promise(() => {}) };
+  let finish, drained;
+  const hung = { ...w.runner, start: (options) => new Promise((resolve) => { finish = () => resolve(w.runner.start(options)); }) };
   const o = { ...w.o, venues: () => venues };
   const wake = { source: 'clock', id: 'w-a4a8ed', agent: 'art', venue: 'wake', place: 'lane:backup', label: 'backup', from: { kind: 'schedule' }, kind: 'wake', at: w.clock.now().toISOString(), text: 'Resume the Drive backup: it was approved.' };
-  const a = await deliver(w.env, wake, { ...o, runner: () => hung });
+  const a = await deliver(w.env, wake, { ...o, runner: () => hung, onDrain: (promise) => { drained = promise; } });
   assert.deepEqual([a.body, a.reason], ['queued', 'its body is still starting']);
   const cv = cvOf('art', 'wake', 'lane:backup');
   // The worker is gone (loom-http-local restarted at 12:10:45, h-971 was 2 s old): its marker names a dead process.
@@ -650,11 +651,16 @@ test('a start whose process died (the runtime restarted under it) leaves its mes
   const path = join(deliveryDir(w.env), 'conversations', `${cv}.json`);
   const c0 = JSON.parse(readFileSync(path, 'utf-8'));
   writeFileSync(path, JSON.stringify({ ...c0, starting: { ...c0.starting, pid: dead } }));
-  // The runtime's tick, after: the wake still reaches a body (before, it was gone with the worker's memory).
+  // Registrar death is not native-worker death: hold the original admission.
   w.clock.advance(60_000);
   await tick(w.env, o);
+  assert.equal(w.log.filter((l) => l[0] === 'start').length, 0);
+  assert.ok(loadConv(w.env, cv).starting.prepared);
+  finish();
+  await drained;
+  await tick(w.env, o);
   const starts = w.log.filter((l) => l[0] === 'start');
-  assert.equal(starts.length, 1, 'the dead start\'s wake is started again');
+  assert.equal(starts.length, 1, 'the original native attempt completed exactly once');
   assert.ok(starts[0][2].endsWith('Resume the Drive backup: it was approved.'));
   const c = loadConv(w.env, cv);
   assert.deepEqual([Object.values(c.outcomes)[0].body, c.queue.length, c.starting], ['started', 0, undefined]);
@@ -664,7 +670,7 @@ test('a start whose process died (the runtime restarted under it) leaves its mes
   assert.equal(w.core.turns.filter((t) => t.conversation === cv).length, 1, 'one wake turn: nothing written again');
 });
 
-test('a start that outlived its marker and finishes late: its messages, started again since, aren\'t given to a body again (t-1853)', async () => {
+test('a slow scheduled start retains its admission after the observer timeout (t-1853)', async () => {
   const w = world();
   const venues = { ...w.o.venues(), wake: { kind: 'scheduled', piece: 'loom' } };
   const o = { ...w.o, venues: () => venues };
@@ -674,20 +680,21 @@ test('a start that outlived its marker and finishes late: its messages, started 
   let drained;
   await deliver(w.env, wake, { ...o, runner: () => slow, onDrain: (p) => { drained = p; } });
   const cv = cvOf('art', 'wake', 'lane:backup');
-  // Past its time (4 min): the tick gives it up and starts the wake again.
+  // A four-minute observer timeout cannot replay a still-running native call.
   w.clock.advance(241_000);
   await tick(w.env, o);
-  assert.equal(w.log.filter((l) => l[0] === 'start').length, 1);
-  const body = loadConv(w.env, cv).body;
-  // The first start comes back at last: its body isn't the conversation's, and the wake goes nowhere again.
+  assert.equal(w.log.filter((l) => l[0] === 'start').length, 0);
+  assert.ok(loadConv(w.env, cv).starting.prepared);
   finish();
   await drained;
   await tick(w.env, o);
   const c = loadConv(w.env, cv);
-  assert.equal(w.log.filter((l) => l[0] === 'start').length, 2, 'the late one started, and nothing after');
-  assert.deepEqual(w.log.filter((l) => l[0] === 'feed'), [], 'nor fed again to the body that has it');
-  assert.deepEqual([c.body, c.queue.length], [body, 0]);
-  assert.ok(w.log.some((l) => l[0] === 'end'), 'the late body is ended');
+  const starts = w.log.filter((l) => l[0] === 'start');
+  assert.equal(starts.length, 1);
+  assert.deepEqual(w.log.filter((l) => l[0] === 'feed'), []);
+  assert.deepEqual([c.body, c.queue.length], [`claude:${starts[0][1]}`, 0]);
+  assert.equal(w.log.filter((l) => l[0] === 'end').length, 0);
+
 });
 
 test('a body that never starts: given up after its tries, with a failed note on the conversation and a notice for the owner (t-1744)', async () => {

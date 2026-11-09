@@ -11,9 +11,14 @@ import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { composeBrief } from './briefs.mjs';
-import { packSession, dropSession, restoreFiles } from './sessions.mjs';
+import { packSession, dropSession, restoreFiles, SessionSizeError } from './sessions.mjs';
 import { PART_CHARS } from './houserunner.mjs';
+import { ClaudeRunner, CodexRunner, nativeRunnerConfiguration } from './runners.mjs';
+import { launchInjectedNative, superviseNativeLaunch } from './native-launch.mjs';
+import { cancelReservedLaunch } from './launch-journal.mjs';
 import { LOGIN_HARNESSES } from './logins.mjs';
+import { nativeHistoryRoot } from './native-history.mjs';
+import { nativePendingInbox } from './native-inbox.mjs';
 
 /**
  * Whether this house has its box's login for a harness: the box sets the login's env only for the harnesses the house
@@ -66,11 +71,15 @@ export const PACK_MS = 120_000;
  * Resolves when the host leaves.
  */
 export async function runBodyHost({ client, runner, env = process.env, hostKey, cwd = process.cwd(), now = () => Date.now(), sleep = (ms) => new Promise((r) => setTimeout(r, ms)), idleS = IDLE_S, beats = Infinity, packMs = PACK_MS, log = () => {} }) {
+  const history = nativeHistoryRoot(env);
   // Its own key, in memory only: the boot key from its task, traded on its first sync for the host's key.
   let key = hostKey;
   // A body's environment is the house's, less what's the host's alone: its task (which carried the boot key).
   const bodyEnv = Object.fromEntries(Object.entries(env).filter(([k]) => k !== 'HOUSE_TASK' && k !== 'LOOM_HOST_KEY'));
   const mine = new Map();   // id -> {harness}
+  const durableRequests = new Set();
+  const launching = new Map(); // durable rid -> in-flight promise
+  const uncertain = new Map(); // durable rid -> original request to reconcile
   const done = {};          // rid -> {id} | {error}
   const packing = new Map(); // id -> {parts: [string], next}
   const heard = new Map();   // id -> Set of follow-up ids fed to it (each is fed once, however often it's sent)
@@ -126,47 +135,87 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
     await reportUsage(turnsOver);
     const packed = {};
     for (const [id, p] of [...packing]) {
-      packed[id] = { part: p.next, parts: p.parts.length, data: p.parts[p.next] };
+      packed[id] = { part: p.next, parts: p.parts.length, data: p.parts[p.next], ...(history ? { pending: p.pending } : {}), ...(p.omitted ? { omitted: p.omitted } : {}) };
     }
     let got;
     const sent = acks;
-    try { got = await client('body-sync', { hostKey: key, report: { bodies, done, packed, inboxAck: sent, caps: ['parts'] } }); } catch (e) { log(`sync failed: ${e.message}`); await sleep(SYNC_MS); continue; }
+    try { got = await client('body-sync', { hostKey: key, report: { bodies, done, packed, inboxAck: sent, caps: ['parts', 'native-admission', ...(history ? ['native-history'] : [])], starting: [...new Set([...launching.keys(), ...uncertain.keys(), ...Object.keys(done)])] } }); } catch (e) { log(`sync failed: ${e.message}`); await sleep(SYNC_MS); continue; }
     if (typeof got.hostKey === 'string') key = got.hostKey;
     // Answered: what it acknowledged is the runtime's to forget now. (A lost answer: they go again next beat.)
     if (acks === sent) acks = {};
     for (const [id, part] of got.acked ?? []) {
       const p = packing.get(id);
-      if (p && p.next === part) { p.next += 1; p.since = now(); if (p.next >= p.parts.length) { packing.delete(id); mine.delete(id); } }
+      if (p && p.next === part) { p.next += 1; p.since = now(); if (p.next >= p.parts.length) {
+        if (p.cleanup) dropSession(runner(p.cleanup.harness), p.cleanup.slot, { id });
+        packing.delete(id); mine.delete(id);
+      } }
     }
+    for (const id of got.restart ?? []) { const p = packing.get(id); if (p) { p.next = 0; p.since = now(); } }
     // A timeout is not evidence that the receiver stopped waiting: network failures retain the only copy.
     // A fresh authenticated answer that explicitly removed its stop may abandon an unclaimed transfer.
     for (const [id, p] of packing) if (!got.stop?.[id] && now() - p.since > packMs) {
+      if (p.cleanup) dropSession(runner(p.cleanup.harness), p.cleanup.slot, { id });
       packing.delete(id); mine.delete(id); log(`dropped ${id}'s session: the runtime no longer asks for it`);
     }
     if (got.exit) { log(`leaving: ${got.reason ?? 'the runtime says so'}`); return; }
     const req = got.req ?? {};
-    for (const rid of Object.keys(done)) if (!req[rid]) delete done[rid];
-    for (const [rid, q] of Object.entries(req)) {
-      if (done[rid]) continue;
-      try {
-        if (!houseHasLogin(env, q.harness)) throw new Error(`this house doesn't declare the ${q.harness} harness (its house file's "harnesses"), so it has no ${q.harness} login: add it there`);
-        const r = runner(q.harness);
-        const cv = q.key && CV.test(q.conversation ?? '') ? q.conversation : null;
-        // A brief in parts names the agent's own files (briefs.mjs): read here, from its repo (this house's cwd).
-        // A file that isn't there fails the start: never a body without what its brief must carry.
-        const brief = q.parts !== undefined ? composeBrief(q.parts, cwd) : q.brief;
-        const o = { brief, model: q.model, deny: q.deny ?? [], cwd, env: { ...bodyEnv, ...(q.key ? { LOOM_BODY_KEY: q.key } : {}), ...(cv ? { LOOM_BODY_CONVERSATION: cv } : {}) } };
-        // Kept by its conversation before the body starts, so its first `send` finds it.
-        if (cv) keepKey(env, cv, q.key);
-        let written = [];
-        let b;
+    if (got.stopping) for (const q of [...launching.values()].map(x => x.request)) {
+      try { cancelReservedLaunch(bodyEnv, q.attempt); } catch { /* admitted or unobservable attempts stay held */ }
+    }
+    for (const rid of Object.keys(done)) {
+      if (durableRequests.has(rid)) {
+        if (got.received?.includes(rid)) { delete done[rid]; durableRequests.delete(rid); }
+      } else if (!req[rid]) delete done[rid];
+    }
+    for (const [rid, q] of new Map([...Object.entries(req), ...uncertain])) {
+      if (done[rid] || launching.has(rid)) continue;
+      const launch = async () => {
+        let enteredNative = false;
         try {
-          if (q.resume) { written = restoreFiles(r, q.files); b = await r.resume({ harness: q.harness, session: q.resume }, o); } else b = await r.start(o);
-        } catch (e) { for (const w of written) rmSync(w, { recursive: true, force: true }); throw e; }
-        mine.set(b.id, { harness: q.harness, seen: 'started', ...(b.slot ? { slot: b.slot } : {}), ...(cv ? { cv, key: q.key } : {}), ...(q.activity === true ? { activity: true } : {}) });
-        done[rid] = { id: b.id };
-        log(`started ${b.id} for ${rid}`);
-      } catch (e) { done[rid] = { error: String(e.message).split('\n')[0].slice(0, 300) }; }
+          if (q.attempt && !/^[0-9a-f]{64}$/.test(q.attempt)) throw Object.assign(new Error('invalid durable native attempt'), { nativeNotStarted: true });
+          if (!houseHasLogin(env, q.harness)) throw new Error(`this house doesn't declare the ${q.harness} harness (its house file's "harnesses"), so it has no ${q.harness} login: add it there`);
+          const r = runner(q.harness);
+          if (env.HOUSE_ID && !history && (r instanceof ClaudeRunner || r instanceof CodexRunner)) throw Object.assign(new Error('this box has not provisioned durable native history; update the box runtime before starting native work'), { nativeNotStarted: true });
+          const cv = q.key && CV.test(q.conversation ?? '') ? q.conversation : null;
+          // A brief in parts names the agent's own files (briefs.mjs): read here, from its repo (this house's cwd).
+          // A file that isn't there fails the start: never a body without what its brief must carry.
+          const brief = q.parts !== undefined ? composeBrief(q.parts, cwd) : q.brief;
+          const o = { brief, model: q.model, deny: q.deny ?? [], cwd, env: { ...bodyEnv, ...(q.key ? { LOOM_BODY_KEY: q.key } : {}), ...(cv ? { LOOM_BODY_CONVERSATION: cv } : {}) } };
+          // Kept by its conversation before the body starts, so its first `send` finds it.
+          if (cv) keepKey(env, cv, q.key);
+          let written = [];
+          let b;
+          try {
+            if (q.attempt) {
+              const configuration = nativeRunnerConfiguration(r);
+              if (!configuration && (r instanceof ClaudeRunner || r instanceof CodexRunner)) throw Object.assign(new Error('this native runner cannot preserve its launch configuration'), { nativeNotStarted: true });
+              enteredNative = true;
+              if (configuration) b = await superviseNativeLaunch(bodyEnv, { id: q.attempt, harness: q.harness, options: o, configuration,
+                ...(q.resume ? { resume: { harness: q.harness, session: q.resume }, files: q.files ?? [] } : {}) });
+              else {
+                b = await launchInjectedNative(bodyEnv, { id: q.attempt, harness: q.harness, options: o,
+                  ...(q.resume ? { resume: { harness: q.harness, session: q.resume }, files: q.files ?? [] } : {}) }, r);
+              }
+            } else {
+              if (q.resume) { written = restoreFiles(r, q.files); b = await r.resume({ harness: q.harness, session: q.resume }, o); } else b = await r.start(o);
+            }
+          } catch (e) { if (!q.attempt || !enteredNative || e.nativeNotStarted) for (const w of written) rmSync(w, { recursive: true, force: true }); throw e; }
+          mine.set(b.id, { harness: q.harness, seen: 'started', ...(b.slot ? { slot: b.slot } : {}), ...(cv ? { cv, key: q.key } : {}), ...(q.activity === true ? { activity: true } : {}) });
+          done[rid] = { id: b.id, ...(q.attempt ? { attempt: q.attempt, inputConfirmed: b.inputUncertain !== true } : {}) };
+          uncertain.delete(rid);
+          log(`started ${b.id} for ${rid}`);
+        } catch (e) {
+          if (q.attempt && enteredNative && !e.nativeNotStarted) {
+            uncertain.set(rid, q); log(`launch ${rid} remains uncertain: ${String(e.message).split('\n')[0].slice(0, 200)}`);
+          } else { done[rid] = { error: String(e.message).split('\n')[0].slice(0, 300), ...(q.attempt ? { attempt: q.attempt, nativeNotStarted: true } : {}) }; uncertain.delete(rid); }
+        }
+      };
+      if (q.attempt) {
+        durableRequests.add(rid);
+        const promise = launch();
+        launching.set(rid, { promise, request: q });
+        promise.finally(() => launching.delete(rid));
+      } else await launch();
     }
     for (const id of [...stopped.keys()]) if (!got.stop?.[id]) stopped.delete(id);
     for (const [id, s] of Object.entries(got.stop ?? {})) {
@@ -175,7 +224,7 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
       const r = runner(b.harness);
       if (b.stopPending !== s.at) {
         try {
-          r.end({ id });
+          r.end({ id }, bodyEnv);
           stopped.set(id, s.at);
           b.stopPending = s.at;
         } catch { /* observe, then retry a request that wasn't acknowledged */ }
@@ -186,24 +235,32 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
       try { status = r.status({ id }); } catch { continue; }
       if (status !== 'idle' && status !== 'ended') continue;
       if (r.stopped) { try { if (!r.stopped({ id })) continue; } catch { continue; } }
-      delete b.stopPending;
-      if (b.cv) dropKey(env, b.cv, b.key);
-      heard.delete(id);
-      b.ended = true;
       if (s.pack) {
         const slot = (() => { try { return r.slotOf({ id }); } catch { return null; } })();
         // An empty pack (nothing kept, or too big to keep) is no slot: the runtime starts the next body fresh.
-        let files = [];
-        try { files = packSession(r, slot, { id }); } catch (e) { log(`packing ${id}: ${e.message}`); files = []; }
-        dropSession(r, slot, { id });
+        let files = [], omitted;
+        try { files = packSession(r, slot, { id }); } catch (e) {
+          log(`packing ${id}: ${e.message}`);
+          // A failed read is not an empty session. Keep its files and stop
+          // ownership so the next beat retries without another native stop.
+          if (!(e instanceof SessionSizeError)) continue;
+          omitted = 'size-limit';
+        }
+        if (!history) dropSession(r, slot, { id });
         const all = Buffer.from(JSON.stringify(files)).toString('base64');
         const parts = [];
         for (let i = 0; i < all.length || i === 0; i += PART_CHARS) parts.push(all.slice(i, i + PART_CHARS));
-        packing.set(id, { parts, next: 0, since: now() });
+        packing.set(id, { parts, next: 0, since: now(), ...(omitted ? { omitted } : {}), ...(history ? {
+          cleanup: { harness: b.harness, slot }, pending: r.inbox ? nativePendingInbox(r.inbox.dir, id) : [],
+        } : {}) });
       } else {
         // A plain stop leaves nothing: its session's files go (only a pack keeps them, sealed, in a slot).
         dropSession(r, (() => { try { return r.slotOf({ id }); } catch { return null; } })(), { id });
       }
+      delete b.stopPending;
+      if (b.cv) dropKey(env, b.cv, b.key);
+      heard.delete(id);
+      b.ended = true;
     }
     // An ended body is reported once its stop is answered, then forgotten (unless its session is still going back).
     for (const [id, b] of mine) if (b.ended && !got.stop?.[id] && !packing.has(id) && bodies[id]?.status === 'ended') mine.delete(id);
@@ -225,7 +282,8 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
       }
     }
     const working = Object.values(bodies).some((b) => b.status === 'working');
-    if (working || Object.keys(req).length || packing.size) lastBusy = now();
+    const collecting = [...mine.values()].some(b => b.stopPending !== undefined);
+    if (working || collecting || Object.keys(req).length || packing.size || launching.size || uncertain.size) lastBusy = now();
     if (idleS && now() - lastBusy >= idleS * 1000) { log(`idle ${idleS}s: leaving`); return; }
     await sleep(SYNC_MS);
   }

@@ -17,7 +17,7 @@ if (args[0] === '--bg') {
   if (existsSync(join(D, 'refuse'))) { process.stderr.write('Error: not logged in\n'); process.exit(1); }
   const prompt = readFileSync(0, 'utf-8');
   // What reached the body's environment: names, and its run's key (the tests check nothing of the runtime's got here).
-  appendFileSync(join(D, 'env.log'), JSON.stringify({ names: Object.keys(process.env).sort(), key: process.env.LOOM_BODY_KEY ?? null }) + '\n');
+  appendFileSync(join(D, 'env.log'), JSON.stringify({ names: Object.keys(process.env).sort(), claudeConfigDir: process.env.CLAUDE_CONFIG_DIR ?? null, key: process.env.LOOM_BODY_KEY ?? null }) + '\n');
   const at = args.indexOf('--resume');
   // As Claude Code: a job's id is its session's first 8 characters, so a resumed session comes back under the id it had.
   const id = at >= 0 ? args[at + 1].slice(0, 8) : randomBytes(4).toString('hex');

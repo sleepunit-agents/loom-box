@@ -160,8 +160,10 @@ test('5. without age, the body is still reached from a detached worker (its text
   const out = loadConv(w.env, cv).outcomes[key];
   assert.equal(out.body, 'failed');
   assert.match(out.reason, /no box owned by art's owner/, 'it had the text (else: its messages\' text is gone)');
-  // A house's body packed without age: no slot, at once, never a wait.
+  // A positively stopped legacy house packed without age: no slot, at once, never a wait.
+  // Missing ownership metadata is uncertainty, not this terminal receipt.
   const hw = houseWorld({ sealer: ageSealer({ LOOM_AGE: '/nonexistent/age', LOOM_AGE_KEYGEN: '/nonexistent/age-keygen' }, scratch('rt-r2-noage-')) });
+  update(hw.env, s => { s.houses['h-1'] = { id: 'h-1', agent: 'art', state: 'stopped' }; });
   const t1 = Date.now();
   assert.equal(await hw.hr.pack({ id: 'h-1-b0000000', agent: 'art', house: 'h-1', harness: 'claude' }), null);
   assert.ok(Date.now() - t1 < 500);

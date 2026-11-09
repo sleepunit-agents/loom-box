@@ -181,7 +181,29 @@ describe('the board on the runtime\'s page and in its manifest', () => {
     writeFileSync(join(env.LOOM_RUNTIME_NOW_DIR, 'art-now', 'convs.json'), '{"at": 1}');
     assert.deepEqual(bridgesOf(join(env.LOOM_RUNTIME_NOW_DIR, 'art-now')), []);
     assert.deepEqual(talking(join(env.LOOM_RUNTIME_NOW_DIR, 'art-now')), {});
-    assert.deepEqual(nowManifest(env), { asks: [], agents: {}, notices: [] });
+    assert.deepEqual(nowManifest(env), { asks: [], agents: {}, jobs: {}, notices: [] });
     assert.equal(manifest(env).tile.label, 'Boxes');
   });
+});
+
+test('complete legacy jobs are private, stable, uncapped, fresh and subordinate to delivery', async () => {
+  const env = world();
+  const now = Date.now() / 1000;
+  const rows = Array.from({ length: 12 }, (_, i) => ({ chan: `private-${i}`, venue: 'secret-room', who: ['Private Person'] }));
+  const write = (talking, waiting = []) => api(env, fx, { caller: art, path: 'now/snapshot', body: { bridge: 'discord', snap: snap(now, { talking, waiting }) } });
+  await write(rows, [{ chan: 'pending', why: 'private reason' }, rows[0]]);
+  const read = (convs = [], at = now) => nowManifest(env, at, undefined, convs).jobs.art ?? [];
+  const first = read();
+  assert.equal(first.length, 13);
+  assert.equal(first.filter((j) => j.status === 'waiting').length, 1);
+  assert.ok(!/private|secret|Person|reason/.test(JSON.stringify(first)));
+  await write([...rows].reverse(), [{ chan: 'pending' }]);
+  assert.deepEqual(read().map((j) => j.id).sort(), first.map((j) => j.id).sort());
+  assert.equal(read([{ agent: 'art', venue: 'discord', place: 'private-0', conversation: 'cv-modern' }]).length, 12, 'idle modern delivery also owns its place');
+  assert.equal(read([{ agent: 'mark', venue: 'discord', place: 'private-0' }]).length, 13, 'another agent cannot absorb it');
+  assert.deepEqual(read([], now + 100), [], 'stale bridge cannot claim live jobs');
+  await write([]);
+  assert.deepEqual(read(), [], 'completed rows disappear');
+  await write(rows, [{ chan: 'pending' }]);
+  assert.equal(manifest(env, now * 1000).agents.art.jobs.length, 13, 'full manifest carries every legacy job');
 });
