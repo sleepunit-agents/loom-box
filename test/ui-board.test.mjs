@@ -46,7 +46,8 @@ test("an agent's Houses tab: its houses, services with Restart, its sessions wit
   assert.deepEqual(section(board, 'agents').blocks[0].rows.map((i) => [i.label, i.agent, i.page]), [['Art', 'art', 'agent:art']]);
   const p = page({ ...env, LOOM_SCOPE: 'art' }, { path: '' });
   const ids = p.sections.map((x) => x.id);
-  assert.deepEqual(ids, ['houses', 'services', 'sessions', 'up', 'agent-art']);
+  assert.deepEqual(ids, ['model', 'houses', 'services', 'sessions', 'up', 'agent-art']);
+  assert.equal(section(p, 'model').blocks[0].action, 'model-choice');
   const sess = section(p, 'sessions');
   const items = sess.blocks.find((b) => b.type === 'list').items;
   assert.deepEqual(items.map((i) => [i.text, i.href, i.agent, i.act.action, i.act.tone]), [['House session', 'https://claude.ai/code?environment=env_01ABCdef', 'art', 'service-down', 'danger']]);
