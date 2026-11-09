@@ -624,7 +624,9 @@ export class CodexRunner {
 
   end(body) {
     const pid = Number(readJson(join(this.runsDir, body.id, 'pid')) ?? NaN);
-    if (this.alive(body.id)) { try { process.kill(-pid, 'SIGTERM'); } catch { /* gone */ } }
+    // Codex handles Ctrl-C by interrupting its turn and shutting down its tool
+    // manager. SIGTERM exits it abruptly and can leave detached tools running.
+    if (this.alive(body.id)) { try { process.kill(-pid, 'SIGINT'); } catch { /* gone */ } }
     this.inbox?.close(body.id);
   }
 
