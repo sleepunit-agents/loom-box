@@ -274,3 +274,15 @@ test('a body host is the runtime\'s mark, never its task\'s text: an agent can\'
   assert.deepEqual(poll.body.bodyHosts, []);
   void list;
 });
+
+test('task-house manifest retains explicit references for backlog absorption and excludes body hosts', () => {
+  const { env } = setup();
+  const task = JSON.stringify({ prompt: 'You are Art (wake id w-abcdef, kind wake, set today, note: Continue t-2006). Wrapper example t-1975.' });
+  const h = up(env, fx, { kind: 'owner' }, { agent: 'art', task });
+  up(env, fx, { kind: 'owner' }, { agent: 'art', task: `loom-runtime body-host --piece runtime --host-key ${'f'.repeat(32)}` }, { kind: 'body-host' });
+  const jobs = manifest(env).agents.art.jobs;
+  assert.equal(jobs.length, 1);
+  assert.equal(jobs[0].id, h.id);
+  assert.deepEqual(jobs[0].tasks, ['t-2006']);
+  assert.equal(jobs[0].status, 'waiting');
+});

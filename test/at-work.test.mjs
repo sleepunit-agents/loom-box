@@ -85,3 +85,11 @@ test('complete jobs retain concurrent runs, queue waiting, and remove completed 
   const c = loadConv(w.env, cv); c.queue = []; saveConv(w.env, c);
   assert.deepEqual(jobs(), []);
 });
+
+test('house task references use explicit task text or wake note and exclude wrapper examples', async () => {
+  const { houseTaskRefs } = await import('../src/ui.mjs');
+  assert.deepEqual(houseTaskRefs('Fix t-2006 with t-2010; t-2006 again'), ['t-2006', 't-2010']);
+  const prompt = 'You are Art (wake id w-abcdef, kind wake, set today, note: Continue t-2006). Instructions mention t-1975.';
+  assert.deepEqual(houseTaskRefs(JSON.stringify({ prompt })), ['t-2006']);
+  assert.deepEqual(houseTaskRefs('No task reference'), []);
+});
