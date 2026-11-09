@@ -1533,6 +1533,57 @@ async function execute(env, op, d, mem) {
   }
 }
 
+const savedBodyRules = (rules, at) => ({ guest: rules.guest, key: rules.key, deny: rules.deny, readers: rules.readers, ...(rules.seat ? { seat: rules.seat } : {}), ...(rules.members?.length ? { members: rules.members, membersAt: new Date(at).toISOString() } : {}), ...(rules.grantFor ? { grantFor: rules.grantFor } : {}), ...(rules.words ? { words: rules.words, persons: rules.persons, notes: rules.notes ?? [] } : {}) });
+
+/** The one conversation commit for a native start or its recovered receipt.
+ * The snapshot contains no prompt or raw sender key. */
+function commitStartedConversation(env, op, { run, senderHash, bodyRules, way }, r, pending, at, localKey) {
+  const keys = op.msgs.map(x => x.key);
+  return locked(env, () => {
+    const c = loadConv(env, op.cv);
+    if (!c) return false;
+    if (!ours(c, op)) {
+      // This op outlived its marker (another took the conversation): its body isn't the conversation's. Its messages
+      // go back on the queue, for whichever body is.
+      requeue(c, [...stillMine(c, op.msgs), ...pending]);
+      saveConv(env, c);
+      return false;
+    }
+    c.body = r.body;
+    c.run = run;
+    // A local body speaks with its run's key as a house's body does: from the keys dir (bodyhost.mjs, keyFile), as
+    // `claude --bg` gives every session its daemon's environment, not this launch's (t-1830).
+    if (localKey !== undefined) keepKey(env, op.cv, localKey);
+    c.bodyRules = bodyRules;
+    ack(c, op.msgs);
+    delete c.retryAt; delete c.startFails; delete c.retryReason; delete c.startStatus;
+    c.sendKey = senderHash;
+    c.runs = (c.runs ?? 0) + 1;
+    openRun(c, run, op.msgs, at, { ref: r.body, how: way.how === 'start' ? 'started' : 'resumed', ...(r.switched ? { switched: { from: r.switched.from, why: r.switched.why } } : {}), ...(way.home ? { home: true } : {}), ...(c.quota ? { retryOf: c.quota.run } : {}) });
+    // What this run was given, sealed, for the one retry a refused turn gets (t-1907); the follow-ups it's fed join.
+    // Tagged with its run (a retry only ever re-runs that run's), and what can't be kept (no age) by key alone.
+    c.runMsgs = { run, msgs: op.msgs.filter((x) => x.sealed && !isNote(x)), lost: op.msgs.filter((x) => !x.sealed && !isNote(x)).map((x) => x.key) };
+    delete c.quota;
+    if (way.how === 'resume' && !way.home) delete c.slot;
+    // Back home (its home slot resumed): the fallback's own slot is gone too, and the conversation's switch is over.
+    if (way.home) { delete c.slot; delete c.home; }
+    // A switch away: the slot it left is its home (routeOf parked it), the switch kept for going back.
+    if (r.switched) {
+      const same = c.fallback?.from === r.switched.from && c.fallback?.to === r.harness;
+      const until = r.switched.until ?? (same ? c.fallback.until : undefined);
+      c.fallback = { from: r.switched.from, to: r.harness, since: same ? c.fallback.since : new Date(at).toISOString(), ...(until ? { until } : {}) };
+    } else if (!c.home) delete c.fallback;
+    delete c.allOut;
+    delete c.starting;
+    c.idleSince = undefined;
+    c.fed = [];
+    c.last = new Date(at).toISOString();
+    outcome(c, [...keys, ...pending.map((p) => p.key)], { body: way.how === 'start' ? 'started' : 'resumed' }, at);
+    saveConv(env, c);
+    return true;
+  });
+}
+
 async function executeOne(env, op, d, mem) {
   const now = () => d.now().getTime();
   if (op.type === 'interrupt') return interruptOp(env, op, d);
@@ -1701,48 +1752,8 @@ async function executeOne(env, op, d, mem) {
       // Back home: the fallback's own session isn't kept (what it said is in the digests).
       if (way.home) rmSync(slotFile(env, op.cv), { force: true });
     }
-    const keep = locked(env, () => {
-      const c = loadConv(env, op.cv);
-      if (!ours(c, op)) {
-        // This op outlived its marker (another took the conversation): its body isn't the conversation's. Its messages
-        // go back on the queue, for whichever body is.
-        requeue(c, [...stillMine(c, op.msgs), ...pending]);
-        saveConv(env, c);
-        return false;
-      }
-      c.body = r.body;
-      c.run = run;
-      // A local body speaks with its run's key as a house's body does: from the keys dir (bodyhost.mjs, keyFile), as
-      // `claude --bg` gives every session its daemon's environment, not this launch's (t-1830).
-      if (local) keepKey(env, op.cv, runKey);
-      c.bodyRules = { guest: rules.guest, key: rules.key, deny: rules.deny, readers: rules.readers, ...(rules.seat ? { seat: rules.seat } : {}), ...(rules.members?.length ? { members: rules.members, membersAt: new Date(now()).toISOString() } : {}), ...(rules.grantFor ? { grantFor: rules.grantFor } : {}), ...(rules.words ? { words: rules.words, persons: rules.persons, notes: rules.notes ?? [] } : {}) };
-      ack(c, op.msgs);
-      delete c.retryAt; delete c.startFails; delete c.retryReason; delete c.startStatus;
-      c.sendKey = keyHash(runKey).toString('hex');
-      c.runs = (c.runs ?? 0) + 1;
-      openRun(c, run, op.msgs, now(), { ref: r.body, how: way.how === 'start' ? 'started' : 'resumed', ...(r.switched ? { switched: { from: r.switched.from, why: r.switched.why } } : {}), ...(way.home ? { home: true } : {}), ...(c.quota ? { retryOf: c.quota.run } : {}) });
-      // What this run was given, sealed, for the one retry a refused turn gets (t-1907); the follow-ups it's fed join.
-      // Tagged with its run (a retry only ever re-runs that run's), and what can't be kept (no age) by key alone.
-      c.runMsgs = { run, msgs: op.msgs.filter((x) => x.sealed && !isNote(x)), lost: op.msgs.filter((x) => !x.sealed && !isNote(x)).map((x) => x.key) };
-      delete c.quota;
-      if (way.how === 'resume' && !way.home) delete c.slot;
-      // Back home (its home slot resumed): the fallback's own slot is gone too, and the conversation's switch is over.
-      if (way.home) { delete c.slot; delete c.home; }
-      // A switch away: the slot it left is its home (routeOf parked it), the switch kept for going back.
-      if (r.switched) {
-        const same = c.fallback?.from === r.switched.from && c.fallback?.to === r.harness;
-        const until = r.switched.until ?? (same ? c.fallback.until : undefined);
-        c.fallback = { from: r.switched.from, to: r.harness, since: same ? c.fallback.since : new Date(now()).toISOString(), ...(until ? { until } : {}) };
-      } else if (!c.home) delete c.fallback;
-      delete c.allOut;
-      delete c.starting;
-      c.idleSince = undefined;
-      c.fed = [];
-      c.last = new Date(now()).toISOString();
-      outcome(c, [...keys, ...pending.map((p) => p.key)], { body: way.how === 'start' ? 'started' : 'resumed' }, now());
-      saveConv(env, c);
-      return true;
-    });
+    const snapshot = { run, senderHash: keyHash(runKey).toString('hex'), bodyRules: savedBodyRules(rules, now()), way: { how: way.how, home: !!way.home } };
+    const keep = commitStartedConversation(env, op, snapshot, r, pending, now(), local ? runKey : undefined);
     if (!keep) endAndForget(env, r, d);
     else noteHarness(env, c0.agent, r, d);
   } catch (e) {
