@@ -331,6 +331,24 @@ export async function advanceAdministration(env, id, approvals, o = {}) {
   });
 }
 
+/** Owner-only page inventory. Other household members do not inherit the
+ * named box owner's work descriptions or command intents. */
+export function listAdministration(env, caller, boxId, o = {}) {
+  if (caller?.kind !== 'owner' || typeof caller.who !== 'string') return [];
+  const initial = read(env);
+  if (!Object.values(initial.scopes).some(s => s.box === boxId)) return [];
+  return transaction(env, o, (j, at) => {
+    const rows = [];
+    for (const s of Object.values(j.scopes)) if (s.box === boxId) {
+      try { access(env, s, caller, {}, o); }
+      catch (e) { if (e instanceof StateError && e.status === 403) continue; throw e; }
+      refresh(env, j, s, at);
+      rows.push({ ...publicScope(s), operations: Object.values(j.operations).filter(r => r.scope === s.id).map(publicOperation) });
+    }
+    return rows.sort((a, b) => b.created - a.created || a.id.localeCompare(b.id));
+  });
+}
+
 export function administrationStatus(env, caller, q, o = {}) {
   return transaction(env, o, (j, at) => {
     const s = scopeOf(j, q.scope); access(env, s, caller, q, o); refresh(env, j, s, at);

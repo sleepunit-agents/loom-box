@@ -184,3 +184,14 @@ lost successful consumption reply, and retry produced one card, one consumption
 and the original fixed lease. No administrative command ran. Owner revocation
 UI, physical execution and result recovery, shared tools and live-harness
 verification remain required before deployment.
+
+The box owner's page now lists existing scoped work and provides a revoke
+action. This inventory requires the named owner of that box; other members and
+agent callers receive no private work descriptions. The action likewise requires
+a named owner caller, cancels queued commands, and retains admitted/unknown
+outcomes as outstanding. It does not claim offline work has stopped.
+
+The isolated real-CLI/tick fixture also passes the current core page vocabulary
+parser and invokes the generated owner revoke action successfully. This is a
+fixture page/action verification, not proof of a deployed browser interaction or
+physical command stop. Both remain part of the release gates.

@@ -4,12 +4,13 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { requestAdministration, administrationApproval, advanceAdministration, administrationStatus, queueAdministration, endAdministration, administrationApprovals, ADMINISTRATION_KIND } from '../src/administration.mjs';
+import { requestAdministration, administrationApproval, advanceAdministration, administrationStatus, queueAdministration, endAdministration, listAdministration, administrationApprovals, ADMINISTRATION_KIND } from '../src/administration.mjs';
 import { deliver, loadConv, saveConv, tick } from '../src/delivery.mjs';
 import { load, update } from '../src/state.mjs';
 import { world } from './delivery-world.mjs';
 import { verify } from '../src/principal.mjs';
 import { deliveryDir } from '../src/delivery.mjs';
+import { page, act } from '../src/ui.mjs';
 
 async function setup(from = { kind: 'person', slug: 'owner' }) {
   const w = world(), caller = { kind: 'agent', agent: 'art' };
@@ -301,4 +302,52 @@ test('requested scopes with changed authority never file and oversized owner car
   await tick(w.env, { ...w.o, approvalsRun: async () => { calls++; throw Error('must not file'); } });
   assert.equal(calls, 0);
   assert.equal(w.journal().scopes[w.scope.id].state, 'revoked');
+});
+
+test('the owner box panel shows scoped access without sealed inputs and revokes through the actual page action', async () => {
+  const w = await setup(); await w.activate(); const op = w.queue();
+  const owner = { kind: 'owner', who: 'owner' }, effects = { now: w.clock.now };
+  const view = page(w.env, { path: 'box/one', caller: owner }, w.clock.now().getTime());
+  const section = view.sections.find(s => s.id === 'administration');
+  assert.ok(section);
+  const row = section.blocks.find(b => b.type === 'panel').rows[0];
+  assert.equal(row.value, 'Active');
+  assert.equal(row.act.action, 'administration-revoke');
+  assert.match(row.detail, /UID 1000/);
+  const text = JSON.stringify(section);
+  assert.equal(text.includes('private-command-input'), false);
+  assert.equal(text.includes('private-stdin-input'), false);
+  const request = { action: row.act.action, fields: row.act.fields };
+  for (const caller of [undefined, { kind: 'agent', agent: 'art' }, { kind: 'owner', who: 'another-member' }]) {
+    const result = act(w.env, effects, { ...request, caller });
+    assert.equal(result.ok, false);
+    assert.equal(w.journal().scopes[w.scope.id].state, 'active');
+  }
+  const result = act(w.env, effects, { ...request, caller: owner });
+  assert.equal(result.ok, true); assert.equal(result.page, 'box/one');
+  assert.equal(w.journal().scopes[w.scope.id].state, 'revoked');
+  assert.equal(w.journal().operations[op.id].state, 'cancelled');
+  const after = page(w.env, { path: result.page, caller: owner }, w.clock.now().getTime());
+  const endedRow = after.sections.find(s => s.id === 'administration').blocks.find(b => b.type === 'panel').rows[0];
+  assert.equal(endedRow.value, 'Revoked'); assert.equal(endedRow.act, undefined);
+});
+
+test('another member cannot inventory private scoped work and offline admitted work stays visibly outstanding', async () => {
+  const w = await setup(); await w.activate(); const op = w.queue();
+  const owner = { kind: 'owner', who: 'owner' };
+  assert.deepEqual(listAdministration(w.env, { kind: 'owner', who: 'another-member' }, 'one', w.o), []);
+  assert.deepEqual(listAdministration(w.env, { kind: 'owner' }, 'one', w.o), []);
+  assert.deepEqual(listAdministration(w.env, { kind: 'agent', agent: 'art' }, 'one', w.o), []);
+  const otherPage = page(w.env, { path: 'box/one', caller: { kind: 'owner', who: 'another-member' } }, w.clock.now().getTime());
+  assert.equal(otherPage.sections.some(s => s.id === 'administration'), false);
+  // Model only the admission receipt, not a process or administrative effect.
+  const journal = w.journal(); journal.operations[op.id].state = 'admitted';
+  writeFileSync(join(w.env.LOOM_BOX_DATA, 'administration/journal.json'), JSON.stringify(journal), { mode: 0o600 });
+  const result = act(w.env, { now: w.clock.now }, { caller: owner, action: 'administration-revoke', fields: { scope: w.scope.id } });
+  assert.equal(result.ok, true); assert.match(result.message, /stop request/);
+  assert.equal(w.journal().operations[op.id].state, 'stop-requested');
+  const view = page(w.env, { path: 'box/one', caller: owner }, w.clock.now().getTime());
+  const section = view.sections.find(s => s.id === 'administration');
+  assert.match(JSON.stringify(section), /outcomes outstanding/);
+  assert.match(JSON.stringify(section), /offline/);
 });
