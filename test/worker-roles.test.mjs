@@ -252,9 +252,11 @@ test('a failover that finds no room anywhere keeps the job\'s session, and the j
   await w.say(r.handle, 'continue');
   c = loadConv(w.env, r.handle);
   assert.equal(c.spawn.assignment.model, 'opus', 'nothing ran, so nothing moved');
+  assert.ok(c.queue.some((m) => !m.note), 'its message waits, not failed');
   w.clock.advance(3601_000);
-  await w.say(r.handle, 'continue now');
+  await tick(w.env, w.o);
   assert.deepEqual([w.runs().at(-1)[0], w.runs().at(-1)[2]], ['resume', session], 'its own session, not a fresh body');
+  assert.match(w.runs().at(-1)[4], /continue/, 'with the message that waited');
   c = loadConv(w.env, r.handle);
   assert.equal(c.home, undefined);
   assert.equal(c.spawn.assignment.model, 'opus');
@@ -266,12 +268,19 @@ test('a parked session begun under other rules is dropped, never resumed under t
   let c = loadConv(w.env, r.handle);
   const session = w.runner.slotOf({ id: c.body.split(':')[1] }).session;
   w.runner.finish(c.body);
+  // Moved to Codex by a failover: its Claude session parked as home.
   w.out(w.max);
-  w.out(w.pro);
   await w.say(r.handle, 'continue');
   c = loadConv(w.env, r.handle);
-  assert.ok(c.home, 'parked by the failover that found no room');
-  // As if it had begun in a guest venue: not the rules it runs under now.
+  assert.ok(c.home, 'parked by the failover');
+  // Codex's body ends and its slot is lost; the job is pinned back on opus by hand (as a legacy job might be), and
+  // its home is marked as begun under other rules (a guest venue).
+  w.codex.finish(c.body);
+  await tick(w.env, w.o);
+  c = loadConv(w.env, r.handle);
+  delete c.slot;
+  delete c.body;
+  c.spawn.assignment = { ...c.spawn.assignment, model: 'opus', harness: 'claude', family: 'anthropic' };
   c.home.rules = { ...(c.home.rules ?? {}), guest: true };
   saveConv(w.env, c);
   w.clock.advance(3601_000);
@@ -280,6 +289,26 @@ test('a parked session begun under other rules is dropped, never resumed under t
   assert.equal(last[0], 'start', 'a fresh body');
   assert.notEqual(last[2], session);
   assert.equal(loadConv(w.env, r.handle).home, undefined, 'the parked session is dropped');
+});
+
+test('a job held longer than its continuity window keeps its session', async () => {
+  const w = workers();
+  const r = await w.spawn({ prefer: 'opus' });
+  let c = loadConv(w.env, r.handle);
+  const session = w.runner.slotOf({ id: c.body.split(':')[1] }).session;
+  w.runner.finish(c.body);
+  await tick(w.env, w.o);
+  // Out for five days: longer than a spawned job's continuity window.
+  const S = Math.floor(w.clock.now().getTime() / 1000);
+  w.max.usage = { '7d': 0.99, reset_7d: S + 5 * 86400 };
+  await w.say(r.handle, 'continue');
+  for (let day = 0; day < 5; day++) {
+    w.clock.advance(86400_000);
+    await tick(w.env, w.o);
+  }
+  w.clock.advance(3600_000);
+  await tick(w.env, w.o);
+  assert.deepEqual([w.runs().at(-1)[0], w.runs().at(-1)[2]], ['resume', session], 'its own session, after the long wait');
 });
 
 test('with failover allowed, a model that left the list still holds the job rather than moving it', async () => {

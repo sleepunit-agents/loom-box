@@ -381,6 +381,17 @@ async function pinGone(env, c, pin, d) {
   }
 }
 
+/** Whether a job's failover would find a model: its role's (as admitted), or any it may use, off the harnesses avoided. */
+async function roomElsewhere(env, c, avoid, d) {
+  try {
+    await resolveFor(env, { agent: c.agent, venue: c.venue, venueKind: c.kind, avoid, ...(c.spawn?.role ? { role: c.spawn.role } : {}), accounts: d.accounts, now: d.now(), fetchImpl: d.fetchImpl });
+    return true;
+  } catch (e) {
+    if (e instanceof StateError && (e.status === 409 || e.status === 410)) return false;
+    throw e;
+  }
+}
+
 async function roomOn(env, c, harness, d, pin) {
   try {
     await resolveFor(env, { agent: c.agent, venue: c.venue, venueKind: c.kind, harness, pin, accounts: d.accounts, now: d.now(), fetchImpl: d.fetchImpl });
@@ -2134,6 +2145,9 @@ async function executeOne(env, op, d, mem) {
         if (ours(c, op)) delete c.starting;
         requeue(c, msgs);
         c.waiting = String(e.message).slice(0, 300);
+        // A job held for its model keeps its session as long as it waits: the continuity window counts from now.
+        if (c.spawn && c.slot?.until) c.slot.until = new Date(Math.max(Date.parse(c.slot.until), now() + windowMs(env, c.venue, c.kind))).toISOString();
+        if (c.spawn && c.home?.until) c.home.until = new Date(Math.max(Date.parse(c.home.until), now() + windowMs(env, c.venue, c.kind))).toISOString();
         outcome(c, msgs.map((x) => x.key), { body: 'queued', reason: c.waiting }, now());
         saveConv(env, c);
       });
@@ -2327,7 +2341,8 @@ async function routeOf(env, c0, op, rules, d, cant = []) {
     if (gone) throw Object.assign(new DeliveryError(`this job's assigned model ${pin} can't run: ${gone}. It waits, its session kept, until that model can run again (or the job is spawned again)`, 503), { held: true });
     // Out of quota: a failover if its spawn allowed one; else it waits for its model, its messages queued (not failed).
     if (!(await roomOn(env, c0, h, d, pin))) {
-      if (c0.spawn.failover) return move('quota');
+      // A failover only when another eligible model has room: else it waits as any job does (its messages queued).
+      if (c0.spawn.failover && await roomElsewhere(env, c0, [...new Set([...avoid, h])], d)) return move('quota');
       throw Object.assign(new DeliveryError(`this job's assigned model ${pin} is out of quota; it waits for it, its session and messages kept`, 503), { held: true });
     }
     // Only a refused turn's own retry is dropped (a pinned job waits for its model instead); `cant` always stays.
