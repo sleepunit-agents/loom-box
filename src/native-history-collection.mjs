@@ -5,7 +5,7 @@ import { constants, closeSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, ope
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { HISTORY_DIRS, historyPaths } from './native-history.mjs';
 import { ClaudeRunner, CodexRunner } from './runners.mjs';
-import { packSession, SessionSizeError } from './sessions.mjs';
+import { packSession, SessionSizeError, SessionHistoryMissing } from './sessions.mjs';
 import { readLaunch } from './launch-journal.mjs';
 import { nativePendingInbox } from './native-inbox.mjs';
 
@@ -17,7 +17,9 @@ const inside = (root, file) => { const rel = relative(resolve(root), resolve(fil
  * never replace a published one or delete the original history. */
 export function snapshotNativeHistory(root, target, { maxBytes = 64 * 1024 * 1024, maxEntries = 10_000 } = {}) {
   if (inside(root, target) || inside(target, root) || stat(target)) throw Error('native history snapshot needs a new separate directory');
-  if (!stat(root)?.isDirectory() || stat(root).isSymbolicLink()) throw Error('native history root is not plain');
+  const rootStat = stat(root);
+  if (!rootStat) throw new SessionHistoryMissing();
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw Error('native history root is not plain');
   mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
   const tmp = mkdtempSync(join(dirname(target), '.native-history-'));
   let bytes = 0, entries = 0;
@@ -58,17 +60,51 @@ export function offlineNativeSession(snapshot, { harness, id, session }) {
   const runner = harness === 'claude'
     ? new ClaudeRunner({ jobsDir: paths['claude-jobs'], projectsDir: paths['claude-projects'], run: forbidden })
     : new CodexRunner({ runsDir: paths['codex-runs'], sessionsDir: paths['codex-sessions'], codexHome: join(snapshot, 'unused-home'), run: forbidden, spawn: forbidden });
+  // The live adapters deliberately tolerate unreadable status metadata. That
+  // tolerance is not proof of missing history in an irreversible collection.
+  const witness = harness === 'claude' ? join(paths['claude-jobs'], id.slice(0, 8), 'state.json') : join(paths['codex-runs'], id, 'events.jsonl');
+  let witnessedIdentity;
+  const witnessStat = stat(witness);
+  if (witnessStat) {
+    const fd = openSync(witness, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    let text;
+    try {
+      const opened = fstatSync(fd);
+      if (!opened.isFile() || opened.nlink !== 1 || opened.dev !== witnessStat.dev || opened.ino !== witnessStat.ino) throw Error('native identity metadata is not a plain file');
+      text = readFileSync(fd, 'utf8'); // Read errors remain read errors.
+      if (Buffer.byteLength(text) !== opened.size) throw Error('native identity metadata changed during collection');
+    } finally { closeSync(fd); }
+    if (harness === 'claude') {
+      try { witnessedIdentity = JSON.parse(text).sessionId; }
+      catch { throw Error('native job state could not be decoded'); }
+      if (witnessedIdentity != null && witnessedIdentity !== '' && (typeof witnessedIdentity !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{3,127}$/.test(witnessedIdentity))) throw Error('native job identity could not be decoded');
+    } else {
+      let malformed = false;
+      for (const line of text.split('\n').filter(Boolean)) {
+        try {
+          const event = JSON.parse(line);
+          if (event.type === 'thread.started') {
+            if (typeof event.thread_id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{3,127}$/.test(event.thread_id)) throw Error('invalid native identity');
+            witnessedIdentity ??= event.thread_id;
+          }
+        }
+        catch { malformed = true; }
+      }
+      if (!witnessedIdentity && malformed) throw Error('native thread identity could not be decoded');
+    }
+  }
   const actual = runner.slotOf({ id });
+  if (witnessedIdentity && !actual?.session) throw Error('native identity could not be read consistently');
   if (actual?.session && session && actual.session !== session) throw Error('native history belongs to a different session');
   const slot = actual ?? (session ? { harness, session } : null);
-  if (!slot?.session) throw Error('native session identity is not collected yet');
+  if (!slot?.session) throw new SessionHistoryMissing();
   let files, omitted;
   try { files = packSession(runner, slot, { id }); }
   catch (error) {
     if (!(error instanceof SessionSizeError)) throw error;
     files = []; omitted = 'size-limit';
   }
-  if (!files.length && !omitted) throw Error('native session history is not collected yet');
+  if ((!files.length || files.every(f => f.data === '')) && !omitted) throw new SessionHistoryMissing();
   return { harness, id, session: slot.session, files, pending: nativePendingInbox(paths.inboxes, id), ...(omitted ? { omitted } : {}) };
 }
 
@@ -79,7 +115,8 @@ export function offlineNativeAttempt(snapshot, { house, attempt, harness }) {
   let record;
   try { record = readLaunch({ HOUSE_ID: house, LOOM_RUNTIME_NATIVE_HISTORY: snapshot }, attempt); }
   catch { throw Error('native admission journal could not be decoded'); }
-  if (!record || record.harness !== harness) throw Error('native admission history is unavailable or belongs to another harness');
+  if (!record) throw new SessionHistoryMissing();
+  if (record.harness !== harness) throw Error('native admission history belongs to another harness');
   if (['reserved', 'refused'].includes(record.state)) return { nativeNotStarted: true, harness, attempt };
   let id, session;
   if (record.state === 'ready') {
@@ -88,6 +125,7 @@ export function offlineNativeAttempt(snapshot, { house, attempt, harness }) {
   } else if (harness === 'codex') id = record.token;
   else {
     const jobs = historyPaths(snapshot)['claude-jobs'];
+    if (!stat(jobs)) throw new SessionHistoryMissing();
     const found = [];
     for (const name of readdirSync(jobs)) {
       if (!/^[A-Za-z0-9-]{4,64}$/.test(name)) continue;
@@ -96,6 +134,7 @@ export function offlineNativeAttempt(snapshot, { house, attempt, harness }) {
       catch (error) { if (error.code === 'ENOENT') continue; throw Error('native job state could not be decoded'); }
       if (job.intent?.split('\n')[1] === ClaudeRunner.TOKEN_LINE.replace('{token}', record.token)) found.push({ id: name, session: job.sessionId });
     }
+    if (!found.length) throw new SessionHistoryMissing();
     if (found.length !== 1) throw Error('native admission does not identify exactly one collected job');
     ({ id, session } = found[0]);
   }

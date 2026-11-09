@@ -137,7 +137,36 @@ test('a declared size-limit omission cannot contain files or complete a malforme
   assert.equal(load(w.env).houses['h-1'].nativeHistory.complete, false);
 });
 
-for (const harness of ['claude', 'codex']) for (const oversized of [false, true]) test(`${harness}: delivery ticking during offline upload holds the original body until its ${oversized ? 'explicit size-limit disposition' : 'slot'} is committed`, { skip: !hasAge }, async () => {
+test('a sealed history-loss marker retains its loss disposition after host journal reconstruction', { skip: !hasAge }, async () => {
+  const w = await prepared('codex'), c = collection(w), plan = ok(c.call({ phase: 'plan', physical: 'gone' })), entry = plan.entries[0];
+  ok(c.call({ phase: 'loss', plan: plan.plan, key: entry.key, reason: 'missing-history', pending: [] }));
+  const path = join(w.env.LOOM_BOX_DATA, 'delivery/hosts/art.json'), host = JSON.parse(readFileSync(path, 'utf8'));
+  delete host.offlineCollection; writeFileSync(path, JSON.stringify(host));
+  const rebuilt = ok(c.call({ phase: 'plan', physical: 'gone' }));
+  assert.equal(rebuilt.entries[0].received, true);
+  assert.equal(w.hr.finalInbox({ id: `h-1-${entry.bodyId}`, agent: 'art', house: 'h-1', harness: 'codex' }).lost, true);
+});
+
+test('termination is immutable and an early consumer acknowledgement survives a retried loss journal commit', { skip: !hasAge }, async () => {
+  const w = await prepared('codex', false), c = collection(w), plan = ok(c.call({ phase: 'plan', physical: 'gone' })), entry = plan.entries[0];
+  const loss = { phase: 'loss', plan: plan.plan, key: entry.key, reason: 'missing-history', pending: null };
+  assert.notEqual(c.call(loss, { kind: 'agent', agent: 'art', house: 'h-1' }).status, 200);
+  ok(c.call(loss)); w.hr.acknowledgePreparedLaunch(w.handle);
+  const terminated = readHouseLaunch(w.env, w.handle.id);
+  assert.equal(terminated.state, 'terminated'); assert.equal(terminated.termination.consumed, true);
+  // Reproduce controller acknowledgement between the durable termination
+  // record and the host-journal completion write. The late write cannot undo it.
+  const path = join(w.env.LOOM_BOX_DATA, 'delivery/hosts/art.json'), host = JSON.parse(readFileSync(path, 'utf8'));
+  delete host.offlineCollection.done[entry.key]; writeFileSync(path, JSON.stringify(host));
+  assert.equal(c.call({ phase: 'refuse', plan: plan.plan, key: entry.key, nativeNotStarted: true }).status, 409);
+  assert.equal(c.call({ ...upload(entry).first, plan: plan.plan }).status, 409, 'late native data cannot reactivate a terminated attempt');
+  ok(c.call(loss)); ok(c.call({ phase: 'finish', plan: plan.plan }));
+  assert.equal(readHouseLaunch(w.env, w.handle.id).termination.consumed, true);
+  assert.equal(w.hr.host('art').offlineCollection.done[entry.key].consumed, true);
+});
+
+for (const harness of ['claude', 'codex']) for (const mode of ['normal', 'size', 'missing']) test(`${harness}: delivery holds the original body until its ${mode} collection disposition is committed`, { skip: !hasAge }, async () => {
+  const oversized = mode === 'size', missing = mode === 'missing';
   const local = world(), w = houseWorld({ harness });
   const warnings = [];
   const o = { ...local.o, runner: () => w.hr, accounts: w.accounts, sealer: w.sealer, warn: m => warnings.push(m) };
@@ -161,14 +190,15 @@ for (const harness of ['claude', 'codex']) for (const oversized of [false, true]
   const transfer = upload(entry, 'original native history survives partial upload', { omitted: oversized });
   transfer.first.pending = transfer.last.pending = [fed[1]];
   await ownerConversationControl(w.env, { kind: 'owner' }, { conversation: start.conversation, action: 'interrupt' }, o);
-  ok(c.call({ ...transfer.first, plan: plan.plan }));
+  if (!missing) ok(c.call({ ...transfer.first, plan: plan.plan }));
   await tick(w.env, o);
   let current = loadConv(w.env, start.conversation);
   assert.equal(current.body, before.body); assert.equal(current.control.state, 'pending'); assert.equal(current.slot, undefined);
   assert.equal(current.nativeRetirement, undefined, 'no empty slot receipt may bypass collection');
   assert.deepEqual(current.actsFor, before.actsFor);
   assert.equal(w.local.startsEntered, 1);
-  ok(c.call({ ...transfer.last, plan: plan.plan }));
+  if (missing) ok(c.call({ phase: 'loss', key: entry.key, reason: 'missing-history', pending: [fed[1]], plan: plan.plan }));
+  else ok(c.call({ ...transfer.last, plan: plan.plan }));
   ok(c.call({ phase: 'finish', plan: plan.plan }));
   ok(c.report('failed'));
   w.hr.sealer = { seal: bytes => w.sealer.seal(bytes), open: () => { throw Error('fixture native pack key temporarily unavailable'); } };
@@ -180,11 +210,20 @@ for (const harness of ['claude', 'codex']) for (const oversized of [false, true]
   await tick(w.env, o);
   current = loadConv(w.env, start.conversation);
   assert.equal(current.control.state, 'held', JSON.stringify({ warnings, retiring: current.retiring?.type, starting: !!current.starting, receipt: current.nativeRetirement }));
-  if (oversized) {
+  if (oversized || missing) {
     assert.equal(current.slot, undefined, 'the shared size policy resumes from digests, never an empty native slot');
-    assert.ok(warnings.some(m => /over 6 MB.*resumes from its digests/.test(m)), 'the shared retirement reports the explicit continuity loss');
+    assert.ok(warnings.some(m => (missing ? /history is missing.*resumes from its digests/ : /over 6 MB.*resumes from its digests/).test(m)), 'the shared retirement reports the explicit continuity loss');
+    if (missing) {
+      assert.equal(current.nativeRecovery.reason, 'missing-history'); assert.equal(current.nativeRecovery.mayHaveActed, true);
+      assert.equal(current.nativeLossCount, 1); assert.equal(current.runLog.at(-1).contextLost, true);
+    }
   } else assert.equal(current.slot.session, entry.session);
   assert.equal(current.body, undefined); assert.deepEqual(current.actsFor, before.actsFor);
-  assert.deepEqual(current.queue.map(x => x.key), [fed[1]], 'only the final unconsumed follow-up is requeued from sealed runtime copies');
+  if (missing) {
+    assert.equal(current.queue.length, 3, 'missing history preserves the original intent and heard context as well as the pending follow-up');
+    assert.deepEqual(current.queue.slice(1).map(x => x.key), fed);
+    assert.equal(current.queue[0].reconciliation, true); assert.equal(current.queue[1].reconciliation, true);
+    assert.equal(current.queue[2].reconciliation, undefined, 'the verified unread follow-up remains a new instruction');
+  } else assert.deepEqual(current.queue.map(x => x.key), [fed[1]], 'only the final unconsumed follow-up is requeued from sealed runtime copies');
   assert.equal(w.local.startsEntered, 1, 'collection never admits replacement native work');
 });

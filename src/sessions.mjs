@@ -8,6 +8,9 @@ export const MAX_SESSION_BYTES = 6 * 1024 * 1024;
 
 export class SessionError extends Error {}
 export class SessionSizeError extends SessionError {}
+export class SessionHistoryMissing extends SessionError {
+  constructor() { super('its native session history is missing'); }
+}
 
 function readTree(root, rel, out, budget) {
   const p = join(root, rel);

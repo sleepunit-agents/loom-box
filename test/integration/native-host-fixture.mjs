@@ -12,7 +12,9 @@ const padding = process.env.FIXTURE_SESSION_BYTES ? 'x'.repeat(Number(process.en
 const put = (file, value) => writeFileSync(file, value, { mode: 0o600 });
 const proof = (session, resumed, brief) => put(join(home, 'proof.json'), JSON.stringify({ session, resumed,
   pending: brief.split('PENDING-HOST-DEATH-FOLLOWUP').length - 1,
-  next: brief.split('NEXT-HOST-DEATH-TURN').length - 1 }));
+  next: brief.split('NEXT-HOST-DEATH-TURN').length - 1,
+  initial: brief.split('INITIAL-HOST-DEATH-TURN').length - 1,
+  reconciliation: brief.includes('Runtime recovery notice:') && brief.includes('external receipts before repeating actions') }));
 const resumeAt = args.indexOf(harness === 'claude' ? '--resume' : 'resume');
 const resumed = resumeAt >= 0;
 

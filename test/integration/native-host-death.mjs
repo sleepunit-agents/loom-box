@@ -17,6 +17,7 @@ import { deliver, loadConv } from '../../src/delivery.mjs';
 import { HouseRunner, hostOf } from '../../src/houserunner.mjs';
 import { collectNativeHistory } from '../../src/native-collection-client.mjs';
 import { MAX_SESSION_BYTES } from '../../src/sessions.mjs';
+import { readHouseLaunch } from '../../src/house-launch-journal.mjs';
 import { cvOf, fakeLoomBin } from '../delivery-world.mjs';
 import { scratch } from '../scratch.mjs';
 
@@ -54,8 +55,10 @@ function child(bin, args, env, input = '') {
     }
   } };
 }
-async function serverFor(env) {
+async function serverFor(env, holdReceipts = false) {
   const seqs = new Map();
+  let held = false, release;
+  const gate = new Promise(r => { release = r; });
   const server = createServer((req, res) => {
     let raw = ''; req.on('data', x => { raw += x; }); req.on('end', async () => {
       const send = (status, body) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); };
@@ -73,16 +76,18 @@ async function serverFor(env) {
         }
         const path = /^\/api\/box\/([a-z-]+)$/.exec(req.url)?.[1], house = /^fixture-house-token-(h-[0-9]+)$/.exec(token ?? '')?.[1];
         if (!path || !house) return send(403, { error: 'wrong house credential' });
+        if (holdReceipts && house === 'h-1' && path === 'body-sync' && Object.values(body.report?.done ?? {}).some(d => d.id)) { held = true; await gate; }
         const result = await api(env, { now: () => new Date() }, { caller: { kind: 'agent', agent: 'art', house }, path, body });
         send(result.status, result.body);
       } catch { send(500, { error: 'fixture request failed' }); }
     });
   });
   await new Promise(r => server.listen(0, '127.0.0.1', r));
-  return { url: `http://127.0.0.1:${server.address().port}/mcp`, close: () => new Promise(r => server.close(r)) };
+  return { url: `http://127.0.0.1:${server.address().port}/mcp`, held: () => held, release, close: () => new Promise(r => server.close(r)) };
 }
 
-for (const harness of ['claude', 'codex']) for (const oversized of [false, true]) test(`${harness}: real container host SIGKILL ${oversized ? 'commits an explicit size-limit fallback' : 'restores the native session'} and preserves usable sender identity`, { timeout: 120_000 }, async t => {
+for (const harness of ['claude', 'codex']) for (const mode of ['normal', 'size', 'missing-bound', 'missing-unbound']) test(`${harness}: real container host SIGKILL ${mode} recovery preserves usable sender identity`, { timeout: 120_000 }, async t => {
+  const oversized = mode === 'size', missing = mode.startsWith('missing'), unbound = mode === 'missing-unbound';
   const root = scratch('native-container-death-'), home = join(root, 'controller'), tag = randomBytes(6).toString('hex');
   const env = { PATH: process.env.PATH, HOME: home, LOOM_HOME: join(home, '.config/loom'), LOOM_BOX_HOME: join(root, 'state'), LOOM_BOX_DATA: join(root, 'data'),
     LOOM_BOX_LOCAL_NAME: 'one', LOOM_RUNTIME_ACCOUNTS: 'none', LOOM_RUNTIME_SCORECARDS: 'off', LOOM_RUNTIME_TOKEN_FILE: join(root, 'runtime-token') };
@@ -90,7 +95,7 @@ for (const harness of ['claude', 'codex']) for (const oversized of [false, true]
   env.LOOM_BIN = fakeLoomBin(root);
   const sends = join(root, 'sends'); mkdirSync(sends); env.FAKE_SEND = sends;
   const previousSend = process.env.FAKE_SEND; process.env.FAKE_SEND = sends;
-  const server = await serverFor(env); env.LOOM_RUNTIME_LOOM_URL = server.url;
+  const server = await serverFor(env, unbound); env.LOOM_RUNTIME_LOOM_URL = server.url;
   setAgent(env, { now: () => new Date() }, { agent: 'art', repo: 'https://example.com/art.git' });
   setModels(env, { list: [{ id: harness === 'claude' ? 'opus' : 'gpt-5.5', harness, family: harness === 'claude' ? 'anthropic' : 'openai' }] });
   update(env, s => { Object.values(s.boxes).find(b => b.local).harnesses = { [harness]: { loggedIn: true } }; });
@@ -135,31 +140,43 @@ for (const harness of ['claude', 'codex']) for (const oversized of [false, true]
   try {
     const queued = await queue('INITIAL-HOST-DEATH-TURN'); assert.equal(queued.body, 'queued'); const cv = queued.conversation;
     const firstController = tick(cv), first = await house('h-1');
-    const started = await bound(firstController, first); assert.equal(started.code, 0, started.stderr);
-    const before = loadConv(env, cv); assert.ok(before.body, JSON.stringify(before.outcomes)); assert.equal(before.actsFor.owner, false);
+    if (unbound) { await wait(server.held, 'native receipt held before core handoff'); firstController.kill(); assert.equal((await firstController.done).signal, 'SIGKILL'); }
+    else { const started = await bound(firstController, first); assert.equal(started.code, 0, started.stderr); }
+    const before = loadConv(env, cv); assert.equal(!!before.body, !unbound, JSON.stringify(before.outcomes)); assert.equal(before.actsFor.owner, false);
+    if (unbound) assert.equal(readHouseLaunch(env, before.starting.prepared.id).state, 'published');
     const originalProof = await wait(() => existsSync(join(first.dir, 'proof.json')) && JSON.parse(readFileSync(join(first.dir, 'proof.json'), 'utf8')), 'original native proof');
     assert.equal(originalProof.resumed, false);
     await queue('PENDING-HOST-DEATH-FOLLOWUP');
-    const fed = await tick(cv).done; assert.equal(fed.code, 0, fed.stderr);
-    await wait(() => Object.values(hostOf(env, 'art', 'p-loren').report?.bodies ?? {}).some(b => b.pending?.length), 'pending native inbox');
+    if (!unbound) {
+      const fed = await tick(cv).done; assert.equal(fed.code, 0, fed.stderr);
+      await wait(() => Object.values(hostOf(env, 'art', 'p-loren').report?.bodies ?? {}).some(b => b.pending?.length), 'pending native inbox');
+    }
     assert.equal(pod(['kill', '--signal', 'KILL', first.name]).status, 0, 'kill the actual body-host container, not the delivery controller');
     const dead = await first.host.done; assert.notEqual(dead.code, 0);
     await wait(() => pod(['container', 'exists', first.name]).status === 1, 'positive physical disappearance');
     rmSync(first.dir, { recursive: true, force: true }); // Container HOME is lost; only the private native mount survives.
+    if (missing) rmSync(first.history, { recursive: true, force: true }); // Deliberate fixture loss after positive physical termination.
     const client = { call };
     await collectNativeHistory({ client, id: first.id, root: first.history, snapshot: first.snapshot, physical: 'gone' });
     assert.equal(load(env).houses[first.id].nativeHistory.complete, true);
+    server.release();
     await call('report', { id: first.id, state: 'failed' });
     await queue('NEXT-HOST-DEATH-TURN');
     const resumedController = tick(cv), second = await house('h-2');
     const resumed = await bound(resumedController, second); assert.equal(resumed.code, 0, resumed.stderr);
     const after = loadConv(env, cv), proof = await wait(() => existsSync(join(second.dir, 'proof.json')) && JSON.parse(readFileSync(join(second.dir, 'proof.json'), 'utf8')), 'restored native proof');
-    assert.equal(proof.resumed, !oversized);
-    if (oversized) assert.notEqual(proof.session, originalProof.session, 'oversized history is explicitly omitted; continuation starts fresh from runtime context');
+    assert.equal(proof.resumed, !oversized && !missing);
+    if (oversized || missing) assert.notEqual(proof.session, originalProof.session, 'explicit context loss continues fresh, never with a fabricated native session');
     else assert.equal(proof.session, originalProof.session);
+    assert.equal(proof.reconciliation, missing, 'missing history must reach the model as an explicit reconciliation notice');
+    if (missing) assert.equal(proof.initial, 1, 'the original sealed intent is supplied exactly once as reconciliation context');
     assert.equal(proof.pending, 1); assert.equal(proof.next, 1);
-    assert.equal(after.body?.startsWith(`${harness}:h-2-`), true); assert.equal(after.runs, 2);
+    assert.equal(after.body?.startsWith(`${harness}:h-2-`), true); assert.equal(after.runs, unbound ? 1 : 2);
     assert.deepEqual(after.actsFor, before.actsFor); assert.notEqual(after.run, before.run); assert.notEqual(after.sendKey, before.sendKey);
+    if (missing) {
+      assert.equal(after.nativeLossCount, 1); assert.equal(after.nativeLosses[0].mayHaveActed, true);
+      assert.equal(after.runLog.at(-1).recovery.kind, 'native-history-missing'); assert.equal(after.nativeRecovery, undefined);
+    }
     const reply = await child('podman', ['exec', '-e', `${harness === 'claude' ? 'CLAUDE_CODE_SESSION_ID' : 'CODEX_THREAD_ID'}=${proof.session}`,
       second.name, imageNode, '/runtime/src/cli.mjs', 'send', '--conversation', cv, '--piece', 'box', '--text', 'native host-death recovered sender'],
     { PATH: process.env.PATH, HOME: process.env.HOME, XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR }).done;
@@ -167,11 +184,13 @@ for (const harness of ['claude', 'codex']) for (const oversized of [false, true]
     const posted = readFileSync(join(sends, 'calls.log'), 'utf8').trim().split('\n').map(JSON.parse);
     assert.deepEqual(posted.map(x => x.text), ['native host-death recovered sender']);
     assert.equal(Object.keys(load(env).houses).length, 2);
-    assert.equal(new HouseRunner(env, harness).packReady({ id: before.body.split(':')[1], house: 'h-1', agent: 'art' }), false, 'the committed continuity slot consumed its old core pack');
+    if (unbound) { const old = readHouseLaunch(env, before.starting.prepared.id); assert.equal(old.state, 'terminated'); assert.equal(old.termination.consumed, true); assert.notEqual(after.sendKey, before.starting.prepared.snapshot.senderHash); }
+    else assert.equal(new HouseRunner(env, harness).packReady({ id: before.body.split(':')[1], house: 'h-1', agent: 'art' }), false, 'the committed continuity slot consumed its old core pack');
   } catch (error) {
     console.error('owned fixture lifecycle', JSON.stringify(containers.map(c => ({ house: c.id, ...c.host.diagnostics() }))));
     throw error;
   } finally {
+    server.release();
     for (const p of controllers) p.kill();
     const cleanup = [];
     for (const value of containers) {

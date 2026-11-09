@@ -114,3 +114,19 @@ test('an allocated native house refuses work before admission when its older box
   assert.match(receipt.error, /provisioned durable native history/);
   assert.equal(readLaunch(env, attempt), null, 'an unbacked house cannot even enter native admission');
 });
+
+for (const harness of ['claude', 'codex']) test(`${harness}: history configuration refusal before runner construction is positively unstarted`, async () => {
+  const home = scratch('native-history-config-refusal-'), attempt = 'c'.repeat(64), history = join(home, 'native'); mkdirSync(history);
+  const env = { HOME: home, HOUSE_ID: 'h-1', LOOM_RUNTIME_NATIVE_HISTORY: history,
+    ...(harness === 'claude' ? { CLAUDE_SECURESTORAGE_CONFIG_DIR: '/fixture/login', LOOM_RUNTIME_CLAUDE_JOBS: join(home, 'unsupported-jobs') }
+      : { LOOM_LOGIN_CODEX: '/fixture/login', LOOM_RUNTIME_CODEX_HOMES: join(history, 'credential-homes') }) };
+  let receipt;
+  await runBodyHost({ env, runner: () => runnerFor(harness, env), hostKey: 'boot', idleS: 0, beats: 2, sleep: async () => {},
+    client: async (path, body) => {
+      if (path !== 'body-sync') return {};
+      if (body.report.done.r1) receipt = body.report.done.r1;
+      return { req: { r1: { attempt, harness, brief: 'never enter a native CLI' } } };
+    } });
+  assert.equal(receipt?.nativeNotStarted, true);
+  assert.equal(readLaunch(env, attempt), null, 'no launch worker or native admission exists before configuration succeeds');
+});

@@ -6,6 +6,7 @@ import { runnerFor } from '../src/runners.mjs';
 import { nativeHistoryEnv } from '../src/native-history.mjs';
 import { offlineNativeSession, snapshotNativeHistory } from '../src/native-history-collection.mjs';
 import { launchAttempt, readLaunch, reserveLaunch } from '../src/launch-journal.mjs';
+import { SessionHistoryMissing } from '../src/sessions.mjs';
 import { scratch } from './scratch.mjs';
 
 const put = (file, data) => { mkdirSync(dirname(file), { recursive: true }); writeFileSync(file, data); };
@@ -89,12 +90,19 @@ for (const failure of ['link', 'bytes', 'entries']) test(`offline snapshot ${fai
   assert.equal(readdirSync(w.root).some(n => n.startsWith('.native-history-')), false);
 });
 
-test('offline history missing a session transcript remains uncertain', () => {
+test('offline absence has a distinct loss classification for a physically terminated caller', () => {
   const w = world(); runnerFor('codex', w.env);
   const snapshot = join(w.root, 'snapshot'); snapshotNativeHistory(w.history, snapshot);
-  assert.throws(() => offlineNativeSession(snapshot, { harness: 'codex', id: 'aabbccdd' }), /identity/);
-  assert.throws(() => offlineNativeSession(snapshot, { harness: 'codex', id: 'aabbccdd', session: 'known-session' }), /history/);
+  assert.throws(() => offlineNativeSession(snapshot, { harness: 'codex', id: 'aabbccdd' }), SessionHistoryMissing);
+  assert.throws(() => offlineNativeSession(snapshot, { harness: 'codex', id: 'aabbccdd', session: 'known-session' }), SessionHistoryMissing);
   assert.throws(() => snapshotNativeHistory(w.history, snapshot), /new separate directory/);
+});
+
+for (const harness of ['claude', 'codex']) test(`${harness}: malformed existing identity metadata cannot be classified as missing history`, () => {
+  const w = world(), id = 'aabbccdd'; runnerFor(harness, w.env);
+  put(join(w.history, harness === 'claude' ? 'claude-jobs' : 'codex-runs', id, harness === 'claude' ? 'state.json' : 'events.jsonl'), '{partial native metadata');
+  const snapshot = join(w.root, 'snapshot'); snapshotNativeHistory(w.history, snapshot);
+  assert.throws(() => offlineNativeSession(snapshot, { harness, id }), error => !(error instanceof SessionHistoryMissing) && /could not be decoded/.test(error.message));
 });
 
 test('durable Codex history preserves custom runner selectors and generated-home placement', () => {

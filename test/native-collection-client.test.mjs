@@ -9,7 +9,7 @@ import { collectNativeHistory } from '../src/native-collection-client.mjs';
 import { offlineNativeAttempt } from '../src/native-history-collection.mjs';
 import { ClaudeRunner } from '../src/runners.mjs';
 import { reserveLaunch, admitLaunch } from '../src/launch-journal.mjs';
-import { MAX_SESSION_BYTES, SessionSizeError } from '../src/sessions.mjs';
+import { MAX_SESSION_BYTES, SessionSizeError, SessionHistoryMissing } from '../src/sessions.mjs';
 import { hasAge, houseWorld } from './delivery-world.mjs';
 const put = (file, data) => { mkdirSync(dirname(file), { recursive: true, mode: 0o700 }); writeFileSync(file, data, { mode: 0o600 }); };
 const wait = async fn => { const end = Date.now() + 10_000; while (!fn()) { if (Date.now() > end) throw Error('native client fixture timed out'); await new Promise(r => setTimeout(r, 10)); } };
@@ -178,14 +178,53 @@ test('missing offline pack files cannot impersonate a committed consumer acknowl
   await assert.rejects(w.hr.pack(body), /pack is unavailable; ownership remains held/);
 });
 
-test('missing native history and malformed completion responses cannot authorize cleanup', { skip: !hasAge }, async () => {
+test('malformed native admission history and malformed completion responses cannot authorize cleanup', { skip: !hasAge }, async () => {
   const w = await setup('codex', false);
-  await assert.rejects(collectNativeHistory(w.options), /admission history/);
+  put(join(w.root, 'launches', `${w.attempt}.json`), 'malformed native admission JSON');
+  await assert.rejects(collectNativeHistory(w.options), /could not be decoded/);
   assert.equal(load(w.env).houses['h-1'].nativeHistory.complete, false);
   assert.equal(existsSync(w.root), true);
   await assert.rejects(collectNativeHistory({ ...w.options, physical: 'running' }), /physical/);
   assert.throws(() => offlineNativeAttempt(w.snapshot, { house: 'h-1', harness: 'codex', attempt: 'invalid' }), /invalid/);
   await assert.rejects(collectNativeHistory({ ...w.options, client: { call: async () => ({ complete: true }) } }), /invalid native collection plan/);
+});
+
+for (const harness of ['claude', 'codex']) for (const bound of [false, true]) test(`${harness}: verified missing history records ${bound ? 'a bound loss receipt' : 'termination without fabricating a native body'}`, { skip: !hasAge }, async () => {
+  const w = await setup(harness, bound);
+  assert.equal(load(w.env).houses['h-1'].nativeHistory.complete, false);
+  await assert.rejects(collectNativeHistory({ ...w.options, physical: 'running' }), /physical/);
+  assert.equal(load(w.env).houses['h-1'].nativeHistory.complete, false);
+  await collectNativeHistory(w.options);
+  assert.equal(load(w.env).houses['h-1'].nativeHistory.complete, true);
+  assert.equal(existsSync(w.root), true, 'the client does not delete evidence before box cleanup');
+  assert.deepEqual(w.calls.map(c => c.phase), ['plan', 'loss', 'finish']);
+  if (bound) {
+    await assert.rejects(w.hr.pack({ id: 'h-1-b0000000', house: 'h-1', agent: 'art', harness }, { deferAck: true }), SessionHistoryMissing);
+    assert.equal(w.hr.observePreparedLaunch(w.handle).state, 'ready', 'the established native identity is never rewritten as unstarted');
+  } else {
+    const observed = w.hr.observePreparedLaunch(w.handle);
+    assert.equal(observed.state, 'terminated'); assert.equal(observed.termination.reason, 'missing-history');
+    assert.equal(w.hr.publishPreparedLaunch(w.handle), 'terminated', 'late publication cannot restart a terminated admission');
+    assert.equal(w.local.startsEntered ?? 0, 0);
+    w.hr.acknowledgePreparedLaunch(w.handle);
+    assert.equal(w.hr.observePreparedLaunch(w.handle).termination.consumed, true);
+  }
+});
+
+for (const phase of ['loss', 'finish']) test(`lost ${phase} acknowledgement retains the same explicit loss after source removal`, { skip: !hasAge }, async () => {
+  const w = await setup('codex', false); let lost = false;
+  const client = { async call(path, body) { const result = await w.client.call(path, body); if (!lost && body.phase === phase) { lost = true; throw Error('fixture lost loss acknowledgement'); } return result; } };
+  await assert.rejects(collectNativeHistory({ ...w.options, client }), /lost loss acknowledgement/);
+  rmSync(w.root, { recursive: true, force: true }); rmSync(w.snapshot, { recursive: true, force: true });
+  await collectNativeHistory(w.options);
+  assert.equal(w.hr.observePreparedLaunch(w.handle).state, 'terminated');
+  assert.equal(w.calls.filter(c => c.phase === 'loss').length, 1);
+});
+
+test('a missing original mount after physical termination is a loss, not proof of an unstarted attempt', { skip: !hasAge }, async () => {
+  const w = await setup('codex', false); rmSync(w.root, { recursive: true });
+  await collectNativeHistory(w.options);
+  assert.equal(w.hr.observePreparedLaunch(w.handle).state, 'terminated');
 });
 
 test('a box retries a partial upload from its immutable snapshot after losing an early part acknowledgement', { skip: !hasAge }, async () => {

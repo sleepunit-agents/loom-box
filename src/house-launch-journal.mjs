@@ -16,7 +16,7 @@ const file = (env, id) => {
 function validate(r, id) {
   if (r?.v !== 1 || r.id !== id || !ID.test(r.intentHash ?? '') || !['claude', 'codex'].includes(r.harness)
       || !/^[a-z][a-z0-9-]{0,39}$/.test(r.agent ?? '') || !/^h-[0-9]{1,9}$/.test(r.house ?? '')
-      || !/^[0-9a-f]{16}$/.test(r.rid ?? '') || !['reserved', 'publishing', 'published', 'ready', 'refused'].includes(r.state)
+      || !/^[0-9a-f]{16}$/.test(r.rid ?? '') || !['reserved', 'publishing', 'published', 'ready', 'refused', 'terminated'].includes(r.state)
       || !SEAT.test(r.seat ?? '') || (['reserved', 'publishing', 'published'].includes(r.state) && typeof r.sealed !== 'string')) {
     throw new StateError('invalid house launch journal; its admission remains held', 409);
   }
@@ -24,6 +24,7 @@ function validate(r, id) {
     throw new StateError('invalid house native receipt; its admission remains held', 409);
   }
   if (r.state === 'refused' && typeof r.reason !== 'string') throw new StateError('invalid house refusal receipt', 409);
+  if (r.state === 'terminated' && (r.termination?.reason !== 'missing-history' || !/^[0-9a-f]{32}$/.test(r.termination?.plan ?? '') || r.termination.consumed !== undefined && typeof r.termination.consumed !== 'boolean')) throw new StateError('invalid house termination receipt', 409);
   return r;
 }
 export function readHouseLaunch(env, id) {

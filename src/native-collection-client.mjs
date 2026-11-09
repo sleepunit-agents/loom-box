@@ -5,6 +5,9 @@ import { createHash } from 'node:crypto';
 import { existsSync, lstatSync } from 'node:fs';
 import { snapshotNativeHistory, offlineNativeAttempt, offlineNativeSession } from './native-history-collection.mjs';
 import { PART_CHARS } from './houserunner.mjs';
+import { SessionHistoryMissing } from './sessions.mjs';
+import { nativePendingInbox } from './native-inbox.mjs';
+import { join } from 'node:path';
 
 export async function collectNativeHistory({ client, id, root, snapshot, physical }) {
   if (!/^h-[0-9]{1,9}$/.test(id ?? '') || !['gone', 'stopped'].includes(physical)) throw Error('native collection needs physical house termination');
@@ -22,16 +25,32 @@ export async function collectNativeHistory({ client, id, root, snapshot, physica
     if (entry.bodyId ? entry.key !== `body:${entry.bodyId}` : entry.attempts.length !== 1 || entry.key !== `attempt:${entry.attempts[0]}`) throw Error('native collection entry changed identity');
     entries.add(entry.key);
   }
+  let historyMissing = false;
   if (plan.entries.some(e => !e.received)) {
-    if (!existsSync(snapshot)) snapshotNativeHistory(root, snapshot);
-    const st = lstatSync(snapshot);
-    if (!st.isDirectory() || st.isSymbolicLink()) throw Error('native collection snapshot is not plain');
+    try {
+      if (!existsSync(snapshot)) snapshotNativeHistory(root, snapshot);
+      const st = lstatSync(snapshot);
+      if (!st.isDirectory() || st.isSymbolicLink()) throw Error('native collection snapshot is not plain');
+    } catch (error) {
+      if (!(error instanceof SessionHistoryMissing)) throw error;
+      historyMissing = true;
+    }
   }
   for (const entry of plan.entries) {
     if (entry.received) continue;
-    const native = entry.bodyId
-      ? offlineNativeSession(snapshot, { harness: entry.harness, id: entry.bodyId, ...(entry.session ? { session: entry.session } : {}) })
-      : offlineNativeAttempt(snapshot, { house: id, harness: entry.harness, attempt: entry.attempts[0] });
+    let native;
+    try {
+      if (historyMissing) throw new SessionHistoryMissing();
+      native = entry.bodyId
+        ? offlineNativeSession(snapshot, { harness: entry.harness, id: entry.bodyId, ...(entry.session ? { session: entry.session } : {}) })
+        : offlineNativeAttempt(snapshot, { house: id, harness: entry.harness, attempt: entry.attempts[0] });
+    } catch (error) {
+      if (!(error instanceof SessionHistoryMissing)) throw error;
+      const pending = !historyMissing && entry.bodyId ? nativePendingInbox(join(snapshot, 'inboxes'), entry.bodyId) : null;
+      const receipt = await call({ phase: 'loss', plan: plan.plan, key: entry.key, reason: 'missing-history', pending });
+      if (receipt?.plan !== plan.plan || receipt.received !== true) throw Error('native history-loss receipt was not acknowledged');
+      continue;
+    }
     if (native.nativeNotStarted) {
       const receipt = await call({ phase: 'refuse', plan: plan.plan, key: entry.key, nativeNotStarted: true });
       if (receipt?.plan !== plan.plan || receipt.received !== true) throw Error('native refusal was not acknowledged');

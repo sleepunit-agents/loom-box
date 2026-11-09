@@ -261,7 +261,8 @@ limits fail without publishing a partial snapshot or deleting the source.
 `offlineNativeSession` uses the existing adapter's `slotOf`/`sessionFiles` and
 `packSession`; it cannot invoke a CLI, inspect host processes, start/resume a
 model, stop a model or sweep credential homes. Missing native identity/history
-remains uncertain. A collected body returns only its own native session files.
+cannot prove an unstarted attempt; the separate physical-termination loss
+disposition is defined below. A collected body returns only its own session files.
 
 The box provisions this mount for newly claimed non-service houses and runs
 collection before terminal reporting or cleanup. The explicit real-container
@@ -328,9 +329,9 @@ Tests cover both adapters' offline decoding, immutable multipart retries,
 reserved and admitted attempts, existing core packs, missing metadata, and box
 restart after lost part/final acknowledgements. These use model-free native
 executables or a fake container engine; the separate integration proof below
-uses real Podman. Explicit handling for admitted work with no native history,
-older-house cutover reconciliation and deployed provider verification remain
-required. The offline size-limit disposition is defined below. This draft is
+uses real Podman. Older-house cutover reconciliation and deployed provider
+verification remain required. The explicit size-limit and missing-history
+dispositions are defined below. This draft is
 not deployable.
 
 ## Final inbox receipts after host failure
@@ -375,7 +376,8 @@ gone, deletes its ephemeral HOME, collects only the retained native history,
 then continues through a second house. The native fixture refuses a native
 resume unless the original context has already been restored. Ordinary cases
 check that same session; oversized cases check an explicit fresh continuation
-under the shared digest fallback. Every case checks exactly one pending
+under the shared digest fallback. Missing-history cases exercise loss before
+and after conversation binding, with a reconciliation notice and audit. Every case checks exactly one pending
 follow-up and new turn, unchanged conversation principal, a new run/sender key,
 and a reply posted from inside the new container.
 Both owned containers must be positively absent after cleanup.
@@ -393,9 +395,9 @@ lifecycle and storage, not a provider model's semantic memory after a crash.
 
 The existing native session budget is 6 MB. Local retirement, live house packing
 and offline collection all use packSession and its SessionSizeError. Only that
-typed exception permits omitting the native session and continuing from the
-conversation's digests. An arbitrary read error or a missing transcript remains
-uncertain and retains its history for retry.
+typed exception permits a size-budget omission. An arbitrary read error retains
+its history for retry. Verified absence after physical termination uses the
+separate history-loss receipt below, never an invented size exception.
 
 Both live and offline transfers now name the omission as size-limit. It is
 immutable across parts and sealed with the final receipt, native identity and
@@ -420,5 +422,57 @@ error. A completed C retirement receipt can retry acknowledgement after a crash.
 
 The independent whole-house snapshot budget remains 64 MB/10,000 entries. A
 snapshot failure retains the original source and reports its resource/read
-error; it is not treated as a session-size omission. Missing-history recovery
-and legacy-house reconciliation remain separate acceptance work.
+error; it is not treated as a session-size omission. Legacy-house reconciliation
+remains separate acceptance work.
+
+## Verified termination without recoverable history
+
+After the allocated box establishes physical termination and opens its immutable
+plan, a SessionHistoryMissing classification can produce a distinct loss
+receipt. This covers a missing original mount, missing admission metadata or a
+missing/empty selected native transcript. Existing malformed identity metadata,
+read errors, ambiguous native jobs, links and snapshot resource failures still
+hold. The offline reader checks metadata readability before using adapters that
+tolerate failed status reads; that tolerance cannot become destructive absence
+proof. A loss cannot replace an already begun native-file transfer.
+
+For an established native body, core seals a missing-history marker under the
+same allocated house/body/plan, with final inbox IDs when known. No native
+session is invented. Shared retirement commits the loss audit and required
+reconciliation notice before acknowledging this marker. If unfinished intent
+is still authorized under the same rules, its sealed original messages and
+heard context accompany the unread tail as explicitly labeled reconciliation
+context. Original sender fencing, current gates, principal, guest scope and
+owner holds remain in force. A job can therefore continue without a new message
+or invented wake; a pending reconciliation cannot publish an old run's premature
+failure/final callback. A durably captured job report is retained as its final
+result. Captured output that was never posted does not finish an ordinary user
+request: it accompanies the replacement as quoted reconciliation data. This
+output is encrypted at rest and forwarded only under the same session authority.
+Collection defers a parent's failure callback until the loss disposition and
+reconciliation decision are committed.
+
+For a published attempt with no native body identity, core records terminated,
+not refused, in its immutable launch journal. Fresh-controller recovery records
+the loss and returns the original sealed intent to normal routing with the same
+reconciliation notice. Late publication, native data or an unstarted assertion
+cannot change this disposition. A consumer acknowledgement is durable in the
+termination journal too, covering a crash before the host-journal receipt write.
+
+The notice says that effects may already have happened, requires checking
+conversation/durable records, repository state and external receipts before
+repeating actions, and requires reporting what cannot be verified. It is
+included for both fresh starts and resumed backup slots and remains pending
+until a native input receipt confirms delivery. The audit stores IDs, reason,
+harness and timestamps, not message text; subsequent runs record which loss
+notice they received. A missing transcript is never a successful recovery of
+native memory or evidence that no work occurred.
+
+The explicit real-container matrix now has eight cases: both adapters under
+normal resume, size fallback, bound history loss and pre-bind history loss. In
+pre-bind cases the controller and container are killed after native work begins
+but before its receipt reaches core. Both missing-history variants lose the
+original history mount and HOME, then prove original-intent preservation,
+reconciliation delivery, fresh native session, unchanged principal/new sender,
+and a posted reply. These remain model-free lifecycle proofs; deployed provider
+semantics and the older-house transition are still release gates.

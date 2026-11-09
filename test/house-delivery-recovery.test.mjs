@@ -1,12 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { deliver, loadConv, ownerConversationControl, tick } from '../src/delivery.mjs';
 import { readBody } from '../src/bodies.mjs';
 import { HouseRunner } from '../src/houserunner.mjs';
 import { readHouseLaunch } from '../src/house-launch-journal.mjs';
-import { load } from '../src/state.mjs';
+import { load, update } from '../src/state.mjs';
+import { api } from '../src/control.mjs';
+import { collectNativeHistory } from '../src/native-collection-client.mjs';
 import { cvOf, hasAge, houseWorld, world } from './delivery-world.mjs';
 const wait = async fn => { const end=Date.now()+5000; while(!fn()) { if(Date.now()>end) throw Error('house delivery fixture timed out'); await new Promise(r=>setTimeout(r,10)); } };
 async function stopHost(h, host, seat) {
@@ -16,6 +18,40 @@ async function stopHost(h, host, seat) {
   writeFileSync(path,JSON.stringify({...record,house:'h-999'}));
   await host;
 }
+
+for (const harness of ['claude', 'codex']) test(`${harness}: a terminated pre-bind attempt preserves its reconciliation notice and sealed input under owner hold`, { skip: !hasAge }, async () => {
+  const w = world(), h = houseWorld({ harness }), seat = 'p-loren', cv = cvOf('art', 'slack', 'dm:lost-prebind');
+  const publish = h.hr.publishPreparedLaunch.bind(h.hr);
+  h.hr.publishPreparedLaunch = handle => { const result = publish(handle); h.setRequestDrop(() => true); return result; };
+  h.hr.waitPreparedLaunch = async () => { throw Error('fixture registrar stopped observing after publication'); };
+  const o = { ...w.o, runner: () => h.hr, accounts: h.accounts, sealer: h.sealer };
+  let host, drained;
+  const first = deliver(h.env, w.msg('dm:lost-prebind', 'reconcile this authorized work'), { ...o, onDrain: p => { drained = p; } });
+  try {
+    await wait(() => load(h.env).houses['h-1']); host = h.host(); await first; await drained;
+    const before = loadConv(h.env, cv), prepared = before.starting.prepared;
+    assert.equal(readHouseLaunch(h.env, prepared.id).state, 'published');
+    const path = join(h.env.LOOM_BOX_DATA, 'delivery/hosts', `art@${seat}.json`), record = readFileSync(path, 'utf8');
+    const stopping = stopHost(h, host, seat); h.setRequestDrop(() => false); await stopping; host = undefined; writeFileSync(path, record);
+    await ownerConversationControl(h.env, { kind: 'owner' }, { conversation: cv, action: 'interrupt' }, { ...o, detach: true, spawnWorker() {} });
+    update(h.env, s => { s.houses['h-1'].state = 'running'; s.houses['h-1'].nativeHistory = { v: 1, complete: false }; });
+    const root = join(h.D, 'missing-native'); mkdirSync(root);
+    const caller = { kind: 'piece', subject: load(h.env).houses['h-1'].box };
+    const client = { async call(path, body) { const result = await api(h.env, { sealer: h.sealer }, { caller, path, body }); assert.equal(result.status, 200, JSON.stringify(result.body)); return result.body; } };
+    await collectNativeHistory({ client, id: 'h-1', root, snapshot: join(h.D, 'snapshot'), physical: 'gone' });
+    w.clock.advance(1001); await tick(h.env, o); await tick(h.env, o);
+    const after = loadConv(h.env, cv);
+    assert.equal(after.body, undefined); assert.equal(after.starting, undefined); assert.equal(after.control.state, 'held');
+    assert.equal(after.queue.length, 1); assert.equal(typeof after.queue[0].sealed, 'string');
+    assert.equal(after.nativeRecovery.reason, 'missing-history'); assert.equal(after.nativeRecovery.mayHaveActed, true);
+    assert.deepEqual(after.actsFor, before.actsFor); assert.equal(after.actsFor.owner, false);
+    assert.equal(after.nativeLossCount, 1); assert.equal(after.runLog.at(-1).contextLost, true);
+    assert.equal(readHouseLaunch(h.env, prepared.id).state, 'terminated');
+    assert.equal(readHouseLaunch(h.env, prepared.id).termination.consumed, true);
+    assert.equal(h.local.startsEntered ?? 0, 0, 'a held reconciliation never creates a replacement');
+    w.clock.advance(1001); await tick(h.env, o); assert.equal(loadConv(h.env, cv).nativeLossCount, 1);
+  } finally { h.setRequestDrop(() => false); await stopHost(h, host, seat); await first; }
+});
 for (const harness of ['claude','codex']) test(`${harness}: conversation recovery binds the original house receipt, generation, run and sender without promoting its principal`, {skip:!hasAge}, async()=>{
   const w=world(), h=houseWorld({harness});
   const cv=cvOf('art','slack','dm:house-recovery'), seat='p-loren';
