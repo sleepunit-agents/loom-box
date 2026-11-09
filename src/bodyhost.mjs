@@ -13,6 +13,9 @@ import { join } from 'node:path';
 import { composeBrief } from './briefs.mjs';
 import { packSession, dropSession, restoreFiles } from './sessions.mjs';
 import { PART_CHARS } from './houserunner.mjs';
+import { ClaudeRunner, CodexRunner, nativeRunnerConfiguration } from './runners.mjs';
+import { launchInjectedNative, superviseNativeLaunch } from './native-launch.mjs';
+import { cancelReservedLaunch } from './launch-journal.mjs';
 import { LOGIN_HARNESSES } from './logins.mjs';
 
 /**
@@ -71,6 +74,9 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
   // A body's environment is the house's, less what's the host's alone: its task (which carried the boot key).
   const bodyEnv = Object.fromEntries(Object.entries(env).filter(([k]) => k !== 'HOUSE_TASK' && k !== 'LOOM_HOST_KEY'));
   const mine = new Map();   // id -> {harness}
+  const durableRequests = new Set();
+  const launching = new Map(); // durable rid -> in-flight promise
+  const uncertain = new Map(); // durable rid -> original request to reconcile
   const done = {};          // rid -> {id} | {error}
   const packing = new Map(); // id -> {parts: [string], next}
   const heard = new Map();   // id -> Set of follow-up ids fed to it (each is fed once, however often it's sent)
@@ -130,7 +136,7 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
     }
     let got;
     const sent = acks;
-    try { got = await client('body-sync', { hostKey: key, report: { bodies, done, packed, inboxAck: sent, caps: ['parts'] } }); } catch (e) { log(`sync failed: ${e.message}`); await sleep(SYNC_MS); continue; }
+    try { got = await client('body-sync', { hostKey: key, report: { bodies, done, packed, inboxAck: sent, caps: ['parts', 'native-admission'], starting: [...new Set([...launching.keys(), ...uncertain.keys(), ...Object.keys(done)])] } }); } catch (e) { log(`sync failed: ${e.message}`); await sleep(SYNC_MS); continue; }
     if (typeof got.hostKey === 'string') key = got.hostKey;
     // Answered: what it acknowledged is the runtime's to forget now. (A lost answer: they go again next beat.)
     if (acks === sent) acks = {};
@@ -145,28 +151,62 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
     }
     if (got.exit) { log(`leaving: ${got.reason ?? 'the runtime says so'}`); return; }
     const req = got.req ?? {};
-    for (const rid of Object.keys(done)) if (!req[rid]) delete done[rid];
-    for (const [rid, q] of Object.entries(req)) {
-      if (done[rid]) continue;
-      try {
-        if (!houseHasLogin(env, q.harness)) throw new Error(`this house doesn't declare the ${q.harness} harness (its house file's "harnesses"), so it has no ${q.harness} login: add it there`);
-        const r = runner(q.harness);
-        const cv = q.key && CV.test(q.conversation ?? '') ? q.conversation : null;
-        // A brief in parts names the agent's own files (briefs.mjs): read here, from its repo (this house's cwd).
-        // A file that isn't there fails the start: never a body without what its brief must carry.
-        const brief = q.parts !== undefined ? composeBrief(q.parts, cwd) : q.brief;
-        const o = { brief, model: q.model, deny: q.deny ?? [], cwd, env: { ...bodyEnv, ...(q.key ? { LOOM_BODY_KEY: q.key } : {}), ...(cv ? { LOOM_BODY_CONVERSATION: cv } : {}) } };
-        // Kept by its conversation before the body starts, so its first `send` finds it.
-        if (cv) keepKey(env, cv, q.key);
-        let written = [];
-        let b;
+    if (got.stopping) for (const q of [...launching.values()].map(x => x.request)) {
+      try { cancelReservedLaunch(bodyEnv, q.attempt); } catch { /* admitted or unobservable attempts stay held */ }
+    }
+    for (const rid of Object.keys(done)) {
+      if (durableRequests.has(rid)) {
+        if (got.received?.includes(rid)) { delete done[rid]; durableRequests.delete(rid); }
+      } else if (!req[rid]) delete done[rid];
+    }
+    for (const [rid, q] of new Map([...Object.entries(req), ...uncertain])) {
+      if (done[rid] || launching.has(rid)) continue;
+      const launch = async () => {
+        let enteredNative = false;
         try {
-          if (q.resume) { written = restoreFiles(r, q.files); b = await r.resume({ harness: q.harness, session: q.resume }, o); } else b = await r.start(o);
-        } catch (e) { for (const w of written) rmSync(w, { recursive: true, force: true }); throw e; }
-        mine.set(b.id, { harness: q.harness, seen: 'started', ...(b.slot ? { slot: b.slot } : {}), ...(cv ? { cv, key: q.key } : {}), ...(q.activity === true ? { activity: true } : {}) });
-        done[rid] = { id: b.id };
-        log(`started ${b.id} for ${rid}`);
-      } catch (e) { done[rid] = { error: String(e.message).split('\n')[0].slice(0, 300) }; }
+          if (q.attempt && !/^[0-9a-f]{64}$/.test(q.attempt)) throw Object.assign(new Error('invalid durable native attempt'), { nativeNotStarted: true });
+          if (!houseHasLogin(env, q.harness)) throw new Error(`this house doesn't declare the ${q.harness} harness (its house file's "harnesses"), so it has no ${q.harness} login: add it there`);
+          const r = runner(q.harness);
+          const cv = q.key && CV.test(q.conversation ?? '') ? q.conversation : null;
+          // A brief in parts names the agent's own files (briefs.mjs): read here, from its repo (this house's cwd).
+          // A file that isn't there fails the start: never a body without what its brief must carry.
+          const brief = q.parts !== undefined ? composeBrief(q.parts, cwd) : q.brief;
+          const o = { brief, model: q.model, deny: q.deny ?? [], cwd, env: { ...bodyEnv, ...(q.key ? { LOOM_BODY_KEY: q.key } : {}), ...(cv ? { LOOM_BODY_CONVERSATION: cv } : {}) } };
+          // Kept by its conversation before the body starts, so its first `send` finds it.
+          if (cv) keepKey(env, cv, q.key);
+          let written = [];
+          let b;
+          try {
+            if (q.attempt) {
+              const configuration = nativeRunnerConfiguration(r);
+              if (!configuration && (r instanceof ClaudeRunner || r instanceof CodexRunner)) throw Object.assign(new Error('this native runner cannot preserve its launch configuration'), { nativeNotStarted: true });
+              enteredNative = true;
+              if (configuration) b = await superviseNativeLaunch(bodyEnv, { id: q.attempt, harness: q.harness, options: o, configuration,
+                ...(q.resume ? { resume: { harness: q.harness, session: q.resume }, files: q.files ?? [] } : {}) });
+              else {
+                b = await launchInjectedNative(bodyEnv, { id: q.attempt, harness: q.harness, options: o,
+                  ...(q.resume ? { resume: { harness: q.harness, session: q.resume }, files: q.files ?? [] } : {}) }, r);
+              }
+            } else {
+              if (q.resume) { written = restoreFiles(r, q.files); b = await r.resume({ harness: q.harness, session: q.resume }, o); } else b = await r.start(o);
+            }
+          } catch (e) { if (!q.attempt || !enteredNative || e.nativeNotStarted) for (const w of written) rmSync(w, { recursive: true, force: true }); throw e; }
+          mine.set(b.id, { harness: q.harness, seen: 'started', ...(b.slot ? { slot: b.slot } : {}), ...(cv ? { cv, key: q.key } : {}), ...(q.activity === true ? { activity: true } : {}) });
+          done[rid] = { id: b.id, ...(q.attempt ? { attempt: q.attempt, inputConfirmed: b.inputUncertain !== true } : {}) };
+          uncertain.delete(rid);
+          log(`started ${b.id} for ${rid}`);
+        } catch (e) {
+          if (q.attempt && enteredNative && !e.nativeNotStarted) {
+            uncertain.set(rid, q); log(`launch ${rid} remains uncertain: ${String(e.message).split('\n')[0].slice(0, 200)}`);
+          } else { done[rid] = { error: String(e.message).split('\n')[0].slice(0, 300), ...(q.attempt ? { attempt: q.attempt, nativeNotStarted: true } : {}) }; uncertain.delete(rid); }
+        }
+      };
+      if (q.attempt) {
+        durableRequests.add(rid);
+        const promise = launch();
+        launching.set(rid, { promise, request: q });
+        promise.finally(() => launching.delete(rid));
+      } else await launch();
     }
     for (const id of [...stopped.keys()]) if (!got.stop?.[id]) stopped.delete(id);
     for (const [id, s] of Object.entries(got.stop ?? {})) {
@@ -175,7 +215,7 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
       const r = runner(b.harness);
       if (b.stopPending !== s.at) {
         try {
-          r.end({ id });
+          r.end({ id }, bodyEnv);
           stopped.set(id, s.at);
           b.stopPending = s.at;
         } catch { /* observe, then retry a request that wasn't acknowledged */ }
@@ -225,7 +265,7 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
       }
     }
     const working = Object.values(bodies).some((b) => b.status === 'working');
-    if (working || Object.keys(req).length || packing.size) lastBusy = now();
+    if (working || Object.keys(req).length || packing.size || launching.size || uncertain.size) lastBusy = now();
     if (idleS && now() - lastBusy >= idleS * 1000) { log(`idle ${idleS}s: leaving`); return; }
     await sleep(SYNC_MS);
   }

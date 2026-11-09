@@ -4,7 +4,8 @@ import { readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { HouseRunner, hostOf } from '../src/houserunner.mjs';
 import { readHouseLaunch, writeHouseLaunch } from '../src/house-launch-journal.mjs';
-import { load } from '../src/state.mjs';
+import { load, update } from '../src/state.mjs';
+import { down } from '../src/control.mjs';
 import { hasAge, houseWorld } from './delivery-world.mjs';
 const wait = async fn => {
   const end = Date.now() + 5000;
@@ -113,7 +114,7 @@ for (const harness of ['claude', 'codex']) test(`${harness}: timeout retains the
     const fresh = new HouseRunner(w.env, harness, { sealer: w.sealer });
     const body = await fresh.waitPreparedLaunch(w.handle);
     assert.equal(body.id, 'h-1-b0000000');
-    assert.equal(body.inputUncertain, true, 'a legacy identity receipt cannot claim full input confirmation');
+    assert.equal(body.inputUncertain, undefined, 'the new host explicitly confirms its completed input handoff');
     assert.equal(fresh.acknowledgePreparedLaunch(w.handle), true);
     assert.equal(hostOf(w.env, 'art').req[w.handle.rid], undefined);
     assert.equal(fresh.acknowledgePreparedLaunch(w.handle), true);
@@ -121,4 +122,114 @@ for (const harness of ['claude', 'codex']) test(`${harness}: timeout retains the
     assert.equal(w.local.startsEntered, 1);
     assert.equal(w.local.status({ id: 'b0000000' }), 'working', 'acknowledging a receipt does not stop its bound writer');
   } finally { await w.finish(); }
+});
+
+
+test('an identity receipt without input confirmation stays input-uncertain', { skip: !hasAge }, async () => {
+  const w = await prepared('codex', '7'.repeat(64));
+  try {
+    w.setRequestDrop(() => true);
+    w.hr.publishPreparedLaunch(w.handle);
+    const h = hostOf(w.env, 'art');
+    h.report.done[w.handle.rid] = { id: 'unconfirmed-native' };
+    writeFileSync(join(w.env.LOOM_BOX_DATA, 'delivery/hosts/art.json'), JSON.stringify(h));
+    const observed = w.hr.observePreparedLaunch(w.handle);
+    assert.equal(observed.state, 'ready');
+    assert.equal(observed.body.inputUncertain, true);
+    w.hr.acknowledgePreparedLaunch(w.handle);
+  } finally { w.setRequestDrop(() => false); await w.finish(); }
+});
+
+
+for (const harness of ['claude', 'codex']) test(`${harness}: owner Down keeps syncing an in-flight request and collects its late native body`, { skip: !hasAge }, async () => {
+  const w = await prepared(harness, '8'.repeat(64));
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const start = w.local.start.bind(w.local);
+  w.local.start = async options => { await gate; return start(options); };
+  w.setRequestDrop((_path, body) => {
+    if (body.report?.starting?.includes(w.handle.rid)) body.report.starting = [...Array.from({ length: 64 }, (_, n) => n.toString(16).padStart(16, '0')), w.handle.rid];
+    return false;
+  });
+  try {
+    w.hr.publishPreparedLaunch(w.handle);
+    await wait(() => hostOf(w.env, 'art').report.starting?.includes(w.handle.rid));
+    update(w.env, state => { state.houses['h-1'].state = 'running'; });
+    down(w.env, {}, { kind: 'owner' }, { id: 'h-1' });
+    await wait(() => hostOf(w.env, 'art').quiescing);
+    assert.ok(hostOf(w.env, 'art').report.starting.includes(w.handle.rid), 'pending identities beyond the receipt limit remain visible');
+    assert.equal(hostOf(w.env, 'art').report.done[w.handle.rid], undefined, 'pending native work was not falsely refused');
+    assert.equal(readHouseLaunch(w.env, w.handle.id).state, 'published');
+    assert.equal(w.left(), false, 'the host stays alive while its native identity is pending');
+    release();
+    await wait(() => w.left());
+    assert.equal(w.local.startsEntered, 1);
+    assert.equal(w.ended.length, 1);
+    assert.equal(readHouseLaunch(w.env, w.handle.id).state, 'ready');
+  } finally { release(); await w.finish(); }
+});
+
+test('a lost receipt acknowledgement remains retryable after the bound request was removed', { skip: !hasAge }, async () => {
+  const w = await prepared('codex', '9'.repeat(64));
+  let lost = false;
+  w.setDrop(reply => { if (!lost && reply.received?.includes(w.handle.rid)) { lost = true; return true; } return false; });
+  try {
+    w.hr.publishPreparedLaunch(w.handle);
+    await wait(() => lost);
+    assert.equal(readHouseLaunch(w.env, w.handle.id).state, 'ready');
+    w.hr.acknowledgePreparedLaunch(w.handle);
+    assert.equal(hostOf(w.env, 'art').req[w.handle.rid], undefined);
+    await wait(() => !hostOf(w.env, 'art').report.starting?.includes(w.handle.rid));
+    assert.equal(w.local.startsEntered, 1);
+  } finally { w.setDrop(() => false); await w.finish(); }
+});
+
+test('a completed receipt beyond the report limit stays held through Down until explicitly acknowledged', { skip: !hasAge }, async () => {
+  const w = await prepared('codex', 'c'.repeat(64));
+  let padded = false, allowReceipt = false;
+  w.setRequestDrop((_path, body) => {
+    const receipt = body.report?.done?.[w.handle.rid];
+    if (receipt && !allowReceipt) {
+      padded = true;
+      body.report.done = Object.fromEntries([...Array.from({ length: 64 }, (_, i) => [i.toString(16).padStart(16, '0'), { id: `unrelated-native-${i}` }]), [w.handle.rid, receipt]]);
+    }
+    return false;
+  });
+  try {
+    w.hr.publishPreparedLaunch(w.handle);
+    await wait(() => padded && hostOf(w.env, 'art').report.starting?.includes(w.handle.rid));
+    update(w.env, state => { state.houses['h-1'].state = 'running'; });
+    down(w.env, {}, { kind: 'owner' }, { id: 'h-1' });
+    await wait(() => hostOf(w.env, 'art').quiescing);
+    assert.equal(hostOf(w.env, 'art').report.done[w.handle.rid], undefined);
+    assert.equal(readHouseLaunch(w.env, w.handle.id).state, 'published', 'report truncation is not proof of no native work');
+    assert.equal(w.left(), false);
+    allowReceipt = true;
+    await wait(() => w.left());
+    assert.equal(readHouseLaunch(w.env, w.handle.id).state, 'ready');
+    assert.equal(w.local.startsEntered, 1);
+    assert.equal(w.ended.length, 1);
+  } finally { allowReceipt = true; w.setRequestDrop(() => false); await w.finish(); }
+});
+
+test('missing pending metadata cannot downgrade an established host into a pre-start refusal proof', { skip: !hasAge }, async () => {
+  const w = await prepared('codex', 'd'.repeat(64));
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const start = w.local.start.bind(w.local);
+  w.local.start = async options => { await gate; return start(options); };
+  try {
+    w.hr.publishPreparedLaunch(w.handle);
+    await wait(() => hostOf(w.env, 'art').report.starting?.includes(w.handle.rid));
+    w.setRequestDrop((_path, body) => { if (body.report) { body.report.caps = ['parts']; delete body.report.starting; } return false; });
+    update(w.env, state => { state.houses['h-1'].state = 'running'; });
+    down(w.env, {}, { kind: 'owner' }, { id: 'h-1' });
+    await wait(() => hostOf(w.env, 'art').report.startingUnknown === true);
+    assert.equal(hostOf(w.env, 'art').report.done[w.handle.rid], undefined);
+    assert.equal(readHouseLaunch(w.env, w.handle.id).state, 'published');
+    assert.equal(w.left(), false);
+    w.setRequestDrop(() => false); release();
+    await wait(() => w.left());
+    assert.equal(w.local.startsEntered, 1);
+  } finally { w.setRequestDrop(() => false); release(); await w.finish(); }
 });

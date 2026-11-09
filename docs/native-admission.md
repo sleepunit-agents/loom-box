@@ -146,3 +146,30 @@ journal metadata. Both adapter fixtures verify restoration before native entry,
 one native resume under competing controllers, and preservation of subsequent
 native edits. A real worker SIGKILL during resumed Codex input verifies recovery
 of the same OS writer with explicit input uncertainty and its restored files kept.
+
+## Pending house launches and receipt acknowledgement
+
+A host advertising `native-admission` starts durable attempts asynchronously so
+native admission and input transfer cannot block authenticated sync, packing or
+owner shutdown. Actual native adapters use the shared OS launch worker and full
+selected constructor configuration. Explicit injected adapters share the same
+ledger in-process; an uncertain injected call cannot run again on every beat.
+
+The host reports every unsettled request id, including completions still waiting
+for a receipt acknowledgement. The controller cannot synthesize a pre-start
+refusal for those ids. The receipt list is bounded; the unsettled-id list must
+not discard ids merely because they fall beyond that receipt limit. Missing or
+malformed pending metadata, or loss of a previously established capability,
+remains uncertainty. A host cannot exit for cooperative shutdown with unsettled
+identities or incomplete pending metadata.
+
+A controller acknowledges a durable receipt explicitly only after persisting it.
+The host retains an unacknowledged completion even when shutdown stops returning
+requests. A receipt carries its original attempt so a lost acknowledgement can
+be retried after the bound request was removed. Terminal journal entries are
+never returned as launch requests again. Stop calls use the host's selected body
+environment, with its bootstrap task and host credential excluded.
+
+This does not yet migrate the conversation controller to the new remote methods,
+nor provide authenticated OS-process restart of the host. Those remain shipping
+requirements.

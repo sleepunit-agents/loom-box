@@ -95,8 +95,8 @@ import { AGENT_NAME, StateError, alive, withLock, load } from './state.mjs';
 import { RUNS_KEPT, causeOf, detectLoop, textHash } from './loops.mjs';
 import { STUCK_AFTER_MIN, asData, taskComment, taskOf } from './stuck.mjs';
 import { CODEX_WONT, codexDeny, configuredNativeRunner, nativeRecoveryConfiguration, nativeRunnerConfiguration, runnerFor } from './runners.mjs';
-import { admitLaunch, cancelReservedLaunch, completeLaunch, launchAttempt, launchWorkerAlive, launchWorkerIdentity, readLaunch, recoverLaunchReceipt, refuseLaunch, reserveLaunch } from './launch-journal.mjs';
-import { superviseNativeLaunch } from './native-launch.mjs';
+import { cancelReservedLaunch, launchAttempt, launchWorkerAlive, launchWorkerIdentity, readLaunch, recoverLaunchReceipt, reserveLaunch } from './launch-journal.mjs';
+import { launchInjectedNative, superviseNativeLaunch } from './native-launch.mjs';
 import { raiseAlert } from './alerthook.mjs';
 import { changed as changedCards } from './activity.mjs';
 import { keepKey } from './bodyhost.mjs';
@@ -1700,21 +1700,7 @@ function preparedLaunch(env, op, d, context) {
       saveConv(env, c);
     });
     if (configuration) return superviseNativeLaunch(env, { id, ...intent });
-    // Explicitly injected adapters use the same journal in this process. Their
-    // known pre-start failures must say so; an arbitrary error is uncertainty.
-    const admission = admitLaunch(env, id);
-    if (!admission.admitted) throw Object.assign(Error('native admission is already owned'), { nativePending: true });
-    try {
-      const input = { ...options, launchToken: admission.record.token };
-      const body = resume ? await runner.resume(resume, input) : await runner.start(input);
-      if (body.inputReady) await body.inputReady;
-      completeLaunch(env, id, body, { inputConfirmed: true });
-      return body;
-    } catch (error) {
-      if (error.nativeNotStarted === true) refuseLaunch(env, id, error.message);
-      else error.nativePending = true;
-      throw error;
-    }
+    return launchInjectedNative(env, { id, ...intent }, runner);
   };
 }
 

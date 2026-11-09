@@ -246,7 +246,7 @@ const houseRec = (h, house) => (house && h.house === house ? h : (house && h.dra
 const freshRec = (x, house, now) => !!x?.report && now - x.report.at < HOST_STALE_MS && x.report.house === house;
 const fresh = (h, now) => freshRec(h, h.house, now);
 /** What's one house's in the record (the rest is the agent's). */
-const PER_HOUSE = ['report', 'hostHash', 'bootHash', 'req', 'stop', 'inbox', 'claimed', 'cancel', 'quiescing'];
+const PER_HOUSE = ['report', 'hostHash', 'bootHash', 'req', 'stop', 'inbox', 'claimed', 'cancel', 'quiescing', 'admissionProtocol'];
 /** Draining houses that are over (or gone from the state): nothing of theirs is left to finish. */
 function pruneDraining(env, h) {
   if (!h.draining) return;
@@ -335,12 +335,15 @@ function cleanReport(r) {
   const done = {};
   for (const [rid, d] of Object.entries(r?.done ?? {}).slice(0, 64)) {
     if (!RID.test(rid) || !d || typeof d !== 'object') continue;
-    if (typeof d.id === 'string' && BODY_ID.test(d.id)) done[rid] = { id: d.id };
-    else done[rid] = { error: String(d.error ?? 'its host couldn\'t start it').slice(0, 300) };
+    const attempt = r?.caps?.includes('native-admission') && /^[0-9a-f]{64}$/.test(d.attempt ?? '') ? { attempt: d.attempt } : {};
+    if (typeof d.id === 'string' && BODY_ID.test(d.id)) done[rid] = { id: d.id, ...attempt, ...(r?.caps?.includes('native-admission') && d.inputConfirmed === true ? { inputConfirmed: true } : {}) };
+    else done[rid] = { ...attempt, error: String(d.error ?? 'its host couldn\'t start it').slice(0, 300), ...(r?.caps?.includes('native-admission') && d.nativeNotStarted === true ? { nativeNotStarted: true } : {}) };
   }
   // What this host can do beyond the first version's: `parts`, a brief that names the agent's files (briefs.mjs).
-  const caps = Array.isArray(r?.caps) ? r.caps.filter((c) => c === 'parts') : [];
-  return { bodies, done, caps };
+  const caps = Array.isArray(r?.caps) ? r.caps.filter((c) => c === 'parts' || c === 'native-admission') : [];
+  const startingUnknown = caps.includes('native-admission') && (!Array.isArray(r?.starting) || r.starting.some(id => !RID.test(id)));
+  const starting = caps.includes('native-admission') && Array.isArray(r?.starting) ? [...new Set(r.starting.filter(id => RID.test(id)))] : [];
+  return { bodies, done, caps, starting, startingUnknown };
 }
 
 /**
@@ -373,7 +376,9 @@ export function bodySync(env, caller, body, o = {}) {
       x.hostHash = keyHash(issued);
       delete x.bootHash; delete x.bootSealed;
     }
-    const { bodies, done, caps } = cleanReport(body?.report);
+    const { bodies, done, caps, starting, startingUnknown: malformedStarting } = cleanReport(body?.report);
+    const startingUnknown = malformedStarting || (x.admissionProtocol === true && !caps.includes('native-admission'));
+    if (caps.includes('native-admission')) x.admissionProtocol = true;
     const current = load(env).houses?.[house];
     const stopping = current?.state === 'stopping' && !current.job && !current.session;
     if (stopping) {
@@ -382,7 +387,7 @@ export function bodySync(env, caller, body, o = {}) {
       for (const [rid, request] of Object.entries(x.req ?? {})) {
         try { const q = JSON.parse(t.open(request.sealed).toString('utf8')); if (/^cv-[0-9a-f]{12}$/.test(q.conversation ?? '')) conversations.add(q.conversation); } catch { /* no text is recovered by guessing */ }
         // A host syncs only between native launch calls: a request absent from done has not run here.
-        if (!done[rid]) done[rid] = { error: 'its house is stopping before this request starts', nativeNotStarted: true };
+        if (!done[rid] && !startingUnknown && !starting.includes(rid)) done[rid] = { error: 'its house is stopping before this request starts', nativeNotStarted: true };
       }
       x.quiescing.conversations = [...conversations];
       for (const [id, b] of Object.entries(bodies)) {
@@ -403,14 +408,16 @@ export function bodySync(env, caller, body, o = {}) {
       if (x.claimed[d.id] && x.claimed[d.id] !== rid) done[rid] = { error: `${house} reported ${d.id} for a second request` };
       else x.claimed[d.id] = rid;
     }
+    const received = [];
     for (const [rid, receipt] of Object.entries(done)) {
-      const attempt = x.req?.[rid]?.launch;
+      const attempt = x.req?.[rid]?.launch ?? receipt.attempt;
       if (!attempt) continue;
       const record = readHouseLaunch(env, attempt);
       if (!record || record.agent !== agent || record.house !== house || record.seat !== seat || record.rid !== rid) throw new RunnerError('house launch receipt belongs to another request');
       keepHouseLaunchReceipt(env, record, receipt);
+      if (['ready', 'refused'].includes(record.state)) received.push(rid);
     }
-    x.report = { at: now, house, bodies, done, caps };
+    x.report = { at: now, house, bodies, done, caps, starting, startingUnknown };
     // A request given up on whose body the house started late: stopped, never run.
     x.cancel ??= {};
     for (const [rid, at] of Object.entries(x.cancel)) {
@@ -460,6 +467,11 @@ export function bodySync(env, caller, body, o = {}) {
     const req = {};
     for (const [rid, r] of Object.entries(x.req ?? {})) {
       if (stopping || done[rid] || x.cancel[rid]) continue;
+      if (r.launch) {
+        const record = readHouseLaunch(env, r.launch);
+        if (!record || record.agent !== agent || record.house !== house || record.seat !== seat || record.rid !== rid) throw new RunnerError('house request journal does not match its publication');
+        if (['ready', 'refused'].includes(record.state)) continue;
+      }
       try { req[rid] = JSON.parse(t.open(r.sealed).toString('utf-8')); } catch { /* its text is gone: never started */ }
     }
     const inbox = {};
@@ -471,8 +483,8 @@ export function bodySync(env, caller, body, o = {}) {
     const wanted = new Set(x.quiescing?.conversations ?? []);
     const outstanding = stopping && listConvs(env).some(c => c.agent === agent && (wanted.has(c.conversation) || belongsToHouse(c, house)) && (c.body || c.starting || c.control?.state !== 'held'));
     const live = Object.values(bodies).some(b => b.status !== 'ended');
-    const exit = stopping && !live && !outstanding && !Object.keys(x.stop ?? {}).length && !Object.keys(req).length;
-    return { req, stop: x.stop ?? {}, inbox, acked: got, ...(exit ? { exit: true, reason: 'its conversations and native sessions were collected before house rescue' } : {}), ...(issued ? { hostKey: issued } : {}) };
+    const exit = stopping && !startingUnknown && !starting.length && !live && !outstanding && !Object.keys(x.stop ?? {}).length && !Object.keys(req).length;
+    return { req, stop: x.stop ?? {}, inbox, acked: got, received, ...(stopping ? { stopping: true } : {}), ...(exit ? { exit: true, reason: 'its conversations and native sessions were collected before house rescue' } : {}), ...(issued ? { hostKey: issued } : {}) };
   });
 }
 
@@ -579,7 +591,7 @@ export class HouseRunner {
     const seat = o.seat ?? OWNER_SEAT;
     if (!SEAT.test(seat)) throw new RunnerError('invalid house launch seat');
     const parts = isParts(o.brief);
-    const ask = { harness: this.harness, model: o.model, deny: o.deny ?? [], ...(parts ? { parts: o.brief } : { brief: o.brief }), key: o.env?.LOOM_BODY_KEY,
+    const ask = { attempt: id, harness: this.harness, model: o.model, deny: o.deny ?? [], ...(parts ? { parts: o.brief } : { brief: o.brief }), key: o.env?.LOOM_BODY_KEY,
       ...(o.env?.LOOM_BODY_CONVERSATION ? { conversation: o.env.LOOM_BODY_CONVERSATION } : {}), ...(o.activity ? { activity: true } : {}),
       ...(resume ? { resume: resume.session, files: o.files ?? [] } : {}) };
     const intent = JSON.stringify({ agent: o.agent, seat, ask });
@@ -596,6 +608,7 @@ export class HouseRunner {
       if (existing) return check(existing);
       const host = this.host(o.agent, seat);
       if (host.house !== house || !houseTakes(this.env, house)) throw Object.assign(new RunnerError('its house stopped before launch reservation'), { nativeNotStarted: true });
+      if (!host.report?.caps?.includes('native-admission')) throw Object.assign(new RunnerError('its body host needs the native admission protocol; update its house runtime'), { nativeNotStarted: true, hostUpgradeRequired: true });
       if (parts && !host.report?.caps?.includes('parts')) throw Object.assign(new RunnerError('its body host cannot read this brief'), { nativeNotStarted: true });
       const record = { v: 1, id, intentHash, harness: this.harness, agent: o.agent, seat, house, rid: id.slice(0, 16),
         state: 'reserved', at: this.now().getTime(), sealed: this.transit.seal(Buffer.from(JSON.stringify(ask))),

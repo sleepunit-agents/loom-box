@@ -236,7 +236,7 @@ export function houseWorld({ sealer, claimMs = 5000, warmMs = 5000, harness = 'c
   let drop = () => false, dropRequest = () => false;
   let left = false;
   // The house declares claude (its login's env is set); a test can take it away.
-  const houseEnv = { ...(harness === 'codex' ? { LOOM_LOGIN_CODEX: '/run/loom/login/codex' } : { CLAUDE_SECURESTORAGE_CONFIG_DIR: '/run/loom/login/claude' }), HOUSE_TASK: 'the task', PATH: '/usr/bin' };
+  const houseEnv = { HOME: join(D, 'house-home'), LOOM_BOX_DATA: join(D, 'house-data'), ...(harness === 'codex' ? { LOOM_LOGIN_CODEX: '/run/loom/login/codex' } : { CLAUDE_SECURESTORAGE_CONFIG_DIR: '/run/loom/login/claude' }), HOUSE_TASK: 'the task', PATH: '/usr/bin' };
   const host = ({ idleS = 0, cwd } = {}) => {
     const client = async (p, b) => {
       if (dropRequest(p, b)) throw new Error('the request never reached the runtime');
