@@ -1,3 +1,4 @@
+import { hostStopLock, hasHostSession } from './houserunner.mjs';
 import { checkLoginExpiry } from './login-expiry.mjs';
 // The control plane's half of the runtime (loom docs/specs/runtime.md): what
 // each caller may ask of it. It runs on the machine loom runs on, reached
@@ -387,7 +388,7 @@ export function up(env, effects, caller, { agent, box, needs, task, session, slo
 }
 
 export function down(env, effects, caller, { id }) {
-  return update(env, (s) => {
+  return hostStopLock(env, () => update(env, (s) => {
     const h = s.houses[id];
     if (!h || !sees(caller, h.agent)) fail(`no house ${id}`, 404);
     // A body host's house is taken down by the owner (or the runtime), and by an agent only from a house of the same
@@ -400,10 +401,13 @@ export function down(env, effects, caller, { id }) {
     if (h.service && LIVE.has(h.state)) fail(`${id} is the ${h.service} service's house: take the service down (service-down) or move it`, 409);
     if (TERMINAL.has(h.state)) return houseView(h);
     if (h.state === 'wanted') h.state = 'stopped';
-    else h.state = 'stopping';
+    else {
+      h.state = 'stopping';
+      if (isHostHouse(h, s) && !h.job && !h.session && hasHostSession(env, h.agent, h.id)) h.cooperativeStop = true;
+    }
     h.updated = now(effects);
     return houseView(h);
-  });
+  }));
 }
 
 export function list(env, caller) {
@@ -544,7 +548,7 @@ function pollState(env, effects, caller, { facts, sessions, harnesses, usage, lo
           // A house asked for with a GPU need gets the box's GPU (t-1616).
           gpu: (h.needs ?? []).some((n) => /^gpu(:|$)/.test(n)) };
       }),
-      stop: mine.filter((h) => h.state === 'stopping').map((h) => h.id),
+      stop: mine.filter((h) => h.state === 'stopping' && !h.cooperativeStop).map((h) => h.id),
       // Its body hosts' houses, running: the box checks their agents' repos for a newer image (build-check).
       bodyHosts: mine.filter((h) => h.state === 'running' && !h.collection && isHostHouse(h, s)).map((h) => ({ id: h.id, agent: h.agent, known: !!h.build })),
       // Taken by this box and not over: one the box doesn't have (it restarted) is lost.

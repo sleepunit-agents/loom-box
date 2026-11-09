@@ -82,7 +82,7 @@ import { fileURLToPath } from 'node:url';
 import { accountsFrom, accountsOfRecord } from './accounts.mjs';
 import { endBody, readBody, resumeBody, startBody } from './bodies.mjs';
 import { CoreError, coreFrom } from './core.mjs';
-import { HouseRunner, releaseEmptySeatHouses, seatRoom, sweepSeats, sweepTransfers } from './houserunner.mjs';
+import { stoppingHosts, HouseRunner, releaseEmptySeatHouses, seatRoom, sweepSeats, sweepTransfers } from './houserunner.mjs';
 import { venueKind as kindOf, resolveFor, readModelChoice, setModelChoice } from './models.mjs';
 import { pieceName, setting } from './piece.mjs';
 import { dropSession, packSession, restoreFiles } from './sessions.mjs';
@@ -180,6 +180,7 @@ const readJson = (p) => { try { return JSON.parse(readFileSync(p, 'utf-8')); } c
 export const loadConv = (env, cv) => (CV.test(cv ?? '') ? readJson(join(convDir(env), `${cv}.json`)) : null);
 export const saveConv = (env, c) => {
   if (!CV.test(c?.conversation ?? '')) fail('not a conversation id', 500);
+  if (c.nativeRetirement && (c.nativeRetirement.body !== c.body || c.nativeRetirement.run !== (c.run ?? null))) delete c.nativeRetirement;
   writeJson(join(convDir(env), `${c.conversation}.json`), c);
 };
 export function listConvs(env) {
@@ -1875,6 +1876,7 @@ export async function ownerConversationControl(env, caller, { agent, conversatio
     if (!c) throw new StateError('no such conversation', 404);
     if ((agent !== undefined && agent !== c.agent) || (Array.isArray(caller.agents) && !caller.agents.includes(c.agent))) throw new StateError('conversation belongs to another agent', 403);
     if (action === 'resume') {
+      if (c.control?.house && load(env).houses?.[c.control.house]?.state === 'stopping') throw new StateError('its house is still saving work; resume after it finishes', 409);
       if (c.control?.state === 'pending') throw new StateError('its body is still stopping; retry when its session is saved', 409);
       if (!c.control) return { accepted: true, state: 'running' };
       before = structuredClone(c);
@@ -1911,10 +1913,12 @@ async function interruptOp(env, op, d) {
       const rec = readBody(env, op.body);
       const runner = d.runner(rec.harness, rec.local);
       const body = bodyOf(op.body, rec);
-      if (runner.remote) {
+      let committed = false;
+      try { committed = !!retirementReceipt(env, op.cv, op.body, rec, d, c0); } catch { /* still request a stop while storage is unavailable */ }
+      if (runner.remote && !committed) {
         runner.requestPack(body);
         if (!runner.packReady(body) && runner.pending(body) !== false) return;
-      } else {
+      } else if (!runner.remote && !committed) {
         if (!c0.control.asked) {
           endBody(env, op.body, { runner: d.runner, now: d.now, bodyEnv: d.bodyEnv() });
           locked(env, () => { const c = loadConv(env, op.cv); if (ours(c, op)) { c.control.asked = true; saveConv(env, c); } });
@@ -2006,6 +2010,17 @@ async function quotaOp(env, op, d) {
       try { d.accounts.hold?.({ name: a.name, until: turn?.resets, why: `${rec.harness} refused a turn of ${rec.agent}'s for a usage limit` }); } catch (e) { d.warn(`couldn't hold ${a.label ?? a.name}: ${e.message}`); }
     }
   }
+  // Reporting a turn whose text cannot be retried must not wait for unavailable session storage.
+  const lossNotice = locked(env, () => {
+    const c = loadConv(env, op.cv), r = c?.runLog?.findLast(x => x.run === op.run);
+    if (c?.runMsgs?.run === op.run && !r?.retryOf && c.runMsgs.lost?.length) {
+      outcome(c, c.runMsgs.lost, { body: 'failed', reason: 'its provider refused the turn for a usage limit, and the runtime can\'t keep its text to run it again (no age)' }, d.now().getTime());
+      const said = !c.runMsgs.lossSaid; c.runMsgs.lossSaid = true;
+      saveConv(env, c); return said;
+    }
+    return false;
+  });
+  if (lossNotice) d.warn(`${op.cv}: the refused turn's messages weren't sealed (no age): failed, not run again`);
   let saved = { slot: null, pending: [] };
   try { saved = await retire(env, op.cv, op.body, d, true); } catch (e) { if (e instanceof RetirementPending) throw e; d.warn(`ending ${op.body}: ${e.message}`); }
   const r0 = locked(env, () => {
@@ -2031,10 +2046,10 @@ async function quotaOp(env, op, d) {
     delete c.runMsgs;
     c.fed = [];
     saveConv(env, c);
-    return { retried, lost: !retried && !again.length && (mine.lost?.length ?? 0) > 0, c: { ...c } };
+    return { retried, lost: !retried && !again.length && (mine.lost?.length ?? 0) > 0, lossSaid: mine.lossSaid, c: { ...c } };
   });
   d.warn(`${op.cv}: ${op.body}'s turn was refused for a usage limit${r0?.retried ? ', and it was the retry: not run again' : ': run once more elsewhere'}`);
-  if (r0?.lost) d.warn(`${op.cv}: the refused turn's messages weren't sealed (no age): failed, not run again`);
+  if (r0?.lost && !r0.lossSaid) d.warn(`${op.cv}: the refused turn's messages weren't sealed (no age): failed, not run again`);
   if (r0?.retried) {
     let out = [];
     try { await resolveFor(env, { agent: r0.c.agent, venue: r0.c.venue, venueKind: r0.c.kind, accounts: d.accounts, now: d.now(), fetchImpl: d.fetchImpl }); } catch (e) { out = e.out ?? []; }
@@ -2109,7 +2124,7 @@ function discardPass(env, d) {
  * A body's inbox, closed: the messages the runtime fed it that its hook never took (G: not one it took, nor one already
  * waiting again, nor one twice), from the runtime's own sealed copies; then the inbox is gone, its text with it.
  */
-function takeInbox(runner, ref, c, rec) {
+function takeInbox(runner, ref, c, rec, peek = false) {
   const id = idOf(ref);
   const queued = new Set((c?.queue ?? []).map((x) => x.key));
   if (runner.remote) {
@@ -2118,7 +2133,7 @@ function takeInbox(runner, ref, c, rec) {
     const body = bodyOf(ref, rec ?? {});
     const unheard = runner.unheard?.(body);
     const out = (c?.fed ?? []).filter((x, i, all) => (unheard === null || unheard === undefined || unheard.includes(x.key)) && !queued.has(x.key) && all.findIndex((y) => y.key === x.key) === i);
-    runner.forgetInbox?.(body);
+    if (!peek) runner.forgetInbox?.(body);
     return out;
   }
   if (!runner.inbox) return [];
@@ -2130,7 +2145,7 @@ function takeInbox(runner, ref, c, rec) {
     if (!pending.has(x.key) || taken.has(x.key) || queued.has(x.key) || out.some((y) => y.key === x.key)) continue;
     out.push(x);
   }
-  runner.inbox.remove(id);
+  if (!peek) runner.inbox.remove(id);
   return out;
 }
 
@@ -2146,50 +2161,83 @@ class RetirementPending extends Error {
   constructor(pending) { super('its session writer has not acknowledged retirement'); this.pending = pending; }
 }
 
+function retirementReceipt(env, cv, ref, rec, _d, c = loadConv(env, cv)) {
+  const r = c?.nativeRetirement;
+  if (!r || r.body !== ref || r.instance !== (rec.instance ?? null) || r.started !== rec.started || r.run !== (c?.run ?? null)) return null;
+  if (!Array.isArray(r.pending)) throw Error('invalid retirement receipt');
+  if (r.slot && (!existsSync(slotFile(env, cv)) || r.slot.harness !== rec.harness || typeof r.slot.session !== 'string')) throw Error('its committed native slot is unavailable');
+  return { slot: r.slot, pending: r.pending };
+}
+
 async function retire(env, cv, ref, d, stop) {
   const c = loadConv(env, cv);
   let rec;
   try { rec = readBody(env, ref); } catch { return { slot: null, pending: [] }; }
   const runner = d.runner(rec.harness, rec.local);
   const body = bodyOf(ref, rec);
+  let committed = null, receiptError = false;
+  try { committed = retirementReceipt(env, cv, ref, rec, d, c); } catch { receiptError = true; }
   // A stop request isn't a completed stop. Keep ownership and inbox data until
   // the native writer (or the remote house's pack) has acknowledged collection.
-  if (!runner.remote) {
+  if (!runner.remote && !committed) {
     try {
       const stopped = () => runner.stopped ? runner.stopped(body) === true : ['idle', 'ended'].includes(runner.status(body));
       if (!rec.ended && (stop || !stopped())) endBody(env, ref, { runner: d.runner, now: d.now, bodyEnv: d.bodyEnv() });
       if (!stopped()) throw new RetirementPending();
     } catch { throw new RetirementPending(); }
   }
-  const pending = c?.retiring?.pendingInbox ?? takeInbox(runner, ref, c, rec);
-  const slot = (() => { try { return runner.slotOf(body) ?? rec.slot; } catch { return rec.slot; } })();
-  let files = [];
-  try {
-    if (runner.remote) files = await runner.pack(body);
-    else {
-      files = packSession(runner, slot, body);
-    }
-  } catch (e) {
-    if (runner.remote && runner.pending?.(body) !== false) throw new RetirementPending(pending);
-    d.warn(`no session files for ${cv} (${e.message}): it resumes from its digests`); files = null;
-  }
-  if (runner.remote && !rec.ended) { try { endBody(env, ref, { runner: d.runner, now: d.now, bodyEnv: d.bodyEnv() }); } catch { /* gone */ } }
-  if (!runner.remote) dropSession(runner, slot, body);
-  let kept = null;
-  // An empty pack (its harness kept nothing, or it was too big to keep) is no slot: a slot that could never resume
-  // would fail every delivery for its whole window. The next body starts fresh, from the conversation's digests.
-  if (slot && c && Array.isArray(files) && files.length) {
+  const file = slotFile(env, cv);
+  if (receiptError) throw new RetirementPending();
+  let slot = committed?.slot ?? (() => { try { return runner.slotOf(body) ?? rec.slot; } catch { return rec.slot; } })();
+  let files = [], pending = committed?.pending ?? c?.retiring?.pendingInbox ?? takeInbox(runner, ref, c, rec, true);
+  if (!committed) {
     try {
-      const blob = d.sealer.seal(Buffer.from(JSON.stringify({ v: 1, harness: slot.harness, session: slot.session, files })));
-      mkdirSync(dirname(slotFile(env, cv)), { recursive: true, mode: 0o700 });
-      writeFileSync(slotFile(env, cv), blob, { mode: 0o600 });
-      const now = d.now().getTime();
-      kept = { harness: slot.harness, session: slot.session, saved: new Date(now).toISOString(), until: new Date(now + windowMs(env, c.venue, c.kind)).toISOString() };
+      files = runner.remote ? await runner.pack(body, { deferAck: true }) : packSession(runner, slot, body);
     } catch (e) {
-      d.warn(`no slot kept for ${cv} (${e.message}): it resumes from its digests`);
+      if (runner.remote && runner.pending?.(body) !== false) throw new RetirementPending(pending);
+      d.warn(`no session files for ${cv} (${e.message}): it resumes from its digests`); files = null;
+    }
+    slot ??= (() => { try { return runner.slotOf(body) ?? rec.slot; } catch { return rec.slot; } })();
+    pending ??= takeInbox(runner, ref, c, rec, true);
+    let kept = null, prepared = null;
+    if (Array.isArray(files) && files.length) {
+      if (!slot || !c) throw new RetirementPending(pending);
+      const at = d.now().getTime();
+      kept = { harness: slot.harness, session: slot.session, saved: new Date(at).toISOString(), until: new Date(at + windowMs(env, c.venue, c.kind)).toISOString() };
+      const tmp = `${file}.${randomBytes(8).toString('hex')}.tmp`;
+      try {
+        const blob = d.sealer.seal(Buffer.from(JSON.stringify({ v: 1, harness: slot.harness, session: slot.session, files })));
+        mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+        writeFileSync(tmp, blob, { mode: 0o600 }); prepared = tmp;
+      } catch (e) {
+        try { rmSync(tmp, { force: true }); } catch { /* encrypted temporary file stays private */ }
+        d.warn(`keeping ${cv}'s native session until its slot can be committed (${e.message})`);
+        throw new RetirementPending(pending);
+      }
+    }
+    try {
+      const accepted = locked(env, () => {
+        const current = loadConv(env, cv), actual = readBody(env, ref);
+        if (!current || current.body !== ref || current.run !== c?.run || actual.instance !== rec.instance || actual.started !== rec.started) return false;
+        if (prepared) renameSync(prepared, file);
+        current.nativeRetirement = { body: ref, instance: rec.instance ?? null, started: rec.started, run: current.run ?? null, slot: kept, pending };
+        saveConv(env, current); return true;
+      });
+      if (!accepted) throw new RetirementPending(pending);
+      committed = { slot: kept, pending };
+    } catch {
+      if (prepared) { try { rmSync(prepared, { force: true }); } catch {} }
+      throw new RetirementPending(pending);
     }
   }
-  return { slot: kept, pending };
+
+  // The receipt makes this boundary retryable even if the worker dies before updating the conversation pointer.
+  if (runner.remote) {
+    runner.ackPack?.(body);
+    if (!rec.ended) { try { endBody(env, ref, { runner: d.runner, now: d.now, bodyEnv: d.bodyEnv() }); } catch { /* gone */ } }
+  } else dropSession(runner, slot, body);
+  takeInbox(runner, ref, c, rec);
+  return { slot: committed?.slot ?? null, pending: pending ?? [] };
 }
 
 /** A slot past its window: deleted, with the harness's own local transcript files for that session, where they're here. */
@@ -2284,6 +2332,14 @@ async function stopStuck(env, op, d) {
  */
 export async function tick(env, o = {}, only, mem = new Map()) {
   const d = depsOf(env, o);
+  // A physical warm-house stop holds its conversations before any further delivery or replacement work.
+  const housesStopping = stoppingHosts(env);
+  if (housesStopping.length) locked(env, () => {
+    for (const c of listConvs(env)) {
+      const h = housesStopping.find(h => h.agent === c.agent && (h.conversations.includes(c.conversation) || ['claude', 'codex'].some(kind => c.body?.startsWith(`${kind}:${h.house}-`))));
+      if (h && !c.control) { c.control = { id: randomBytes(12).toString('hex'), at: d.now().toISOString(), state: c.body || c.starting ? 'pending' : 'held', house: h.house }; saveConv(env, c); }
+    }
+  });
   discardPass(env, d);
   if (only) await drain(env, only, d, mem);
   const now = d.now().getTime();
