@@ -223,3 +223,19 @@ Both Claude and Codex cover four boundaries:
 Every case verifies one native launch and one house, then posts one reply through
 the recovered native session and its original sender proof. These process tests
 do not substitute for real-container host-failure/session-collection verification.
+
+## Session read failures during acknowledged retirement
+
+An acknowledged native stop is only permission to collect its files. A failed
+filesystem read is not evidence that the session is empty. Both the local
+retirement transaction and the shared house host retain the original session
+and pending stop, retry collection, and avoid admitting replacement work until
+collection succeeds. House retries do not repeat the native stop. Only the
+explicit `SessionSizeError` preserves the documented over-6-MB fallback to an
+empty continuity pack; other read failures cannot silently select that fallback.
+
+The body-stop and retirement-commit regressions cover persistent read failure,
+recovery of the original transcript, no empty slot receipt, and the explicit
+size limit. These do not close the separate unexpected-house-host-exit gap:
+auto-removed containers and stateless cleanup still require durable native
+history collection before that cleanup can be considered safe.

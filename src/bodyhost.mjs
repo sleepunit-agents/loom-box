@@ -11,7 +11,7 @@ import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { composeBrief } from './briefs.mjs';
-import { packSession, dropSession, restoreFiles } from './sessions.mjs';
+import { packSession, dropSession, restoreFiles, SessionSizeError } from './sessions.mjs';
 import { PART_CHARS } from './houserunner.mjs';
 import { ClaudeRunner, CodexRunner, nativeRunnerConfiguration } from './runners.mjs';
 import { launchInjectedNative, superviseNativeLaunch } from './native-launch.mjs';
@@ -226,15 +226,16 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
       try { status = r.status({ id }); } catch { continue; }
       if (status !== 'idle' && status !== 'ended') continue;
       if (r.stopped) { try { if (!r.stopped({ id })) continue; } catch { continue; } }
-      delete b.stopPending;
-      if (b.cv) dropKey(env, b.cv, b.key);
-      heard.delete(id);
-      b.ended = true;
       if (s.pack) {
         const slot = (() => { try { return r.slotOf({ id }); } catch { return null; } })();
         // An empty pack (nothing kept, or too big to keep) is no slot: the runtime starts the next body fresh.
         let files = [];
-        try { files = packSession(r, slot, { id }); } catch (e) { log(`packing ${id}: ${e.message}`); files = []; }
+        try { files = packSession(r, slot, { id }); } catch (e) {
+          log(`packing ${id}: ${e.message}`);
+          // A failed read is not an empty session. Keep its files and stop
+          // ownership so the next beat retries without another native stop.
+          if (!(e instanceof SessionSizeError)) continue;
+        }
         dropSession(r, slot, { id });
         const all = Buffer.from(JSON.stringify(files)).toString('base64');
         const parts = [];
@@ -244,6 +245,10 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
         // A plain stop leaves nothing: its session's files go (only a pack keeps them, sealed, in a slot).
         dropSession(r, (() => { try { return r.slotOf({ id }); } catch { return null; } })(), { id });
       }
+      delete b.stopPending;
+      if (b.cv) dropKey(env, b.cv, b.key);
+      heard.delete(id);
+      b.ended = true;
     }
     // An ended body is reported once its stop is answered, then forgotten (unless its session is still going back).
     for (const [id, b] of mine) if (b.ended && !got.stop?.[id] && !packing.has(id) && bodies[id]?.status === 'ended') mine.delete(id);
@@ -265,7 +270,8 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
       }
     }
     const working = Object.values(bodies).some((b) => b.status === 'working');
-    if (working || Object.keys(req).length || packing.size || launching.size || uncertain.size) lastBusy = now();
+    const collecting = [...mine.values()].some(b => b.stopPending !== undefined);
+    if (working || collecting || Object.keys(req).length || packing.size || launching.size || uncertain.size) lastBusy = now();
     if (idleS && now() - lastBusy >= idleS * 1000) { log(`idle ${idleS}s: leaving`); return; }
     await sleep(SYNC_MS);
   }

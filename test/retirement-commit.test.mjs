@@ -71,3 +71,29 @@ test('remote retirement keeps the received pack through seal failure and recover
     assert.equal(h.ended.length,1);
   }finally{if(host&&!h.left()){await h.kill();await host}await first}
 });
+
+test('local native read failure keeps retirement pending until the transcript can be collected', async () => {
+  const w = world();
+  const a = await deliver(w.env, w.msg('dm:read-checkpoint', 'original native work'), w.o);
+  const before = loadConv(w.env, a.conversation), id = before.body.split(':')[1];
+  const native = w.runner.slotOf({ id }).session;
+  const originalFiles = w.runner.sessionFiles.bind(w.runner);
+  w.runner.sessionFiles = () => ({ keep: [{ root: Object.keys(w.runner.roots)[0], rel: 'temporarily-unreadable-native-session' }], drop: [] });
+  await ownerConversationControl(w.env, { kind: 'owner' }, { conversation: a.conversation, action: 'interrupt' }, w.o);
+  await tick(w.env, w.o);
+  let c = loadConv(w.env, a.conversation);
+  assert.equal(c.control.state, 'pending');
+  assert.equal(c.body, before.body);
+  assert.equal(c.nativeRetirement, undefined, 'a failed filesystem read cannot commit an empty slot');
+  assert.equal(c.slot, undefined);
+  assert.equal(existsSync(w.runner.transcript(native)), true);
+  assert.equal(w.log.filter(x => x[0] === 'resume').length, 0);
+  w.runner.sessionFiles = originalFiles;
+  await tick(w.env, w.o);
+  c = loadConv(w.env, a.conversation);
+  assert.equal(c.control.state, 'held');
+  assert.equal(c.slot.session, native);
+  assert.equal(existsSync(w.runner.transcript(native)), false, 'cleanup follows a committed slot');
+  await ownerConversationControl(w.env, { kind: 'owner' }, { conversation: a.conversation, action: 'resume' }, w.o);
+  assert.equal(loadConv(w.env, a.conversation).runLog.at(-1).how, 'resumed');
+});

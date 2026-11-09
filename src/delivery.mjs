@@ -86,7 +86,7 @@ import { CoreError, coreFrom } from './core.mjs';
 import { stoppingHosts, HouseRunner, releaseEmptySeatHouses, seatRoom, sweepSeats, sweepTransfers } from './houserunner.mjs';
 import { venueKind as kindOf, resolveFor, readModelChoice, setModelChoice } from './models.mjs';
 import { pieceName, setting } from './piece.mjs';
-import { dropSession, packSession, restoreFiles } from './sessions.mjs';
+import { dropSession, packSession, restoreFiles, SessionSizeError } from './sessions.mjs';
 import { ageSealer } from './sealed.mjs';
 import { RulesError, gatesWords, policyOf, rulesFor, sameRules, tierOf } from './policy.mjs';
 import { gatesOf } from './gates.mjs';
@@ -2440,6 +2440,10 @@ async function retire(env, cv, ref, d, stop) {
       files = runner.remote ? await runner.pack(body, { deferAck: true }) : packSession(runner, slot, body);
     } catch (e) {
       if (runner.remote && runner.pending?.(body) !== false) throw new RetirementPending(pending);
+      if (!runner.remote && !(e instanceof SessionSizeError)) {
+        d.warn(`keeping ${cv}'s native session until its files can be read (${e.message})`);
+        throw new RetirementPending(pending);
+      }
       d.warn(`no session files for ${cv} (${e.message}): it resumes from its digests`); files = null;
     }
     slot ??= (() => { try { return runner.slotOf(body) ?? rec.slot; } catch { return rec.slot; } })();

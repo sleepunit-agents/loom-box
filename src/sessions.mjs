@@ -7,6 +7,7 @@ import { dirname, isAbsolute, join, normalize, sep } from 'node:path';
 export const MAX_SESSION_BYTES = 6 * 1024 * 1024;
 
 export class SessionError extends Error {}
+export class SessionSizeError extends SessionError {}
 
 function readTree(root, rel, out, budget) {
   const p = join(root, rel);
@@ -15,7 +16,7 @@ function readTree(root, rel, out, budget) {
   if (st.isDirectory()) { for (const n of readdirSync(p)) readTree(root, join(rel, n), out, budget); return; }
   if (!st.isFile()) return;
   budget.n += st.size;
-  if (budget.n > MAX_SESSION_BYTES) throw new SessionError(`its session is over ${MAX_SESSION_BYTES / 1024 / 1024} MB`);
+  if (budget.n > MAX_SESSION_BYTES) throw new SessionSizeError(`its session is over ${MAX_SESSION_BYTES / 1024 / 1024} MB`);
   out.push({ rel, data: readFileSync(p).toString('base64') });
 }
 
