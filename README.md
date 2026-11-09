@@ -771,3 +771,12 @@ An interactive entrypoint runs `loom-runtime session-host` for `HOUSE_SESSION=1`
 `loom runtime session` opens the conversation. `loom runtime attach h-ID` reconnects it, including the latest final report. Tool activity appears while a turn runs, and a new message can steer the conversation during work. Use `/begin` and `/end` for one multiline message; `/cancel` discards an unfinished multiline message. `/stop` waits through common cancellation and saves native continuity; `/resume` uses that continuity. `/model auto|claude|codex` sets the same conversation choice as Comms. `/shell` opens the house’s ordinary shell, with its configured tools, mounts and network; `attach h-ID --shell` opens that shell directly.
 
 `/detach` leaves the native conversation running for reconnect. `/close` stops and saves it before asking the box to close the house; new input cancels a pending close. An unconfirmed send stays in the terminal: `/retry` uses the same message ID, and `/discard` explicitly discards it. EOF prints unconfirmed or unfinished text and exits unsuccessfully so it is recoverable. `/status` and `/help` describe the current state and controls. Guest capacity cleanup never reaps a session house waiting for its owner to reconnect. The entrypoint still rescues repository changes when the house closes.
+
+
+### Recovery and state collection
+
+A lost attached launcher does not end its container. The box observes the physical container and adopts a running one without restarting its work. Inspection errors and containers still being created remain unknown; they do not authorize stop, removal or state cleanup.
+
+After physical exit, stateful houses retain their local state until the control plane acknowledges its upload. A private atomic completion receipt records only bookkeeping and phase, never a prompt, run key or secret value. Uploads and terminal reports retry, including across a runner restart; a lost reply after a committed report is reconciled against the next authoritative poll. Cleanup follows these acknowledgements. Polls include the box’s own active house bookkeeping so an adopted service or slot retains its state requirements. An older control plane that cannot supply those requirements leaves collection pending and keeps the local data.
+
+Pending collection appears as “Saving state” or “Finishing” on the Runtime page and CLI. The physically ended house is not offered new model work or counted as a running guest container while its local state is retained.

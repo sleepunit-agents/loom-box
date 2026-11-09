@@ -174,7 +174,7 @@ function releaseLocked(env, agent, seat, nowMs) {
   for (const other of seatsOf(env, agent)) {
     if (other === OWNER_SEAT || other === seat) continue;
     const h = loadHost(env, agent, other);
-    if (!h.house || s.houses[h.house]?.session || s.houses[h.house]?.state !== 'running' || !freshRec(h, h.house, nowMs) || h.draining) continue;
+    if (!h.house || s.houses[h.house]?.collection || s.houses[h.house]?.session || s.houses[h.house]?.state !== 'running' || !freshRec(h, h.house, nowMs) || h.draining) continue;
     if (Object.values(h.report.bodies ?? {}).some((b) => b.status !== 'ended')) continue;
     if (Object.keys(h.req ?? {}).length || Object.keys(h.stop ?? {}).length || Object.keys(h.inbox ?? {}).length) continue;
     // Just handed to a start (warm, then launch's request): not empty, it's about to have a body.
@@ -236,7 +236,7 @@ function pruneDraining(env, h) {
 /** A house a body may still be handed to: asked for, starting or running. One stopping (or gone) never is, however fresh its host's last report. */
 const TAKES = new Set(['wanted', 'starting', 'running']);
 const LIVE = new Set([...TAKES, 'stopping']);
-const houseTakes = (env, id) => { try { return TAKES.has(load(env).houses[id]?.state); } catch { return false; } };
+const houseTakes = (env, id) => { try { const h = load(env).houses[id]; return !!h && !h.collection && TAKES.has(h.state); } catch { return false; } };
 
 /** What a house runs as its task to be the agent's body host. */
 /** Register an already allocated raw-task house, retaining its box, needs and state slot. */
@@ -581,14 +581,18 @@ export class HouseRunner {
   /** Its house's part of the record, if its house is the agent's or draining, and its host is reporting. */
   rec(body) {
     const x = houseRec(this.host(body.agent, this.seatFor(body)), body.house);
-    return x && freshRec(x, body.house, this.now().getTime()) ? x : null;
+    let collecting = false;
+    try { collecting = !!load(this.env).houses?.[body.house]?.collection; } catch { /* fresh reports still carry their own facts */ }
+    return x && (collecting || freshRec(x, body.house, this.now().getTime())) ? x : null;
   }
 
   entry(body) {
     const raw = rawOf(body);
     const x = raw ? this.rec(body) : null;
     if (!x) return null;
-    return x.report.bodies[raw] ?? { status: 'ended' };
+    const entry = x.report.bodies[raw] ?? { status: 'ended' };
+    try { if (load(this.env).houses?.[body.house]?.collection) return { ...entry, status: 'ended' }; } catch { /* keep the observed report */ }
+    return entry;
   }
 
   status(body) { return this.entry(body)?.status ?? 'unknown'; }
@@ -596,7 +600,7 @@ export class HouseRunner {
   pending(body) {
     try {
       const h = load(this.env).houses?.[body.house];
-      return !!h && h.agent === body.agent && ['wanted', 'starting', 'running', 'stopping'].includes(h.state);
+      return !!h && !h.collection && h.agent === body.agent && ['wanted', 'starting', 'running', 'stopping'].includes(h.state);
     } catch { return true; } // An unreadable control plane cannot prove termination either.
   }
   /** Its host reports it alive/ended; a live house with no fresh report is unknown. */

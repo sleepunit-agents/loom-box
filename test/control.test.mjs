@@ -654,3 +654,16 @@ test('a box polling loom over plain HTTP outside the tailnet won\'t run a login'
   assert.equal(load(env).logins[l.id].state, 'failed');
   assert.match(load(env).logins[l.id].error, /plain HTTP, outside the tailnet/);
 });
+
+
+test('collection progress belongs only to the house’s own box and clears after terminal acknowledgement',()=>{
+  const h=ok(call(art,'up',{task:'work'}));ok(call(box('one'),'claim',{id:h.id}));
+  ok(call(box('one'),'report',{id:h.id,state:'running'}));
+  assert.equal(call(art,'collection-status',{id:h.id,phase:'state'}).status,403);
+  ok(call(owner,'add-box',{name:'other',mayHost:'art'}));
+  assert.equal(call(box('other'),'collection-status',{id:h.id,phase:'state'}).status,404);
+  assert.equal(call(box('one'),'collection-status',{id:h.id,phase:'secret-text'}).status,400);
+  assert.equal(ok(call(box('one'),'collection-status',{id:h.id,phase:'state'})).collection.phase,'state');
+  const done=ok(call(box('one'),'report',{id:h.id,state:'done',exit:0}));assert.equal(done.collection,undefined);
+  assert.equal(call(box('one'),'collection-status',{id:h.id,phase:'state'}).status,409);
+});
