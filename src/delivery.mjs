@@ -2869,7 +2869,7 @@ export function conversationOrigins(env, caller, { agent, conversations } = {}) 
   const origins = {};
   for (const cv of conversations) {
     let c = loadConv(env, cv);
-    if (!c || c.agent !== agent) throw new StateError('no such conversation', 404);
+    if (!c || c.agent !== agent) continue; // An old or foreign id never hides other valid roots in the batch.
     const seen = new Set([cv]);
     for (let n = 0; n < 32; n++) {
       const parent = c.originConversation ?? c.spawn?.origin;

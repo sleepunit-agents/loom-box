@@ -339,6 +339,6 @@ test('wake provenance follows same-agent continuations without widening their pr
   assert.deepEqual(answer.body.origins, Object.fromEntries(body.conversations.map((cv) => [cv, root.conversation])));
   assert.equal((await call({ kind: 'agent', agent: 'art' }, body)).status, 403);
   assert.equal((await call({ kind: 'owner', agents: ['mark'] }, body)).status, 403);
-  assert.equal((await call({ kind: 'owner' }, { agent: 'mark', conversations: [root.conversation] })).status, 404);
+  assert.deepEqual((await call({ kind: 'owner' }, { agent: 'mark', conversations: [root.conversation] })).body, { origins: {} });
   assert.equal((await call({ kind: 'owner' }, { agent: 'art', conversations: [[root.conversation]] })).status, 400);
 });
