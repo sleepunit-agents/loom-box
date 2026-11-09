@@ -66,3 +66,18 @@ feed must not silently rebind a grant. Preserve PR145 native admission ownership
 Keep every emitted core payload field stable across retries. Classify core's
 HTTP409 payload conflict and permanent 4xx refusals rather than catching them as
 transient forever. Non-core adapters remain disabled without equivalent dedup.
+
+Clock/admission checkpoint: companion clock accepts `wake in/at --continuation
+cont-…`, stores only `{handle,wake}`, and forwards it under its piece token.
+Core's strict parser accepts exactly those two fields on a scheduled wake and
+refuses every non-clock caller. Runtime seals the clock firing with its exact
+delivery id. Only a successful start/resume commit retains the admission snapshot
+(run, principal, reset and target); queued deliveries and warm feeds cannot bind.
+The child's holder-authenticated enqueue/status lazily binds from that admission,
+so a crash between admission and binding is recoverable without a body bind API.
+
+Still draft: the clock's existing remove-before-post fire flow is not a durable
+firing journal. A process kill there can lose the wake or regenerate a different
+payload. Prove and fix clock recovery before shipping, alongside tick/CLI,
+permanent adapter refusal classification and actual runtime-outbox process-kill
+proof. No merge/install or full-route delivery claim follows from these tests.

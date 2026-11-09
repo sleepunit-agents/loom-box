@@ -621,7 +621,7 @@ const str = (v, max, min = 1) => typeof v === 'string' && v.length >= min && v.l
 /** The deliver body (agent-runtime.md, "The deliver contract"), checked whole: `source` (the calling piece) is core's, added as it forwards. */
 export function parseDelivery(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) fail('a delivery is a JSON object');
-  const bad = Object.keys(raw).find((k) => !['id', 'agent', 'venue', 'place', 'label', 'from', 'kind', 'at', 'text', 'source', 'local'].includes(k));
+  const bad = Object.keys(raw).find((k) => !['id', 'agent', 'venue', 'place', 'label', 'from', 'kind', 'at', 'text', 'source', 'local', 'continuation'].includes(k));
   if (bad !== undefined) fail(`a delivery has no key ${JSON.stringify(bad)}`);
   if (!str(raw.id, MAX_ID)) fail(`id is the source's own id for the message, 1-${MAX_ID} characters`);
   if (!AGENT_NAME.test(raw.agent ?? '')) fail('agent is an agent id');
@@ -638,6 +638,12 @@ export function parseDelivery(raw) {
   if (!PIECE.test(raw.source ?? '')) fail('source is the calling piece, as core forwards it');
   if (raw.local !== undefined && raw.local !== true) fail('local is true, or left out');
   if (raw.local === true && (raw.venue !== 'wake' || raw.kind !== 'wake' || raw.from.kind !== 'schedule')) fail('local is only for a wake from a schedule, on venue wake');
+  if (raw.continuation !== undefined) {
+    const c = raw.continuation;
+    if (!c || typeof c !== 'object' || Array.isArray(c) || Object.keys(c).some((k) => !['handle', 'wake'].includes(k)) ||
+        !/^cont-[0-9a-f]{64}$/.test(c.handle ?? '') || !/^w-[0-9a-f]{6}$/.test(c.wake ?? '')) fail('continuation is an opaque handle and exact wake id');
+    if (raw.source !== 'clock' || raw.venue !== 'wake' || raw.kind !== 'wake' || raw.from.kind !== 'schedule') throw new DeliveryError('only the authenticated clock may carry a continuation wake', 403);
+  }
   return { ...raw };
 }
 
@@ -791,7 +797,7 @@ async function deliverOnce(env, raw, o) {
           else c.control.resume = true;
         }
         // Whom the clock said a wake is for stays with it while it waits (t-1975): a reset re-notes it as that, never more.
-        c.queue.push({ key, id: m.id, at: m.at, from: m.from, kind: m.kind, ...(wake ? { wakeFor: wakeFor ?? '-' } : {}), ...(local ? { local: true } : {}), ...(o.deferPeer === true && m.from.kind === 'agent' ? { untilIdle: true } : {}), ...(tier ? { tier } : {}), ...(owner ? { owner: true } : {}), ...(tierUnread ? { tierUnread: true } : {}), ...(sealed ? { sealed } : { mem: true }) });
+        c.queue.push({ ...(m.continuation ? { clockContinuation: d.sealer.seal(Buffer.from(JSON.stringify({ ...m.continuation, delivery: m.id }))).toString('base64') } : {}), key, id: m.id, at: m.at, from: m.from, kind: m.kind, ...(wake ? { wakeFor: wakeFor ?? '-' } : {}), ...(local ? { local: true } : {}), ...(o.deferPeer === true && m.from.kind === 'agent' ? { untilIdle: true } : {}), ...(tier ? { tier } : {}), ...(owner ? { owner: true } : {}), ...(tierUnread ? { tierUnread: true } : {}), ...(sealed ? { sealed } : { mem: true }) });
       }
       c.last = d.now().toISOString();
       saveConv(env, c);
@@ -1713,6 +1719,8 @@ async function executeOne(env, op, d, mem) {
       }
       c.body = r.body;
       c.run = run;
+      // Only start/resume admission owns this binding. Warm feed never changes it.
+      c.continuationAdmissions = op.msgs.filter((x) => x.clockContinuation).map((x) => ({ run, sealed: x.clockContinuation, child: { conversation: c.conversation, run, agent: c.agent, principal: principalOf(env, c), reset: c.actsFor?.reset ?? null, resetPending: !!c.resetPending, target: { venue: c.venue, place: c.place } } }));
       // A local body speaks with its run's key as a house's body does: from the keys dir (bodyhost.mjs, keyFile), as
       // `claude --bg` gives every session its daemon's environment, not this launch's (t-1830).
       if (local) keepKey(env, op.cv, runKey);
@@ -2658,6 +2666,13 @@ export function continuationCall(env, { action, conversation, key, session, hand
   if (action === 'issue') return outbox.issue(child);
   if (action !== 'enqueue' && action !== 'status') throw new StateError('unknown continuation action', 400);
   const source = continuationSnapshot(env, outbox.sourceConversation(handle));
+  // Recover admission-to-binding after a runtime crash. These sealed records came
+  // only from core-authenticated clock delivery and the successful start/resume commit.
+  for (const a of c.continuationAdmissions ?? []) {
+    if (a.run !== c.run) continue;
+    const firing = JSON.parse(d.sealer.open(Buffer.from(a.sealed, 'base64')).toString('utf8'));
+    if (firing.handle === handle) outbox.bind(handle, { wake: firing.wake, delivery: firing.delivery }, source, a.child);
+  }
   if (action === 'enqueue') return outbox.enqueue(handle, child, source, { id, text });
   return outbox.status(handle, child, id, source);
 }
