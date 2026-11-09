@@ -784,6 +784,10 @@ async function deliverOnce(env, raw, o) {
           c.actsFor = o.spawnInit.actsFor;
           c.kind = 'agent';
         } else if (!o.spawnSender) noteSender(env, c, m, { wakeFor });
+        if (owner && c.control) {
+          if (c.control.state === 'held') delete c.control;
+          else c.control.resume = true;
+        }
         // Whom the clock said a wake is for stays with it while it waits (t-1975): a reset re-notes it as that, never more.
         c.queue.push({ key, id: m.id, at: m.at, from: m.from, kind: m.kind, ...(wake ? { wakeFor: wakeFor ?? '-' } : {}), ...(local ? { local: true } : {}), ...(o.deferPeer === true && m.from.kind === 'agent' ? { untilIdle: true } : {}), ...(tier ? { tier } : {}), ...(owner ? { owner: true } : {}), ...(tierUnread ? { tierUnread: true } : {}), ...(sealed ? { sealed } : { mem: true }) });
       }
@@ -1010,6 +1014,7 @@ function plan(env, cv, d, mem) {
   const now = d.now().getTime();
   const c = loadConv(env, cv);
   if (!c?.queue?.length) return null;
+  if (c.control) return null;
   // A wake whose kind (here, or in a house) isn't its conversation's never reaches its body (t-1830): failed, whatever
   // let it onto the queue. A person's message (the owner's Reply) has no kind and joins either.
   const stray = c.queue.filter((x) => x.kind === 'wake' && !isNote(x) && !!x.local !== !!c.local);
@@ -1497,6 +1502,7 @@ export async function answerLoop(env, cv, answer, o = {}) {
 
 async function execute(env, op, d, mem) {
   const now = () => d.now().getTime();
+  if (op.type === 'interrupt') return interruptOp(env, op, d);
   if (op.type === 'loop-note') return loopNote(env, op, d);
   if (op.type === 'stuck') return stopStuck(env, op, d);
   if (op.type === 'resume-warm') {
@@ -1826,6 +1832,87 @@ export function ownerModelChoice(env, caller, { agent, conversation, harness } =
   return harness === undefined ? readModelChoice(env, agent, conversation) : setModelChoice(env, { agent, conversation, harness });
 }
 
+/** Interrupt through the same body host and continuity slot used by normal delivery. */
+export async function ownerConversationControl(env, caller, { agent, conversation, action } = {}, o = {}) {
+  if (caller?.kind !== 'owner') throw new StateError('conversation control is the agent owner’s', 403);
+  if (!CV.test(conversation ?? '')) throw new StateError('which conversation', 400);
+  if (!['interrupt', 'resume'].includes(action)) throw new StateError('interrupt or resume', 400);
+  let before;
+  const result = locked(env, () => {
+    const c = loadConv(env, conversation);
+    if (!c) throw new StateError('no such conversation', 404);
+    if ((agent !== undefined && agent !== c.agent) || (Array.isArray(caller.agents) && !caller.agents.includes(c.agent))) throw new StateError('conversation belongs to another agent', 403);
+    if (action === 'resume') {
+      if (c.control?.state === 'pending') throw new StateError('its body is still stopping; retry when its session is saved', 409);
+      if (!c.control) return { accepted: true, state: 'running' };
+      before = structuredClone(c);
+      if (c.queue?.length) delete c.control;
+    } else if (!c.control) {
+      c.control = { id: randomBytes(12).toString('hex'), at: (o.now?.() ?? new Date()).toISOString(), state: c.body || c.starting ? 'pending' : 'held', ...(caller.who ? { by: caller.who } : {}) };
+    }
+    saveConv(env, c);
+    return { accepted: true, state: action === 'resume' ? 'resuming' : c.control?.state ?? 'running' };
+  });
+  if (before && !before.queue?.length) {
+    // This is an owner-authenticated control message, not a newly invented sender
+    // or an elevation of the conversation's original principal.
+    const r = await deliver(env, { source: 'runtime', id: `resume-${before.control?.id ?? randomBytes(12).toString('hex')}`, agent: before.agent,
+      venue: before.venue, place: before.place, from: { kind: 'agent', id: before.agent }, kind: 'message', at: before.control.at, text: 'The operator resumed this conversation. Continue the interrupted work.' },
+    { ...o, spawnSender: { principal: principalOf(env, before), targetReset: before.actsFor?.reset } });
+    if (r.error) throw new StateError(r.error, r.status ?? 503);
+    locked(env, () => {
+      const c = loadConv(env, conversation);
+      if (c?.control?.id === before.control.id && c.control.state === 'held') { delete c.control; saveConv(env, c); }
+    });
+  }
+  if (o.detach) (o.spawnWorker ?? ((cv) => spawnWorker(env, cv)))(conversation);
+  else if (before) await tick(env, o, conversation);
+  return result;
+}
+
+async function interruptOp(env, op, d) {
+  const c0 = loadConv(env, op.cv);
+  if (!c0 || !ours(c0, op) || c0.control?.id !== op.control) return;
+  let saved = { slot: null, pending: [] };
+  try {
+    if (op.body) {
+      const rec = readBody(env, op.body);
+      const runner = d.runner(rec.harness, rec.local);
+      const body = bodyOf(op.body, rec);
+      if (runner.remote) {
+        runner.requestPack(body);
+        if (!runner.packReady(body) && runner.alive(body) !== false) return;
+      } else {
+        if (!c0.control.asked) {
+          endBody(env, op.body, { runner: d.runner, now: d.now, bodyEnv: d.bodyEnv() });
+          locked(env, () => { const c = loadConv(env, op.cv); if (ours(c, op)) { c.control.asked = true; saveConv(env, c); } });
+        }
+        const status = runner.status(body);
+        if (!['idle', 'ended'].includes(status) || (runner.stopped && !runner.stopped(body))) return;
+      }
+      saved = await retire(env, op.cv, op.body, d, false);
+    }
+    locked(env, () => {
+      const c = loadConv(env, op.cv);
+      if (!ours(c, op) || c.control?.id !== op.control) return;
+      if (c.body !== op.body) return;
+      const run = c.runLog?.findLast(x => x.run === c.run);
+      if (run && !Number.isFinite(run.end)) { run.end = d.now().getTime(); run.interrupted = true; }
+      c.body = undefined;
+      delete c.idleSince;
+      if (saved.slot) c.slot = { ...saved.slot, rules: c.bodyRules ?? { guest: false } };
+      else if (op.body) delete c.slot;
+      requeue(c, saved.pending);
+      if (c.control.resume) delete c.control;
+      else c.control.state = 'held';
+      saveConv(env, c);
+    });
+  } catch (e) { d.warn(`interrupting ${op.cv}: ${e.message}`); }
+  finally {
+    locked(env, () => { const c = loadConv(env, op.cv); if (c && ours(c, op)) { delete c.starting; saveConv(env, c); } });
+  }
+}
+
 async function routeOf(env, c0, op, rules, d, cant = []) {
   const now = d.now().getTime();
   const avoid = [...new Set([...(c0.quota?.from ? [c0.quota.from] : []), ...cant])];
@@ -2115,6 +2202,15 @@ export async function tick(env, o = {}, only, mem = new Map()) {
     for (const c of listConvs(env)) {
       let dirty = false;
       if (c.starting && !isStarting(c, now)) { abandon(c, now); dirty = true; }
+      if (c.control?.state === 'pending') {
+        if (!c.starting) {
+          c.starting = mark(now);
+          ops.push({ cv: c.conversation, mark: c.starting.op, type: 'interrupt', body: c.body, control: c.control.id });
+          dirty = true;
+        }
+        if (dirty) saveConv(env, c);
+        continue;
+      }
       if (!c.starting && c.body) {
         let st = statusOf(env, c, d);
         if (st === 'working') {

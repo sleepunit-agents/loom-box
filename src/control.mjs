@@ -1452,6 +1452,9 @@ export function api(env, effects, { caller, path, body }) {
     if (path === 'model-choice') {
       return import('./delivery.mjs').then((m) => ({ status: 200, body: m.ownerModelChoice(env, caller, b) })).catch(apiError);
     }
+    if (path === 'conversation-control') {
+      return import('./delivery.mjs').then(async (m) => ({ status: 200, body: await m.ownerConversationControl(env, caller, b, { detach: true }) })).catch(apiError);
+    }
     // A body's message out, as its own agent, proving its run with LOOM_BODY_KEY (delivery.mjs, send): checked and
     // accepted at once ({accepted, ref}); the post runs detached, with its full 15 s, outside this call.
     if (path === 'send') {

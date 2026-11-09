@@ -659,6 +659,28 @@ export class HouseRunner {
     });
   }
 
+  /** Ask once, without waiting: an interrupt must survive an unavailable house. */
+  requestPack(body) {
+    const raw = rawOf(body);
+    if (!raw) return false;
+    return hostLocked(this.env, () => {
+      const seat = this.seatFor(body);
+      const h = loadHost(this.env, body.agent, seat);
+      const x = houseRec(h, body.house);
+      if (!x) return false;
+      if (!x.stop?.[raw]?.pack) {
+        (x.stop ??= {})[raw] = { pack: true, at: this.now().getTime() };
+        writeJson(hostFile(this.env, body.agent, seat), h);
+      }
+      return true;
+    });
+  }
+
+  packReady(body) {
+    const raw = rawOf(body);
+    return !!raw && existsSync(packedFile(this.env, body.agent, body.house, raw));
+  }
+
   /** Its session's files, from its house: it's stopped there and its host sends them back. [] when its house is gone. */
   async pack(body) {
     const raw = rawOf(body);
@@ -667,16 +689,7 @@ export class HouseRunner {
     if (!this.canSeal()) { this.end(body); return null; }
     const f = packedFile(this.env, body.agent, body.house, raw);
     if (this.alive(body) === false && !existsSync(f)) return [];
-    const asked = hostLocked(this.env, () => {
-      const seat = this.seatFor(body);
-      const h = loadHost(this.env, body.agent, seat);
-      // Its house isn't the agent's house now, nor one draining: nothing there to ask, and nothing to wait for.
-      const x = houseRec(h, body.house);
-      if (!x) return false;
-      (x.stop ??= {})[raw] = { pack: true, at: this.now().getTime() };
-      writeJson(hostFile(this.env, body.agent, seat), h);
-      return true;
-    });
+    const asked = existsSync(f) || this.requestPack(body);
     if (!asked) return [];
     const end = Date.now() + this.claimMs;
     while (!existsSync(f)) {

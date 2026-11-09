@@ -170,9 +170,11 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
       if (!b || b.ended || (stopped.get(id) === s.at && b.stopPending !== s.at)) continue;
       const r = runner(b.harness);
       if (b.stopPending !== s.at) {
-        stopped.set(id, s.at);
-        b.stopPending = s.at;
-        try { r.end({ id }); } catch { /* observe before collecting its files */ }
+        try {
+          r.end({ id });
+          stopped.set(id, s.at);
+          b.stopPending = s.at;
+        } catch { /* observe, then retry a request that wasn't acknowledged */ }
       }
       // A stop request is not an acknowledgement. Codex exits asynchronously and
       // may flush its rollout after SIGTERM; never snapshot or delete it mid-write.
