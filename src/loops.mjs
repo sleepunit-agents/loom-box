@@ -67,6 +67,7 @@ export function causeOf(msgs) {
  * is never called a failure for that.
  */
 export function judge(r) {
+  if (r.interrupted) return { failed: null, sig: null };
   const ok = (r.posts ?? []).filter((p) => p.ok);
   const bad = (r.posts ?? []).filter((p) => !p.ok);
   let failed = null;
@@ -95,7 +96,8 @@ export function detectLoop({ runs = [], relays = [], agent, peer, now, spawnDept
   if (spawnDepth > 8) return { pattern: 'spawn-chain', reason: 'a spawn chain reached 8 generations' };
   // A relay this agent sent while a run was going (to the end of it, and a few seconds on) is what that run said.
   const mine = relays.filter((x) => x.from === agent);
-  const done = runs.filter((r) => Number.isFinite(r.end)).map((r) => ({ ...r, relayed: mine.filter((x) => x.at >= r.at && x.at <= r.end + RELAY_SLACK_MS).length }));
+  const sinceInterrupt = runs.slice(runs.findLastIndex(r => r.interrupted) + 1);
+  const done = sinceInterrupt.filter((r) => Number.isFinite(r.end)).map((r) => ({ ...r, relayed: mine.filter((x) => x.at >= r.at && x.at <= r.end + RELAY_SLACK_MS).length }));
   const tail = (n) => (done.length >= n ? done.slice(-n) : null);
 
   // A failure streak: however fast or slow.
