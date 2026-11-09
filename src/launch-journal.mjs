@@ -1,0 +1,92 @@
+// Native admission ownership shared by launch supervisors. A dead registrar or
+// worker does not prove that a submitted native/daemon request cannot run.
+import { createHash, randomBytes } from 'node:crypto';
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { StateError, withLock } from './state.mjs';
+
+const ID = /^[0-9a-f]{64}$/;
+const BODY = /^[A-Za-z0-9-]{4,64}$/;
+const fail = message => { throw new StateError(message, 409); };
+const root = env => join(env.LOOM_BOX_DATA || join(env.HOME || homedir(), '.local/share/loom-box'), 'launches');
+const checked = id => { if (!ID.test(id ?? '')) fail('invalid native launch attempt'); return id; };
+const file = (env, id) => join(root(env), checked(id) + '.json');
+const locked = (env, fn) => withLock(root(env), 'lock', fn, 'native launch admissions', 10_000);
+
+export function launchAttempt(conversation, operation) {
+  if (!/^cv-[0-9a-f]{12}$/.test(conversation ?? '') || !/^[0-9a-f]{12}$/.test(operation ?? '')) fail('a launch needs its conversation and durable operation');
+  return createHash('sha256').update(conversation + '\0' + operation).digest('hex');
+}
+
+export function readLaunch(env, id) {
+  try { return JSON.parse(readFileSync(file(env, id), 'utf8')); }
+  catch (e) { if (e.code === 'ENOENT') return null; throw e; }
+}
+
+function save(env, record) {
+  mkdirSync(root(env), { recursive: true, mode: 0o700 });
+  const target = file(env, record.id), tmp = target + '.' + randomBytes(8).toString('hex') + '.tmp';
+  writeFileSync(tmp, JSON.stringify(record) + '\n', { mode: 0o600, flag: 'wx' });
+  renameSync(tmp, target);
+}
+
+/** No text, run key or native credentials in this journal; hash a sealed intent. */
+export function reserveLaunch(env, { id, harness, intentHash }) {
+  checked(id);
+  if (!['claude', 'codex'].includes(harness) || !ID.test(intentHash ?? '')) fail('a launch needs its harness and immutable intent hash');
+  return locked(env, () => {
+    const old = readLaunch(env, id);
+    if (old) {
+      if (old.harness !== harness || old.intentHash !== intentHash) fail('native launch attempt already has another intent');
+      return old;
+    }
+    const record = { v: 1, id, harness, intentHash, token: randomBytes(12).toString('hex'), state: 'reserved', at: Date.now() };
+    save(env, record);
+    return record;
+  });
+}
+
+/** The boot and kernel process start time distinguish a worker from PID reuse. */
+export function launchWorkerIdentity() {
+  const stat = readFileSync('/proc/self/stat', 'utf8');
+  const tail = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/);
+  return { pid: process.pid, boot: readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim(), birth: tail[19] };
+}
+const sameWorker = (a, b) => !!a && a.pid === b.pid && a.boot === b.boot && a.birth === b.birth;
+
+/** Only a reserved attempt grants permission to enter the native launcher, once.
+ * Re-reading even from the same worker is observation, never another admission. */
+export function admitLaunch(env, id) {
+  const worker = launchWorkerIdentity();
+  return locked(env, () => {
+    const r = readLaunch(env, id);
+    if (!r) fail('native launch was not reserved');
+    if (r.state !== 'reserved') return { admitted: false, record: r };
+    Object.assign(r, { state: 'admitted', worker, admittedAt: Date.now() });
+    save(env, r);
+    return { admitted: true, record: r };
+  });
+}
+
+/** The worker commits a native identity before returning it to its registrar. */
+export function completeLaunch(env, id, body) {
+  if (!body || !BODY.test(body.id ?? '') || !['claude', 'codex'].includes(body.harness)) fail('invalid native launch receipt');
+  // Only the receipt fields, never arbitrary caller data (brief/env/key).
+  const receipt = { id: body.id, harness: body.harness,
+    ...(body.slot?.harness === body.harness && typeof body.slot.session === 'string' && BODY.test(body.slot.session) ? { slot: { harness: body.harness, session: body.slot.session } } : {}) };
+  const worker = launchWorkerIdentity();
+  return locked(env, () => {
+    const r = readLaunch(env, id);
+    if (!r || !sameWorker(r.worker, worker)) fail('native launch receipt is not this worker\'s');
+    if (r.harness !== receipt.harness) fail('native launch receipt changed harness');
+    if (r.state === 'ready') {
+      if (JSON.stringify(r.body) !== JSON.stringify(receipt)) fail('native launch already has another receipt');
+      return r;
+    }
+    if (r.state !== 'admitted') fail('native launch was not admitted');
+    Object.assign(r, { state: 'ready', body: receipt, readyAt: Date.now() });
+    save(env, r);
+    return r;
+  });
+}
