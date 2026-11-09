@@ -589,7 +589,7 @@ export function agentReports(s, nowMs = Date.now(), busy = {}, convs = [], adapt
     const down = mine.filter((v) => !up(v) && late(v));
     const failing = down.filter((v) => (v.restarts ?? 0) >= BROKEN_RESTARTS);
     // A body host's house is where its conversations run, not something it's doing: its bodies are (the now board's).
-    const tasks = Object.values(s.houses).filter((h) => h.agent === a && !h.service && !isHostHouse(h, s) && (h.state === 'running' || h.state === 'starting'))
+    const tasks = Object.values(s.houses).filter((h) => h.agent === a && !h.collection && !h.service && !isHostHouse(h, s) && (h.state === 'running' || h.state === 'starting'))
       // Running first (it's what the agent is doing), then the newest.
       .sort((x, y) => (y.state === 'running') - (x.state === 'running') || Date.parse(y.created) - Date.parse(x.created));
     const readings = [];
@@ -818,6 +818,14 @@ function healthFact(env, b, w) {
   return parts.join(' · ');
 }
 
+/** Pending collection retains bookkeeping, not a running container. */
+function houseProgress(houses) {
+  const collecting = houses.filter(h => h.collection).length;
+  const waiting = houses.filter(h => !h.collection && ['wanted', 'starting'].includes(h.state)).length;
+  const stopping = houses.filter(h => !h.collection && h.state === 'stopping').length;
+  return [collecting ? `${plural(collecting, 'house')} finishing` : '', waiting ? `${plural(waiting, 'house')} starting or waiting` : '', stopping ? `${plural(stopping, 'house')} stopping` : ''].filter(Boolean).join(' · ');
+}
+
 const TONE_RANK = { bad: 0, warn: 1, ok: 2 };
 
 /** A status headline: the worst thing in words (and how many more), the next few under it; else the counts. `floor`: a tone it's at least. */
@@ -838,7 +846,7 @@ function boxesPage(env, nowMs) {
   const view = list(env, OWNER);
   const agents = Object.keys(s.agents).sort();
   const live = view.houses.filter((h) => LIVE.has(h.state));
-  const running = live.filter((h) => h.state === 'running');
+  const running = live.filter((h) => h.state === 'running' && !h.collection);
   const sections = [];
   const live_boxes = view.boxes.filter((b) => !b.revoked).map((b) => ({ ...b, label: boxLabelOf(s, b.id) }));
   const up = live_boxes.filter((b) => b.local || (b.lastSeen && nowMs - Date.parse(b.lastSeen) <= 10 * 60_000));
@@ -853,10 +861,10 @@ function boxesPage(env, nowMs) {
   const disk = diskUse(env);
   const local = live_boxes.find((b) => b.local);
   sections.push({ id: 'status', blocks: [
-    headline(bad, warn, counts, `${plural(svcUp.length, 'service')} up${live.length > running.length ? ` · ${live.length - running.length} starting or waiting` : ''}. Nothing needs you.`),
+    headline(bad, warn, counts, `${plural(svcUp.length, 'service')} up${houseProgress(live) ? ` · ${houseProgress(live)}` : ''}. ${live.some(h => h.collection) ? 'Completed work is still being collected.' : 'Nothing needs you.'}`, live.some(h => h.collection) ? 'warn' : 'ok'),
     { type: 'stats', items: [
       { label: 'Boxes', value: String(up.length), detail: live_boxes.length > up.length ? `of ${live_boxes.length}` : 'all up', tone: live_boxes.length > up.length ? 'warn' : 'ok' },
-      { label: 'Houses', value: String(running.length), detail: live.length > running.length ? `${live.length - running.length} more on the way` : 'running' },
+      { label: 'Houses', value: String(running.length), detail: houseProgress(live) || 'running' },
       { label: 'Services', value: String(svcUp.length), detail: 'kept up' },
       ...(disk && local ? [{ label: `${local.label}'s disk`, value: `${Math.round(disk.used * 100)}%`, detail: `${disk.free} free`, meter: disk.used, ...(disk.used >= 0.95 ? { tone: 'bad' } : disk.used >= 0.85 ? { tone: 'warn' } : {}) }] : []),
     ] },
@@ -934,10 +942,10 @@ function boxPage(env, id, nowMs, caller = OWNER) {
   const st = boxState(b, nowMs);
   const i = boxIssues(env, b, nowMs, watchBoxes(env)[b.id]);
   const bad = i.bad.map((x) => x.text), warn = i.warn.map((x) => x.text);
-  const running = here.filter((h) => h.state === 'running').length;
-  const counts = `${st.short} · ${plural(running, 'house')} running`;
+  const running = here.filter((h) => h.state === 'running' && !h.collection).length;
+  const counts = `${st.short} · ${plural(running, 'house')} running${houseProgress(here) ? ` · ${houseProgress(here)}` : ''}`;
   return { title: b.label, intro: b.local ? boxRole(b) : cap(boxRole(b)), sections: [
-    { id: 'status', blocks: [headline(bad, warn, counts, 'Nothing needs you.', st.tone)] },
+    { id: 'status', blocks: [headline(bad, warn, counts, here.some(h => h.collection) ? 'Completed work is still being collected.' : 'Nothing needs you.', here.some(h => h.collection) && st.tone === 'ok' ? 'warn' : st.tone)] },
     { id: `box-${b.id}`, blocks: [
       { type: 'panel', rows: [
         { label: 'State', value: st.value, ...(st.detail ? { detail: st.detail } : {}), tone: st.tone },
@@ -1197,16 +1205,16 @@ function agentTabPage(env, agent, caller, nowMs) {
   const svcs = view.services.filter((v) => v.agent === agent);
   const svcUp = svcs.filter((v) => v.want === 'up');
   const svcDown = svcUp.filter((v) => v.state === 'failed' || v.state === 'lost');
-  const running = live.filter((h) => h.state === 'running').length;
-  const draining = live.filter((h) => h.draining && h.state === 'running').length;
+  const running = live.filter((h) => h.state === 'running' && !h.collection).length;
+  const draining = live.filter((h) => h.draining && h.state === 'running' && !h.collection).length;
   const counts = `${plural(running, 'house')} running · ${plural(svcUp.length, 'service')} up`;
   const sections = [{ id: 'model', title: 'Model', blocks: modelChoiceBlocks(env, agent, caller) }, { id: 'houses', title: 'Houses', blocks: [
     { type: 'health', tone: svcDown.length ? 'bad' : draining || live.length > running ? 'warn' : live.length ? 'ok' : 'muted',
       text: svcDown.length ? `${andList(svcDown.map((v) => serviceWords(v.name)))} ${svcDown.length === 1 ? 'is' : 'are'} down` : counts,
-      detail: svcDown.length ? counts : draining ? `${plural(draining, 'house')} draining to a newer image.` : live.length > running ? `${live.length - running} more starting or waiting for a box.` : live.length ? 'All running.' : 'Nothing running now.' },
+      detail: svcDown.length ? counts : [draining ? `${plural(draining, 'house')} draining to a newer image` : '', houseProgress(live)].filter(Boolean).join(' · ') || (live.length ? 'All running.' : 'Nothing running now.') },
     live.length
       ? { type: 'panel', rows: live.slice(0, 30).map((h) => housePanelRow(s, h, nowMs,
-        h.state === 'wanted' || h.state === 'running' || h.state === 'starting' ? { detail: `On ${nameOf(h.box)}`, act: { action: 'down', label: 'Stop', tone: 'danger', fields: { id: h.id }, confirm: 'This house stops.' } } : { detail: `On ${nameOf(h.box)}` })) }
+        !h.collection && (h.state === 'wanted' || h.state === 'running' || h.state === 'starting') ? { detail: `On ${nameOf(h.box)}`, act: { action: 'down', label: 'Stop', tone: 'danger', fields: { id: h.id }, confirm: 'This house stops.' } } : { detail: `On ${nameOf(h.box)}` })) }
       : { type: 'text', tone: 'muted', text: 'No houses up now.' },
     ...(houses.length > live.length ? [{ type: 'details', summary: 'Recent', meta: String(houses.length - live.length), blocks: [{ type: 'table', columns: ['House', 'Box', 'State', 'Updated'],
       rows: houses.filter((h) => !LIVE.has(h.state)).slice(0, 20).map((h) => [short(houseName(h, s)), nameOf(h.box), houseWords(h) + (h.exit !== undefined ? ` (exit ${h.exit})` : ''), ago(h.updated, nowMs)]) }] }] : []),
@@ -1321,8 +1329,8 @@ function agentOwnerPage(env, caller, nowMs) {
   const view = list(env, caller);
   const live = view.houses.filter((h) => LIVE.has(h.state));
   const sections = [{ id: 'houses', title: 'Houses', blocks: [live.length
-    ? { type: 'list', items: live.slice(0, 30).map((h) => ({ text: short(houseName(h)), meta: h.state, badge: h.state, tone: toneOf(h.state), agent: h.agent,
-      ...(h.state === 'wanted' || h.state === 'running' || h.state === 'starting' ? { act: { action: 'down', label: 'Stop', tone: 'danger', fields: { id: h.id }, confirm: 'This house stops.' } } : {}) })) }
+    ? { type: 'list', items: live.slice(0, 30).map((h) => ({ text: short(houseName(h)), meta: h.collection ? houseWords(h) : h.state, badge: houseBadge(h), tone: houseTone(h), agent: h.agent,
+      ...(!h.collection && (h.state === 'wanted' || h.state === 'running' || h.state === 'starting') ? { act: { action: 'down', label: 'Stop', tone: 'danger', fields: { id: h.id }, confirm: 'This house stops.' } } : {}) })) }
     : { type: 'text', tone: 'muted', text: `No houses for ${caller.agents.join(', ')} now.` }] }];
   if (view.services.length) {
     sections.push({ id: 'services', title: 'Services', blocks: [{ type: 'list', items: view.services.slice(0, 20).map((v) => ({
