@@ -592,7 +592,16 @@ export class CodexRunner {
       if (found.length > 1) return { state: 'pending' };
       if (found.length === 1) writeFileSync(join(dir, 'pid'), String(found[0]) + '\n', { mode: 0o600 });
     }
-    if (!this.alive(key) && !this.events(key).length) return { state: 'pending' };
+    if (!this.alive(key)) {
+      const pid = Number(readJson(join(dir, 'pid')) ?? NaN);
+      let gone = false;
+      if (Number.isInteger(pid) && pid > 0) {
+        try { process.kill(pid, 0); } catch (error) { gone = error.code === 'ESRCH'; }
+      }
+      // Events alone do not establish that an unregistered writer stopped.
+      // A failed proc observation (including access denial) cannot release it.
+      if (!gone || !this.events(key).length) return { state: 'pending' };
+    }
     const slot = this.slotOf({ id: key });
     return { state: 'ready', body: { id: key, harness: 'codex', model, ...(slot ? { slot } : {}) } };
   }

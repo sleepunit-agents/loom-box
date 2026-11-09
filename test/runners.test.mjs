@@ -34,6 +34,15 @@ const rx = (p) => new RegExp(p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
 
 const BRIEF = 'You are Art, in a DM with Loren.\nSECRET-ISH MESSAGE TEXT: what did we decide?';
 
+test('Codex events without native process identity do not prove its writer is absent', () => {
+  const h = harness(), key = 'd'.repeat(24), runsDir = join(h.D, 'runs');
+  const dir = join(runsDir, key);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'events.jsonl'), JSON.stringify({ type: 'thread.started', thread_id: 'thread-1234' }) + '\n');
+  const runner = new CodexRunner({ runsDir, codexHome: realCodexHome(h.D) });
+  assert.deepEqual(runner.recoverLaunch(key), { state: 'pending' }, 'no PID receipt and no observed process remains uncertain');
+});
+
 test('Claude durable token recovers the original job without another daemon submission or lost inbox', () => {
   const h = harness(), launchToken = 'a'.repeat(24);
   const options = { claude: join(here, 'fake-claude.mjs'), jobsDir: join(h.D, 'jobs'), inboxDir: h.inbox, sleep: () => {} };
