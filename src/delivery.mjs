@@ -1742,7 +1742,7 @@ async function executeOne(env, op, d, mem) {
       saveConv(env, c);
       return true;
     });
-    if (!keep) endAndForget(env, r.body, d);
+    if (!keep) endAndForget(env, r, d);
     else noteHarness(env, c0.agent, r, d);
   } catch (e) {
     // No model the agent may use has room (t-1907): said plainly, once, and its messages aren't tried again on the
@@ -2046,9 +2046,11 @@ async function quotaOp(env, op, d) {
  * A body ended with nothing kept: stopped, and its harness's session files deleted (in its house, the host does that
  * on a plain stop). Every end either packs into a slot (retire) or comes here: none leaves a transcript behind.
  */
-function endAndForget(env, ref, d) {
+function endAndForget(env, created, d) {
+  const ref = created.body;
   try {
     const rec = readBody(env, ref);
+    if (rec.instance !== created.instance) return; // a resumed Claude job can reuse its id
     const runner = d.runner(rec.harness, rec.local);
     if (runner.remote) {
       // The house host acknowledges native exit before dropping its files.
@@ -2057,16 +2059,22 @@ function endAndForget(env, ref, d) {
     }
     // A cancelled start has no conversation left to own its cleanup. Keep only
     // its body reference so a runtime restart cannot strand the native writer.
-    writeJson(discardFile(env, ref), { body: ref });
-    finishDiscard(env, ref, d);
+    const pending = { body: ref, instance: rec.instance, started: rec.started };
+    writeJson(discardFile(env, ref), pending);
+    finishDiscard(env, pending, d);
   } catch (e) { d.warn(`ending ${ref}: ${e.message}`); }
 }
 
 const discardDir = env => join(deliveryDir(env), 'discarding');
 const discardFile = (env, ref) => join(discardDir(env), `${ref.replace(':', '-')}.json`);
 
-function finishDiscard(env, ref, d) {
+function finishDiscard(env, expected, d) {
+  const ref = expected.body;
   const rec = readBody(env, ref); // validates the reference before it names a file
+  if (rec.instance !== expected.instance || rec.started !== expected.started) {
+    rmSync(discardFile(env, ref), { force: true });
+    return;
+  }
   const runner = d.runner(rec.harness, rec.local);
   if (runner.remote) return;
   const body = bodyOf(ref, rec);
@@ -2090,8 +2098,9 @@ function discardPass(env, d) {
     const ref = value.body;
     try {
       // Rotate uncertain writers too: one bad stop cannot starve later cleanup.
-      writeJson(join(discardDir(env), name), { body: ref, checkedAt: d.now().getTime() });
-      finishDiscard(env, ref, d);
+      const pending = { body: ref, instance: value.instance, started: value.started, checkedAt: d.now().getTime() };
+      writeJson(join(discardDir(env), name), pending);
+      finishDiscard(env, pending, d);
     } catch (e) { d.warn(`discarding ${ref}: ${e.message}`); }
   }
 }

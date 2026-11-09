@@ -15,6 +15,7 @@
 // agent's preferred one, because that one's account is out (models.mjs, fallback; t-1907).
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
+import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import { accountsFrom } from './accounts.mjs';
 import { checkParts, composeBrief, isParts } from './briefs.mjs';
@@ -81,7 +82,7 @@ export async function startBody(env, { agent, brief: b, venue, venueKind, prefer
     // What it was started with of its rules (tool names, never the brief): for the owner's `loom runtime bodies`.
     ...(deny.length ? { deny: [...deny] } : {}), ...(guest ? { guest: true } : {}), ...(local ? { local: true } : {}),
     harness: body.harness, model: pick.model, family: pick.family, ...(pick.account ? { account: pick.account } : {}), ...(pick.accountKey ? { accountKey: pick.accountKey } : {}), ...switchedOf(pick),
-    started: d.now().toISOString(), ...(body.slot ? { slot: body.slot } : {}), ...(body.house ? { house: body.house } : {}), ...(body.seat ? { seat: body.seat } : {}),
+    started: d.now().toISOString(), instance: randomBytes(12).toString('hex'), ...(body.slot ? { slot: body.slot } : {}), ...(body.house ? { house: body.house } : {}), ...(body.seat ? { seat: body.seat } : {}),
   };
   save(env, rec);
   return { ...rec, why: pick.why, preferred: pick.preferred };
@@ -114,7 +115,7 @@ export async function resumeBody(env, { body: ref, slot, agent, venue, venueKind
     body: `${body.harness}:${body.id}`, agent: who, venue: where, kind: pick.kind, ...(rec?.place ? { place: rec.place } : {}),
     ...(deny.length ? { deny: [...deny] } : {}), ...(guest ? { guest: true } : {}), ...(here ? { local: true } : {}),
     harness: body.harness, model: pick.model, family: pick.family, ...(pick.account ? { account: pick.account } : {}), ...(pick.accountKey ? { accountKey: pick.accountKey } : {}), ...switchedOf(pick),
-    started: d.now().toISOString(), slot: body.slot ?? slot, ...(ref ? { resumed: ref } : {}), ...(body.house ? { house: body.house } : {}), ...(body.seat ? { seat: body.seat } : {}),
+    started: d.now().toISOString(), instance: randomBytes(12).toString('hex'), slot: body.slot ?? slot, ...(ref ? { resumed: ref } : {}), ...(body.house ? { house: body.house } : {}), ...(body.seat ? { seat: body.seat } : {}),
   };
   save(env, next);
   return { ...next, why: pick.why, preferred: pick.preferred };
