@@ -839,6 +839,7 @@ const bodyOf = (ref, rec) => ({ id: idOf(ref), ...rec });
 /** How a conversation's body is: none, working (mid-turn), idle (turn over, warm), ended or unknown. */
 function statusOf(env, c, d) {
   if (!c.body) return 'none';
+  if (c.retiring?.body === c.body) return 'working';
   let rec;
   try { rec = readBody(env, c.body); } catch { return 'unknown'; }
   if (rec.ended) return 'ended';
@@ -1013,6 +1014,7 @@ function requeue(c, items) {
 function plan(env, cv, d, mem) {
   const now = d.now().getTime();
   const c = loadConv(env, cv);
+  if (c?.retiring) return null;
   if (!c?.queue?.length) return null;
   if (c.control) return null;
   // A wake whose kind (here, or in a house) isn't its conversation's never reaches its body (t-1830): failed, whatever
@@ -1152,7 +1154,7 @@ export async function drain(env, cv, d = depsOf(env), mem = new Map()) {
   for (let i = 0; i < 6; i++) {
     const op = locked(env, () => plan(env, cv, d, mem));
     if (!op) break;
-    await execute(env, op, d, mem);
+    if ((await execute(env, op, d, mem))?.pending) break;
   }
   await announce(env, cv, d);
 }
@@ -1314,15 +1316,15 @@ async function stopBody(env, c, d, v) {
     delete x.waiting;
     x.starting = mark(now);
     saveConv(env, x);
-    return { cv: x.conversation, mark: x.starting.op, type: 'evict', body: x.body };
+    return { cv: x.conversation, mark: x.starting.op, type: 'evict', body: x.body, discardInbox: true };
   });
   if (!op) return;
-  await execute(env, op, d, new Map());
+  if ((await execute(env, op, d, new Map()))?.pending) return;
   // What its inbox held when it stopped isn't asked for any more either.
   let said = true;
   try { await callAdapter(d, v, c, ['--status', 'done']); } catch { said = false; }
   // Its done, said; or kept for the tick's presence pass to say again (a lost one leaves the venue showing it at work).
-  locked(env, () => { const x = loadConv(env, c.conversation); if (x) { x.queue = []; if (said) delete x.presence; delete x.acks; saveConv(env, x); } });
+  locked(env, () => { const x = loadConv(env, c.conversation); if (x) { if (said) delete x.presence; delete x.acks; saveConv(env, x); } });
   d.warn(`${c.conversation}: stopped by the stop word`);
 }
 
@@ -1501,6 +1503,36 @@ export async function answerLoop(env, cv, answer, o = {}) {
 }
 
 async function execute(env, op, d, mem) {
+  try {
+    const result = await executeOne(env, op, d, mem);
+    if (op.retirement) locked(env, () => {
+      const c = loadConv(env, op.cv);
+      if (c?.retiring?.id === op.retirement) { delete c.retiring; saveConv(env, c); }
+    });
+    return result;
+  } catch (e) {
+    if (!(e instanceof RetirementPending)) throw e;
+    locked(env, () => {
+      const c = loadConv(env, op.cv);
+      if (!ours(c, op)) return;
+      const { cv, mark: _mark, retirement: _retirement, ...work } = op;
+      // Queued text stays sealed across a restart, just as it does on a start marker.
+      if (work.msgs) {
+        const lost = work.msgs.filter(x => !x.sealed);
+        outcome(c, lost.map(x => x.key), { body: 'failed', reason: 'its body is still stopping and the runtime cannot keep this message to retry (no age)' }, d.now().getTime());
+        work.msgs = work.msgs.filter(x => x.sealed);
+      }
+      if (work.what && !op.retirement) work.what = asData(work.what);
+      if (e.pending) work.pendingInbox = e.pending;
+      c.retiring = { ...work, id: c.retiring?.id ?? randomBytes(12).toString('hex') };
+      delete c.starting;
+      saveConv(env, c);
+    });
+    return { pending: true };
+  }
+}
+
+async function executeOne(env, op, d, mem) {
   const now = () => d.now().getTime();
   if (op.type === 'interrupt') return interruptOp(env, op, d);
   if (op.type === 'loop-note') return loopNote(env, op, d);
@@ -1510,7 +1542,7 @@ async function execute(env, op, d, mem) {
     // sealed into its slot first (so a resume that fails leaves no transcript in the clear), and what it was given goes
     // back on the queue; the next plan resumes from that slot (where carriesSession lets it), or starts fresh.
     let saved = { slot: null, pending: [] };
-    try { saved = await retire(env, op.cv, op.body, d, true); } catch (e) { d.warn(`ending ${op.body}: ${e.message}`); }
+    try { saved = await retire(env, op.cv, op.body, d, true); } catch (e) { if (e instanceof RetirementPending) throw e; d.warn(`ending ${op.body}: ${e.message}`); }
     locked(env, () => {
       const c = loadConv(env, op.cv);
       if (!c) return;
@@ -1526,7 +1558,7 @@ async function execute(env, op, d, mem) {
     // A body whose rules aren't what its next message needs (a guest's, to a body that isn't a guest venue's): ended,
     // its session not kept (no slot), what its inbox held back on the queue, and the next plan starts a fresh one.
     let saved = { slot: null, pending: [] };
-    try { saved = await retire(env, op.cv, op.body, d, true); } catch (e) { d.warn(`ending ${op.body}: ${e.message}`); }
+    try { saved = await retire(env, op.cv, op.body, d, true); } catch (e) { if (e instanceof RetirementPending) throw e; d.warn(`ending ${op.body}: ${e.message}`); }
     locked(env, () => {
       rmSync(slotFile(env, op.cv), { force: true });
       const c = loadConv(env, op.cv);
@@ -1541,7 +1573,7 @@ async function execute(env, op, d, mem) {
   }
   if (op.type === 'retire' || op.type === 'evict') {
     let saved = { slot: null, pending: [] };
-    try { saved = await retire(env, op.cv, op.body, d, op.type === 'evict'); } catch (e) { d.warn(`ending ${op.body}: ${e.message}`); }
+    try { saved = await retire(env, op.cv, op.body, d, op.type === 'evict'); } catch (e) { if (e instanceof RetirementPending) throw e; d.warn(`ending ${op.body}: ${e.message}`); }
     locked(env, () => {
       const c = loadConv(env, op.cv);
       if (!c) return;
@@ -1549,7 +1581,7 @@ async function execute(env, op, d, mem) {
       if (ours(c, op)) delete c.starting;
       if (saved.slot) c.slot = { ...saved.slot, rules: c.bodyRules ?? { guest: false } }; else if (c.body === undefined) delete c.slot;
       // What its inbox still held goes to its next body (shuttle's drop: pending becomes a fresh batch).
-      requeue(c, saved.pending);
+      if (!op.discardInbox) requeue(c, saved.pending);
       saveConv(env, c);
     });
     return;
@@ -1975,7 +2007,7 @@ async function quotaOp(env, op, d) {
     }
   }
   let saved = { slot: null, pending: [] };
-  try { saved = await retire(env, op.cv, op.body, d, true); } catch (e) { d.warn(`ending ${op.body}: ${e.message}`); }
+  try { saved = await retire(env, op.cv, op.body, d, true); } catch (e) { if (e instanceof RetirementPending) throw e; d.warn(`ending ${op.body}: ${e.message}`); }
   const r0 = locked(env, () => {
     const c = loadConv(env, op.cv);
     if (!c) return null;
@@ -2062,22 +2094,37 @@ function takeInbox(runner, ref, c, rec) {
  * the slot now, or kept nowhere. A house's body is packed by its host and sent back; a local one, here. Without a key
  * (no age) there's no slot: the conversation resumes from its digests.
  */
+class RetirementPending extends Error {
+  constructor(pending) { super('its session writer has not acknowledged retirement'); this.pending = pending; }
+}
+
 async function retire(env, cv, ref, d, stop) {
   const c = loadConv(env, cv);
   let rec;
   try { rec = readBody(env, ref); } catch { return { slot: null, pending: [] }; }
   const runner = d.runner(rec.harness, rec.local);
   const body = bodyOf(ref, rec);
-  const pending = takeInbox(runner, ref, c, rec);
+  // A stop request isn't a completed stop. Keep ownership and inbox data until
+  // the native writer (or the remote house's pack) has acknowledged collection.
+  if (!runner.remote) {
+    try {
+      const stopped = () => runner.stopped ? runner.stopped(body) === true : ['idle', 'ended'].includes(runner.status(body));
+      if (!rec.ended && (stop || !stopped())) endBody(env, ref, { runner: d.runner, now: d.now, bodyEnv: d.bodyEnv() });
+      if (!stopped()) throw new RetirementPending();
+    } catch { throw new RetirementPending(); }
+  }
+  const pending = c?.retiring?.pendingInbox ?? takeInbox(runner, ref, c, rec);
   const slot = (() => { try { return runner.slotOf(body) ?? rec.slot; } catch { return rec.slot; } })();
   let files = [];
   try {
     if (runner.remote) files = await runner.pack(body);
     else {
-      if (stop && !rec.ended) endBody(env, ref, { runner: d.runner, now: d.now, bodyEnv: d.bodyEnv() });
       files = packSession(runner, slot, body);
     }
-  } catch (e) { d.warn(`no session files for ${cv} (${e.message}): it resumes from its digests`); files = null; }
+  } catch (e) {
+    if (runner.remote && runner.pending?.(body) !== false) throw new RetirementPending(pending);
+    d.warn(`no session files for ${cv} (${e.message}): it resumes from its digests`); files = null;
+  }
   if (runner.remote && !rec.ended) { try { endBody(env, ref, { runner: d.runner, now: d.now, bodyEnv: d.bodyEnv() }); } catch { /* gone */ } }
   if (!runner.remote) dropSession(runner, slot, body);
   let kept = null;
@@ -2131,7 +2178,7 @@ async function stopStuck(env, op, d) {
   const mins = Math.round(op.waited / 60_000);
   const reason = `stopped: it waited ${mins} minutes on a permission prompt nobody can answer`;
   let saved = { slot: null, pending: [] };
-  try { saved = await retire(env, op.cv, op.body, d, true); } catch (e) { d.warn(`ending ${op.body}: ${e.message}`); }
+  try { saved = await retire(env, op.cv, op.body, d, true); } catch (e) { if (e instanceof RetirementPending) throw e; d.warn(`ending ${op.body}: ${e.message}`); }
   const at = d.now();
   let c0 = null;
   locked(env, () => {
@@ -2202,6 +2249,15 @@ export async function tick(env, o = {}, only, mem = new Map()) {
     for (const c of listConvs(env)) {
       let dirty = false;
       if (c.starting && !isStarting(c, now)) { abandon(c, now); dirty = true; }
+      if (c.retiring) {
+        if (!c.starting) {
+          c.starting = mark(now);
+          ops.push({ ...c.retiring, cv: c.conversation, mark: c.starting.op, retirement: c.retiring.id });
+          dirty = true;
+        }
+        if (dirty) saveConv(env, c);
+        continue;
+      }
       if (c.control?.state === 'pending') {
         if (!c.starting) {
           c.starting = mark(now);

@@ -1,0 +1,100 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { appendFileSync, existsSync, readFileSync } from 'node:fs';
+import { deliver, deliveryDir, loadConv, saveConv, tick } from '../src/delivery.mjs';
+import { world } from './delivery-world.mjs';
+import { join } from 'node:path';
+import { packSession } from '../src/sessions.mjs';
+
+test('a warm resume preserves its queued message and final native write while stop is pending', async () => {
+  const w = world();
+  const { conversation } = await deliver(w.env, w.msg('warm-stop', 'first'), w.o);
+  const first = loadConv(w.env, conversation).body;
+  const file = w.runner.transcript(w.runner.slotOf({ id: first.split(':')[1] }).session);
+  w.runner.finish(first, { worked: true, failed: false });
+  let stopped = false;
+  w.runner.stopped = () => stopped;
+  await deliver(w.env, w.msg('warm-stop', 'PRESERVED-CORRECTION'), w.o);
+  let c = loadConv(w.env, conversation);
+  assert.equal(c.body, first);
+  assert.equal(c.retiring.type, 'resume-warm');
+  assert.equal(existsSync(file), true);
+  assert.equal(readFileSync(join(deliveryDir(w.env), 'conversations', conversation + '.json'), 'utf8').includes('PRESERVED-CORRECTION'), false);
+  await tick(w.env, { ...w.o });
+  assert.equal(w.log.filter(x => x[0] === 'end').length, 1);
+  assert.equal(w.log.filter(x => x[0] === 'resume').length, 0);
+  appendFileSync(file, '\nFINAL-NATIVE-FLUSH');
+  stopped = true;
+  await tick(w.env, { ...w.o });
+  c = loadConv(w.env, conversation);
+  assert.equal(c.retiring, undefined);
+  assert.notEqual(c.body, first);
+  const resumed = w.log.find(x => x[0] === 'resume');
+  assert.match(resumed[3], /FINAL-NATIVE-FLUSH/);
+  assert.match(resumed[4], /PRESERVED-CORRECTION/);
+});
+
+test('idle eviction holds a native writer and delivers a correction only after collection', async () => {
+  const w = world();
+  const { conversation } = await deliver(w.env, w.msg('idle-stop', 'first'), w.o);
+  const first = loadConv(w.env, conversation).body;
+  w.runner.finish(first, { worked: true, failed: false });
+  let stopped = false;
+  w.runner.stopped = () => stopped;
+  await tick(w.env, w.o);
+  w.clock.advance(11 * 60_000);
+  await tick(w.env, w.o);
+  assert.equal(loadConv(w.env, conversation).retiring.type, 'evict');
+  await deliver(w.env, w.msg('idle-stop', 'new correction'), w.o);
+  assert.equal(loadConv(w.env, conversation).body, first);
+  assert.equal(w.log.filter(x => x[0] === 'resume').length, 0);
+  stopped = true;
+  await tick(w.env, w.o);
+  assert.equal(loadConv(w.env, conversation).retiring, undefined);
+  assert.ok(w.log.find(x => x[0] === 'resume' && /new correction/.test(x[4])));
+});
+
+test('a reset remains a fresh start after deferred retirement, never a resume of old authority', async () => {
+  const w = world();
+  const { conversation } = await deliver(w.env, w.msg('reset-stop', 'first'), w.o);
+  const first = loadConv(w.env, conversation).body;
+  const c = loadConv(w.env, conversation);
+  c.resetPending = true; saveConv(w.env, c);
+  let stopped = false;
+  w.runner.stopped = () => stopped;
+  await deliver(w.env, w.msg('reset-stop', 'after reset'), w.o);
+  assert.equal(loadConv(w.env, conversation).retiring.type, 'reseat');
+  assert.equal(loadConv(w.env, conversation).body, first);
+  stopped = true;
+  await tick(w.env, w.o);
+  assert.equal(loadConv(w.env, conversation).retiring, undefined);
+  assert.equal(w.log.filter(x => x[0] === 'start').length, 2);
+  assert.equal(w.log.filter(x => x[0] === 'resume').length, 0);
+});
+
+test('an uncertain remote collection retains its unread snapshot and pending turn across retry', async () => {
+  const w = world();
+  const { conversation } = await deliver(w.env, w.msg('remote-retry', 'first'), w.o);
+  const first = loadConv(w.env, conversation).body;
+  await deliver(w.env, w.msg('remote-retry', 'UNREAD-FOLLOWUP'), w.o);
+  let unheard = loadConv(w.env, conversation).fed.map(x => x.key);
+  w.runner.finish(first, { worked: true, failed: false });
+  w.runner.remote = true;
+  w.runner.pending = () => true;
+  w.runner.unheard = () => unheard;
+  w.runner.forgetInbox = () => { unheard = []; };
+  let attempts = 0;
+  w.runner.pack = async body => {
+    if (++attempts === 1) throw new Error('host temporarily unavailable');
+    return packSession(w.runner, w.runner.slotOf(body), body);
+  };
+  await deliver(w.env, w.msg('remote-retry', 'NEXT-TURN'), w.o);
+  const held = loadConv(w.env, conversation);
+  assert.equal(held.body, first);
+  assert.equal(held.retiring.pendingInbox.length, 1);
+  await tick(w.env, { ...w.o });
+  assert.equal(loadConv(w.env, conversation).retiring, undefined);
+  const resumed = w.log.find(x => x[0] === 'resume');
+  assert.equal(resumed[4].split('UNREAD-FOLLOWUP').length - 1, 1);
+  assert.equal(resumed[4].split('NEXT-TURN').length - 1, 1);
+});
