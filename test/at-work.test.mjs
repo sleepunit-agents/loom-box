@@ -67,3 +67,29 @@ test('core hears when what is at work moves, and only then', async () => {
   assert.equal(await tellAtWork(w.env, o), true, 'its turn over: core is told');
   assert.equal(calls.length, 2);
 });
+
+test('complete jobs retain concurrent runs, queue waiting, and remove completed delivery work without labels', async () => {
+  const { conversationJobs, loadConv, saveConv } = await import('../src/delivery.mjs');
+  const w = world();
+  for (const place of ['th:aaaaaaaaaa', 'th:bbbbbbbbbb']) {
+    await deliver(w.env, { ...commsMsg(w), id: `comms:${place}:aaaaaaaaaaaaaaaa`, place }, w.o);
+  }
+  const jobs = () => conversationJobs(w.env, w.o, w.clock.now().getTime());
+  assert.equal(jobs().filter((j) => j.status === 'running').length, 2);
+  assert.ok(!JSON.stringify(jobs()).includes('garden'));
+  const cv = cvOf('mark', 'loom', 'th:cccccccccc');
+  saveConv(w.env, { conversation: cv, agent: 'mark', venue: 'loom', place: 'th:cccccccccc', queue: [{ key: 'pending' }] });
+  assert.equal(jobs().find((j) => j.id === cv).status, 'waiting');
+  for (const [, id] of w.log.filter((l) => l[0] === 'start')) w.runner.finish(`claude:${id}`);
+  assert.equal(jobs().length, 1);
+  const c = loadConv(w.env, cv); c.queue = []; saveConv(w.env, c);
+  assert.deepEqual(jobs(), []);
+});
+
+test('house task references use explicit task text or wake note and exclude wrapper examples', async () => {
+  const { houseTaskRefs } = await import('../src/ui.mjs');
+  assert.deepEqual(houseTaskRefs('Fix t-2006 with t-2010; t-2006 again'), ['t-2006', 't-2010']);
+  const prompt = 'You are Art (wake id w-abcdef, kind wake, set today, note: Continue t-2006). Instructions mention t-1975.';
+  assert.deepEqual(houseTaskRefs(JSON.stringify({ prompt })), ['t-2006']);
+  assert.deepEqual(houseTaskRefs('No task reference'), []);
+});

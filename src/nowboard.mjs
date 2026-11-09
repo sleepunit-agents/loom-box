@@ -36,6 +36,7 @@
 import { existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, writeFileSync, appendFileSync, closeSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { setting } from './piece.mjs';
 import { AGENT_NAME, load, withLock } from './state.mjs';
@@ -353,10 +354,11 @@ const withWhom = (t) => {
 const why = (w) => String(w?.why ?? w?.reason ?? w?.hold ?? '').slice(0, 80);
 
 /** The manifest's part: an alert for each bridge actually down (dark or looping), the FYIs, and each agent's doing. */
-export function nowManifest(env, nowS = Date.now() / 1000, s = undefined) {
+export function nowManifest(env, nowS = Date.now() / 1000, s = undefined, conversations = []) {
   const { all, notices } = watchBridges(env, nowS, s);
   const asks = [];
   const agents = {};
+  const jobs = {};
   for (const [agent, bs] of Object.entries(all)) {
     for (const b of bs) {
       const who = `${cap(agent)}'s ${b.name} bridge`;
@@ -374,6 +376,27 @@ export function nowManifest(env, nowS = Date.now() / 1000, s = undefined) {
           at: new Date(since * 1000).toISOString(), page: `now/${agent}`, label: 'Look', kind: 'alert', agent });
       }
     }
+    // Legacy snapshots have no membership proof: publish generic words and opaque identities only.
+    // Delivery owns a migrated place even when idle; an old bridge snapshot must not revive completed work.
+    const seen = new Set();
+    for (const b of bs.filter((b) => !b.stale)) {
+      for (const [status, rows] of [['running', b.talking], ['waiting', b.waiting]]) {
+        for (const row of rows) {
+          if (!row || typeof row !== 'object') continue;
+          const place = typeof row.chan === 'string' ? row.chan : null;
+          const conversation = typeof row.conversation === 'string' ? row.conversation : null;
+          if (conversations.some((c) => c.agent === agent && ((conversation && c.conversation === conversation)
+            || (place && c.venue === b.name && c.place === place)))) continue;
+          // No index or label identity: unidentified rows cannot be reconciled safely across snapshots.
+          const key = conversation || place || (typeof row.id === 'string' ? row.id : null);
+          if (!key) continue;
+          const id = `bridge:${createHash('sha256').update(JSON.stringify([agent, b.name, key])).digest('hex').slice(0, 24)}`;
+          if (seen.has(id)) continue;
+          seen.add(id);
+          (jobs[agent] ??= []).push({ id, status, text: status === 'running' ? 'Working in a conversation' : 'Waiting to continue' });
+        }
+      }
+    }
     // Each conversation one of its bodies is in, simply (as shuttle's card said it): who or where, and how lately.
     const doing = bs.filter((b) => !b.stale).flatMap((b) => b.talking.map((t) => {
       const who = Array.isArray(t.who) ? t.who.filter((x) => typeof x === 'string') : [];
@@ -388,7 +411,7 @@ export function nowManifest(env, nowS = Date.now() / 1000, s = undefined) {
     }));
     if (doing.length) agents[agent] = doing.slice(0, DOING_MAX);
   }
-  return { asks: asks.slice(0, ASKS_MAX), agents, notices };
+  return { asks: asks.slice(0, ASKS_MAX), agents, jobs, notices };
 }
 
 /** The Now page: the old status board's tiles (bridges, talking, waiting, quota), then a row per agent. */

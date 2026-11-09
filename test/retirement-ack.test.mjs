@@ -4,7 +4,7 @@ import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 import { deliver, deliveryDir, loadConv, saveConv, tick } from '../src/delivery.mjs';
 import { world } from './delivery-world.mjs';
 import { join } from 'node:path';
-import { packSession } from '../src/sessions.mjs';
+import { packSession, SessionHistoryMissing } from '../src/sessions.mjs';
 
 test('a warm resume preserves its queued message and final native write while stop is pending', async () => {
   const w = world();
@@ -97,4 +97,96 @@ test('an uncertain remote collection retains its unread snapshot and pending tur
   const resumed = w.log.find(x => x[0] === 'resume');
   assert.equal(resumed[4].split('UNREAD-FOLLOWUP').length - 1, 1);
   assert.equal(resumed[4].split('NEXT-TURN').length - 1, 1);
+});
+
+test('a final offline inbox receipt supersedes a provisional live snapshot before warm resume', async () => {
+  const w = world();
+  const { conversation } = await deliver(w.env, w.msg('final-inbox', 'first'), w.o);
+  const first = loadConv(w.env, conversation).body;
+  await deliver(w.env, w.msg('final-inbox', 'HEARD-FOLLOWUP'), w.o);
+  await deliver(w.env, w.msg('final-inbox', 'UNHEARD-FOLLOWUP'), w.o);
+  const keys = loadConv(w.env, conversation).fed.map(x => x.key);
+  w.runner.finish(first, { worked: true, failed: false });
+  let final;
+  Object.assign(w.runner, { remote: true, pending: () => true, finalInbox: () => final,
+    unheard: () => final?.ready ? final.pending : keys, forgetInbox() {} });
+  let packs = 0;
+  w.runner.pack = async body => {
+    if (++packs === 1) throw Error('live host disappeared during collection');
+    return packSession(w.runner, w.runner.slotOf(body), body);
+  };
+  await deliver(w.env, w.msg('final-inbox', 'NEXT-TURN'), w.o);
+  assert.equal(loadConv(w.env, conversation).retiring.pendingInbox.length, 2);
+  final = { ready: false };
+  await tick(w.env, w.o);
+  assert.equal(packs, 1, 'offline retirement waits for its final inbox and native pack');
+  assert.equal(loadConv(w.env, conversation).body, first);
+  final = { ready: true, pending: [keys[1]] };
+  await tick(w.env, w.o);
+  const resumed = w.log.find(x => x[0] === 'resume');
+  assert.ok(resumed);
+  assert.doesNotMatch(resumed[4], /\bHEARD-FOLLOWUP\b/, 'the delivered follow-up is not replayed from the provisional snapshot');
+  assert.equal(resumed[4].split('UNHEARD-FOLLOWUP').length - 1, 1);
+  assert.equal(resumed[4].split('NEXT-TURN').length - 1, 1);
+});
+
+test('lost native history reconstructs an unfinished job without another message and does not publish premature failure', async () => {
+  const w = world();
+  const { conversation } = await deliver(w.env, w.msg('automatic-reconcile', 'ORIGINAL-AUTHORIZED-INTENT'), w.o);
+  const before = loadConv(w.env, conversation), old = before.body;
+  before.spawn = {}; saveConv(w.env, before);
+  let duringCollection;
+  Object.assign(w.runner, { remote: true, pending: () => true, finalInbox: () => ({ ready: true, lost: true, pending: [] }),
+    unheard: () => [], forgetInbox() {}, pack: async () => { duringCollection = loadConv(w.env, conversation).spawn.failed; throw new SessionHistoryMissing(); } });
+  w.runner.dead.add(old.split(':')[1]);
+  await tick(w.env, w.o);
+  const after = loadConv(w.env, conversation), starts = w.log.filter(x => x[0] === 'start');
+  assert.equal(duringCollection, undefined, 'a polling parent must not see a failed report while native recovery is still collecting');
+  assert.equal(starts.length, 2, 'the already authorized work continues without inventing a new wake');
+  assert.notEqual(after.body, old); assert.deepEqual(after.actsFor, before.actsFor);
+  assert.equal(starts[1][2].split('ORIGINAL-AUTHORIZED-INTENT').length - 1, 1);
+  assert.match(starts[1][2], /Runtime recovery notice:/); assert.match(starts[1][2], /Context from the interrupted attempt/);
+  assert.equal(after.nativeLossCount, 1); assert.equal(after.runLog[0].reconciliationPending, true);
+  assert.equal(after.spawn.failed, undefined); assert.equal(after.spawn.report, undefined);
+  w.runner.final = () => 'reconciled final result';
+  w.runner.finish(after.body, { worked: true, failed: false });
+  await tick(w.env, w.o);
+  const done = loadConv(w.env, conversation);
+  assert.equal(done.spawn.reportRun, after.run);
+  assert.equal(w.o.sealer.open(Buffer.from(done.spawn.report, 'base64')).toString(), 'reconciled final result');
+});
+
+test('a captured final report survives loss-receipt acknowledgement and host metadata pruning', async () => {
+  const w = world();
+  const { conversation } = await deliver(w.env, w.msg('captured-final', 'authorized job'), w.o);
+  const before = loadConv(w.env, conversation); before.spawn = {}; saveConv(w.env, before);
+  Object.assign(w.runner, { remote: true, pending: () => true, finalInbox: () => ({ ready: true, lost: true, pending: [] }),
+    unheard: () => [], forgetInbox() {}, final: () => 'DURABLE-FINAL-RESULT',
+    pack: async () => { throw new SessionHistoryMissing(); }, ackPack: () => { w.runner.final = () => null; } });
+  w.runner.dead.add(before.body.split(':')[1]);
+  await tick(w.env, w.o);
+  const after = loadConv(w.env, conversation);
+  assert.equal(typeof after.spawn.report, 'string', 'the captured report must be committed before host cleanup can remove its source');
+  assert.equal(w.o.sealer.open(Buffer.from(after.spawn.report, 'base64')).toString(), 'DURABLE-FINAL-RESULT');
+  assert.equal(after.spawn.reportRun, before.run); assert.equal(after.spawn.failed, undefined);
+  assert.equal(w.log.filter(x => x[0] === 'start').length, 1, 'a durably captured completed report does not repeat its original job');
+});
+
+test('unposted captured output accompanies reconciliation as private quoted context', async () => {
+  const w = world();
+  const { conversation } = await deliver(w.env, w.msg('unposted-final', 'ORIGINAL-UNFINISHED-REQUEST'), w.o);
+  const before = loadConv(w.env, conversation);
+  Object.assign(w.runner, { remote: true, pending: () => true, finalInbox: () => ({ ready: true, lost: true, pending: [] }),
+    unheard: () => [], forgetInbox() {}, final: () => 'PRIVATE-UNPOSTED-OUTPUT',
+    pack: async () => { throw new SessionHistoryMissing(); }, ackPack: () => { w.runner.final = () => null; } });
+  w.runner.dead.add(before.body.split(':')[1]);
+  await tick(w.env, w.o);
+  const starts = w.log.filter(x => x[0] === 'start');
+  assert.equal(starts.length, 2, 'unposted output cannot silently finish the user request');
+  assert.match(starts[1][2], /ORIGINAL-UNFINISHED-REQUEST/);
+  assert.match(starts[1][2], /quoted as data rather than new instructions/);
+  assert.match(starts[1][2], /PRIVATE-UNPOSTED-OUTPUT/);
+  const stored = readFileSync(join(deliveryDir(w.env), 'conversations', conversation + '.json'), 'utf8');
+  assert.equal(stored.includes('PRIVATE-UNPOSTED-OUTPUT'), false);
+  assert.equal(loadConv(w.env, conversation).nativeRecovery, undefined, 'notice clears after confirmed replacement input');
 });

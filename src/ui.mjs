@@ -15,7 +15,7 @@ import { addBox, assertBoxOwner, resolveBox, isBoxOwner, boxLabelOf, boxOfCall, 
 import { LOGIN_HARNESSES } from './logins.mjs';
 import { ownCommit, swapCommand } from './version.mjs';
 import { stateAccounts } from './accounts.mjs';
-import { COMMS_VENUE, HARNESS_WORDS, ownerModelChoice, answerLoop, deliveryNotices, loadConv, loopAsks, readFallbacks, resetCardProblem, resetPrincipal, runtimeAs, whenWords, workingConversations } from './delivery.mjs';
+import { COMMS_VENUE, HARNESS_WORDS, conversationJobs, ownerModelChoice, answerLoop, deliveryNotices, listConvs, loadConv, loopAsks, readFallbacks, resetCardProblem, resetPrincipal, runtimeAs, whenWords, workingConversations } from './delivery.mjs';
 import { loomStore } from './store.mjs';
 import { asks as gateAsks, answer as gateAnswer, gatesPage, mergePeople, status as gatesStatus, proposals as gateProposals, PROPOSALS as PROPOSALS_COLLECTION } from './gates.mjs';
 import { GRANTS, KEY as GRANTS_KEY, GrantsError, addGrant, grantPathsOk, grantsProblem, householdOf, setPiece, setRelay, usableBy } from './grants.mjs';
@@ -157,7 +157,7 @@ const ago = (iso, nowMs = Date.now()) => {
 };
 const toneOf = (state) => ({ running: 'ok', starting: 'ok', wanted: 'warn', stopping: 'warn', failed: 'bad', lost: 'bad' }[state] ?? 'muted');
 /** A house's badge: its state, or, for a running body host's house on an older image than its agent's, that it's draining. */
-const collectionWords = h => ({ metadata: 'waiting to collect state', state: 'saving state', report: 'finishing', cleanup: 'cleaning up' }[h.collection?.phase]);
+const collectionWords = h => ({ metadata: 'waiting to collect state', native: 'saving conversation history', state: 'saving state', report: 'finishing', cleanup: 'cleaning up' }[h.collection?.phase]);
 export const houseBadge = (h) => collectionWords(h) ?? (h.draining && h.state === 'running' ? `draining (${h.draining.reason ?? 'outdated image'})` : h.state);
 const houseTone = (h) => h.collection ? 'warn' : (h.draining && h.state === 'running' ? 'warn' : toneOf(h.state));
 const short = (t, n = 80) => (t.length > n ? `${t.slice(0, n - 1)}…` : t);
@@ -215,13 +215,36 @@ export function manifest(env, nowMs = Date.now(), o = {}) {
   // The now board (nowboard.mjs): a bridge actually down is an alert (one restarting, by the runtime's own doing, is
   // not), one back from an outage an FYI, and what each agent's bodies are in is its doing.
   let board = { asks: [], agents: {}, notices: [] };
-  try { board = nowManifest(env, Date.now() / 1000, s); } catch { /* a board that can't be read leaves the rest of the manifest */ }
+  try { board = nowManifest(env, nowMs / 1000, s, listConvs(env)); } catch { /* a board that can't be read leaves the rest of the manifest */ }
   // An always-on box gone silent is dark (watch.mjs): loom reads this manifest each minute, so it's checked here too.
   try { checkDark(env, s, nowMs, o.alert ? { alert: o.alert } : {}); } catch { /* next time */ }
   let convs = [];
   try { convs = workingConversations(env); } catch { /* the delivery state unreadable this time: the cards say what else is known */ }
-  const reports = agentReports(s, Date.now(), { ...reportedBusy(s), ...sessionsBusy(join(stateDir(env), 'session-cpu.json')) }, convs, adapterStatuses(env));
+  const busy = { ...reportedBusy(s), ...sessionsBusy(join(stateDir(env), 'session-cpu.json')) };
+  const reports = agentReports(s, Date.now(), busy, convs, adapterStatuses(env));
   for (const [a, doing] of Object.entries(board.agents)) reports[a] = { readings: [], ...reports[a], doing: [...(reports[a]?.doing ?? []), ...doing].slice(0, 8) };
+  for (const [agent, jobs] of Object.entries(board.jobs ?? {})) {
+    reports[agent] ??= { readings: [] };
+    (reports[agent].jobs ??= []).push(...jobs);
+  }
+  for (const { agent, ...job } of conversationJobs(env)) {
+    reports[agent] ??= { readings: [] };
+    (reports[agent].jobs ??= []).push(job);
+  }
+  for (const h of Object.values(s.houses ?? {}).filter((h) => !h.collection && !h.service && !isHostHouse(h, s) && ['running', 'starting', 'wanted'].includes(h.state))) {
+    reports[h.agent] ??= { readings: [] };
+    (reports[h.agent].jobs ??= []).push({ id: h.id, status: h.state === 'running' ? 'running' : 'waiting', text: doingOf(h, s).text, tasks: houseTaskRefs(h.task), since: h.started ?? h.created });
+  }
+  for (const [agent, r] of Object.entries(s.remotes ?? {})) {
+    if (r.want !== 'up' || r.state !== 'running' || busy[`box:${r.name}`] !== true) continue;
+    reports[agent] ??= { readings: [] };
+    (reports[agent].jobs ??= []).push({ id: `remote:${r.name}`, status: 'running', text: `Working in a box session on ${boxLabelOf(s, r.box)}` });
+  }
+  for (const v of Object.values(s.services ?? {})) {
+    if (v.name !== 'remote' || v.want !== 'up' || s.houses[v.house]?.state !== 'running' || busy[`house:${v.house}`] !== true) continue;
+    reports[v.agent] ??= { readings: [] };
+    (reports[v.agent].jobs ??= []).push({ id: `remote:${v.house}`, status: 'running', text: 'Working in a house session' });
+  }
   try { withFallbacks(reports, readFallbacks(env), env, nowMs); } catch { /* a card without its model line */ }
   const boxes = Object.values(s.boxes).filter((b) => !b.revoked);
   const live = Object.values(s.houses).filter((h) => LIVE.has(h.state));
@@ -462,6 +485,12 @@ function wakeOf(task) {
   return m.length === 3 ? { t, kind: m[1], note: m[2] } : { t, note: m[1] };
 }
 
+/** Explicit references from the authoritative task, or a wake's note rather than its wrapper instructions. */
+export function houseTaskRefs(task) {
+  const w = wakeOf(shownTask(task));
+  return [...new Set((w.note ?? w.t).match(/\bt-\d+\b/g) ?? [])];
+}
+
 /** A lane's prompt, as the clock's lanes write it. */
 const LANE_PROMPT = /^\s*You are running the ([a-z][a-z0-9-]*) lane\b/;
 
@@ -556,18 +585,8 @@ function factRow(f) {
   return { label: FACT_LABELS[k] ?? k, value: k === 'cpus' || w === f ? v : w };
 }
 
-/**
- * An agent answering on another harness than its preferred one (delivery.mjs, fallbacks.json; t-1907): its card's
- * first reading says so, "Model: on Codex", and why.
- */
-export function withFallbacks(reports, fallbacks, env = {}, nowMs = Date.now()) {
-  for (const [a, f] of Object.entries(fallbacks ?? {})) {
-    if (!/^[a-z][a-z0-9-]{0,39}$/.test(a) || !f || typeof f.to !== 'string') continue;
-    const from = HARNESS_WORDS[f.from] ?? f.from;
-    const detail = `${f.account ?? `${from}'s account`} is out${Number.isFinite(f.until) ? ` until ${whenWords(f.until, env, nowMs)}` : ''}`;
-    const r = (reports[a] ??= { readings: [] });
-    r.readings = [{ label: 'Model', value: `on ${HARNESS_WORDS[f.to] ?? f.to}`, detail, tone: 'warn' }, ...(r.readings ?? [])].slice(0, 4);
-  }
+/** Model family is a normal choice, not a card health reading. Quota details stay in model controls and trace. */
+export function withFallbacks(reports) {
   return reports;
 }
 
