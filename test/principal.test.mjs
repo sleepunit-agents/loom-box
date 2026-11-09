@@ -318,3 +318,27 @@ test('piece-call sends approvals and the clock the runtime\'s statement and neve
     assert.equal(readFileSync(join(D, 'asked'), 'utf-8'), 'principal --conversation cv-0123456789ab\nprincipal --conversation cv-0123456789ab\n');
   } finally { server.close(); }
 });
+
+test('wake provenance follows same-agent continuations without widening their principal or exposing other agents', async () => {
+  const w = world(); household(w.env);
+  const venues = { ...w.o.venues(), wake: { kind: 'scheduled', piece: 'clock' } };
+  const o = { ...w.o, venues: () => venues };
+  const root = await deliver(w.env, w.msg('origin-root', 'owner work'), o);
+  const wake = async (id, origin, who = 'owner') => {
+    const place = `wake:${id}`;
+    putWakeFor(deliveryDir(w.env), { agent: 'art', place, id, for: who, origin });
+    return deliver(w.env, { source: 'clock', id, agent: 'art', venue: 'wake', place, from: { kind: 'schedule' }, kind: 'wake', at: w.clock.now().toISOString(), text: 'continue' }, o);
+  };
+  const one = await wake('w-origin-one', root.conversation);
+  const two = await wake('w-origin-two', one.conversation, 'loren');
+  assert.equal(loadConv(w.env, two.conversation).actsFor.owner, false, 'display ancestry never promotes authority');
+  const call = (caller, body) => api(w.env, {}, { path: 'conversation-origins', caller, body });
+  const body = { agent: 'art', conversations: [root.conversation, one.conversation, two.conversation] };
+  const answer = await call({ kind: 'owner', agents: ['art'] }, body);
+  assert.equal(answer.status, 200);
+  assert.deepEqual(answer.body.origins, Object.fromEntries(body.conversations.map((cv) => [cv, root.conversation])));
+  assert.equal((await call({ kind: 'agent', agent: 'art' }, body)).status, 403);
+  assert.equal((await call({ kind: 'owner', agents: ['mark'] }, body)).status, 403);
+  assert.deepEqual((await call({ kind: 'owner' }, { agent: 'mark', conversations: [root.conversation] })).body, { origins: {} });
+  assert.equal((await call({ kind: 'owner' }, { agent: 'art', conversations: [[root.conversation]] })).status, 400);
+});

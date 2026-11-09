@@ -245,21 +245,25 @@ function writeMap(dir, d) {
  * (agent, place and the delivery's id): a word for a wake that never arrives is never another wake's. The caller
  * holds the lock.
  */
-export function putWakeFor(dir, { agent, place, id, for: who }, nowMs = Date.now()) {
+export function putWakeFor(dir, { agent, place, id, for: who, origin }, nowMs = Date.now()) {
   if (!(who === 'owner' || who === '-' || PERSON.test(who ?? ''))) throw new Error('--for is owner, a person\'s slug, or - (unknown)');
   if (typeof id !== 'string' || !id || id.length > 200) throw new Error('--id is the wake delivery\'s id');
+  if (origin !== undefined && !/^cv-[0-9a-f]{12}$/.test(origin)) throw new Error('--origin-conversation is a conversation id');
   const d = Object.fromEntries(Object.entries(readMap(dir)).filter(([, v]) => nowMs - (v?.at ?? 0) < WAKE_FOR_MS));
-  d[wakeKey(agent, place, id)] = { for: who, at: nowMs };
+  d[wakeKey(agent, place, id)] = { for: who, at: nowMs, ...(origin ? { origin } : {}) };
   writeMap(dir, d);
 }
 
 /** Take (and drop) the clock's word for this wake (agent, place, id): what it said, or undefined. The caller holds the lock. */
-export function takeWakeFor(dir, agent, place, id, nowMs = Date.now()) {
+export function takeWakeContext(dir, agent, place, id, nowMs = Date.now()) {
   const d = readMap(dir);
   const k = wakeKey(agent, place, id);
   const v = d[k];
   if (v === undefined) return undefined;
   delete d[k];
   writeMap(dir, d);
-  return nowMs - (v?.at ?? 0) < WAKE_FOR_MS ? v.for : undefined;
+  return nowMs - (v?.at ?? 0) < WAKE_FOR_MS ? v : undefined;
 }
+
+/** Compatibility reader when the caller only needs the principal. */
+export const takeWakeFor = (...args) => takeWakeContext(...args)?.for;

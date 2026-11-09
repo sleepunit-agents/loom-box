@@ -102,7 +102,7 @@ import { spawnCap } from './spawn.mjs';
 import { readRelays } from './relay.mjs';
 import { householdOwners, membersOf, ownersOf } from './owners.mjs';
 import { approvalsFake, approvalsRun, approvalsRunAsync, approvalsWhy } from './approvals-call.mjs';
-import { OWNER_SEAT, carriesSession, mint, noteSender, resetSigned, principalOf, putWakeFor, resetActsFor, seatOf, takeWakeFor, verify } from './principal.mjs';
+import { OWNER_SEAT, carriesSession, mint, noteSender, resetSigned, principalOf, putWakeFor, resetActsFor, seatOf, takeWakeContext, verify } from './principal.mjs';
 
 const DAY_MS = 86_400_000;
 export const MAX_TEXT = 40_000;
@@ -761,7 +761,12 @@ async function deliverOnce(env, raw, o) {
         const wake = m.venue === 'wake' && m.from.kind === 'schedule';
         // The runtime's own daily review (review.mjs, source: this piece, which core sets) is the owner's schedule.
         const own = wake && m.source === pieceName(env) && m.place === 'review';
-        const wakeFor = own ? 'owner' : wake ? takeWakeFor(deliveryDir(env), m.agent, m.place, m.id, d.now().getTime()) : undefined;
+        const wakeContext = wake && !own ? takeWakeContext(deliveryDir(env), m.agent, m.place, m.id, d.now().getTime()) : undefined;
+        const wakeFor = own ? 'owner' : wakeContext?.for;
+        if (wakeContext?.origin && c.runs === 0 && c.queue.length === 0 && !c.originConversation) {
+          const parent = loadConv(env, wakeContext.origin);
+          if (parent?.agent === c.agent && parent.conversation !== c.conversation) c.originConversation = parent.conversation;
+        }
         const lineage = o.spawnInit?.metadata ?? o.spawnSender;
         if (lineage?.origin) {
           const parent = loadConv(env, lineage.origin);
@@ -2855,4 +2860,25 @@ export async function spawnComms(env, d = depsOf(env)) {
       await d.core.comms({ op: 'status', agent: c.agent, place: c.spawn.thread, status: working ? 'working' : 'done', run: c.run });
     } catch (e) { d.warn(`spawn Comms: ${e.message}`); }
   }
+}
+
+/** Display provenance only: never changes a conversation's principal or where its body may run. */
+export function conversationOrigins(env, caller, { agent, conversations } = {}) {
+  if (caller?.kind !== 'owner' || (Array.isArray(caller.agents) && !caller.agents.includes(agent))) throw new StateError('conversation provenance is the agent owner’s', 403);
+  if (!AGENT_NAME.test(agent ?? '') || !Array.isArray(conversations) || conversations.length > 128 || !conversations.every((cv) => typeof cv === 'string' && CV.test(cv))) throw new StateError('name an agent and up to 128 conversations', 400);
+  const origins = {};
+  for (const cv of conversations) {
+    let c = loadConv(env, cv);
+    if (!c || c.agent !== agent) continue; // An old or foreign id never hides other valid roots in the batch.
+    const seen = new Set([cv]);
+    for (let n = 0; n < 32; n++) {
+      const parent = c.originConversation ?? c.spawn?.origin;
+      if (!parent || seen.has(parent)) break;
+      const next = loadConv(env, parent);
+      if (!next || next.agent !== agent) break;
+      seen.add(parent); c = next;
+    }
+    origins[cv] = c.conversation;
+  }
+  return { origins };
 }
