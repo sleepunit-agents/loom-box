@@ -693,6 +693,28 @@ export class CodexRunner {
 export const usageDirOf = (env = process.env) => env.LOOM_RUNTIME_USAGE_DIR || join(env.HOME || homedir(), '.local', 'state', 'loom-runtime', 'usage');
 
 /** The runner for a harness, from the runtime's settings (LOOM_RUNTIME_CLAUDE, …) and what a test passes in. */
+export function nativeRunnerConfiguration(runner) {
+  if (runner instanceof ClaudeRunner && runner.run === spawnSync) return {
+    claude: runner.claude, jobsDir: runner.jobsDir, projectsDir: runner.roots.projects,
+    args: runner.args, usageDir: runner.usageDir, node: runner.node, claimPolls: runner.claimPolls,
+    ...(runner.inbox ? { inboxDir: runner.inbox.dir } : {}),
+  };
+  if (runner instanceof CodexRunner && runner.spawn === nodeSpawn && runner.run === spawnSync) return {
+    codex: runner.codex, profile: runner.profile, runsDir: runner.runsDir,
+    codexHome: runner.codexHome, sessionsDir: runner.roots.sessions, homesDir: runner.homesDir, systemDir: runner.systemDir,
+    ...(runner.inbox ? { inboxDir: runner.inbox.dir } : {}),
+  };
+  return null;
+}
+
+/** Private launch-worker input; never a new model routing or permissions path. */
+export function configuredNativeRunner(harness, configuration, env = process.env) {
+  if (!configuration) return runnerFor(harness, env);
+  if (harness === 'claude') return new ClaudeRunner(configuration);
+  if (harness === 'codex') return new CodexRunner(configuration);
+  throw new RunnerError('unsupported native launch configuration');
+}
+
 export function runnerFor(harness, env = process.env, opts = {}) {
   const argv = (v) => { try { const a = JSON.parse(v); return Array.isArray(a) && a.every((x) => typeof x === 'string') ? a : []; } catch { return []; } };
   const inboxDir = env.LOOM_RUNTIME_INBOX_DIR || undefined;

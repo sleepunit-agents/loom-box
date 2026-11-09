@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { launchAttempt, readLaunch, reserveLaunch } from '../src/launch-journal.mjs';
 import { superviseNativeLaunch } from '../src/native-launch.mjs';
-import { runnerFor } from '../src/runners.mjs';
+import { configuredNativeRunner, nativeRunnerConfiguration, runnerFor } from '../src/runners.mjs';
 import { scratch } from './scratch.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -46,11 +46,23 @@ function controller(w, pollMs = 10, program) {
 async function cleanup(w) {
   const record = readLaunch(w.env, w.request.id);
   if (record?.body && w.request.harness === 'codex') {
-    const runner = runnerFor('codex', w.env);
+    const runner = configuredNativeRunner('codex', w.request.configuration, w.env);
     runner.end(record.body);
     await wait(() => runner.stopped(record.body));
   }
 }
+
+test('the worker uses the selected native configuration rather than silently rebuilding another one', async () => {
+  const w = setup('claude');
+  const config = nativeRunnerConfiguration(runnerFor('claude', w.env));
+  config.args = ['--fixture-selected-native-option'];
+  w.request.configuration = config;
+  const body = await superviseNativeLaunch(w.env, w.request, { pollMs: 10 });
+  assert.equal(body.harness, 'claude');
+  assert.ok(w.argv().find(a => a[0] === '--bg').includes('--fixture-selected-native-option'));
+  const journal = JSON.stringify(readLaunch(w.env, w.request.id));
+  assert.doesNotMatch(journal, /fixture-selected-native-option|Harmless fixture prompt/, 'private launch options never become journal metadata');
+});
 
 for (const harness of ['claude', 'codex']) {
   test(`${harness}: independent controllers receive one worker's committed native receipt`, async () => {
