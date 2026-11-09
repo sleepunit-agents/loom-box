@@ -94,8 +94,9 @@ body-host journal. Host and house PID namespaces differ: only the native host
 observes its own worker. Older hosts need a capability check and drain/update
 path before receiving this protocol. Legacy unprepared starts also need explicit
 reconciliation or a physical execution barrier; new records cannot prove their
-absence after the fact. The unfinished draft must not deploy until these cases
-and the two delivery exclusion regressions pass.
+absence after the fact. The exclusion and real-container lifecycle tests below
+cover the protocol. Live legacy entries still require an explicit disposition
+under the transition procedure before rollout can be called complete.
 
 ## House request journal
 
@@ -128,8 +129,10 @@ A legacy identity receipt carries `inputUncertain`; it cannot acknowledge full
 input delivery. Conversation delivery now commits prepared house state before
 warming and the exact handle before publication, then binds the original receipt
 through its common generation/run/sender commit. The native house fence and
-capability gate use the shared worker. Authenticated host restart reconstruction,
-legacy-start reconciliation and physical barrier recovery still gate deployment.
+capability gate use the shared worker. Authenticated receipt reconstruction and
+physical barrier recovery are exercised below. Arbitrary in-place supervisor
+replacement is outside the stated guarantee; legacy starts remain held until
+explicitly reconciled.
 
 ## Resume restoration inside admission
 
@@ -331,9 +334,10 @@ reserved and admitted attempts, existing core packs, missing metadata, and box
 restart after lost part/final acknowledgements. These use model-free native
 executables or a fake container engine; the separate integration proof below
 uses real Podman. Older-house cutover reconciliation and deployed provider
-verification remain required. The explicit size-limit and missing-history
+verification remain release gates. The cooperative transition is tested below;
+each actual deployment must still reconcile its live inventory. The explicit size-limit and missing-history
 dispositions are defined below. This draft is
-not deployable.
+subject to the live inventory and supported rollout gates below.
 
 ## Final inbox receipts after host failure
 
@@ -468,6 +472,66 @@ until a native input receipt confirms delivery. The audit stores IDs, reason,
 harness and timestamps, not message text; subsequent runs record which loss
 notice they received. A missing transcript is never a successful recovery of
 native memory or evidence that no work occurred.
+
+## Transition from older houses
+
+Existing houses cannot acquire a history mount or the admission protocol by
+updating core alone. Their native files must be collected while the old host
+is still alive. Ordinary owner Down provides this cooperative path; do not
+replace it with a container stop, timeout or deletion of host records.
+
+Before rollout, inventory each active non-service house, host capability set,
+pending host request, conversation body/starting/retiring marker and existing
+owner hold. Keep IDs and counts; no message text or credentials are needed.
+An unprepared legacy start remains unresolved until its original controller
+commits it, its authenticated original host accounts for it, or the original
+execution namespace is positively stopped and its work reconciled. No timeout
+or absent request proves that it did not run. An unresolved entry prevents
+declaring the transition complete; never clear its marker to allow a retry.
+
+Use this sequence for each legacy host:
+
+1. Keep its original image, host and native files available. Have compatible
+   new house images and the box client ready before admitting replacement work.
+   Mixed versions must pass the capability gate or refuse before native work.
+2. Issue ordinary owner Down. The host stops admitting work and stops/collects
+   its bodies. The runtime holds affected conversations and queues incoming
+   messages under their original principals. A pre-existing owner hold stays
+   in force. Inspect pending legacy starts separately; a bound-body drain
+   cannot establish an unknown launch's identity.
+3. Wait for encrypted native slots and unread input to be committed, the host's
+   collection acknowledgement, its natural exit and the box's terminal report.
+   Resume must refuse while that house is still saving work. Keep a failed or
+   disconnected host's evidence and hold instead of forcing physical cleanup.
+4. After the supported controller/box update, resume only holds created by this
+   transition, using ordinary owner conversation control. Existing owner holds
+   remain held. Recheck gates and principal through normal delivery, restore
+   the encrypted slot on a compatible new house, and verify native identity,
+   pending input and the new run/sender. Messages queued during the hold are
+   delivered through that same path.
+5. Repeat the live inventory, including houses created during rollout. Every
+   remaining legacy request or start needs an explicit disposition. Verify
+   real provider continuation before claiming the deployment complete.
+
+The optional `legacy-cutover` integration cases execute an older runtime's
+actual controller, authenticated core API and body-host inside real Podman,
+without a history mount or admission capability. They use owner Down through
+that old runtime, collect its native session, reject premature resume, wait for
+physical exit, delete the old HOME, switch to the current controller, queue a
+message while held and resume on a newly provisioned house. Both adapters must
+find the original native context before accepting input, replay the unread
+follow-up once, preserve the non-owner principal and post an in-container reply
+under a new sender. This proves the transition mechanism, not a production
+inventory or provider result.
+
+To include these cases, supply an extracted older checkout as well as the
+existing local Node 24 image:
+
+```
+LOOM_LEGACY_RUNTIME=/path/to/older-runtime \
+LOOM_NATIVE_HOST_IMAGE=<existing-local-node24-image> \
+node --test --test-name-pattern=legacy-cutover test/integration/native-host-death.mjs
+```
 
 The explicit real-container matrix now has eight cases: both adapters under
 normal resume, size fallback, bound history loss and pre-bind history loss. In

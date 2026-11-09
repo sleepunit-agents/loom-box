@@ -4,9 +4,28 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { deliver, deliveryDir, loadConv, tick } from '../src/delivery.mjs';
+import { deliver, deliveryDir, loadConv, ownerConversationControl, saveConv, tick } from '../src/delivery.mjs';
 import { cvOf, world } from './delivery-world.mjs';
 import { completeLaunch } from '../src/launch-journal.mjs';
+
+for (const marker of ['legacy', 'untracked']) test(`${marker} start cannot expire into duplicate work during a controller upgrade`, async () => {
+  const w = world(), place = `dm:upgrade-${marker}`;
+  const first = await deliver(w.env, w.msg(place, 'original unresolved work'), { ...w.o, detach: true, spawnWorker() {} });
+  const c = loadConv(w.env, first.conversation), original = c.queue;
+  c.starting = { pid: 2147483647, since: 1, op: 'a'.repeat(12), msgs: original,
+    ...(marker === 'untracked' ? { protocol: 2, untracked: true } : {}) };
+  c.queue = []; saveConv(w.env, c);
+  w.clock.advance(8 * 24 * 3600_000);
+  await deliver(w.env, w.msg(place, 'later queued work'), w.o);
+  await tick(w.env, w.o);
+  await ownerConversationControl(w.env, { kind: 'owner' }, { conversation: c.conversation, action: 'interrupt' }, w.o);
+  const held = loadConv(w.env, c.conversation);
+  assert.equal(held.starting.op, c.starting.op);
+  assert.deepEqual(held.starting.msgs, original);
+  assert.equal(held.control.state, 'pending', 'unknown native work is not falsely declared collected');
+  assert.equal(held.queue.length, 1);
+  assert.equal(w.log.filter(x => x[0] === 'start').length, 0);
+});
 
 for (const owner of ['slow-live', 'registrar-gone']) {
   test(`one native admission while the prior start is unresolved: ${owner}`, async () => {

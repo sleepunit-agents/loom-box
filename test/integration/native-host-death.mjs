@@ -9,11 +9,11 @@ import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { api, setAgent } from '../../src/control.mjs';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { api, down, setAgent } from '../../src/control.mjs';
 import { load, update } from '../../src/state.mjs';
 import { setModels } from '../../src/models.mjs';
-import { deliver, loadConv } from '../../src/delivery.mjs';
+import { deliver, loadConv, ownerConversationControl } from '../../src/delivery.mjs';
 import { HouseRunner, hostOf } from '../../src/houserunner.mjs';
 import { collectNativeHistory } from '../../src/native-collection-client.mjs';
 import { MAX_SESSION_BYTES } from '../../src/sessions.mjs';
@@ -55,7 +55,7 @@ function child(bin, args, env, input = '') {
     }
   } };
 }
-async function serverFor(env, holdReceipts = false) {
+async function serverFor(env, holdReceipts = false, runtime = () => api) {
   const seqs = new Map();
   let held = false, release;
   const gate = new Promise(r => { release = r; });
@@ -77,7 +77,7 @@ async function serverFor(env, holdReceipts = false) {
         const path = /^\/api\/box\/([a-z-]+)$/.exec(req.url)?.[1], house = /^fixture-house-token-(h-[0-9]+)$/.exec(token ?? '')?.[1];
         if (!path || !house) return send(403, { error: 'wrong house credential' });
         if (holdReceipts && house === 'h-1' && path === 'body-sync' && Object.values(body.report?.done ?? {}).some(d => d.id)) { held = true; await gate; }
-        const result = await api(env, { now: () => new Date() }, { caller: { kind: 'agent', agent: 'art', house }, path, body });
+        const result = await runtime()(env, { now: () => new Date() }, { caller: { kind: 'agent', agent: 'art', house }, path, body });
         send(result.status, result.body);
       } catch { send(500, { error: 'fixture request failed' }); }
     });
@@ -86,8 +86,10 @@ async function serverFor(env, holdReceipts = false) {
   return { url: `http://127.0.0.1:${server.address().port}/mcp`, held: () => held, release, close: () => new Promise(r => server.close(r)) };
 }
 
-for (const harness of ['claude', 'codex']) for (const mode of ['normal', 'size', 'missing-bound', 'missing-unbound']) test(`${harness}: real container host SIGKILL ${mode} recovery preserves usable sender identity`, { timeout: 120_000 }, async t => {
-  const oversized = mode === 'size', missing = mode.startsWith('missing'), unbound = mode === 'missing-unbound';
+const legacyRuntime = process.env.LOOM_LEGACY_RUNTIME;
+if (legacyRuntime) assert.ok(existsSync(join(legacyRuntime, 'src/cli.mjs')), 'legacy cutover requires an existing runtime checkout');
+for (const harness of ['claude', 'codex']) for (const mode of ['normal', 'size', 'missing-bound', 'missing-unbound', ...(legacyRuntime ? ['legacy-cutover'] : [])]) test(`${harness}: real container host ${mode === 'legacy-cutover' ? 'cooperative' : 'SIGKILL'} ${mode} recovery preserves usable sender identity`, { timeout: 120_000 }, async t => {
+  const legacy = mode === 'legacy-cutover', oversized = mode === 'size', missing = mode.startsWith('missing'), unbound = mode === 'missing-unbound';
   const root = scratch('native-container-death-'), home = join(root, 'controller'), tag = randomBytes(6).toString('hex');
   const env = { PATH: process.env.PATH, HOME: home, LOOM_HOME: join(home, '.config/loom'), LOOM_BOX_HOME: join(root, 'state'), LOOM_BOX_DATA: join(root, 'data'),
     LOOM_BOX_LOCAL_NAME: 'one', LOOM_RUNTIME_ACCOUNTS: 'none', LOOM_RUNTIME_SCORECARDS: 'off', LOOM_RUNTIME_TOKEN_FILE: join(root, 'runtime-token') };
@@ -95,13 +97,14 @@ for (const harness of ['claude', 'codex']) for (const mode of ['normal', 'size',
   env.LOOM_BIN = fakeLoomBin(root);
   const sends = join(root, 'sends'); mkdirSync(sends); env.FAKE_SEND = sends;
   const previousSend = process.env.FAKE_SEND; process.env.FAKE_SEND = sends;
-  const server = await serverFor(env, unbound); env.LOOM_RUNTIME_LOOM_URL = server.url;
+  let control = legacy ? await import(pathToFileURL(join(legacyRuntime, 'src/control.mjs')).href) : { api, down };
+  const server = await serverFor(env, unbound, () => control.api); env.LOOM_RUNTIME_LOOM_URL = server.url;
   setAgent(env, { now: () => new Date() }, { agent: 'art', repo: 'https://example.com/art.git' });
   setModels(env, { list: [{ id: harness === 'claude' ? 'opus' : 'gpt-5.5', harness, family: harness === 'claude' ? 'anthropic' : 'openai' }] });
   update(env, s => { Object.values(s.boxes).find(b => b.local).harnesses = { [harness]: { loggedIn: true } }; });
   const box = { kind: 'piece', subject: Object.keys(load(env).boxes).find(k => load(env).boxes[k].local) };
   const call = async (path, body) => {
-    const result = await api(env, { mint: () => 'fixture-minted-token', revoke: () => {}, secret: () => '' }, { caller: box, path, body });
+    const result = await control.api(env, { mint: () => 'fixture-minted-token', revoke: () => {}, secret: () => '' }, { caller: box, path, body });
     assert.equal(result.status, 200, JSON.stringify(result.body)); return result.body;
   };
   const containers = [], controllers = [];
@@ -111,7 +114,7 @@ for (const harness of ['claude', 'codex']) for (const mode of ['normal', 'size',
   const message = text => ({ source: 'slack', id: `${tag}-${++serial}`, agent: 'art', venue: 'slack', place: 'dm:native-host-death', label: 'fixture',
     from: { kind: 'person', slug: 'loren' }, kind: 'message', at: new Date().toISOString(), text });
   const queue = text => deliver(env, message(text), { detach: true, spawnWorker: () => {} });
-  const tick = cv => { const p = child(process.execPath, [cli, 'deliver', 'tick', '--conversation', cv], env); controllers.push(p); return p; };
+  const tick = (cv, old = false) => { const p = child(process.execPath, [old ? join(legacyRuntime, 'src/cli.mjs') : cli, 'deliver', 'tick', '--conversation', cv], env); controllers.push(p); return p; };
   const bound = (controller, house) => Promise.race([controller.done, house.host.done.then(result => {
     throw Error(`fixture host exited before native bind: ${JSON.stringify({ code: result.code, stderr: result.stderr.replace(/[0-9a-f]{40,}/gi, '[fixture-key]') })}`);
   })]);
@@ -120,18 +123,20 @@ for (const harness of ['claude', 'codex']) for (const mode of ['normal', 'size',
     const dir = join(root, id), history = join(root, `${id}-native`), snapshot = join(root, `${id}-snapshot`);
     mkdirSync(join(dir, 'work'), { recursive: true, mode: 0o700 }); mkdirSync(history, { mode: 0o700 });
     writeFileSync(join(dir, 'token'), `fixture-house-token-${id}\n`, { mode: 0o600 });
-    const claimed = await call('claim', { id, nativeHistory: 1 }); assert.equal(claimed.nativeHistory.v, 1);
+    const old = legacy && id === 'h-1';
+    const claimed = await call('claim', { id, ...(!old ? { nativeHistory: 1 } : {}) });
+    assert.equal(claimed.nativeHistory?.v, old ? undefined : 1);
     await call('report', { id, state: 'running' });
     const name = `loom-native-death-${tag}-${id}`;
     const variables = { HOME: '/fixture/house', PATH: `${dirname(imageNode)}:/usr/local/bin:/usr/bin:/bin`, HOUSE_ID: id, HOUSE_AGENT: 'art', LOOM_URL: server.url, LOOM_TOKEN_FILE: '/fixture/house/token',
       CLAUDE_CONFIG_DIR: '/fixture/house', LOOM_RUNTIME_CLAUDE_JOBS: '/fixture/house/jobs', LOOM_RUNTIME_CODEX_RUNS: '/fixture/house/runs',
-      LOOM_RUNTIME_CLAUDE: '/runtime/test/integration/native-host-fixture.mjs', LOOM_RUNTIME_CODEX: '/runtime/test/integration/native-host-fixture.mjs',
-      LOOM_RUNTIME_INBOX_DIR: '/fixture/house/inbox', LOOM_RUNTIME_NATIVE_HISTORY: '/run/loom-native-history', FIXTURE_NATIVE_HARNESS: harness,
+      LOOM_RUNTIME_CLAUDE: '/fixture-code/test/integration/native-host-fixture.mjs', LOOM_RUNTIME_CODEX: '/fixture-code/test/integration/native-host-fixture.mjs',
+      LOOM_RUNTIME_INBOX_DIR: '/fixture/house/inbox', ...(!old ? { LOOM_RUNTIME_NATIVE_HISTORY: '/run/loom-native-history' } : {}), FIXTURE_NATIVE_HARNESS: harness,
       ...(oversized && id === 'h-1' ? { FIXTURE_SESSION_BYTES: String(MAX_SESSION_BYTES + 1) } : {}),
       ...(harness === 'claude' ? { CLAUDE_SECURESTORAGE_CONFIG_DIR: '/fixture/house/login' } : { LOOM_LOGIN_CODEX: '/fixture/house/login' }) };
     const boot = /--host-key ([0-9a-f]{48})/.exec(allocated.task)?.[1]; assert.ok(boot);
     const args = ['run', '--rm', '--pull=never', '--name', name, '--network=host',
-      '-v', `${dir}:/fixture/house`, '-v', `${history}:/run/loom-native-history`, '-v', `${repo}:/runtime:ro`, '-w', '/fixture/house/work',
+      '-v', `${dir}:/fixture/house`, ...(!old ? ['-v', `${history}:/run/loom-native-history`] : []), '-v', `${old ? legacyRuntime : repo}:/runtime:ro`, '-v', `${repo}:/fixture-code:ro`, '-w', '/fixture/house/work',
       ...Object.entries(variables).flatMap(([key, value]) => ['-e', `${key}=${value}`]), '--entrypoint', imageNode, image,
       '/runtime/src/cli.mjs', 'body-host', '--piece', 'box', '--host-key', boot, '--beats', '200'];
     const host = child('podman', args, { PATH: process.env.PATH, HOME: process.env.HOME, XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR });
@@ -139,7 +144,7 @@ for (const harness of ['claude', 'codex']) for (const mode of ['normal', 'size',
   }
   try {
     const queued = await queue('INITIAL-HOST-DEATH-TURN'); assert.equal(queued.body, 'queued'); const cv = queued.conversation;
-    const firstController = tick(cv), first = await house('h-1');
+    const firstController = tick(cv, legacy), first = await house('h-1');
     if (unbound) { await wait(server.held, 'native receipt held before core handoff'); firstController.kill(); assert.equal((await firstController.done).signal, 'SIGKILL'); }
     else { const started = await bound(firstController, first); assert.equal(started.code, 0, started.stderr); }
     const before = loadConv(env, cv); assert.equal(!!before.body, !unbound, JSON.stringify(before.outcomes)); assert.equal(before.actsFor.owner, false);
@@ -148,20 +153,38 @@ for (const harness of ['claude', 'codex']) for (const mode of ['normal', 'size',
     assert.equal(originalProof.resumed, false);
     await queue('PENDING-HOST-DEATH-FOLLOWUP');
     if (!unbound) {
-      const fed = await tick(cv).done; assert.equal(fed.code, 0, fed.stderr);
+      const fed = await tick(cv, legacy).done; assert.equal(fed.code, 0, fed.stderr);
       await wait(() => Object.values(hostOf(env, 'art', 'p-loren').report?.bodies ?? {}).some(b => b.pending?.length), 'pending native inbox');
     }
-    assert.equal(pod(['kill', '--signal', 'KILL', first.name]).status, 0, 'kill the actual body-host container, not the delivery controller');
-    const dead = await first.host.done; assert.notEqual(dead.code, 0);
+    if (legacy) {
+      assert.deepEqual(hostOf(env, 'art', 'p-loren').report.caps, ['parts'], 'the original host actually uses the old protocol');
+      control.down(env, {}, { kind: 'owner' }, { id: first.id });
+      await wait(async () => {
+        const drained = await tick(cv, true).done; assert.equal(drained.code, 0, drained.stderr);
+        return loadConv(env, cv).control?.state === 'held';
+      }, 'legacy session collection and conversation hold');
+      const held = loadConv(env, cv); assert.equal(held.body, undefined); assert.equal(held.slot.session, originalProof.session);
+      assert.deepEqual(held.actsFor, before.actsFor);
+      await assert.rejects(ownerConversationControl(env, { kind: 'owner' }, { conversation: cv, action: 'resume' }), /still saving work/);
+    } else assert.equal(pod(['kill', '--signal', 'KILL', first.name]).status, 0, 'kill the actual body-host container, not the delivery controller');
+    const dead = await first.host.done; if (legacy) assert.equal(dead.code, 0, dead.stderr); else assert.notEqual(dead.code, 0);
     await wait(() => pod(['container', 'exists', first.name]).status === 1, 'positive physical disappearance');
     rmSync(first.dir, { recursive: true, force: true }); // Container HOME is lost; only the private native mount survives.
     if (missing) rmSync(first.history, { recursive: true, force: true }); // Deliberate fixture loss after positive physical termination.
     const client = { call };
-    await collectNativeHistory({ client, id: first.id, root: first.history, snapshot: first.snapshot, physical: 'gone' });
-    assert.equal(load(env).houses[first.id].nativeHistory.complete, true);
+    if (!legacy) {
+      await collectNativeHistory({ client, id: first.id, root: first.history, snapshot: first.snapshot, physical: 'gone' });
+      assert.equal(load(env).houses[first.id].nativeHistory.complete, true);
+    }
     server.release();
-    await call('report', { id: first.id, state: 'failed' });
+    await call('report', { id: first.id, state: legacy ? 'done' : 'failed', ...(legacy ? { exit: 0 } : {}) });
+    if (legacy) control = { api, down }; // Supported controller cutover follows the old runtime's complete drain.
     await queue('NEXT-HOST-DEATH-TURN');
+    if (legacy) {
+      assert.equal(loadConv(env, cv).control.state, 'held', 'ingress queues while the migration hold is active');
+      assert.equal(Object.keys(load(env).houses).length, 1, 'held work never starts a replacement early');
+      await ownerConversationControl(env, { kind: 'owner' }, { conversation: cv, action: 'resume' }, { detach: true, spawnWorker() {} });
+    }
     const resumedController = tick(cv), second = await house('h-2');
     const resumed = await bound(resumedController, second); assert.equal(resumed.code, 0, resumed.stderr);
     const after = loadConv(env, cv), proof = await wait(() => existsSync(join(second.dir, 'proof.json')) && JSON.parse(readFileSync(join(second.dir, 'proof.json'), 'utf8')), 'restored native proof');
