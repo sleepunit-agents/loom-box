@@ -7,7 +7,7 @@ import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ageSealer } from '../src/sealed.mjs';
 import { world } from './delivery-world.mjs';
-import { deliver, deliveryDir, handOverWake, loadConv, tick } from '../src/delivery.mjs';
+import { continuationCall, deliver, deliveryDir, handOverWake, loadConv, tick } from '../src/delivery.mjs';
 
 // This retains deterministic harness and delivery/principal bridge seams. Holder APIs
 // run through the actual managed production executable in separate processes. It adds the
@@ -46,7 +46,12 @@ test('clock fire process reaches authenticated core delivery and binds only its 
   const source=await deliver(w.env,w.msg(setup.place,'owner',{source:'loom',venue:'loom',place:setup.place,from:{kind:'person',slug:'jonathan'}}),w.o);
   const proof=cv=>{const c=loadConv(w.env,cv);return {conversation:cv,key:w.runner.envs[c.body.split(':')[1]].LOOM_BODY_KEY,session:w.sessionFor(cv)};};
   const holder=async(action,b)=>{const r=await fetch(`http://127.0.0.1:${setup.port}/api/runtime/continuation-${action}`,{method:'POST',headers:{authorization:`Bearer ${setup.agentToken}`,'content-type':'application/json'},body:JSON.stringify(b)});return {status:r.status,body:await r.json()};};
-  const issued=await holder('issue',proof(source.conversation));assert.equal(issued.status,200,JSON.stringify(issued));const grant=issued.body;
+  // Production executable must retain its policy hold. Only this trusted test
+  // parent supplies a lifetime; enqueue/status still use the unchanged executable.
+  const issued=await holder('issue',proof(source.conversation));
+  assert.notEqual(issued.status,200,JSON.stringify(issued));
+  assert.match(JSON.stringify(issued.body), /deadline policy is not configured/);
+  const grant=continuationCall(w.env,{...proof(source.conversation),action:'issue'},w.o);
   const bin=join(w.env.HOME,'bin');mkdirSync(bin);
   for (const name of ['systemctl','systemd-run']) writeFileSync(join(bin,name),'#!/bin/sh\nexit 0\n',{mode:0o755});
   const principal=join(bin,'principal.mjs');

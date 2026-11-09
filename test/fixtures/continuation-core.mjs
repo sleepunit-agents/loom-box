@@ -9,6 +9,14 @@ const { createConversationTables } = await load('dist/backends/conversations.js'
 const { openThread, setArchived, deleteThread, sweepComms } = await load('dist/comms.js');
 const { startHttpServer } = await load('dist/transport/http-server.js');
 const { default: Sqlite } = await load('node_modules/better-sqlite3/lib/index.js');
+// TEST-ONLY clock: configured and advanced exclusively by the parent fixture.
+// Production modules and HTTP routes expose no time override.
+const RealDate = Date;
+let fixtureTime = process.env.CONTINUATION_TEST_TIME ? RealDate.parse(process.env.CONTINUATION_TEST_TIME) : null;
+globalThis.Date = class extends RealDate {
+  constructor(...args) { super(...(args.length || fixtureTime === null ? args : [fixtureTime])); }
+  static now() { return fixtureTime ?? RealDate.now(); }
+};
 const home = process.env.LOOM_HOME;
 mkdirSync(join(home, 'agents', 'art'), { recursive: true });
 writeFileSync(join(home, 'agents', 'art', 'IDENTITY.md'), '# Art\n');
@@ -41,7 +49,9 @@ const agentToken = process.env.CONTINUATION_BRIDGE ? createToken(h, {role:{kind:
 process.send({ port: server.port, token, clockToken, impostorToken, agentToken, place: thread.id });
 
 // Test control stays on the parent IPC channel; never an HTTP production route.
-process.on('message', ({ action }) => {
+process.on('message', ({ action, at }) => {
+  if (action === 'clock') { fixtureTime = RealDate.parse(at); if (!Number.isSafeInteger(fixtureTime)) throw Error('bad test clock'); }
+  else
   if (action === 'sweep') sweepComms(h, new Date('2027-02-01T00:00:00Z'));
   else if (action === 'archive') setArchived(h, thread, true);
   else if (action === 'delete') deleteThread(h, thread);
