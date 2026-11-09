@@ -62,6 +62,23 @@ reach that HTTP adapter. It uses a fake harness and test sealer, and does not
 exercise the actual clock process or core-to-runtime piece dispatch. Without the
 companion checkout the test explicitly skips.
 
+The clock route bench additionally runs the real clock `fire` CLI, its spool and
+principal handover subprocess, core's managed delivery offer and agent piece API,
+the production holder API, real age sealing, delivery tick and core receipt:
+
+```
+CONTINUATION_CORE=/path/to/loom CONTINUATION_CLOCK=/path/to/loom-clock \
+  node --test test/continuation-clock.integration.test.mjs
+```
+
+It proves core replay avoids a second child, non-clock credentials and a supplied
+source field are refused before forwarding, and forged handles, borrowed holder
+keys/sessions, rebinding and source reset cannot produce another stored reply.
+A forged handle can launch an ordinary wake; it cannot authorize a report.
+The fake harness and managed executable bridge remain explicit test seams;
+no installed runner, native harness or installed end-to-end proof is claimed.
+Timer creation is stubbed so this bench never installs host systemd units.
+
 All three PRs remain draft (runtime148, core675, clock24). Before merge/install:
 prove the complete authenticated clock→core→runtime route and its negatives,
 including the clock's durable firing journal; complete exact-head CI and resolve
