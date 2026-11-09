@@ -112,11 +112,13 @@ export function detectFacts(env = process.env, labels = []) {
 export function remoteClient(url, credential, fetchImpl = fetch, piece = 'box') {
   const base = url.replace(/\/+$/, '');
   return {
-    async call(path, body = {}) {
+    async call(path, body = {}, { timeoutMs } = {}) {
+      if (timeoutMs !== undefined && (!Number.isInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 60_000)) throw new BoxError('invalid box request timeout');
       const r = await fetchImpl(`${base}/api/${piece}/${path}`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${credential}` },
         body: JSON.stringify(body),
+        ...(timeoutMs === undefined ? {} : { signal: AbortSignal.timeout(timeoutMs) }),
       });
       let out;
       try { out = await r.json(); } catch { out = {}; }

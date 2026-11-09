@@ -25,7 +25,7 @@ function validate(r, id) {
   if (r.phase === 'finished' && (typeof r.resultSealed !== 'string' || !r.resultSealed)) broken();
   return r;
 }
-export function readExecution(root, id) {
+export function readPrivateRecord(root, id, validator) {
   let fd;
   try { fd = openSync(target(root, id), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
   catch (e) { if (e.code === 'ENOENT') return null; throw e; }
@@ -34,15 +34,16 @@ export function readExecution(root, id) {
     if (!st.isFile() || st.nlink !== 1 || st.mode & 0o077 || st.uid !== process.getuid() || st.size > 2 * 1024 * 1024) throw Error('administrative execution is not a bounded private file');
     const text = readFileSync(fd, 'utf8');
     if (Buffer.byteLength(text) !== st.size) throw Error('administrative execution changed while reading');
-    return validate(JSON.parse(text), id);
+    return validator(JSON.parse(text), id);
   } finally { closeSync(fd); }
 }
-export function executionTransaction(root, id, fn) {
+export const readExecution = (root, id) => readPrivateRecord(root, id, validate);
+export function privateRecordTransaction(root, id, fn, validator) {
   mkdirSync(root, { recursive: true, mode: 0o700 }); chmodSync(root, 0o700);
   return withLock(root, id + '.lock', () => {
-    const old = readExecution(root, id), next = fn(old);
+    const old = readPrivateRecord(root, id, validator), next = fn(old);
     if (!next) return old;
-    validate(next, id);
+    validator(next, id);
     const path = target(root, id), tmp = path + '.' + randomBytes(8).toString('hex') + '.tmp';
     const text = JSON.stringify(next);
     if (Buffer.byteLength(text) > 2 * 1024 * 1024) throw Error('administrative execution exceeds its journal budget');
@@ -63,4 +64,5 @@ export function executionTransaction(root, id, fn) {
     return next;
   }, 'administrative execution');
 }
+export const executionTransaction = (root, id, fn) => privateRecordTransaction(root, id, fn, validate);
 export const monotonicMs = () => Number(process.hrtime.bigint() / 1_000_000n);

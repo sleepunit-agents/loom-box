@@ -10,7 +10,7 @@
   },
   "scripts": {
     "test": "node --test test/*.test.mjs",
-    "test:administration-supervisor": "LOOM_ADMIN_TEST_SUPERVISOR=systemd node --test test/administration-worker.test.mjs"
+    "test:administration-supervisor": "LOOM_ADMIN_TEST_SUPERVISOR=systemd node --test test/administration-worker.test.mjs test/administration-client.test.mjs"
   },
   "engines": {
     "node": ">=22"

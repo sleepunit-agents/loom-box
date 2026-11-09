@@ -1500,6 +1500,7 @@ export function api(env, effects, { caller, path, body }) {
     const administrationBox = {
       'administration-work': 'administrationWork', 'administration-claim': 'claimAdministration',
       'administration-admit': 'admitAdministration', 'administration-command': 'administrationCommandStatus',
+      'administration-cancel-claim': 'cancelAdministrationClaim',
       'administration-complete': 'completeAdministrationCommand',
     };
     if (Object.hasOwn(administrationBox, path)) {

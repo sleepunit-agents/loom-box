@@ -153,6 +153,7 @@ const publicScope = s => ({ id: s.id, agent: s.agent, conversation: s.conversati
   ...(s.approval ? { approval: s.approval } : {}), ...(s.activation ? { until: s.activation.until } : {}) });
 const publicOperation = r => ({ id: r.id, scope: r.scope, intent: r.intent, payloadHash: r.payloadHash,
   state: r.state, created: r.created, timeoutMs: r.timeoutMs,
+  ...(r.cancelledBeforeAdmission ? { notStarted: true } : {}),
   ...(r.result ? { result: { hash: r.result.hash, at: r.result.at, outcome: r.result.outcome, exitCode: r.result.exitCode, signal: r.result.signal } } : {}) });
 
 // The approval page normalizes display text. ASCII JSON escapes preserve the
@@ -199,7 +200,7 @@ export function administrationApproval(env, id, approval, o = {}) {
 function stop(j, scope, state, at) {
   scope.state = state; scope.ended = at;
   for (const r of Object.values(j.operations)) if (r.scope === scope.id) {
-    if (['queued', 'claimed'].includes(r.state)) r.state = 'cancelled';
+    if (['queued', 'claimed'].includes(r.state)) { r.state = 'cancelled'; r.cancelledBeforeAdmission = true; }
     else if (r.state === 'admitted') { r.state = 'stop-requested'; r.stopRequested = at; }
   }
 }
@@ -497,6 +498,22 @@ export function administrationCommandStatus(env, caller, q, o = {}) {
     if (!r.claim || !same(r.claim.worker, worker) || typeof q.ticket !== 'string' || hash(q.ticket) !== r.claim.ticketHash) fail('administrative observation does not match its claim', 403);
     refresh(env, j, s, at);
     return { operation: publicOperation(r), stop: s.state !== 'active' || ['cancelled', 'stop-requested'].includes(r.state) };
+  });
+}
+
+/** A pre-admission cancellation fences a late admission. It never declares
+ * an already admitted command absent, stopped, or safe to replay. */
+export function cancelAdministrationClaim(env, caller, q, o = {}) {
+  const boxId = administrativeBox(env, caller, { reporting: true });
+  return transaction(env, o, (j, at) => {
+    const { r, s } = operationFor(j, q.operation, boxId), worker = workerFor(s, q.worker);
+    if (!r.claim || !same(r.claim.worker, worker) || typeof q.ticket !== 'string' || hash(q.ticket) !== r.claim.ticketHash) fail('administrative cancellation does not match its claim', 403);
+    refresh(env, j, s, at);
+    if (!r.admission && ['claimed', 'cancelled'].includes(r.state)) {
+      r.state = 'cancelled'; r.cancelledBeforeAdmission = true;
+      return { cancelled: true, operation: publicOperation(r) };
+    }
+    return { cancelled: false, operation: publicOperation(r) };
   });
 }
 

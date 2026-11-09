@@ -177,3 +177,24 @@ noninteractive sudo only to run isolated temporary-directory tests. Root
 workers use the system manager and the same gate/journal implementation.
 This does not yet provision root workers from the box daemon or advertise root
 support to requesting bodies; that remains part of capability wiring.
+
+The durable box client now saves its worker identity before claiming, and seals
+the claim ticket and immutable payload before admission. Results remain local
+until the controller acknowledges the exact output hash; a mismatched or lost
+reply leaves the same result available for retry from another process. Calls
+use explicit abortable observation deadlines.
+
+A stale claim can be cancelled only through a journal compare-and-set before
+admission. Cancellation fences a late admission; an admission that won first
+cannot be called absent or transferred to a new worker. The client uses this
+boundary to retire dead unadmitted claimants rather than replay their commands.
+Known non-execution is explicit in status.
+
+HTTP/client tests run actual harmless commands through the same physical
+executor, including claim reply loss, completion reply loss, a mismatched
+acknowledgement, fresh-process upload, and stale-worker cancellation. This
+matrix also passes with real user-manager and root-system-manager units.
+The library is not yet connected to the normal box poll/reconciliation loop:
+worker provisioning, truthful capability reporting and shared body tools remain.
+Local input/result receipts are retained; automatic retention cleanup is not
+enabled.
