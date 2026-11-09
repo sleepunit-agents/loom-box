@@ -1,3 +1,5 @@
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
@@ -62,7 +64,8 @@ test('remote retirement keeps the received pack through seal failure and recover
     await tick(h.env,o);
     let c=loadConv(h.env,a.conversation);assert.equal(failed,true);assert.ok(c.nativeRetirement.slot.session);
     const native=c.nativeRetirement.slot.session;assert.equal(h.hr.packReady(body),false);const previousReads=reads;
-    await tick(h.env,o);
+    const recovered=spawnSync(process.execPath,[fileURLToPath(new URL('../src/cli.mjs',import.meta.url)),'deliver','tick','--conversation',a.conversation],{env:{...h.env,LOOM_RUNTIME_LOOM_URL:'http://127.0.0.1:1/mcp',LOOM_RUNTIME_TOKEN_FILE:join(h.D,'no-token')},encoding:'utf8',timeout:15000});
+    assert.equal(recovered.status,0,recovered.stderr);
     c=loadConv(h.env,a.conversation);assert.equal(c.control.state,'held');assert.equal(c.slot.session,native);
     assert.equal(c.nativeRetirement,undefined);assert.equal(reads,previousReads,'committed receipt avoids a second native pack');
     assert.equal(h.ended.length,1);

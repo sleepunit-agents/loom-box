@@ -58,7 +58,7 @@ function dropKey(env, conversation, key) {
 
 export const SYNC_MS = 2000;
 export const IDLE_S = 600;
-/** A session going back that the runtime hasn't acknowledged in this long is dropped (and its files with it). */
+/** An abandoned transfer may expire after this age only when a fresh controller answer no longer requests it. */
 export const PACK_MS = 120_000;
 
 /**
