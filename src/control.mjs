@@ -794,6 +794,9 @@ export function report(env, effects, caller, { id, state, exit, log, build }) {
     boxOf(s, caller);
     const h = s.houses[id];
     if (!h || h.box !== caller.subject) fail(`no house ${id} for this box`, 404);
+    // A cooperative Down exits naturally after native collection and Git rescue.
+    // The box sees a clean completion; retain the owner's explicit stop intent.
+    if (h.cooperativeStop && state === 'done' && exit === 0) state = 'stopped';
     if (!NEXT[h.state]?.has(state)) fail(`house ${id} can't go from ${h.state} to ${state}`, 409);
     if (TERMINAL.has(state) && h.nativeHistory?.v === 1 && !h.nativeHistory.complete) fail('native history collection must finish before this house ends', 409);
     // The image the box just ran it from (box.mjs, image): this house's build, and, as the newest build its agent's
