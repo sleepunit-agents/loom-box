@@ -26,7 +26,7 @@ import { boxSessions } from './remote.mjs';
 import { sessionsBusy } from './busy.mjs';
 import { bootInfo, SAMPLE_MS, unitSampler } from './watch.mjs';
 import { sampleHealth } from './health.mjs';
-import { harnessStatus, LOGIN_HARNESSES, loginDir, pruneLoginDir, startLogin, sweepCliContainers } from './logins.mjs';
+import { harnessStatus, machineClaudeStatus, LOGIN_HARNESSES, loginDir, pruneLoginDir, startLogin, sweepCliContainers } from './logins.mjs';
 import { COLLECTION_TIMEOUT, collectNativeHistory } from './native-collection-client.mjs';
 
 /** How often a box asks its harness CLIs whether they're logged in (and at once after a login). */
@@ -469,7 +469,7 @@ function rootless(env) {
  * on loom's own machine); `loomUrl` is what a house is told loom is.
  */
 export function runner(env, client, { loomUrl, labels = [], log = (m) => process.stderr.write(`loom-box: ${m}\n`), hasSocket = (p) => existsSync(p), hasCdi = () => CDI_SPECS.some((p) => existsSync(p)), upgrade = maybeUpgrade,
-  status = (agents, force) => harnessStatus(env, { agents, force }), login = (h, o) => startLogin(env, h, o), codexUsage = () => null, clock = () => Date.now(), secureChannel = true,
+  machineLogin = false, machineStatus = () => machineClaudeStatus(env), status = (agents, force) => harnessStatus(env, { agents, force }), login = (h, o) => startLogin(env, h, o), codexUsage = () => null, clock = () => Date.now(), secureChannel = true,
   sweep = () => sweepCliContainers(env), runtime = () => ({ commit: ownCommit(), piece: ownPiece() }),
   buildOf = (c) => buildNow(env, c), houseImage = (id) => imageOf(env, id), sampleUnits: unitsImpl = undefined, bootInfo: bootImpl = undefined, sampleHealth: healthImpl = undefined, reportOnly = undefined, collectionGiveUpMs = collectionGiveUpOf(env) }) {
   const houses = new Map(); // id -> { child, dir, stopAt? }
@@ -482,6 +482,7 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
   // The harness CLIs' own word on their logins, asked every STATUS_MS (and after a login), not every poll.
   let harnesses = null;
   let asked = 0;
+  let machineHarnesses = {};
   const logins = new Map(); // login id -> the CLI's login under way
   let loginAgents = null; // per harness, the agents the control plane says may use this box's login (its last poll)
   function harnessesNow(force) {
@@ -489,6 +490,7 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
     if (!loginAgents) return harnesses;
     if (force || !harnesses || clock() - asked >= STATUS_MS) {
       try { harnesses = status(loginAgents, !!force); } catch (e) { log(`harness status: ${e.message}`); }
+      if (machineLogin) { try { machineHarnesses = { claude: machineStatus() }; } catch (e) { log(`machine Claude status: ${e.message}`); machineHarnesses = { claude: { installed: true, loggedIn: false } }; } }
       asked = clock();
     }
     return harnesses;
@@ -500,6 +502,10 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
       if (l.state === 'cancel') { have?.cancel(); continue; }
       if (have) { if (l.code) have.code?.(l.code); continue; }
       if (l.state !== 'wanted' || !LOGIN_HARNESSES[l.harness]) continue;
+      if (l.scope === 'machine' && (!machineLogin || l.harness !== 'claude')) {
+        client.call('login-report', { id: l.id, state: 'failed', error: 'Machine login is not enabled here.' }).catch(() => {});
+        continue;
+      }
       // A pasted code would cross this box's channel to loom: not over plain HTTP outside the tailnet.
       if (!secureChannel) {
         client.call('login-report', { id: l.id, state: 'failed', error: 'this box reaches loom over plain HTTP, outside the tailnet: a login needs HTTPS or the tailnet (loom box join with an https:// or tailnet URL)' }).catch(() => {});
@@ -511,12 +517,12 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
         if (last) log(`${l.harness} login: ${st.state}${st.error ? ` (${st.error})` : ''}`);
         const hs = last ? harnessesNow(true) : undefined;
         // Still this box's until its last word has landed: a poll between would say it's gone (control.mjs).
-        return client.call('login-report', { id: l.id, ...st, kind: LOGIN_HARNESSES[l.harness].kind, ...(hs ? { harnesses: hs } : {}) })
+        return client.call('login-report', { id: l.id, ...st, kind: LOGIN_HARNESSES[l.harness].kind, ...(hs ? { harnesses: hs } : {}), ...(machineHarnesses ? { machineHarnesses } : {}) })
           .catch((e) => log(`login-report ${l.id}: ${e.message}`))
           .finally(() => { if (last) logins.delete(l.id); });
       };
       logins.set(l.id, { starting: true });
-      try { logins.set(l.id, login(l.harness, { say: report, agents: loginAgents?.[l.harness] ?? [], id: l.id })); } catch (e) { report({ state: 'failed', error: e.message }); }
+      try { logins.set(l.id, login(l.harness, { say: report, agents: loginAgents?.[l.harness] ?? [], id: l.id, machine: l.scope === 'machine' })); } catch (e) { report({ state: 'failed', error: e.message }); }
     }
   }
   const sessions = boxSessions(env, client, { dataDir: dataDir(env), log });
@@ -942,14 +948,14 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
     // Which runtime this box runs, and how its last upgrade went (version.mjs): the box's page shows both.
     let rt = null;
     try { const r = runtime(); rt = { ...(r.commit ? { commit: r.commit } : {}), ...(r.piece ? { piece: r.piece } : {}) }; const u = lastUpgrade(stateDir(env), clock()); if (u) rt.upgrade = u; } catch { rt = null; }
-    const want = await client.call('poll', { ...watchReport(), facts: detectFacts(env, labels), ...(busy ? { sessions: busy } : {}), ...(hs ? { harnesses: hs } : {}), ...(cx ? { usage: { codex: cx } } : {}),
+    const want = await client.call('poll', { ...watchReport(), facts: detectFacts(env, labels), ...(busy ? { sessions: busy } : {}), ...(hs ? { harnesses: hs } : {}), ...(machineHarnesses ? { machineHarnesses } : {}), ...(cx ? { usage: { codex: cx } } : {}),
       // The logins this runner has going: one loom handed out that isn't here was lost (control.mjs, settleLogins).
       loginsRunning: { run, ids: [...logins.keys()] }, ...(rt ? { runtime: rt } : {}) });
     if (want.loginAgents) {
       const first = !loginAgents;
       loginAgents = want.loginAgents;
       // The first poll told the box whose images it may run its CLI in: ask the CLI now, not in five minutes.
-      if (first) { const hs2 = harnessesNow(true); if (hs2) await client.call('poll', { harnesses: hs2 }).catch((e) => log(`poll: ${e.message}`)); }
+      if (first) { const hs2 = harnessesNow(true); if (hs2) await client.call('poll', { harnesses: hs2, ...(machineHarnesses ? { machineHarnesses } : {}) }).catch((e) => log(`poll: ${e.message}`)); }
     }
     onLogins(want.logins);
     for (const id of want.stop || []) stop(id, true);

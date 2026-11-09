@@ -499,7 +499,7 @@ async function main(argv, env) {
         labels = c.labels || [];
       }
       // A login's pasted code travels this channel: only over HTTPS, the tailnet or loopback (logins.mjs).
-      const r = runner(env, client, { loomUrl, labels, secureChannel: local || secureLoomUrl(loadConfig(env).url) });
+      const r = runner(env, client, { loomUrl, labels, machineLogin: local && setting(env, 'MACHINE_CLAUDE_LOGIN') === 'on', secureChannel: local || secureLoomUrl(loadConfig(env).url) });
       const every = Number(env.LOOM_BOX_POLL_MS) || POLL_MS;
       // systemd restarting this service with a house up (t-1498): a bare SIGTERM
       // used to drop the process at once, leaving every house running until
