@@ -646,6 +646,10 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
   /** A house is over: a service's state goes back first, then its secrets and dirs, then the report. */
   async function ended(h, dir, secretNames, code, signal) {
     const entry = houses.get(h.id);
+    if (!entry || entry.ended) return;
+    // The attached podman client can exit while PID 1 is still rescuing. Its exit never substitutes for stop's acknowledgement.
+    if (entry.stopAt && !entry.stopAck) { entry.pendingExit = [h, dir, secretNames, code, signal]; return; }
+    entry.ended = true;
     houses.delete(h.id);
     // A service's state goes back to loom before anything else knows it stopped,
     // so the next box (a move, or a restart) picks up where this one left off.
@@ -688,14 +692,24 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
 
   function stop(id) {
     const e = houses.get(id);
-    if (!e || e.stopAt) return;
-    e.stopAt = Date.now();
-    // podman stop reaches the container itself; the signal, the podman client.
-    spawn(podman(env), ['stop', '-t', '25', containerName(id)], { stdio: 'ignore', env: { PATH: env.PATH, HOME: env.HOME, ...(env.XDG_RUNTIME_DIR ? { XDG_RUNTIME_DIR: env.XDG_RUNTIME_DIR } : {}) } }).on('error', () => {});
-    // An adopted house's child is only `podman wait`: it ends when the container does.
-    if (e.adopted) return;
-    try { process.kill(-e.child.pid, 'SIGTERM'); } catch { /* gone */ }
-    setTimeout(() => { try { process.kill(-e.child.pid, 'SIGKILL'); } catch { /* gone */ } }, STOP_GRACE_MS).unref();
+    if (!e || e.stopProcess || e.stopAck) return;
+    e.stopAt ??= Date.now();
+    e.stopProcess = true;
+    // Stop the container, not its attached client: signalling that client can end its observation before PID 1 finishes rescue.
+    const child = spawn(podman(env), ['stop', '-t', '25', containerName(id)], { stdio: 'ignore', env: { PATH: env.PATH, HOME: env.HOME, ...(env.XDG_RUNTIME_DIR ? { XDG_RUNTIME_DIR: env.XDG_RUNTIME_DIR } : {}) } });
+    const complete = (code) => {
+      if (houses.get(id) !== e) return;
+      e.stopProcess = false;
+      // A run that completed and auto-removed itself can race the stop command. Other inspection failures are unknown, not gone.
+      const gone = code !== 0 && e.pendingExit && pod(env, ['container', 'exists', containerName(id)]).status === 1;
+      if (code === 0 || gone) {
+        e.stopAck = true;
+        if (e.pendingExit) ended(...e.pendingExit);
+      } else log(`${id}: container stop not acknowledged; retrying while the house stays owned`);
+    };
+    child.once('error', () => complete(null));
+    child.once('exit', (code) => complete(code));
+    // A start can still be creating its container. Failed stops remain eligible for the next poll; no client kill can create an unobserved house.
   }
 
   /**
@@ -740,7 +754,7 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
     await endLogins();
     for (const id of houses.keys()) stop(id);
     const until = Date.now() + STOP_GRACE_MS + 5_000;
-    while (houses.size && Date.now() < until) await new Promise((res) => setTimeout(res, 200));
+    while (houses.size && Date.now() < until) { for (const id of houses.keys()) stop(id); await new Promise((res) => setTimeout(res, 200)); }
   }
 
   // Keeping watch (watch.mjs): this boot on every poll; the units, sampled once a minute and sent with the next poll.

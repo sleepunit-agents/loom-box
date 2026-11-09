@@ -627,3 +627,48 @@ test('shutdown cancels a held image build before starting a container', async ()
     assert.throws(() => parse(watch), /build.watch/);
   }
 });
+
+
+test('manual stop retains ownership and state until the container finishes rescue, after its attached client can exit', async () => {
+  agentRepo(repo);setAgent();podmanCfg({run:'separate'});
+  const h=ok(api(env,fx,{caller:owner,path:'up',body:{agent:'art',slot:'rescue-check',task:'work'}}));
+  const prefix=join(fake,'runs',`loom-house-${h.id}`);
+  try {
+    await r.tick();
+    await until(()=>existsSync(prefix+'.ready'));
+    ok(api(env,fx,{caller:owner,path:'down',body:{id:h.id}}));
+    await r.tick();
+    await until(()=>existsSync(prefix+'.stopping'));
+    await sleep(150);
+    assert.equal(house(h.id).state,'stopping','the client exit is not the container stop acknowledgement');
+    assert.equal(r.houses.has(h.id),true,'the runner still owns its physical container');
+    assert.equal(existsSync(join(env.LOOM_BOX_DATA,'houses',h.id,'state','cursor')),true,'state is not cleaned while rescue can write');
+    writeFileSync(prefix+'.release','');
+    await until(()=>house(h.id).state==='stopped');
+    assert.equal(house(h.id).exit,0,'report the actual completed container outcome');
+    const saved=ok(api(env,fx,{caller:owner,path:'saved-state',body:{agent:'art',name:'rescue-check',slot:true}}));
+    const cursor=spawnSync('tar',['-xzOf','-','./cursor'],{input:Buffer.from(saved.state,'base64'),encoding:'utf8'});
+    assert.equal(cursor.status,0,cursor.stderr);assert.equal(cursor.stdout,'RESCUE-COMPLETED','saved state includes the final rescue write');
+  } finally {
+    writeFileSync(prefix+'.release','');
+    await until(()=>existsSync(prefix+'.exit')).catch(()=>{});
+  }
+});
+
+
+test('a failed stop while its container is still being created retries without orphaning the launch', async()=>{
+  agentRepo(repo);setAgent();podmanCfg({run:'separate',createGate:true});
+  const h=up('wait'),prefix=join(fake,'runs',`loom-house-${h.id}`);
+  try{
+    await r.tick();await until(()=>existsSync(prefix+'.json'));
+    ok(api(env,fx,{caller:owner,path:'down',body:{id:h.id}}));await r.tick();
+    await until(()=>existsSync(prefix+'.attempts')&&!r.houses.get(h.id)?.stopProcess);
+    assert.equal(house(h.id).state,'stopping');assert.equal(r.houses.has(h.id),true);
+    writeFileSync(prefix+'.create','');await until(()=>existsSync(prefix+'.ready'));
+    await r.tick();await until(()=>existsSync(prefix+'.stopping'));
+    assert.ok(Number(readFileSync(prefix+'.attempts','utf8'))>=2,'the original stop failed before the container existed');
+    assert.equal(house(h.id).state,'stopping');
+    writeFileSync(prefix+'.release','');await until(()=>house(h.id).state==='stopped');
+    assert.equal(house(h.id).exit,0);
+  }finally{writeFileSync(prefix+'.create','');writeFileSync(prefix+'.release','');await until(()=>existsSync(prefix+'.exit')).catch(()=>{});}
+});
