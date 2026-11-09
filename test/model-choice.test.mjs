@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { staticAccounts } from '../src/accounts.mjs';
 import { api } from '../src/control.mjs';
+import { startBody, resumeBody } from '../src/bodies.mjs';
 import { deliver, loadConv, ownerModelChoice } from '../src/delivery.mjs';
 import { resolveFor, resolveModel, setModels, setModelChoice } from '../src/models.mjs';
 import { update } from '../src/state.mjs';
@@ -90,4 +91,16 @@ test('an explicit harness choice is not demoted across harnesses, including resu
   const resumed = resolveModel({ ...q, models: [MODELS[1]], all: MODELS });
   assert.deepEqual(resumed.preferred, { model: 'gpt', harness: 'codex' });
   assert.equal(resumed.fallback, undefined);
+});
+
+test('resumed body metadata honors its thread choice rather than labeling it an agent fallback', async () => {
+  const w = setup();
+  const conversation = 'cv-0000000000ab';
+  setModelChoice(w.env, { agent: 'art', conversation, harness: 'codex' });
+  const o = { ...w.o, bodyEnv: { LOOM_BODY_CONVERSATION: conversation } };
+  const first = await startBody(w.env, { agent: 'art', venue: 'slack', brief: 'first' }, o);
+  assert.equal(first.harness, 'codex');
+  const resumed = await resumeBody(w.env, { body: first.body, brief: 'again' }, o);
+  assert.deepEqual(resumed.preferred, { model: 'gpt', harness: 'codex' });
+  assert.equal(resumed.switched, undefined);
 });
