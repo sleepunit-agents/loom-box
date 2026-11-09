@@ -380,6 +380,20 @@ describe('the return address is the asker\'s, proved or unambiguous', () => {
     assert.equal(originOf(w.env, { agent: 'art' }, owner), null, 'no body is at work there to have asked');
   });
 
+  test('a body on loom\'s machine relays from its shell only with its proof (t-1953)', async () => {
+    const dir = scratch('relay-local-');
+    const env = { ...process.env, HOME: dir, LOOM_RUNTIME_PIECE: 'runtime', LOOM_BODY_CONVERSATION: 'cv-0123456789ab', LOOM_BODY_KEY: 'k-not-its-key', CLAUDE_CODE_SESSION_ID: 'sess-1' };
+    delete env.LOOM_URL; delete env.LOOM_TOKEN_FILE;
+    const out = await new Promise((resolve) => {
+      const child = spawn(process.execPath, [join(import.meta.dirname, '..', 'src', 'cli.mjs'), 'relay', '--to', 'mark', '--say', 'hi'], { env });
+      let stderr = ''; child.stderr.on('data', (x) => { stderr += x; });
+      child.on('close', (status) => resolve({ status, stderr }));
+    });
+    assert.equal(out.status, 1);
+    assert.match(out.stderr, /can't prove it holds cv-0123456789ab/);
+    assert.equal(readRelays({ ...env }, Date.now()).length, 0, 'nothing sent');
+  });
+
   test('the house CLI names its conversation and sends its proof in the call\'s body, never argv', async (t) => {
     const calls = [];
     const server = createServer(async (req, res) => {
@@ -425,9 +439,17 @@ describe('a relay approval is spent only for whom it was asked (t-1953)', () => 
     d.approvals.spend = (aid, target, caller, onBehalf) => { spent.push({ aid, target, caller, onBehalf }); return onBehalf === 'owner' ? '' : `${aid} was asked for the owner; this body acts for someone loom can't name`; };
     await assert.rejects(relay(w.env, { agent: 'art' }, { to: 'fez', say: 'three', conversation: mine, approval: 'a-00000013' }, d), /someone loom can't name.*`loom runtime relay` proves it/);
     assert.equal(spent.at(-1).onBehalf, '-');
-    // A proof for another conversation proves nothing about this one.
-    await assert.rejects(relay(w.env, { agent: 'art' }, { to: 'fez', say: 'four', conversation: mine, approval: 'a-00000013' }, d, proofOf(w, dans)));
+    // A proof for another conversation proves nothing about this one: spent (tried) for no one loom can name.
+    const before = spent.length;
+    await assert.rejects(relay(w.env, { agent: 'art' }, { to: 'fez', say: 'four', conversation: mine, approval: 'a-00000013' }, d, proofOf(w, dans)), /was asked for the owner/);
+    assert.equal(spent.length, before + 1, 'it reached the spend');
     assert.equal(spent.at(-1).onBehalf, '-');
+    // Several people steered it: no one person, so no one loom can name (fails closed; approvals then refuses).
+    const both = (await deliver(w.env, w.msg('dm:group', 'ask fez', { from: { kind: 'person', slug: 'dan' } }), w.o)).conversation;
+    await deliver(w.env, w.msg('dm:group', 'me too', { from: { kind: 'person', slug: 'eve' } }), w.o);
+    await assert.rejects(relay(w.env, { agent: 'art' }, { to: 'fez', say: 'five', conversation: both, approval: 'a-00000013' }, d, proofOf(w, both)));
+    assert.equal(spent.at(-1).onBehalf, '-');
+    assert.equal(spent.length, before + 2);
   });
 
   test('the real spend passes --on-behalf to approvals use', () => {
