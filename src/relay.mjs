@@ -226,7 +226,7 @@ export async function relay(env, caller, args, d = depsOf(env), proof = {}) {
   const target = `${from}->${to}`;
   if (!paired(doc, from, to)) {
     if (!d.approvals.installed()) no(`relay: the household doesn't pair ${from} with ${to}, and no approvals piece is installed to allow one relay: the owner pairs them on the runtime's page (Permissions)`);
-    if (!approval) no(`relay: the household doesn't pair ${from} with ${to} (the runtime's Permissions). Ask the owner for this one: approvals request --kind relay --target ${target} --what 'relay to ${to}' --why '<what about>', then relay again with approval set to its id once it's allowed`);
+    if (!approval) no(`relay: the household doesn't pair ${from} with ${to} (the runtime's Permissions). Ask the owner for this one, in plain words: approvals request --kind relay --target ${target} --what 'relay to ${to}' --ask 'OK for ${cap(from)} to ask ${cap(to)} about <what, no ids>?' --why '<one line>' --if-yes '<what you do>' --if-no '<what you do instead>', then relay again with approval set to its id once it's allowed`);
     if (!APPROVAL_ID.test(approval)) no('relay: approval is an approval id (a-…)');
     const why = d.approvals.spend(approval, target, caller);
     if (why) no(`relay: approval ${approval} isn't allowed for a relay from ${from} to ${to}: ${why}`);

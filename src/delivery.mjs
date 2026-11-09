@@ -3040,7 +3040,16 @@ export function bodyPrincipal(env, { conversation, key, session }, o = {}) {
 const SHOWN_ROOM = 650;
 /** Who the runtime files, spends and withdraws a reset card as, the same every time. */
 export const runtimeAs = (agent) => JSON.stringify({ kind: 'agent', agent, house: 'loom\'s runtime' });
-export function shownRows(rows) {
+/** When a waiting row arrived, as the owner reads it on a card (t-2008): "Mon, Nov 9, 8:33 AM CST", in the household's tz. */
+export function rowWhen(at, env = {}) {
+  const ms = Date.parse(String(at ?? ''));
+  if (!Number.isFinite(ms)) return '';
+  const o = { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short' };
+  const tz = setting(env, 'TZ') || env.TZ || 'UTC';
+  try { return new Intl.DateTimeFormat('en-US', { ...o, timeZone: tz }).format(new Date(ms)); } catch { return new Intl.DateTimeFormat('en-US', { ...o, timeZone: 'UTC' }).format(new Date(ms)); }
+}
+
+export function shownRows(rows, env = {}) {
   const out = [];
   let used = 0;
   for (const q of rows ?? []) {
@@ -3048,7 +3057,7 @@ export function shownRows(rows) {
     if (q.from?.kind === 'schedule' && q.wakeFor !== '-') continue;   // the clock's word names whom, or a row from before
     const words = q.from?.kind === 'schedule' ? 'a wake with no word from the clock'
       : q.from?.kind === 'agent' && /^[a-z][a-z0-9-]{0,39}$/.test(q.from.id ?? '') ? `a relay from ${cap(q.from.id)}` : 'a message from a sender loom can\'t name';
-    const w = `${words} (${String(q.at ?? '').slice(0, 16).replace('T', ' ')})`;
+    const w = `${words} (${rowWhen(q.at, env) || 'time unknown'})`;
     // Every row listed fits on the card whole (approvals' 1000 for details, less the conversation's own line): one that
     // wouldn't isn't listed, so it isn't counted either.
     if (out.length >= 12 || used + w.length + 2 > SHOWN_ROOM) break;
@@ -3109,7 +3118,7 @@ export async function askOwnerReset(env, c, warn = (m) => console.warn(m), taken
     // retry keeps what the first filing listed: approvals hands back that same card, with that first list on it.
     if (cur.resetAsk) { cur.resetAsk = { ...cur.resetAsk, at }; saveConv(env, cur); return cur; }
     const rows = [...(cur.queue ?? []), ...taken.filter((x) => !(cur.queue ?? []).some((q) => q.key === x.key))];
-    const shown = shownRows(rows);
+    const shown = shownRows(rows, env);
     cur.resetAsk = { at, queued: shown.map((r) => r.key), shown: shown.map((r) => r.words) };
     saveConv(env, cur);
     return cur;

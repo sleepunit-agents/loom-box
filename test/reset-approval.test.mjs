@@ -159,6 +159,10 @@ test('only the rows shown on the card he allowed count as his: a relay not on it
   // What a card lists: the unplaced wake and the relay, in words; never Loren's wake.
   assert.deepEqual(shownRows(c.queue).map((r) => r.key), ['k1', 'k3']);
   assert.match(shownRows(c.queue)[1].words, /^a relay from Mark/);
+  // When each arrived, in the household's time zone and saying which (t-2008: a bare UTC time read as hours off).
+  assert.equal(shownRows(c.queue, { LOOM_RUNTIME_TZ: 'America/Chicago' })[0].words, 'a wake with no word from the clock (Sun, Nov 8, 4:00 AM CST)');
+  assert.match(shownRows(c.queue)[1].words, /\(Sun, Nov 8, 10:01 AM UTC\)$/);
+  assert.match(shownRows([{ ...relay, at: undefined }])[0].words, /\(time unknown\)$/);
   // The card showed only k1: k1 is his, the relay (not shown) leaves it unknown, Loren's wake is hers.
   // (Loren's wake was noted as hers when it queued: then she's named, and no reset counts it as his.)
   writeFileSync(join(dir, `${cv}.json`), JSON.stringify({ ...c, actsFor: { ...c.actsFor, people: ['loren'] }, resetAsk: { at: 'x', queued: ['k1'], approval: 'a-00000001' } }));
