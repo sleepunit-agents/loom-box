@@ -368,6 +368,19 @@ function noteHarness(env, agent, r, d) {
 }
 
 /** Whether a harness has a model with room for this conversation's agent now (the resolver's hard limits). */
+/** Why a pinned model can't run at all (gone from the list, or outside the agent's allow), or null: quota is not this. */
+async function pinGone(env, c, pin, d) {
+  try {
+    await resolveFor(env, { agent: c.agent, venue: c.venue, venueKind: c.kind, pin, accounts: d.accounts, now: d.now(), fetchImpl: d.fetchImpl });
+    return null;
+  } catch (e) {
+    if (!(e instanceof StateError)) throw e;
+    if (e.status === 409 && Array.isArray(e.out) && e.out.some((x) => x.account)) return null;
+    if (e.status === 409 || e.status === 410) return e.message;
+    throw e;
+  }
+}
+
 async function roomOn(env, c, harness, d, pin) {
   try {
     await resolveFor(env, { agent: c.agent, venue: c.venue, venueKind: c.kind, harness, pin, accounts: d.accounts, now: d.now(), fetchImpl: d.fetchImpl });
@@ -1633,7 +1646,7 @@ export function commitStartedConversation(env, op, { run, senderHash, bodyRules,
     // before assignments) gets one here, from the body it runs now. A failover re-pins it, the move kept as lineage.
     if (c.spawn && r.model && (!c.spawn.assignment || (way.failover && c.spawn.assignment.model !== r.model))) {
       const a = { model: r.model, harness: r.harness, family: r.family, at: new Date(at).toISOString(), ...(c.spawn.role ? { role: c.spawn.role.id, roleVersion: c.spawn.role.version } : {}) };
-      if (c.spawn.assignment) c.spawn.lineage = [...(c.spawn.lineage ?? []), { ...c.spawn.assignment, until: new Date(at).toISOString(), why: 'out of quota; failover allowed' }].slice(-8);
+      if (c.spawn.assignment) c.spawn.lineage = [...(c.spawn.lineage ?? []), { ...c.spawn.assignment, until: new Date(at).toISOString(), why: way.failover === 'rules' ? 'its rules can\'t be kept on that harness' : 'out of quota; failover allowed' }].slice(-8);
       c.spawn.assignment = a;
     }
     if (!r.inputUncertain) ack(c, op.msgs);
@@ -2000,7 +2013,7 @@ async function executeOne(env, op, d, mem) {
     bodyDeps.launch = preparedLaunch(env, op, d, { local, runKey, snapshot: () => launchSnapshot ??= {
       run, senderHash: keyHash(runKey).toString('hex'), bodyRules: savedBodyRules(rules, now()),
       ...(c0.nativeRecovery ? { nativeRecovery: c0.nativeRecovery.id } : {}),
-      way: { how: way.how, home: !!way.home, ...(way.file ? { file: way.file } : {}), ...(way.failover ? { failover: true } : {}) },
+      way: { how: way.how, home: !!way.home, ...(way.file ? { file: way.file } : {}), ...(way.failover ? { failover: way.failover } : {}) },
     } });
     const base = { activity: c0.spawn?.interactive === true, agent: c0.agent, venue: c0.venue, venueKind: c0.kind, prefer: c0.spawn?.prefer ? [c0.spawn.prefer] : [], cwd: local ? lb.cwd : d.cwd, deny: rules.deny, guest: rules.guest, ...(local ? { local: true } : {}), ...(rules.seat ? { seat: rules.seat } : {}), ...jobModel(c0) };
     // Out of quota (t-1907): which session this run continues, on which harness. Its home slot, when the harness it
@@ -2022,7 +2035,7 @@ async function executeOne(env, op, d, mem) {
       if (why) { cant = ['codex']; cantWhy = String(why).replace(CODEX_WONT, ''); }
     }
     way = await routeOf(env, c0, op, rules, d, cant);
-    // An allowed failover (t-2038): the job moves once, to another model its role allows, and is pinned there.
+    // A failover (t-2038): allowed and out of quota, or its rules forbid its harness: another model, pinned there.
     if (way.failover) { delete base.pin; if (c0.spawn?.role) base.role = c0.spawn.role; }
     const notes = quotaNotes(c0, way);
     let briefContext = c0;
@@ -2039,6 +2052,8 @@ async function executeOne(env, op, d, mem) {
         cant = ['codex'];
         cantWhy = String(e.message).replace(CODEX_WONT, '');
         d.warn(`${op.cv}: ${String(e.message).slice(0, 200)}; starting it off Codex`);
+        // A job pinned to Codex moves too: its rules come before its assignment (routeOf).
+        if (base.pin && c0.spawn?.assignment?.harness === 'codex') { delete base.pin; if (c0.spawn.role) base.role = c0.spawn.role; way = { ...way, failover: 'rules' }; }
         r = await go([...new Set([...(way.avoid ?? []), 'codex'])]);
       }
     } else {
@@ -2056,7 +2071,7 @@ async function executeOne(env, op, d, mem) {
         if (way.home) rmSync(slotFile(env, op.cv), { force: true });
       });
     }
-    const snapshot = launchSnapshot ?? { run, senderHash: keyHash(runKey).toString('hex'), bodyRules: savedBodyRules(rules, now()), way: { how: way.how, home: !!way.home, ...(way.failover ? { failover: true } : {}) }, ...(c0.nativeRecovery ? { nativeRecovery: c0.nativeRecovery.id } : {}) };
+    const snapshot = launchSnapshot ?? { run, senderHash: keyHash(runKey).toString('hex'), bodyRules: savedBodyRules(rules, now()), way: { how: way.how, home: !!way.home, ...(way.failover ? { failover: way.failover } : {}) }, ...(c0.nativeRecovery ? { nativeRecovery: c0.nativeRecovery.id } : {}) };
     const keep = commitStartedConversation(env, op, snapshot, r, pending, now(), local ? runKey : undefined);
     if (!keep) endAndForget(env, r, d);
     else { finishLaunchAck(env, op.cv, d); noteHarness(env, c0.agent, r, d); }
@@ -2293,16 +2308,27 @@ async function routeOf(env, c0, op, rules, d, cant = []) {
   const avoid = [...new Set([...(c0.quota?.from ? [c0.quota.from] : []), ...cant])];
   // A worker job keeps its assigned model (t-2038): never a return home, never a switch because a preference changed
   // or another account has room. Its own model out of quota, it waits (resolveFor's 409, said as out of quota), unless
-  // its spawn allowed a failover: then it starts once on another eligible model, its slot kept as lineage, no return.
+  // its spawn allowed a failover: then it starts on another eligible model, its slot kept as lineage, no return.
+  // Its rules come first: a harness this body's rules can't be kept on (`cant`: a deny list Codex can't hold, a local
+  // body with no Codex opt-in) is never resumed or started, pinned or not; the job moves, said as such in its lineage.
   const pin = c0.spawn?.assignment?.model;
   if (pin) {
     const h = c0.spawn.assignment.harness;
-    if (c0.spawn.failover && !(await roomOn(env, c0, h, d, pin))) {
+    const forbidden = cant.includes(h);
+    if (forbidden || (c0.spawn.failover && !(await roomOn(env, c0, h, d, pin)))) {
       if (op.type === 'resume') parkSlot(env, op);
-      return { how: 'start', avoid: [...new Set([...avoid.filter((x) => x !== h), h])], failover: true };
+      return { how: 'start', avoid: [...new Set([...avoid, h])], failover: forbidden ? 'rules' : 'quota' };
     }
-    if (op.type === 'resume' && op.slot?.harness === h) return { how: 'resume', file: slotFile(env, op.cv) };
-    return { how: 'start', avoid: avoid.filter((x) => x !== h) };
+    // Its model gone from the list, or no longer one the agent may use: not quota, so no reset will bring it back. The
+    // job holds, its session and messages kept (never the failed-resume path, which would drop its slot), and says why.
+    const gone = await pinGone(env, c0, pin, d);
+    if (gone) throw Object.assign(new DeliveryError(`this job's assigned model ${pin} can't run: ${gone}. It waits, its session kept, until the owner restores the model (or spawns the job again)`, 503), { held: true });
+    // Only a refused turn's own retry is dropped (a pinned job waits for its model instead); `cant` always stays.
+    const keep = avoid.filter((x) => x !== h || cant.includes(x));
+    if (op.type === 'resume' && op.slot?.harness === h) return { how: 'resume', file: slotFile(env, op.cv), avoid: keep };
+    // A slot on another harness (an older job's) is kept as lineage, never orphaned.
+    if (op.type === 'resume' && op.slot) parkSlot(env, op);
+    return { how: 'start', avoid: keep };
   }
   const home = c0.home && Date.parse(c0.home.until) > now && existsSync(homeFile(env, op.cv)) ? c0.home : null;
   const choice = readModelChoice(env, c0.agent, c0.conversation).effective;

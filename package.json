@@ -254,7 +254,7 @@
             },
             "failover": {
               "type": "boolean",
-              "description": "Allow the job to move once to another eligible model if its own runs out of quota (default: it waits)"
+              "description": "Allow the job to move to another eligible model if its own runs out of quota (default: it waits)"
             },
             "title": {
               "type": "string",

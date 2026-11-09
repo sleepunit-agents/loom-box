@@ -135,7 +135,7 @@ test('a worker job out of quota waits on its own model, its session kept, never 
   assert.match(loadConv(w.env, r.handle).body, /^claude:/);
 });
 
-test('an allowed failover moves the job once, keeps the move as lineage, and never returns home', async () => {
+test('an allowed failover moves the job, keeps the move as lineage, and never returns home', async () => {
   const w = workers();
   setRole(w.env, { role: { id: 'coding', description: 'Write and fix code', models: ['opus', 'sol'] } });
   const r = await w.spawn({ role: 'coding', failover: true });
@@ -167,4 +167,49 @@ test('a body reads the roles through spawn (the MCP tool\'s action roles), with 
   assert.deepEqual(r, { version: 1, roles: [{ id: 'review', description: 'Review a change', eligible: ['opus'], output: 'findings, most severe first' }] });
   assert.equal(readRoles(w.env).version, 1, 'reading never edits');
   await assert.rejects(spawnCall(w.env, { kind: 'stranger' }, { action: 'roles' }, w.o));
+});
+
+test('rules come before the assignment: a job pinned to Codex never runs there once its rules can\'t be kept on Codex', async () => {
+  const w = workers();
+  setRole(w.env, { role: { id: 'coding', description: 'Write and fix code', models: ['sol', 'opus'] } });
+  const r = await w.spawn({ role: 'coding' });
+  let c = loadConv(w.env, r.handle);
+  assert.equal(c.spawn.assignment.model, 'sol');
+  w.codex.finish(c.body);
+  // Now the job's rules carry a deny list this Codex says it can't keep.
+  w.codex.wontRun = () => 'Codex would read /x/.codex/config.toml too';
+  w.o.policy = () => ({ deny: ['mcp__handoff'] });
+  await w.say(r.handle, 'continue');
+  c = loadConv(w.env, r.handle);
+  assert.match(c.body, /^claude:/, 'off Codex, though pinned there');
+  assert.equal(w.runs().at(-1)[0], 'start', 'a fresh body, never the Codex session resumed on Claude');
+  assert.equal(c.spawn.assignment.model, 'opus');
+  assert.deepEqual(c.spawn.lineage.map((l) => [l.model, l.why]), [['sol', 'its rules can\'t be kept on that harness']]);
+});
+
+test('a job whose assigned model left the list holds, its session and message kept, and resumes once the model is back', async () => {
+  const w = workers();
+  const r = await w.spawn({ prefer: 'sonnet' });
+  let c = loadConv(w.env, r.handle);
+  assert.equal(c.spawn.assignment.model, 'sonnet');
+  const session = w.runner.slotOf({ id: c.body.split(':')[1] }).session;
+  w.runner.finish(c.body);
+  setModels(w.env, { list: [OPUS, SOL] });
+  const before = w.runs().length;
+  await w.say(r.handle, 'continue');
+  c = loadConv(w.env, r.handle);
+  assert.equal(w.runs().length, before, 'no body started on another model');
+  assert.match(c.waiting, /assigned model sonnet can't run/);
+  assert.ok(c.queue.some((m) => !m.note), 'its message waits');
+  setModels(w.env, { list: [OPUS, SONNET, SOL] });
+  await tick(w.env, w.o);
+  assert.deepEqual(w.runs().at(-1).slice(0, 1).concat(w.runs().at(-1)[2]), ['resume', session], 'its own session, kept through the hold');
+  assert.equal(loadConv(w.env, r.handle).spawn.assignment.model, 'sonnet');
+});
+
+test('a role whose models the agent may not use is refused at spawn', async () => {
+  const w = workers();
+  setRole(w.env, { role: { id: 'coding', description: 'Write and fix code', models: ['sol'] } });
+  setModels(w.env, { agent: 'art', allow: ['opus', 'sonnet'] });
+  await assert.rejects(w.spawn({ role: 'coding' }), /may use none of role coding's models \(sol\)/);
 });

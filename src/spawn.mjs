@@ -5,7 +5,7 @@ import { originOf } from './relay.mjs';
 import { principalOf } from './principal.mjs';
 import { detectLoop } from './loops.mjs';
 import { AGENT_NAME, load } from './state.mjs';
-import { readRoles, roleOf } from './models.mjs';
+import { readModels, readRoles, roleOf } from './models.mjs';
 export const SPAWN_DEPTH = 8;
 export function spawnCap(env) {
   const n = Number(env.LOOM_RUNTIME_SPAWN_LIMIT ?? 3);
@@ -58,6 +58,9 @@ export async function spawnCall(env, caller, q = {}, o = {}) {
     if (typeof q.role !== 'string') no('role is a role\'s id (loom runtime roles)');
     try { const r = roleOf(load(env), q.role); role = { id: r.id, version: r.version, eligible: r.eligible, ...(r.failover ? { failover: true } : {}) }; } catch (e) { no(e.message); }
     if (!role.eligible.length) no(`role ${role.id} has no eligible model`);
+    // Refused now, not left to fail at its start: a role whose models are all outside what this agent may use.
+    const allow = readModels(env).agents[agent]?.allow;
+    if (allow?.length && !role.eligible.some((id) => allow.includes(id))) no(`${agent} may use none of role ${role.id}'s models (${role.eligible.join(', ')})`);
   }
   const depth = (parent?.spawn?.depth ?? 0) + 1;
   const loop = detectLoop({ spawnDepth: depth });
