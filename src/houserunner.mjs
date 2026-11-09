@@ -31,6 +31,7 @@
 // host finds its record by its house (from its token), so no house is ever handed another seat's bodies, keys or
 // sessions. Houses for anyone but the owner are capped per agent (seatRoom, LOOM_RUNTIME_SEAT_HOUSES): at the cap a
 // body waits for one to idle out; it never shares one.
+import { houseLaunchHandle, readHouseLaunch, writeHouseLaunch } from './house-launch-journal.mjs';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -130,6 +131,26 @@ const partDir = (env, agent, house, id) => { if (!safe(agent, house, id)) throw 
  * reused, so no house can report an id that's another house's body (another agent's, or its own agent's earlier house).
  */
 export const bodyIdOf = (house, raw) => `${house}-${raw}`;
+
+// Persist an authenticated receipt before its transient host report can vanish.
+// A legacy host's identity alone does not prove that the full input was handed on.
+function keepHouseLaunchReceipt(env, record, receipt) {
+  if (['ready', 'refused'].includes(record.state)) return record;
+  if (!['publishing', 'published'].includes(record.state)) throw new RunnerError('house receipt preceded request publication');
+  if (receipt?.id) {
+    const id = bodyIdOf(record.house, receipt.id);
+    if (!BODY_REF.test(id)) throw new RunnerError('house launch receipt has an invalid body id');
+    record.state = 'ready';
+    record.body = { id, harness: record.harness, house: record.house, seat: record.seat,
+      ...(record.model ? { model: record.model } : {}), ...(record.slot ? { slot: record.slot } : {}),
+      ...(receipt.inputConfirmed !== true ? { inputUncertain: true } : {}) };
+    delete record.sealed; writeHouseLaunch(env, record);
+  } else if (receipt?.nativeNotStarted === true) {
+    record.state = 'refused'; record.reason = receipt.error; delete record.sealed; writeHouseLaunch(env, record);
+  }
+  return record;
+}
+
 const rawOf = (body) => (body?.house && HOUSE.test(body.house) && String(body.id).startsWith(`${body.house}-`) ? String(body.id).slice(body.house.length + 1) : null);
 
 const readJson = (p) => { try { return JSON.parse(readFileSync(p, 'utf-8')); } catch { return null; } };
@@ -382,6 +403,13 @@ export function bodySync(env, caller, body, o = {}) {
       if (x.claimed[d.id] && x.claimed[d.id] !== rid) done[rid] = { error: `${house} reported ${d.id} for a second request` };
       else x.claimed[d.id] = rid;
     }
+    for (const [rid, receipt] of Object.entries(done)) {
+      const attempt = x.req?.[rid]?.launch;
+      if (!attempt) continue;
+      const record = readHouseLaunch(env, attempt);
+      if (!record || record.agent !== agent || record.house !== house || record.seat !== seat || record.rid !== rid) throw new RunnerError('house launch receipt belongs to another request');
+      keepHouseLaunchReceipt(env, record, receipt);
+    }
     x.report = { at: now, house, bodies, done, caps };
     // A request given up on whose body the house started late: stopped, never run.
     x.cancel ??= {};
@@ -542,6 +570,127 @@ export class HouseRunner {
       } catch { /* the page shows it next time */ }
     }
     return moved;
+  }
+
+  /** Reserve a stable request without handing any work to its host. The caller
+   * persists this public handle with its conversation before publication. */
+  async prepareLaunch(id, o, resume) {
+    if (!/^[0-9a-f]{64}$/.test(id ?? '') || !AGENT_NAME.test(o.agent ?? '')) throw new RunnerError('a house launch needs its durable attempt and agent');
+    const seat = o.seat ?? OWNER_SEAT;
+    if (!SEAT.test(seat)) throw new RunnerError('invalid house launch seat');
+    const parts = isParts(o.brief);
+    const ask = { harness: this.harness, model: o.model, deny: o.deny ?? [], ...(parts ? { parts: o.brief } : { brief: o.brief }), key: o.env?.LOOM_BODY_KEY,
+      ...(o.env?.LOOM_BODY_CONVERSATION ? { conversation: o.env.LOOM_BODY_CONVERSATION } : {}), ...(o.activity ? { activity: true } : {}),
+      ...(resume ? { resume: resume.session, files: o.files ?? [] } : {}) };
+    const intent = JSON.stringify({ agent: o.agent, seat, ask });
+    const intentHash = createHash('sha256').update(intent).digest('hex');
+    const check = old => {
+      if (old.intentHash !== intentHash || old.agent !== o.agent || old.seat !== seat || old.harness !== this.harness) throw new RunnerError('house launch attempt already has another intent');
+      return houseLaunchHandle(old);
+    };
+    const old = readHouseLaunch(this.env, id);
+    if (old) return check(old);
+    const house = await this.warm(o.agent, seat);
+    return hostLocked(this.env, () => {
+      const existing = readHouseLaunch(this.env, id);
+      if (existing) return check(existing);
+      const host = this.host(o.agent, seat);
+      if (host.house !== house || !houseTakes(this.env, house)) throw Object.assign(new RunnerError('its house stopped before launch reservation'), { nativeNotStarted: true });
+      if (parts && !host.report?.caps?.includes('parts')) throw Object.assign(new RunnerError('its body host cannot read this brief'), { nativeNotStarted: true });
+      const record = { v: 1, id, intentHash, harness: this.harness, agent: o.agent, seat, house, rid: id.slice(0, 16),
+        state: 'reserved', at: this.now().getTime(), sealed: this.transit.seal(Buffer.from(JSON.stringify(ask))),
+        ...(o.model ? { model: o.model } : {}), ...(resume ? { slot: { harness: resume.harness, session: resume.session } } : {}) };
+      writeHouseLaunch(this.env, record);
+      return houseLaunchHandle(record);
+    });
+  }
+
+  checkedLaunch(handle) {
+    const record = readHouseLaunch(this.env, handle?.id);
+    if (!record || JSON.stringify(houseLaunchHandle(record)) !== JSON.stringify(houseLaunchHandle(handle)) || record.harness !== this.harness) throw new RunnerError('house launch handle does not match its sealed request');
+    return record;
+  }
+
+  /** Cancel only a request that has never become visible to the host. An
+   * interrupted two-file publication is recognized from its exact req marker. */
+  cancelPreparedLaunch(handle) {
+    return hostLocked(this.env, () => {
+      const record = this.checkedLaunch(handle);
+      const h = this.host(record.agent, record.seat), x = houseRec(h, record.house);
+      if (record.state === 'reserved' && x?.req?.[record.rid]?.launch === record.id) {
+        record.state = 'published'; writeHouseLaunch(this.env, record);
+      }
+      if (record.state !== 'reserved') return false;
+      record.state = 'refused'; record.reason = 'cancelled before house request publication'; delete record.sealed;
+      writeHouseLaunch(this.env, record);
+      return true;
+    });
+  }
+
+  publishPreparedLaunch(handle) {
+    return hostLocked(this.env, () => {
+      const record = this.checkedLaunch(handle);
+      if (!['reserved', 'publishing'].includes(record.state)) return record.state;
+      const h = this.host(record.agent, record.seat), x = houseRec(h, record.house);
+      if (!x || !houseTakes(this.env, record.house) || x.quiescing) {
+        if (record.state === 'publishing') return record.state;
+        record.state = 'refused'; record.reason = 'its house stopped before request publication'; delete record.sealed;
+        writeHouseLaunch(this.env, record); return record.state;
+      }
+      const request = x.req?.[record.rid];
+      if (request && request.launch !== record.id) throw new RunnerError('house launch request id is already occupied');
+      // Persist irrevocable publication intent first. Losing a transient host
+      // record later can never turn possibly published work back into reserved.
+      record.state = 'publishing'; writeHouseLaunch(this.env, record);
+      (x.req ??= {})[record.rid] = { at: record.at, sealed: record.sealed, launch: record.id };
+      // Recovery can repeat publication only to this same house and request.
+      writeJson(hostFile(this.env, record.agent, record.seat), h);
+      record.state = 'published'; writeHouseLaunch(this.env, record);
+      return record.state;
+    });
+  }
+
+  observePreparedLaunch(handle) {
+    return hostLocked(this.env, () => {
+      const record = this.checkedLaunch(handle);
+      if (record.state === 'ready') return { state: 'ready', body: record.body };
+      if (record.state === 'refused') return { state: 'refused', reason: record.reason };
+      const h = this.host(record.agent, record.seat), x = houseRec(h, record.house);
+      if (['reserved', 'publishing'].includes(record.state)) {
+        if (x?.req?.[record.rid]?.launch !== record.id) return { state: 'pending' };
+        record.state = 'published'; writeHouseLaunch(this.env, record);
+      }
+      const receipt = x?.report?.done?.[record.rid];
+      if (receipt) keepHouseLaunchReceipt(this.env, record, receipt);
+      if (record.state === 'ready') return { state: 'ready', body: record.body };
+      if (record.state === 'refused') return { state: 'refused', reason: record.reason };
+      return { state: 'pending', ...(receipt?.error ? { reason: receipt.error } : {}) };
+    });
+  }
+
+  async waitPreparedLaunch(handle, { claimMs = this.claimMs } = {}) {
+    const end = Date.now() + claimMs;
+    for (;;) {
+      const result = this.observePreparedLaunch(handle);
+      if (result.state === 'ready') return result.body;
+      if (result.state === 'refused') throw Object.assign(new RunnerError(result.reason), { nativeNotStarted: true });
+      if (Date.now() > end) throw Object.assign(new RunnerError('its house launch is still uncertain; the original request is retained'), { nativePending: true });
+      await sleep(this.poll);
+    }
+  }
+
+  /** Called after the conversation bound the durable receipt. Removing the
+   * request cannot remove that receipt or authorize another native admission. */
+  acknowledgePreparedLaunch(handle) {
+    return hostLocked(this.env, () => {
+      const record = this.checkedLaunch(handle);
+      if (record.state !== 'ready') return false;
+      const h = this.host(record.agent, record.seat), x = houseRec(h, record.house);
+      if (x?.req?.[record.rid]?.launch === record.id) {
+        delete x.req[record.rid]; writeJson(hostFile(this.env, record.agent, record.seat), h);
+      }
+      return true;
+    });
   }
 
   async launch(o, resume) {

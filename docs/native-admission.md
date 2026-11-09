@@ -96,3 +96,36 @@ path before receiving this protocol. Legacy unprepared starts also need explicit
 reconciliation or a physical execution barrier; new records cannot prove their
 absence after the fact. The unfinished draft must not deploy until these cases
 and the two delivery exclusion regressions pass.
+
+## House request journal
+
+The controller reserves a stable request in `delivery/house-launches/<attempt>.json`.
+Its public handle fixes the agent, seat, house, harness, intent hash and 16-digit
+request id. The private request uses the existing transit representation and
+private atomic file writes. The conversation must commit that handle before
+publication. Repeating preparation with another intent is refused.
+
+Publication shares the host lock with stop admission and authenticated host sync:
+
+1. Write `publishing` to the journal before exposing the request.
+2. Write the exact request, tagged with its attempt, into that house's record.
+3. Mark the journal `published`.
+
+Only `reserved` can be cancelled. A late publisher sees the refusal and cannot
+expose it. `publishing` remains uncertain even if the temporary host request was
+lost; its absence cannot authorize replacement work. Recovery may repeat that
+same publication to the same house, never choose another house from a timeout.
+The exact request tag also recognizes an interrupted publication between writes.
+
+Authenticated host sync persists the native receipt before returning its answer.
+A fresh controller can recover it after the transient host report disappears.
+A claim timeout retains both request and journal. Once the conversation commits
+the receipt, acknowledgement removes the request while preserving the receipt.
+An ordinary error string cannot prove that native admission never occurred.
+The explicit between-launch stopping handshake can provide that proof.
+
+A legacy identity receipt carries `inputUncertain`; it cannot acknowledge full
+input delivery. The new controller methods and their tests do not yet connect
+this protocol to delivery or add the native body-host fence. Those integrations,
+restart reconstruction, capability gating, acknowledgement recovery, and physical
+barrier recovery remain required before this draft can deploy.
