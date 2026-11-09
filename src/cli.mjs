@@ -521,7 +521,7 @@ async function main(argv, env) {
         const r = await spawnTool(env, rest.slice(1), await readStdin());
         out(r); if (r.isError) process.exitCode = 1; return;
       }
-      const action = ['wait', 'result', 'say'].includes(rest[0]) ? rest[0] : 'start';
+      const action = ['wait', 'result', 'say', 'roles'].includes(rest[0]) ? rest[0] : 'start';
       const cv = ownConversation(env);
       const body = !!(env.HOUSE_ID || env.LOOM_BODY_KEY || env.LOOM_BODY_CONVERSATION);
       const remote = !!(env.LOOM_URL && env.LOOM_TOKEN_FILE);
@@ -530,7 +530,7 @@ async function main(argv, env) {
       if (!agent || agent === 'self') agent = (body || remote) ? undefined : defaultAgent(env);
       const callerAgent = !remote && body ? (await import('./delivery.mjs')).loadConv(env, cv)?.agent : agent;
       const q = { action: action === 'wait' ? 'result' : action, agent, ...(cv ? { conversation: cv, ...bodyProof(env, cv) } : {}),
-        ...(action === 'start' ? { brief: await textOf(rest, '--brief'), prefer: flag(rest, '--prefer'), title: flag(rest, '--title') } : { handle: rest[1] }),
+        ...(action === 'start' ? { brief: await textOf(rest, '--brief'), prefer: flag(rest, '--prefer'), role: flag(rest, '--role'), ...(rest.includes('--failover') ? { failover: true } : {}), title: flag(rest, '--title') } : { handle: rest[1] }),
         ...(action === 'say' ? { text: await textOf(rest, '--text') } : {}) };
       const call = () => remote ? pieceCall(env)('spawn', q) : spawnCall(env, body ? { kind: 'agent', agent: callerAgent } : { kind: 'owner' }, q, { detach: true });
       const timeout = Number(flag(rest, '--timeout') ?? 600);
@@ -621,6 +621,7 @@ async function main(argv, env) {
       return;
     }
     case 'models': return models(rest, env, json);
+    case 'roles': return roles(rest, env, json);
     case 'grants': {
       if (env.LOOM_URL && env.LOOM_TOKEN_FILE) return runAnswer(await pieceCall(env)('run', { argv: ['grants', ...rest] }));
       if (env.HOUSE_ID) throw new Fail('grants in a house need LOOM_URL and LOOM_TOKEN_FILE; the grants live on loom', 2);
@@ -906,6 +907,36 @@ async function models(rest, env, json) {
     return;
   }
   throw new Fail('usage: loom runtime models [set|resolve] …', 2);
+}
+
+/**
+ * The worker roles (models.mjs, t-2036): `loom runtime roles` lists them, for any body or the owner; `roles set`
+ * (a role as JSON on stdin) and `roles remove <id>` are the household owner's, each with `--why`. Here on loom's
+ * machine it reads the runtime's state; elsewhere (a house) it asks the piece.
+ */
+async function roles(rest, env, json) {
+  const [sub, id] = positional(rest);
+  const remote = !!(env.LOOM_URL && env.LOOM_TOKEN_FILE);
+  const why = flag(rest, '--why');
+  let q = {};
+  if (sub === 'set') q = { role: JSON.parse(await readStdin()), ...(why ? { why } : {}) };
+  else if (sub === 'remove') { if (!id) throw new Fail('usage: loom runtime roles remove <id> --why …', 2); q = { remove: id, ...(why ? { why } : {}) }; }
+  else if (sub !== undefined) throw new Fail('usage: loom runtime roles [set|remove <id>] [--why …]', 2);
+  let r;
+  if (remote) r = await pieceCall(env)('roles', q);
+  else if (env.HOUSE_ID) throw new Fail('roles in a house need LOOM_URL and LOOM_TOKEN_FILE', 2);
+  else {
+    const m = await import('./models.mjs');
+    r = sub === undefined ? m.readRoles(env) : m.setRole(env, { ...q, by: 'owner' });
+  }
+  if (r?.error) throw new Fail(r.error);
+  if (json || sub !== undefined) return out(r);
+  if (!r.roles.length) { process.stdout.write('no roles yet: the owner adds them (loom runtime roles set)\n'); return; }
+  process.stdout.write(`catalog v${r.version}\n`);
+  for (const x of r.roles) {
+    process.stdout.write(`${x.id}: ${x.description}\n  eligible: ${x.eligible.join(', ') || '(none: its models left the list)'}${x.failover ? '; may move to another eligible model when out of quota' : ''}\n`);
+    for (const k of ['needs', 'input', 'output', 'dossier']) if (x[k]) process.stdout.write(`  ${k}: ${x[k]}\n`);
+  }
 }
 
 /** A dir packed and handed over as a service's (or slot's) starting state, in parts inside loom's body cap. */
