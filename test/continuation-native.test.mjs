@@ -2,15 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { continuationCall, deliver, handOverWake, loadConv, saveConv, tick } from '../src/delivery.mjs';
+import { continuationCall, deliver, handOverWake, loadConv, ownerConversationControl, saveConv, tick } from '../src/delivery.mjs';
 import { HouseRunner } from '../src/houserunner.mjs';
 import { readHouseLaunch } from '../src/house-launch-journal.mjs';
 import { load } from '../src/state.mjs';
 import { setModels } from '../src/models.mjs';
-import { hasAge, houseWorld, world } from './delivery-world.mjs';
+import { cvOf, hasAge, houseWorld, world } from './delivery-world.mjs';
 const wait = async fn => { const end = Date.now() + 5000; while (!fn()) { if (Date.now() > end) throw Error('continuation native fixture timed out'); await new Promise(r => setTimeout(r, 10)); } };
 
-for (const harness of ['claude', 'codex']) for (const mode of ['lost-receipt', 'expires-during-prepare', 'source-reset-during-prepare']) {
+for (const harness of ['claude', 'codex']) for (const mode of ['lost-receipt', 'expires-during-prepare', 'source-reset-during-prepare', 'uncertain-held']) {
   test(`${harness}: continuation through completed native admission: ${mode}`, { skip: !hasAge }, async () => {
     const w = world(), h = houseWorld({ harness });
     setModels(h.env, { list: [{ id: 'opus', harness: 'claude', family: 'anthropic' }], agent: 'art', prefer: ['opus'] });
@@ -28,7 +28,14 @@ for (const harness of ['claude', 'codex']) for (const mode of ['lost-receipt', '
       if (mode === 'source-reset-during-prepare') { const c = loadConv(h.env, sc.conversation); c.actsFor.reset = 'changed'; saveConv(h.env, c); }
       return handle;
     };
-    h.hr.waitPreparedLaunch = async handle => { await observe(handle); throw Error('fixture registrar lost receipt'); };
+    h.hr.waitPreparedLaunch = async handle => {
+      const body = await observe(handle);
+      if (mode === 'uncertain-held') {
+        await ownerConversationControl(h.env, { kind: 'owner' }, { conversation: cvOf('art', 'wake', firing.place), action: 'interrupt' }, { ...o, detach: true, spawnWorker() {} });
+        return { ...body, inputUncertain: true };
+      }
+      throw Error('fixture registrar lost receipt');
+    };
     const o = { ...w.o, runner: () => h.hr, accounts: h.accounts, sealer: h.sealer };
     let host, drained;
     const first = deliver(h.env, firing, { ...o, onDrain: p => { drained = p; } });
@@ -36,6 +43,14 @@ for (const harness of ['claude', 'codex']) for (const mode of ['lost-receipt', '
       await wait(() => load(h.env).houses['h-1']); host = h.host();
       const result = await first; await drained;
       let c = loadConv(h.env, result.conversation);
+      if (mode === 'uncertain-held') {
+        for (let i = 0; i < 5 && c.control?.state !== 'held'; i++) { w.clock.advance(1001); await tick(h.env, o, c.conversation); c = loadConv(h.env, c.conversation); }
+        assert.equal(c.control.state, 'held');
+        assert.equal(c.continuationAdmissions?.length ?? 0, 0, 'uncertain input never gains report authority');
+        assert.equal(h.local.startsEntered, 1, 'owner hold prevents replacement');
+        assert.ok(c.queue.some(x => x.clockContinuation), 'sealed firing survives retirement under owner hold');
+        return;
+      }
       if (mode !== 'lost-receipt') {
         assert.equal(h.local.startsEntered ?? 0, 0, 'no native publication after authority expires or resets during preparation');
         assert.equal(c.body, undefined);
