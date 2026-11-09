@@ -169,3 +169,34 @@ test('same-principal child reset invalidates the previous handle', async () => {
   saveConv(w.env, c);
   await assert.rejects(spawnCall(w.env, owner, { agent: 'art', handle: r.handle, action: 'result' }, w.o), /principal has changed/);
 });
+
+test('a stale house report keeps the same spawn open until it reconnects with its final report', async () => {
+  const { HouseRunner } = await import('../src/houserunner.mjs');
+  const { update } = await import('../src/state.mjs');
+  const w = world();
+  update(w.env, s => { s.houses['h-1'] = { id: 'h-1', agent: 'art', state: 'running' }; });
+  const house = new HouseRunner(w.env, 'claude', { sealer: w.o.sealer });
+  w.runner.houses = { owner: 'h-1' };
+  w.runner.remote = true;
+  w.runner.pending = b => house.pending(b);
+  const status = w.runner.status;
+  let outage = false;
+  w.runner.status = b => outage ? 'unknown' : status(b);
+  w.runner.final = () => outage ? null : 'REPORT-AFTER-RECONNECT';
+  const r = await start(w);
+  const before = loadConv(w.env, r.handle);
+  outage = true;
+  await tick(w.env, w.o);
+  const waiting = loadConv(w.env, r.handle);
+  assert.equal(waiting.body, before.body);
+  assert.equal(waiting.runLog.at(-1).end, undefined);
+  assert.equal((await spawnCall(w.env, owner, { agent: 'art', action: 'result', handle: r.handle }, w.o)).state, 'pending');
+  assert.equal(w.log.filter(x => x[0] === 'start').length, 1, 'no duplicate body during the outage');
+  outage = false;
+  w.runner.finish(before.body, { worked: true, failed: false });
+  await tick(w.env, w.o);
+  const result = await spawnCall(w.env, owner, { agent: 'art', action: 'result', handle: r.handle }, w.o);
+  assert.equal(result.report, 'REPORT-AFTER-RECONNECT');
+  update(w.env, s => { s.houses['h-1'].state = 'done'; });
+  assert.equal(house.pending({ agent: 'art', house: 'h-1' }), false, 'authoritative termination still releases it');
+});
