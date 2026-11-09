@@ -11,7 +11,7 @@
 // read-only. No agent code runs on the box itself. When it ends, its secrets,
 // clone and dirs go.
 import { lastUpgrade, maybeUpgrade, ownCommit, ownPiece } from './version.mjs';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { gunzipSync } from 'node:zlib';
 import { pieceName } from './piece.mjs';
@@ -264,7 +264,15 @@ export function buildTagAt(repo, ref, agent, build) {
     if (r.status !== 0) throw new BoxError(`git rev-parse ${spec}: ${(r.stderr || '').trim() || 'no such path'}`);
     return r.stdout.trim();
   };
-  return `loom-house-${agent}:${rev(`${ref}:${build.context}`).slice(0, 12)}${rev(`${ref}:${build.containerfile}`).slice(0, 8)}`;
+  const context = rev(`${ref}:${build.context}`);
+  const containerfile = rev(`${ref}:${build.containerfile}`);
+  // Extra tracked code read at boot (hooks, instructions, helpers) must rotate a warm house too.
+  // Keep old tags identical when no watch paths are declared; unrelated state commits never rotate it.
+  const watched = [...new Set(build.watch ?? [])].sort();
+  const tag = watched.length ? createHash('sha256').update(JSON.stringify([context, containerfile,
+    ...watched.map((path) => [path, rev(`${ref}:${path}`)])])).digest('hex').slice(0, 20)
+    : context.slice(0, 12) + containerfile.slice(0, 8);
+  return `loom-house-${agent}:${tag}`;
 }
 
 /**
