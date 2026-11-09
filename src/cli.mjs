@@ -31,7 +31,7 @@
 //   loom runtime slot seed <name> --from <dir> | slot state <name> --to <dir>   a slot's state (the owner's)
 //   loom runtime list [--json]   |   loom runtime down <house>
 //   loom runtime session [--agent a]                           a house with an interactive session, here, at this terminal
-//   loom runtime attach <house>                                into a session house on this box (again)
+//   loom runtime attach <house> [--shell]                      reconnect its runtime conversation, or open its shell
 //   loom runtime service up <name> [--agent a] [--box b]       a long-lived house (a bridge), kept up
 //   loom runtime service move <name> <box> [--force]           hand it off: stopped there, then started here
 //   loom runtime service down <name>
@@ -63,6 +63,7 @@
 //   loom runtime deliver stale-runs [--json]   read only: open runs whose body is gone (t-1958)
 //   loom runtime deliver resume|dismiss <cv>   a conversation paused as a loop (loops.mjs): start what waited, or drop it
 //   loom runtime task-host                                  in an already allocated raw-task house: common delivery
+//   loom runtime session-host                               in a session house: keep its common body host alive
 //   loom runtime body-host [--piece <name>] --host-key <boot key>   in an agent's house, as its task: the bodies delivery asks for
 // Models and accounts (the owner's, on loom's machine):
 //   loom runtime models [--json]                                         the model list and each agent's settings
@@ -226,17 +227,17 @@ function ownerOrRemote(env) {
     const token = readFileSync(env.LOOM_TOKEN_FILE, 'utf-8').trim();
     return async (path, body) => {
       const r = await fetch(`${base}/api/${pieceName(env)}/${path}`, {
-        method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` }, body: JSON.stringify(body),
+        method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` }, body: JSON.stringify(body), signal: AbortSignal.timeout(30_000),
       });
       const out = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Fail(out.error ?? `${r.status} ${r.statusText}`);
+      if (!r.ok) throw Object.assign(new Fail(out.error ?? `${r.status} ${r.statusText}`), { status: r.status });
       return out;
     };
   }
   const effects = realEffects(env);
   return async (path, body) => {
     const r = await api(env, effects, { caller: { kind: 'owner' }, path, body });
-    if (r.status !== 200) throw new Fail(r.body.error);
+    if (r.status !== 200) throw Object.assign(new Fail(r.body.error), { status: r.status });
     return r.body;
   };
 }
@@ -371,16 +372,15 @@ async function main(argv, env) {
       process.stderr.write(`${r.id}: ${r.agent}'s session house on ${r.boxName ?? r.box}; starting (a first build can take a while)…\n`);
       const ready = await waitRunning(call, r.id);
       if (ready !== 'running') throw new Fail(`${r.id} didn't start (${ready}); see loom box list`);
-      const code = attachHere(env, r.id);
-      await call('down', { id: r.id }).catch(() => {});
-      process.stderr.write(`${r.id}: left; the house is going (what it left unpushed is pushed first)\n`);
+      const code = await attachHere(env, r.id);
+      process.stderr.write(`${r.id}: terminal left; use attach to reconnect or down to close its house\n`);
       process.exitCode = code;
       return;
     }
     case 'attach': {
       const id = positional(rest)[0];
       if (!/^h-\d+$/.test(id ?? '')) throw new Fail('usage: loom box attach <house>', 2);
-      process.exitCode = attachHere(env, id);
+      process.exitCode = await attachHere(env, id, { shell: rest.includes('--shell') });
       return;
     }
     case 'down': { out(await ownerOrRemote(env)('down', { id: positional(rest)[0], ...(ownConversation(env) ? { conversation: ownConversation(env), ...bodyProof(env, ownConversation(env)) } : {}) })); return; }
@@ -610,6 +610,15 @@ async function main(argv, env) {
       log: m => process.stderr.write(`loom-runtime task-host: ${m}\n`) });
       if (result?.report) process.stdout.write(result.report + '\n');
       if (!result?.ok) throw new Fail(result?.reason || 'task host ended before its result was collected');
+      return;
+    }
+    case 'session-host': {
+      if (!env.HOUSE_ID || !env.LOOM_URL || !env.LOOM_TOKEN_FILE) throw new Fail('session-host runs only in its allocated house');
+      const call = pieceCall(env);
+      const boot = await call('session-bootstrap', {});
+      if (boot.error || !boot.hostKey) throw new Fail(boot.error || 'the runtime did not bootstrap this session');
+      await runBodyHost({ client: async (p, b) => { const r = await call(p, b); if (r.error) throw new Fail(r.error); return r; }, runner: h => runnerFor(h, env), env, hostKey: boot.hostKey, idleS: 0,
+        log: m => process.stderr.write(`loom-runtime session-host: ${m}\n`) });
       return;
     }
     case 'body-host': {
@@ -944,13 +953,20 @@ async function waitRunning(call, id, timeoutMs = 30 * 60_000) {
   }
 }
 
-/** Into a session house that runs on this box, at this terminal: what its house file says to run. */
-function attachHere(env, id) {
+/** Reconnect its owner-controlled runtime conversation; an explicit shell keeps the same house's reach. */
+async function attachHere(env, id, { shell = false } = {}) {
   const f = `${env.LOOM_BOX_DATA || `${env.HOME}/.local/share/loom-box`}/houses/${id}/attach.json`;
   if (!existsSync(f)) throw new Fail(`${id} isn't a session house on this box`);
-  const { container, command } = JSON.parse(readFileSync(f, 'utf-8'));
-  const r = spawnSync(env.LOOM_BOX_PODMAN || 'podman', ['exec', '-it', container, ...command], { stdio: 'inherit' });
-  return r.status ?? 1;
+  const { container } = JSON.parse(readFileSync(f, 'utf-8'));
+  const intoShell = async () => {
+    const r = spawnSync(env.LOOM_BOX_PODMAN || 'podman', ['exec', '-it', container, '/bin/sh'], { stdio: 'inherit' });
+    if (r.status) throw new Fail(`house shell exited ${r.status}`);
+  };
+  if (shell) { await intoShell(); return 0; }
+  const { runTerminal, waitTerminalReady } = await import('./terminal.mjs');
+  const call = ownerOrRemote(env);
+  await waitTerminalReady(call, id);
+  return runTerminal({ call, id, shell: intoShell });
 }
 
 // `loom box list | head` closes stdout early: that's fine, not a crash.

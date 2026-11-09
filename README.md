@@ -592,8 +592,8 @@ loom box up --needs gpu:5090 --task "train the thing"      # the one box with a 
 loom box up --box laptop --task "…"                        # that box
 loom box list | loom box down h-12
 loom box up --slot tending --task -                        # with its slot: restored at start, saved at the end, one house at a time
-loom box session                                           # a house here with you in it, at this terminal; it goes when you leave
-loom box attach h-14                                       # back into a session house on this box
+loom box session                                           # a runtime conversation in a house here; detach and reconnect without stopping it
+loom box attach h-14                                       # reconnect its runtime conversation on this box
 ```
 
 As the owner on loom's machine, add `--agent <name>`. From a body anywhere, with `LOOM_URL` and `LOOM_TOKEN_FILE` set, it goes through loom's piece API as that body's own agent token. An agent asks only for its own houses.
@@ -762,3 +762,12 @@ A model-task entrypoint may run `loom-runtime task-host` instead of launching a 
 `up` carries a body’s conversation/run proof when available. A verified parent’s principal and standing restrictions follow the task; an unproved agent call is unknown, never promoted to owner. The allocating house or a proved continuation can cancel its job. Only that raw-task house can bootstrap or inspect its completion; services, interactive session houses and unrelated callers cannot claim a task host. Bootstrap retries reuse one conversation and boot credential until the first body sync trades the credential. Established host credentials are never returned.
 
 The entrypoint returns the common final report only after delivery has collected the session, then performs its existing Git rescue and lets the box save its state slot. A task whose allocated house terminates fails explicitly rather than silently moving onto an unconstrained box. Native task entrypoints must be updated together with their runtime pin; older native entrypoints retain their previous behavior until replaced. Explicit script tasks and interactive attachment require their own applicable execution path; `task-host` is for model prompts, not arbitrary shell commands.
+
+
+### Interactive session houses
+
+An interactive entrypoint runs `loom-runtime session-host` for `HOUSE_SESSION=1` after its usual login, repository and tool setup. The allocated house hosts common delivery and the same native runners as raw tasks and wakes. The terminal is an owner controller; its credential is not given to the model. An agent token can bootstrap only its own session host and cannot control a terminal. Captured principal, box, requirements and state slot stay attached to the session. A house without the new host refuses attachment clearly; it does not launch a separate native model.
+
+`loom runtime session` opens the conversation. `loom runtime attach h-ID` reconnects it, including the latest final report. Tool activity appears while a turn runs, and a new message can steer the conversation during work. Use `/begin` and `/end` for one multiline message; `/cancel` discards an unfinished multiline message. `/stop` waits through common cancellation and saves native continuity; `/resume` uses that continuity. `/model auto|claude|codex` sets the same conversation choice as Comms. `/shell` opens the house’s ordinary shell, with its configured tools, mounts and network; `attach h-ID --shell` opens that shell directly.
+
+`/detach` leaves the native conversation running for reconnect. `/close` stops and saves it before asking the box to close the house; new input cancels a pending close. An unconfirmed send stays in the terminal: `/retry` uses the same message ID, and `/discard` explicitly discards it. EOF prints unconfirmed or unfinished text and exits unsuccessfully so it is recoverable. `/status` and `/help` describe the current state and controls. Guest capacity cleanup never reaps a session house waiting for its owner to reconnect. The entrypoint still rescues repository changes when the house closes.

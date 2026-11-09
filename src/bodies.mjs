@@ -68,15 +68,15 @@ function forRunner(runner, b, cwd) {
 /** A pick's fallback (models.mjs), as a body's record keeps it. */
 const switchedOf = (pick) => (pick.fallback ? { switched: { from: pick.fallback.from, why: String(pick.fallback.why ?? '').slice(0, 300), ...(pick.fallback.account ? { account: pick.fallback.account } : {}), ...(pick.fallback.until ? { until: pick.fallback.until } : {}) } } : {});
 
-export async function startBody(env, { agent, brief: b, venue, venueKind, prefer = [], avoid = [], cwd, deny = [], place, guest, local, seat }, o = {}) {
+export async function startBody(env, { agent, brief: b, venue, venueKind, prefer = [], avoid = [], cwd, deny = [], place, guest, local, seat, activity = false }, o = {}) {
   const d = deps(env, o);
   const text = brief(b);
   if (typeof venue !== 'string' || !/^[a-z][a-z0-9-]{0,39}$/.test(venue)) fail('which venue (wake, relay, session, discord, slack, …)');
   const pick = await resolveFor(env, { agent, venue, venueKind, prefer, avoid, conversation: o.bodyEnv?.LOOM_BODY_CONVERSATION, accounts: d.accounts, now: d.now(), fetchImpl: d.fetchImpl });
   const runner = d.runner(pick.harness, !!local);
-  // A Comms thread's body (venue loom) has its tool steps read as activity cards (activity.mjs); no other venue's is.
+  // Comms and interactive terminal bodies expose their native tool steps as activity cards (activity.mjs).
   // Whose house (t-1952): a house's runner seats it there; a local one has no houses.
-  const body = await runner.start({ agent, brief: forRunner(runner, text, cwd), model: pick.model, cwd, env: o.bodyEnv, deny, ...(seat ? { seat } : {}), ...(venue === COMMS_VENUE ? { activity: true } : {}) });
+  const body = await runner.start({ agent, brief: forRunner(runner, text, cwd), model: pick.model, cwd, env: o.bodyEnv, deny, ...(seat ? { seat } : {}), ...((venue === COMMS_VENUE || activity) ? { activity: true } : {}) });
   const rec = {
     body: `${body.harness}:${body.id}`, agent, venue, kind: pick.kind, ...(place ? { place: String(place).slice(0, 200) } : {}),
     // What it was started with of its rules (tool names, never the brief): for the owner's `loom runtime bodies`.
@@ -95,7 +95,7 @@ export function feedBody(env, ref, message, o = {}) {
 }
 
 /** A body continued: by its id (its slot, from the harness), or by a slot ({harness, session}) another machine kept. */
-export async function resumeBody(env, { body: ref, slot, agent, venue, venueKind, brief: b, prefer = [], cwd, deny = [], files, guest, local, seat }, o = {}) {
+export async function resumeBody(env, { body: ref, slot, agent, venue, venueKind, brief: b, prefer = [], cwd, deny = [], files, guest, local, seat, activity = false }, o = {}) {
   const d = deps(env, o);
   let rec = null;
   if (ref) {
@@ -110,7 +110,7 @@ export async function resumeBody(env, { body: ref, slot, agent, venue, venueKind
   const pick = await resolveFor(env, { agent: who, venue: where, venueKind: rec?.kind ?? venueKind, prefer: [...prefer, ...(rec ? [rec.model] : [])], harness: slot.harness, conversation: o.bodyEnv?.LOOM_BODY_CONVERSATION, accounts: d.accounts, now: d.now(), fetchImpl: d.fetchImpl });
   const here = !!(local ?? rec?.local);
   const runner = d.runner(slot.harness, here);
-  const body = await runner.resume(slot, { agent: who, brief: forRunner(runner, brief(b), cwd), model: pick.model, cwd, env: o.bodyEnv, deny, ...(seat ? { seat } : {}), ...(files ? { files } : {}), ...(where === COMMS_VENUE ? { activity: true } : {}) });
+  const body = await runner.resume(slot, { agent: who, brief: forRunner(runner, brief(b), cwd), model: pick.model, cwd, env: o.bodyEnv, deny, ...(seat ? { seat } : {}), ...(files ? { files } : {}), ...((where === COMMS_VENUE || activity) ? { activity: true } : {}) });
   const next = {
     body: `${body.harness}:${body.id}`, agent: who, venue: where, kind: pick.kind, ...(rec?.place ? { place: rec.place } : {}),
     ...(deny.length ? { deny: [...deny] } : {}), ...(guest ? { guest: true } : {}), ...(here ? { local: true } : {}),

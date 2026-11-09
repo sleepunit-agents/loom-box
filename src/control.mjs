@@ -1500,6 +1500,7 @@ export function api(env, effects, { caller, path, body }) {
       if (b.conversation === undefined && b.key === undefined && typeof b.session !== 'string') return { status: 200, body: up(env, effects, caller, b) };
       return import('./taskhost.mjs').then(async m => ({ status: 200, body: await m.upTask(env, effects, caller, b) })).catch(apiError);
     }
+    if (path === 'session-bootstrap' || path === 'session-command') return import('./sessionhost.mjs').then(async m => ({ status: 200, body: await (path === 'session-bootstrap' ? m.bootstrapSession(env, caller) : m.sessionCommand(env, caller, b)) })).catch(apiError);
     if (path === 'task-bootstrap' || path === 'task-status') return import('./taskhost.mjs').then(async m => ({ status: 200, body: await (path === 'task-bootstrap' ? m.bootstrapTask(env, caller) : m.taskStatus(env, caller)) })).catch(apiError);
     if (path === 'down') {
       if (!load(env).houses?.[b.id]?.job) return { status: 200, body: down(env, effects, caller, b) };
