@@ -50,14 +50,14 @@ const capture = into => chunk => {
   if (keep < chunk.length) truncated = true;
 };
 const stop = () => {
-  child?.kill('SIGTERM');
-  escalation ??= setTimeout(() => { try { process.kill(-process.pid, 'SIGKILL'); } catch {} }, 1000);
+  if (child?.pid) { try { process.kill(-child.pid, 'SIGTERM'); } catch {} }
+  escalation ??= setTimeout(() => { if (child?.pid) { try { process.kill(-child.pid, 'SIGKILL'); } catch {} } }, 1000);
 };
 process.on('SIGTERM', stop);
-const timer = setTimeout(() => { try { process.kill(-process.pid, 'SIGTERM'); } catch { stop(); } }, Math.max(1, r.deadlineMono - monotonicMs()));
+const timer = setTimeout(stop, Math.max(1, r.deadlineMono - monotonicMs()));
 try {
   child = spawn(payload.argv[0], payload.argv.slice(1), {
-    cwd: payload.cwd, stdio: ['pipe', 'pipe', 'pipe'],
+    cwd: payload.cwd, detached: true, stdio: ['pipe', 'pipe', 'pipe'],
     // No box token, run key, broker credentials or model environment reaches the command.
     env: { PATH: '/usr/local/bin:/usr/bin:/bin', HOME: process.env.HOME, LANG: 'C.UTF-8' },
   });

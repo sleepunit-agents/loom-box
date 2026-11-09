@@ -9,6 +9,7 @@ import { scratch } from './scratch.mjs';
 import { administrativeHost, runAdministrationCommand, observeAdministrationExecution } from '../src/administration-worker.mjs';
 import { readExecution } from '../src/administration-execution-journal.mjs';
 import { launchWorkerAlive } from '../src/launch-journal.mjs';
+import { administrationSupervisorAvailable, administrationUnitState, signalAdministrationUnit } from '../src/administration-supervisor.mjs';
 import { world } from './delivery-world.mjs';
 import { deliver, loadConv } from '../src/delivery.mjs';
 import { update } from '../src/state.mjs';
@@ -28,7 +29,7 @@ function fixture() {
     serverAt: Date.now(), until: Date.now() + 10_000, remainingMs: 10_000 } });
   // Freeze both wall timestamps together; this is a protocol fixture, not a grant.
   const admission = async q => { const r = await admit(q); r.receipt.until = r.receipt.serverAt + r.receipt.remainingMs; return r; };
-  return { root, id, env, execution, payload, admit: admission };
+  return { root, id, env, execution, payload, admit: admission, supervisor: process.env.LOOM_ADMIN_TEST_SUPERVISOR === 'systemd' ? 'systemd' : 'process-fixture' };
 }
 
 test('a physical command runs once, receives stdin, and seals input and output without box credentials', async () => {
@@ -87,9 +88,10 @@ test('the gate seals a result after worker SIGKILL and restart never repeats the
   t.after(() => {
     if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
     const record = readExecution(q.root, q.id);
-    if (record?.child && launchWorkerAlive(record.child) === true) { try { process.kill(-record.child.pid, 'SIGKILL'); } catch {} }
+    if (record?.supervisor) signalAdministrationUnit(q.env, record, 'SIGKILL');
+    else if (record?.child && launchWorkerAlive(record.child) === true) { try { process.kill(-record.child.pid, 'SIGKILL'); } catch {} }
   });
-  child.stdin.end(JSON.stringify({ root: q.root, id: q.id, execution: q.execution, payload: q.payload, env: q.env }));
+  child.stdin.end(JSON.stringify({ root: q.root, id: q.id, execution: q.execution, payload: q.payload, env: q.env, supervisor: q.supervisor }));
   await until(() => existsSync(marker));
   assert.equal(readExecution(q.root, q.id).phase, 'executing', errors);
   child.kill('SIGKILL'); assert.equal((await closed).signal, 'SIGKILL');
@@ -144,10 +146,60 @@ test('loss of the executing gate records unknown and never replays a possibly ef
   const running = runAdministrationCommand(q);
   await until(() => existsSync(marker));
   const gate = readExecution(q.root, q.id).child;
+  if (q.supervisor === 'systemd') {
+    const unit = administrationUnitState(q.env, readExecution(q.root, q.id).supervisor.unit);
+    assert.equal(unit.killMode, 'control-group');
+    assert.equal(unit.stopTimeout, '2s');
+    assert.notEqual(unit.runtimeMax, 'infinity');
+  }
   assert.equal(launchWorkerAlive(gate), true);
   process.kill(gate.pid, 'SIGKILL');
   const result = await running;
   assert.equal(result.result.outcome, 'unknown');
   assert.deepEqual(await runAdministrationCommand(q), result);
   assert.equal(readFileSync(effect, 'utf8'), 'one\n');
+  if (q.supervisor === 'systemd') {
+    const command = JSON.parse(readFileSync(marker, 'utf8'));
+    await until(() => launchWorkerAlive(command) === false);
+  }
+});
+
+test('an unavailable supervisor refuses before making an execution record and never falls back', async () => {
+  const q = fixture();
+  q.env.PATH = '/fixture-no-executables';
+  assert.equal(administrationSupervisorAvailable(q.env), false);
+  await assert.rejects(runAdministrationCommand({...q, supervisor:'systemd'}), /available systemd user manager/);
+  assert.equal(readExecution(q.root,q.id),null);
+});
+
+test('the lease deadline refuses expired startup or stops the admitted command after worker death', async t => {
+  const q = fixture(), marker = join(q.root, 'started');
+  q.payload.argv = [process.execPath, '-e', 'require("fs").writeFileSync(' + JSON.stringify(marker) + ',"started");setTimeout(()=>{},60000)'];
+  const script = `import{readFileSync}from'node:fs';import{runAdministrationCommand}from${JSON.stringify(new URL('../src/administration-worker.mjs', import.meta.url).href)};const q=JSON.parse(readFileSync(0,'utf8'));await runAdministrationCommand({...q,admit:async r=>({authorized:true,receipt:{operation:r.operation,payloadHash:r.payloadHash,worker:r.worker,serverAt:100,until:3100,remainingMs:3000}})});`;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', script], { env: { PATH: process.env.PATH, HOME: q.root }, stdio: ['pipe', 'ignore', 'ignore'] });
+  let ended = false;
+  const closed = new Promise(resolve => child.once('close', code => { ended = true; resolve(code); }));
+  t.after(() => {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    const r = readExecution(q.root, q.id);
+    if (r?.supervisor) signalAdministrationUnit(q.env, r, 'SIGKILL');
+    else if (r?.child && launchWorkerAlive(r.child) === true) { try { process.kill(-r.child.pid, 'SIGKILL'); } catch {} }
+  });
+  child.stdin.end(JSON.stringify({ root: q.root, id: q.id, execution: q.execution, payload: q.payload, env: q.env, supervisor: q.supervisor }));
+  await until(() => existsSync(marker) || ended);
+  if (!existsSync(marker)) {
+    const result = observeAdministrationExecution(q);
+    assert.equal(result.result.outcome, 'not-started');
+    assert.match(result.result.stderr, /ended|expired/i);
+    t.diagnostic('Startup lease expired: safe refusal verified; running-expiry boundary not exercised in this run.');
+    return;
+  }
+  child.kill('SIGKILL'); await closed;
+  await until(() => readExecution(q.root, q.id).phase === 'finished');
+  const result = observeAdministrationExecution(q);
+  assert.equal(result.result.outcome, 'exited');
+  assert.equal(result.result.signal, 'SIGTERM');
+  await until(() => launchWorkerAlive(readExecution(q.root, q.id).child) === false);
+  assert.deepEqual(await runAdministrationCommand(q), result);
+  t.diagnostic('Actual running command lease expiry verified after worker SIGKILL.');
 });

@@ -124,125 +124,42 @@ change recorded in the work, not a child process the runtime claims it can revok
 
 ## Implementation status
 
-The draft now has a private, bounded, fsynced administration journal and its
-scope/activation/command-queue engine (`src/administration.mjs`). Requests use
-the existing current native run proof, capture principal/reset authority and
-the box's reported OS identity, and bind the exact work to an immutable target.
-The observed owner decision, approval expiry and fixed lease cutoff are written
-before consumption. A lost consumption reply recovers that same lease; a used
-card without its original activation intent stays explicitly unresolved.
-Payloads are sealed and idempotency keys cannot change a command. Expiry,
-revocation, changed steering or OS identity prevent new work. These are internal
-functions only: the draft does not expose a functioning administration tool or
-execute host commands yet.
+This remains an undeployed draft. The private bounded journal, immutable scope,
+sealed command queue, and recovery of approval activation are implemented. The
+existing delivery tick files and activates approvals without a model turn.
+Approval cards include every scope field as ASCII JSON; oversized cards refuse
+rather than truncate authority. The box owner's page lists existing access and
+provides a named-owner revoke action. Other members receive no private scope
+inventory. These changes depend on approvals PR 16 for decision provenance,
+piece-only consumption and recovery of original terminal filing answers.
 
-The approvals integration must expose the authenticated decision maker (`by` in
-the existing approval record) as well as kind/target/principal. An agent with
-several owners must not let another member grant access to the named box owner's
-OS identity. The engine requires that owner on both allowed and consumed
-receipts. The installed approvals read currently omits this field and omits
-expiry after consumption; do not invent either. Register the new kind for
-piece-only consumption before advertising the tool, so a body cannot consume
-the Yes without enabling its lease.
+Controller operations bind each command to one worker's host, PID, boot,
+process birth and UID/GID. Claim tickets, command inputs and results are sealed.
+Admission rechecks authority, identity and expiry; retries preserve the same
+worker and immutable result. Unknown outcomes cannot authorize replay.
 
-Remaining gates include actual approval filing/activation and owner UI, box
-capability reporting and physical command admission/receipts, result retrieval,
-the shared CLI/MCP surface, and isolated native-harness/app verification. The
-foundation tests use fake approvals and OS identities; no real host command,
-sudo policy or production lease is enabled by them.
+The physical worker now requires a systemd user manager by default and refuses
+an unavailable manager. A stable per-operation unit is recorded before submit.
+The gate is its main process, with control-group cleanup, a bounded runtime and
+stop grace. The lease is obtained before unit creation, so its startup time
+consumes the lease. No command input is released before the actual gate identity
+and one-shot execution marker are durable. A conservative monotonic deadline
+also applies inside the gate. Commands receive a minimal environment without
+broker credentials. The gate seals bounded output independently of the worker;
+a separate sealing phase protects the only result writer from worker escalation.
 
-The production check/use adapter now uses the existing bounded approvals
-subprocess helper and mints a fresh principal statement immediately before
-consumption, after rechecking the saved conversation and box identity. It never
-substitutes an owner principal for unknown or several people. Approval checks
-use the approvals protocol's question mark for an unknown principal. This
-adapter depends on approvals PR 16 for authenticated decision-maker reads and
-piece-only administration consumption; neither draft is deployed.
+The direct-process adapter is explicitly a test fixture, never an automatic
+production fallback. Default tests exercise that fixture plus refusal of an
+unavailable manager. On a Linux host with a user manager, run
+`npm run test:administration-supervisor` for real transient-unit checks.
+Verified boundaries include worker SIGKILL with result recovery, gate SIGKILL
+with descendant cleanup and unknown/no replay, targeted revoke, actual
+controller admission/results around a harmless command, and running lease
+expiry after worker death. A short lease can correctly expire during startup;
+the tests report that refusal separately from the running-expiry proof.
 
-An isolated integration run against that actual approvals CLI exercised a
-fixture UI Allow, a ten-minute approval wait, preservation of an unknown
-principal's named people, and a deliberately lost successful consumption reply.
-Retry recovered the same lease with one consumption. This verifies the adapter
-boundary; automatic filing/tick activation, production UI and host execution
-remain unimplemented.
-
-Automatic filing and activation now run from the existing delivery tick, with
-at most four slow approval reconciliations per pass and rotation across pending
-scopes. Every lease is refreshed for expiry and authority changes on each pass.
-Filing retries use the immutable target to recover the original card, including
-a terminal answer; approvals PR 16 supplies this administration-specific
-reconciliation rule. A denial cannot turn a lost filing response into another
-request for the same scope.
-
-The card contains all authorization fields as ASCII JSON (Unicode strings are
-escaped to preserve exact paths through display normalization). Oversized cards
-refuse before the scope is saved. No authority field is truncated.
-
-The normal tick was verified against the actual approvals CLI in an isolated
-store: a lost filing reply, a fixture UI Allow, a ten-minute simulated wait, a
-lost successful consumption reply, and retry produced one card, one consumption
-and the original fixed lease. No administrative command ran. Owner revocation
-UI, physical execution and result recovery, shared tools and live-harness
-verification remain required before deployment.
-
-The box owner's page now lists existing scoped work and provides a revoke
-action. This inventory requires the named owner of that box; other members and
-agent callers receive no private work descriptions. The action likewise requires
-a named owner caller, cancels queued commands, and retains admitted/unknown
-outcomes as outstanding. It does not claim offline work has stopped.
-
-The isolated real-CLI/tick fixture also passes the current core page vocabulary
-parser and invokes the generated owner revoke action successfully. This is a
-fixture page/action verification, not proof of a deployed browser interaction or
-physical command stop. Both remain part of the release gates.
-
-Internal controller operations now implement observation, immutable worker
-claim, admission, sealed completion and authorized result retrieval. These are
-not yet exposed as box routes. A claim binds host, PID, boot id, process birth
-and UID/GID; its random ticket is sealed at rest. Another worker cannot acquire
-the command merely because time elapsed. Admission rechecks the active lease,
-current principal and approved box identity. Repeated admission returns the
-original worker-bound receipt, never permission to spawn another process.
-
-The future box worker must persist that receipt and pass through one durable
-physical child gate. It must measure the admission request's elapsed time with
-a monotonic clock and conservatively consume the returned remaining lease time;
-network delay cannot extend access. Expiry and targeted stop still need actual
-process tests. Controller admission alone does not prove physical execution.
-
-Completion accepts only the admitted worker and ticket, even after the lease
-ends. It stores bounded stdout/stderr sealed, exposes only outcome metadata,
-and rejects a retry with different output. A lost completion acknowledgement
-can be reconciled from a fresh controller process. An unknown outcome remains
-explicit and cannot be reclaimed for automatic execution. These controller
-tests run no host commands; worker transport, physical admission and stop,
-output capture/upload, shared tools and provider verification remain gates.
-
-The draft now contains a physical execution primitive and child gate, with
-box-private bounded/fsynced journals and real age encryption for input/results.
-It verifies the actual host and UID/GID, records the gate's PID/boot/birth before
-releasing stdin, commits a one-shot execution marker before spawning, and uses
-a conservative monotonic lease deadline. Commands receive a fixed minimal
-environment without box or broker credentials. Output capture is bounded and
-signals target only the recorded operation's process group.
-
-The child gate seals its result itself, so killing the parent worker does not
-discard the only result. A separate sealing phase protects the result writer
-from timeout escalation after the command has exited. Recovery observes the
-same operation and never starts another command. Positive non-execution has a
-separate not-started outcome; an executing gate lost without a result remains
-unknown.
-
-Physical temporary-directory tests verify stdin, credential omission, one side
-effect across retry, refusal/wrong UID/expired admission, bounded output,
-targeted revoke, actual parent-worker SIGKILL with result recovery, gate SIGKILL
-with explicit unknown/no replay, and the actual controller claim/admission/result
-functions around a real command. Admission decisions remain fixtures; these
-tests do not answer a production owner approval.
-
-The prototype still lacks OS-supervisor containment for loss of the gate
-itself. Its unknown result is truthful, but it cannot yet guarantee immediate
-descendant cleanup after that loss. Supported supervisor ownership and crash
-tests, box capability/transport wiring, root identity provisioning, upload
-acknowledgements and the shared CLI/MCP surface remain release gates. Nothing
-advertises or deploys administrative access yet.
+Remaining release gates are authenticated box capability/transport wiring,
+supported root identity provisioning, result upload acknowledgements, the
+shared CLI/MCP surface, and actual owner-app/both-native-harness verification.
+No production approval is answered by these fixtures, no administrator
+capability is advertised, and no sudo policy is broadened.
