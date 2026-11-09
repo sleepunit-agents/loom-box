@@ -87,6 +87,19 @@ export function admitLaunch(env, id) {
   });
 }
 
+/** A new registrar may fence a request only before native admission. A worker
+ * that arrives afterward reads refused and cannot enter the native launcher. */
+export function cancelReservedLaunch(env, id) {
+  return locked(env, () => {
+    const r = readLaunch(env, id);
+    if (!r) fail('native launch was not reserved');
+    if (r.state !== 'reserved') return { cancelled: false, record: r };
+    Object.assign(r, { state: 'refused', reason: 'cancelled before native admission', refusedAt: Date.now() });
+    save(env, r);
+    return { cancelled: true, record: r };
+  });
+}
+
 /** The worker commits a native identity before returning it to its registrar. */
 export function completeLaunch(env, id, body, { inputConfirmed = false } = {}) {
   if (!body || !BODY.test(body.id ?? '') || !['claude', 'codex'].includes(body.harness)) fail('invalid native launch receipt');

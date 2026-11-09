@@ -4,7 +4,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { admitLaunch, completeLaunch, launchAttempt, readLaunch, reserveLaunch } from '../src/launch-journal.mjs';
+import { admitLaunch, cancelReservedLaunch, completeLaunch, launchAttempt, readLaunch, reserveLaunch } from '../src/launch-journal.mjs';
 import { scratch } from './scratch.mjs';
 
 const exec = promisify(execFile);
@@ -22,6 +22,29 @@ test('an attempt retains its token and refuses changes to the immutable native i
   assert.throws(() => reserveLaunch(env, { ...request, harness: 'claude' }), /another intent/);
   assert.throws(() => reserveLaunch(env, { ...request, intentHash: 'b'.repeat(64) }), /another intent/);
   assert.equal(statSync(join(env.LOOM_BOX_DATA, 'launches', id + '.json')).mode & 0o777, 0o600);
+});
+
+test('cancellation fences a reserved late worker but cannot erase native admission', () => {
+  const first = setup();
+  reserveLaunch(first.env, first.request);
+  assert.equal(cancelReservedLaunch(first.env, first.id).cancelled, true);
+  assert.equal(admitLaunch(first.env, first.id).admitted, false, 'late worker cannot begin native work');
+  const second = setup();
+  reserveLaunch(second.env, second.request);
+  assert.equal(admitLaunch(second.env, second.id).admitted, true);
+  assert.equal(cancelReservedLaunch(second.env, second.id).cancelled, false, 'admitted work needs native reconciliation, not deletion');
+  assert.equal(readLaunch(second.env, second.id).state, 'admitted');
+});
+
+test('independent cancellation and native-admission workers have one authoritative winner', async () => {
+  const { env, id, request } = setup();
+  reserveLaunch(env, request);
+  const moduleURL = new URL('../src/launch-journal.mjs', import.meta.url).href;
+  const base = `import{admitLaunch,cancelReservedLaunch}from${JSON.stringify(moduleURL)};`;
+  const run = operation => exec(process.execPath, ['--input-type=module', '-e', base + `console.log(JSON.stringify(${operation}(process.env,process.argv[1])));`, id], { env: { ...process.env, ...env } });
+  const [admission, cancellation] = (await Promise.all([run('admitLaunch'), run('cancelReservedLaunch')])).map(r => JSON.parse(r.stdout));
+  assert.equal(Number(admission.admitted) + Number(cancellation.cancelled), 1);
+  assert.equal(readLaunch(env, id).state, admission.admitted ? 'admitted' : 'refused');
 });
 
 test('even the same worker receives native admission only once; a receipt cannot change', () => {
