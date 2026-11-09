@@ -13,7 +13,7 @@
 // (<LOOM_BOX_DATA>/bodies), 0600 in a 0700 dir, and hold no brief and no message: the agent, venue, model, harness
 // and slot only, and `switched` ({from, why, until?}) when the body is a harness switch: on another harness than the
 // agent's preferred one, because that one's account is out (models.mjs, fallback; t-1907).
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
@@ -34,7 +34,9 @@ const fail = (m, status = 400) => { throw new StateError(m, status); };
 
 function save(env, rec) {
   mkdirSync(dir(env), { recursive: true, mode: 0o700 });
-  writeFileSync(file(env, rec.body), JSON.stringify(rec, null, 1) + '\n', { mode: 0o600 });
+  const target = file(env, rec.body), tmp = target + '.' + process.pid + '.' + randomBytes(6).toString('hex') + '.tmp';
+  writeFileSync(tmp, JSON.stringify(rec, null, 1) + '\n', { mode: 0o600, flag: 'wx' });
+  renameSync(tmp, target);
 }
 
 export function readBody(env, ref) {
@@ -68,6 +70,20 @@ function forRunner(runner, b, cwd) {
 /** A pick's fallback (models.mjs), as a body's record keeps it. */
 const switchedOf = (pick) => (pick.fallback ? { switched: { from: pick.fallback.from, why: String(pick.fallback.why ?? '').slice(0, 300), ...(pick.fallback.account ? { account: pick.fallback.account } : {}), ...(pick.fallback.until ? { until: pick.fallback.until } : {}) } } : {});
 
+/** Complete exactly the selected record generation after native admission, or
+ * recover that same commit. A retry cannot erase an already ended generation. */
+export function commitPreparedBody(env, prepared, body, at = new Date().toISOString()) {
+  const metadata = prepared?.metadata;
+  if (!metadata || !/^[0-9a-f]{24}$/.test(metadata.instance ?? '') || metadata.harness !== body?.harness || !REF.test(`${body?.harness}:${body?.id}`)) fail('native receipt does not match its prepared body');
+  const ref = `${body.harness}:${body.id}`;
+  let old;
+  try { old = JSON.parse(readFileSync(file(env, ref), 'utf8')); } catch { /* no committed body yet */ }
+  if (old?.instance === metadata.instance) return { ...old, why: prepared.why, preferred: prepared.preferred };
+  const rec = { ...metadata, body: ref, started: at, ...(body.slot ? { slot: body.slot } : {}), ...(body.house ? { house: body.house } : {}), ...(body.seat ? { seat: body.seat } : {}), ...(body.inputUncertain === true ? { inputUncertain: true } : {}) };
+  save(env, rec);
+  return { ...rec, why: prepared.why, preferred: prepared.preferred };
+}
+
 export async function startBody(env, { agent, brief: b, venue, venueKind, prefer = [], avoid = [], cwd, deny = [], place, guest, local, seat, activity = false }, o = {}) {
   const d = deps(env, o);
   const text = brief(b);
@@ -76,16 +92,16 @@ export async function startBody(env, { agent, brief: b, venue, venueKind, prefer
   const runner = d.runner(pick.harness, !!local);
   // Comms and interactive terminal bodies expose their native tool steps as activity cards (activity.mjs).
   // Whose house (t-1952): a house's runner seats it there; a local one has no houses.
-  const body = await runner.start({ agent, brief: forRunner(runner, text, cwd), model: pick.model, cwd, env: o.bodyEnv, deny, ...(seat ? { seat } : {}), ...((venue === COMMS_VENUE || activity) ? { activity: true } : {}) });
-  const rec = {
-    body: `${body.harness}:${body.id}`, agent, venue, kind: pick.kind, ...(place ? { place: String(place).slice(0, 200) } : {}),
+  const metadata = {
+    agent, venue, kind: pick.kind, ...(place ? { place: String(place).slice(0, 200) } : {}),
     // What it was started with of its rules (tool names, never the brief): for the owner's `loom runtime bodies`.
     ...(deny.length ? { deny: [...deny] } : {}), ...(guest ? { guest: true } : {}), ...(local ? { local: true } : {}),
-    harness: body.harness, model: pick.model, family: pick.family, ...(pick.account ? { account: pick.account } : {}), ...(pick.accountKey ? { accountKey: pick.accountKey } : {}), ...switchedOf(pick),
-    started: d.now().toISOString(), instance: randomBytes(12).toString('hex'), ...(body.slot ? { slot: body.slot } : {}), ...(body.house ? { house: body.house } : {}), ...(body.seat ? { seat: body.seat } : {}),
+    harness: pick.harness, model: pick.model, family: pick.family, ...(pick.account ? { account: pick.account } : {}), ...(pick.accountKey ? { accountKey: pick.accountKey } : {}), ...switchedOf(pick), instance: randomBytes(12).toString('hex'),
   };
-  save(env, rec);
-  return { ...rec, why: pick.why, preferred: pick.preferred };
+  const options = { agent, brief: forRunner(runner, text, cwd), model: pick.model, cwd, env: o.bodyEnv, deny, ...(seat ? { seat } : {}), ...((venue === COMMS_VENUE || activity) ? { activity: true } : {}) };
+  const prepared = { metadata, why: pick.why, preferred: pick.preferred };
+  const body = o.launch ? await o.launch({ runner, harness: pick.harness, options, prepared }) : await runner.start(options);
+  return commitPreparedBody(env, prepared, body, d.now().toISOString());
 }
 
 export function feedBody(env, ref, message, o = {}) {
@@ -110,15 +126,16 @@ export async function resumeBody(env, { body: ref, slot, agent, venue, venueKind
   const pick = await resolveFor(env, { agent: who, venue: where, venueKind: rec?.kind ?? venueKind, prefer: [...prefer, ...(rec ? [rec.model] : [])], harness: slot.harness, conversation: o.bodyEnv?.LOOM_BODY_CONVERSATION, accounts: d.accounts, now: d.now(), fetchImpl: d.fetchImpl });
   const here = !!(local ?? rec?.local);
   const runner = d.runner(slot.harness, here);
-  const body = await runner.resume(slot, { agent: who, brief: forRunner(runner, brief(b), cwd), model: pick.model, cwd, env: o.bodyEnv, deny, ...(seat ? { seat } : {}), ...(files ? { files } : {}), ...((where === COMMS_VENUE || activity) ? { activity: true } : {}) });
-  const next = {
-    body: `${body.harness}:${body.id}`, agent: who, venue: where, kind: pick.kind, ...(rec?.place ? { place: rec.place } : {}),
+  const metadata = {
+    agent: who, venue: where, kind: pick.kind, ...(rec?.place ? { place: rec.place } : {}),
     ...(deny.length ? { deny: [...deny] } : {}), ...(guest ? { guest: true } : {}), ...(here ? { local: true } : {}),
-    harness: body.harness, model: pick.model, family: pick.family, ...(pick.account ? { account: pick.account } : {}), ...(pick.accountKey ? { accountKey: pick.accountKey } : {}), ...switchedOf(pick),
-    started: d.now().toISOString(), instance: randomBytes(12).toString('hex'), slot: body.slot ?? slot, ...(ref ? { resumed: ref } : {}), ...(body.house ? { house: body.house } : {}), ...(body.seat ? { seat: body.seat } : {}),
+    harness: pick.harness, model: pick.model, family: pick.family, ...(pick.account ? { account: pick.account } : {}), ...(pick.accountKey ? { accountKey: pick.accountKey } : {}), ...switchedOf(pick),
+    instance: randomBytes(12).toString('hex'), slot, ...(ref ? { resumed: ref } : {}),
   };
-  save(env, next);
-  return { ...next, why: pick.why, preferred: pick.preferred };
+  const options = { agent: who, brief: forRunner(runner, brief(b), cwd), model: pick.model, cwd, env: o.bodyEnv, deny, ...(seat ? { seat } : {}), ...(files ? { files } : {}), ...((where === COMMS_VENUE || activity) ? { activity: true } : {}) };
+  const prepared = { metadata, why: pick.why, preferred: pick.preferred };
+  const body = o.launch ? await o.launch({ runner, harness: pick.harness, options, resume: slot, prepared }) : await runner.resume(slot, options);
+  return commitPreparedBody(env, prepared, body, d.now().toISOString());
 }
 
 export function endBody(env, ref, o = {}) {
