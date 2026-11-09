@@ -298,12 +298,20 @@ function imageOf(env, id) {
  * its build context and the Containerfile's blob, so an unchanged house file
  * reuses the image and any change builds a new one.
  */
-function image(env, h, house, repo, logFd) {
+async function image(env, h, house, repo, logFd, signal) {
   const ctx = inside(repo, house.build.context, 'build context');
   const cf = inside(repo, house.build.containerfile, 'Containerfile');
   const tag = buildTagAt(repo, 'HEAD', h.agent, house.build);
   if (pod(env, ['image', 'exists', tag]).status === 0) return tag;
-  const b = pod(env, ['build', '-t', tag, '-f', cf, ctx], { stdio: ['ignore', logFd, logFd] });
+  const b = await new Promise((resolve, reject) => {
+    const child = spawn(podman(env), ['build', '-t', tag, '-f', cf, ctx], {
+      env: { PATH: env.PATH, HOME: env.HOME, ...(env.XDG_RUNTIME_DIR ? { XDG_RUNTIME_DIR: env.XDG_RUNTIME_DIR } : {}) },
+      stdio: ['ignore', logFd, logFd], timeout: 3_600_000, signal,
+    });
+    let error;
+    child.once('error', (e) => { error = e; });
+    child.once('close', (status) => error ? reject(error) : resolve({ status }));
+  });
   if (b.status !== 0) throw new BoxError(`the image didn't build (exit ${b.status}); see the house log`);
   try { pruneImages(env, h.agent); } catch { /* a cleanup that fails isn't the build's */ }
   return tag;
@@ -450,6 +458,8 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
   // dropped (control.mjs, settleLogins).
   const run = randomBytes(6).toString('hex');
   let swept = false;
+  let work = null, closing = false;
+  const building = new AbortController();
   // The harness CLIs' own word on their logins, asked every STATUS_MS (and after a login), not every poll.
   let harnesses = null;
   let asked = 0;
@@ -554,9 +564,9 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
       rmSync(dir, { recursive: true, force: true });
       return;
     }
-    let made = [];
+    let made = [], logFd;
     try {
-      const logFd = openSync(pathJoin(dir, 'log'), 'a', 0o600);
+      logFd = openSync(pathJoin(dir, 'log'), 'a', 0o600);
       const { repo, mirror } = checkout(env, h, dir, claimed.repoAuth);
       const house = specFor(parseHouseFile(readFileSync(inside(repo, h.houseFile || 'house/house.json', 'house file'), 'utf-8')), h.service);
       // Every house gets its own loom token; the rest are what the control plane chose.
@@ -566,7 +576,7 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
       if (house.nested && !rootless(env)) throw new BoxError('nested containers need rootless podman on the box');
       if (h.gpu && !claimed.gpu) throw new BoxError(`the house needs the GPU, and the owner hasn't allowed ${h.agent}'s houses a GPU (loom box agent ${h.agent} … --gpu, or the agent's page)`);
       if (h.gpu && !hasCdi()) throw new BoxError('the house needs the GPU, and this box has no NVIDIA CDI spec: run `sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml` (nvidia-container-toolkit) once, then try again');
-      const tag = image(env, h, house, repo, logFd);
+      const tag = await image(env, h, house, repo, logFd, building.signal);
       // The box's own logins the house wants: each must be logged in here (the box's report, as of its claim). Checked
       // after the image is built, so a first house leaves an image the box can run its own login in (logins.mjs).
       const notIn = (house.logins ?? []).filter((l) => !(claimed.logins ?? []).includes(l));
@@ -605,6 +615,7 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
         env: { PATH: env.PATH, HOME: env.HOME, ...(env.XDG_RUNTIME_DIR ? { XDG_RUNTIME_DIR: env.XDG_RUNTIME_DIR } : {}) },
       });
       closeSync(logFd);
+      logFd = undefined;
       if (house.task === 'stdin') { child.stdin.on('error', () => {}); child.stdin.end(h.task); }
       const secretNames = made;
       made = [];
@@ -619,6 +630,8 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
       // The build's own output is in the house log: send its end along with why.
       const out = tail(pathJoin(dir, 'log'));
       await client.call('report', { id: h.id, state: 'failed', log: `the box couldn't start it: ${err.message}${out ? `\n${out}` : ''}` }).catch(() => {});
+    } finally {
+      if (logFd !== undefined) closeSync(logFd);
     }
   }
 
@@ -709,6 +722,9 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
   }
 
   async function shutdown() {
+    closing = true;
+    building.abort();
+    if (work) await work;
     await endLogins();
     for (const id of houses.keys()) stop(id);
     const until = Date.now() + STOP_GRACE_MS + 5_000;
@@ -745,7 +761,7 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
   /** For a test: the units' sample under way, done. */
   async function settled() { while (unitsBusy || healthBusy) await new Promise((r) => setTimeout(r, 5)); }
 
-  async function tick() {
+  async function tick({ wait = true } = {}) {
     // Which remote sessions here are mid-turn (busy.mjs): loom shows it on the agents' cards (t-1624).
     let busy;
     try { busy = sessionsBusy(pathJoin(stateDir(env), 'session-cpu.json')); } catch { busy = undefined; }
@@ -775,6 +791,16 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
       if (first) { const hs2 = harnessesNow(true); if (hs2) await client.call('poll', { harnesses: hs2 }).catch((e) => log(`poll: ${e.message}`)); }
     }
     onLogins(want.logins);
+    for (const id of want.stop || []) stop(id);
+    // Polls carry real health, even while a build is held. Only one reconciliation
+    // runs at a time: no duplicate claims, concurrent mirror writes or image builds.
+    if (closing || work) return want;
+    work = reconcile(want).catch((e) => log(`houses: ${e.message}`)).finally(() => { work = null; });
+    if (wait) await work;
+    return want;
+  }
+
+  async function reconcile(want) {
     // The control plane thinks these are up here, but this box doesn't have them:
     // it restarted under them. Say so rather than leave them "running" forever.
     for (const id of want.active || []) {
@@ -803,8 +829,7 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
       await client.call('report', { id, state, log: 'the box no longer has this house (it restarted while the house was up)' })
         .catch((e) => log(`report ${id}: ${e.message}`));
     }
-    for (const id of want.stop || []) stop(id);
-    for (const h of want.start || []) if (!houses.has(h.id)) await start(h);
+    for (const h of want.start || []) if (!closing && !houses.has(h.id)) await start(h);
     await checkBuilds(want.bodyHosts);
     await sessions(want.remotes);
     // On another loom-box than loom's: install that one, between house starts (version.mjs).

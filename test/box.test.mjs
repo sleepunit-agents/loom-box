@@ -576,3 +576,46 @@ test('a build leaves an agent its two newest house images: older ones go, unless
   assert.deepEqual(pruneImages(env, 'art'), [t(2), t(4)]);
   assert.deepEqual(readFileSync(join(fake, 'rmis'), 'utf-8').trim().split('\n'), [t(2), t(4)]);
 });
+
+test('a held image build leaves polls and health reports flowing without duplicate claims', async () => {
+  agentRepo(repo);
+  setAgent();
+  const h = up();
+  podmanCfg({ holdBuild: true });
+  const calls = [];
+  const box = runner(env, { async call(path, body) {
+    calls.push({ path, body });
+    return client.call(path, body);
+  } }, { loomUrl: 'http://loom.test/mcp', log: () => {},
+    sampleHealth: async () => ({ marker: 'fresh health' }), sampleUnits: async () => [],
+  });
+  try {
+    await box.tick({ wait: false });
+    await until(() => existsSync(join(fake, 'building')));
+    await box.settled();
+    for (let i = 0; i < 3; i++) await box.tick({ wait: false });
+    assert.equal(house(h.id).state, 'starting');
+    assert.equal(calls.filter((c) => c.path === 'claim').length, 1);
+    const polls = calls.filter((c) => c.path === 'poll' && c.body.facts);
+    assert.equal(polls.length, 4);
+    assert.ok(polls.slice(1).some((c) => c.body.health?.marker === 'fresh health'));
+    podmanCfg({});
+    await until(() => house(h.id).state === 'done');
+    assert.equal(readFileSync(join(fake, 'builds'), 'utf-8').trim().split('\n').length, 1);
+  } finally {
+    podmanCfg({});
+    await box.shutdown();
+  }
+});
+
+test('shutdown cancels a held image build before starting a container', async () => {
+  agentRepo(repo);
+  setAgent();
+  const h = up();
+  podmanCfg({ holdBuild: true });
+  await r.tick({ wait: false });
+  await until(() => existsSync(join(fake, 'building')));
+  await r.shutdown();
+  assert.equal(house(h.id).state, 'failed');
+  assert.equal(existsSync(join(fake, 'runs', `loom-house-${h.id}.json`)), false);
+});

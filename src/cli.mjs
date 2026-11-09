@@ -479,7 +479,7 @@ async function main(argv, env) {
       });
       for (;;) {
         if (stopping) return;
-        try { await r.tick(); } catch (err) { process.stderr.write(`loom-box: poll: ${err.message}\n`); }
+        try { await r.tick({ wait: false }); } catch (err) { process.stderr.write(`loom-box: poll: ${err.message}\n`); }
         if (rest.includes('--once') || stopping) return;
         await sleep(every);
       }

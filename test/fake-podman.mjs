@@ -60,6 +60,12 @@ switch (`${args[0]} ${args[1] ?? ''}`) {
   default: break;
 }
 if (args[0] === 'build') {
+  if (cfg().holdBuild) {
+    writeFileSync(join(D, 'building'), '');
+    const until = Date.now() + 10_000;
+    while (cfg().holdBuild && Date.now() < until) await new Promise((r) => setTimeout(r, 20));
+    if (cfg().holdBuild) process.exit(124);
+  }
   if (cfg().build) { console.log('build broke'); process.exit(cfg().build); }
   writeFileSync(join(D, 'images', safe(args[args.indexOf('-t') + 1])), '');
   writeFileSync(join(D, 'builds'), `${(existsSync(join(D, 'builds')) ? readFileSync(join(D, 'builds'), 'utf-8') : '')}${args[2]}\n`);
