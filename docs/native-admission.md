@@ -313,7 +313,8 @@ After physical termination the client snapshots missing entries, recovers only
 the matching native token or session through the existing adapters, and retries
 immutable multipart uploads. Container PIDs are never interpreted as box PIDs.
 A reserved/refused launch journal can establish that no admission happened; an
-admitted journal without recoverable history remains held. Completion is
+admitted journal with unreadable or malformed history remains held; verified
+absence after physical termination uses the explicit loss disposition below. Completion is
 acknowledged and persisted in the box's ending receipt before normal cleanup.
 Lost acknowledgements and box restarts retry this same transaction. The UI calls
 this phase “saving conversation history.”
