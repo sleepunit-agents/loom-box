@@ -106,7 +106,8 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
       // A turn just over (it was working, or just started, and isn't now): its account's usage goes to the runtime.
       if (['working', 'started'].includes(b.seen) && (status === 'idle' || status === 'ended')) turnsOver.push({ id, harness: b.harness, body: { id, ...(b.slot ? { slot: b.slot } : {}) } });
       if (status !== 'unknown') b.seen = status;
-      const slot = (() => { try { return r.slotOf({ id }); } catch { return null; } })();
+      const slot = (() => { try { return r.slotOf({ id, ...(b.slot ? { slot: b.slot } : {}) }) ?? b.slot; } catch { return b.slot; } })();
+      if (slot?.session) b.slot = slot;
       // What its inbox still holds (ids only): fed, never taken by its hook. The runtime keeps their text.
       const pending = (() => { try { return (r.inbox?.pending?.(id) ?? []).map((p) => p?.id).filter((k) => typeof k === 'string').slice(0, 64); } catch { return []; } })();
       // Its turn over: how it went (runners.mjs, turn), for the runtime's loop check (t-1763).
