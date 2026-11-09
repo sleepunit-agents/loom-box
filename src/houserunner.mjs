@@ -34,6 +34,7 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { listConvs } from './delivery.mjs';
 import { outdatedHouse, up } from './control.mjs';
 import { pieceName } from './piece.mjs';
 import { bodyBox } from './placement.mjs';
@@ -224,7 +225,7 @@ const houseRec = (h, house) => (house && h.house === house ? h : (house && h.dra
 const freshRec = (x, house, now) => !!x?.report && now - x.report.at < HOST_STALE_MS && x.report.house === house;
 const fresh = (h, now) => freshRec(h, h.house, now);
 /** What's one house's in the record (the rest is the agent's). */
-const PER_HOUSE = ['report', 'hostHash', 'bootHash', 'req', 'stop', 'inbox', 'claimed', 'cancel'];
+const PER_HOUSE = ['report', 'hostHash', 'bootHash', 'req', 'stop', 'inbox', 'claimed', 'cancel', 'quiescing'];
 /** Draining houses that are over (or gone from the state): nothing of theirs is left to finish. */
 function pruneDraining(env, h) {
   if (!h.draining) return;
@@ -233,6 +234,18 @@ function pruneDraining(env, h) {
   for (const id of Object.keys(h.draining)) if (!LIVE.has(s.houses[id]?.state)) delete h.draining[id];
   if (!Object.keys(h.draining).length) delete h.draining;
 }
+/** Down and body-sync share this lock: an unauthenticated host cannot acquire work between stop admission and state change. */
+export const hostStopLock = (env, action) => hostLocked(env, action);
+export const hasHostSession = (env, agent, house) => { const found = recordOfHouse(env, agent, house); return !!found && !!houseRec(found.h, house)?.hostHash; };
+export function stoppingHosts(env) {
+  const houses = Object.values(load(env).houses ?? {}).filter(h => h.state === 'stopping' && h.cooperativeStop === true);
+  return houses.map(h => {
+    const found = recordOfHouse(env, h.agent, h.id);
+    return { house: h.id, agent: h.agent, conversations: found ? houseRec(found.h, h.id)?.quiescing?.conversations ?? [] : [] };
+  });
+}
+const belongsToHouse = (c, house) => ['claude', 'codex'].some(h => c.body?.startsWith(`${h}:${house}-`));
+
 /** A house a body may still be handed to: asked for, starting or running. One stopping (or gone) never is, however fresh its host's last report. */
 const TAKES = new Set(['wanted', 'starting', 'running']);
 const LIVE = new Set([...TAKES, 'stopping']);
@@ -340,6 +353,23 @@ export function bodySync(env, caller, body, o = {}) {
       delete x.bootHash; delete x.bootSealed;
     }
     const { bodies, done, caps } = cleanReport(body?.report);
+    const current = load(env).houses?.[house];
+    const stopping = current?.state === 'stopping' && !current.job && !current.session;
+    if (stopping) {
+      x.quiescing ??= { at: now, conversations: [], seen: [] };
+      const conversations = new Set(x.quiescing.conversations);
+      for (const [rid, request] of Object.entries(x.req ?? {})) {
+        try { const q = JSON.parse(t.open(request.sealed).toString('utf8')); if (/^cv-[0-9a-f]{12}$/.test(q.conversation ?? '')) conversations.add(q.conversation); } catch { /* no text is recovered by guessing */ }
+        // A host syncs only between native launch calls: a request absent from done has not run here.
+        if (!done[rid]) done[rid] = { error: 'its house is stopping before this request starts' };
+      }
+      x.quiescing.conversations = [...conversations];
+      for (const [id, b] of Object.entries(bodies)) {
+        if (x.quiescing.seen.includes(id)) continue;
+        x.quiescing.seen.push(id);
+        (x.stop ??= {})[id] ??= { pack: true, at: now, ...(b.session ? { session: b.session } : {}) };
+      }
+    }
     for (const b of Object.values(bodies)) if (typeof b.final === 'string') {
       // A host reports over its authenticated channel; words are sealed before they reach disk.
       try { b.finalSealed = sealer.seal(Buffer.from(b.final)).toString('base64'); } catch { /* retry next sync */ }
@@ -396,12 +426,12 @@ export function bodySync(env, caller, body, o = {}) {
     for (const id of Object.keys(x.stop ?? {})) {
       const gone = !bodies[id] || bodies[id].status === 'ended';
       // Done, and its id's claim with it: a resume of its session comes back under that id (t-1881). Only now, once
-      // it's gone from the house, never while it may still run there.
-      if (gone && (!x.stop[id].pack || existsSync(packedFile(env, agent, house, id)) || now - x.stop[id].at > CLAIM_MS)) { delete x.stop[id]; if (x.claimed) delete x.claimed[id]; }
+      // it's gone from the house, never while it may still run there. A transfer deadline is not a collected session.
+      if (gone && (!x.stop[id].pack || existsSync(packedFile(env, agent, house, id)))) { delete x.stop[id]; if (x.claimed) delete x.claimed[id]; }
     }
     const req = {};
     for (const [rid, r] of Object.entries(x.req ?? {})) {
-      if (done[rid] || x.cancel[rid]) continue;
+      if (stopping || done[rid] || x.cancel[rid]) continue;
       try { req[rid] = JSON.parse(t.open(r.sealed).toString('utf-8')); } catch { /* its text is gone: never started */ }
     }
     const inbox = {};
@@ -410,7 +440,11 @@ export function bodySync(env, caller, body, o = {}) {
     }
     if (x === h) pruneDraining(env, h);
     writeJson(hostFile(env, agent, seat), h);
-    return { req, stop: x.stop ?? {}, inbox, acked: got, ...(issued ? { hostKey: issued } : {}) };
+    const wanted = new Set(x.quiescing?.conversations ?? []);
+    const outstanding = stopping && listConvs(env).some(c => c.agent === agent && (wanted.has(c.conversation) || belongsToHouse(c, house)) && (c.body || c.starting || c.control?.state !== 'held'));
+    const live = Object.values(bodies).some(b => b.status !== 'ended');
+    const exit = stopping && !live && !outstanding && !Object.keys(x.stop ?? {}).length && !Object.keys(req).length;
+    return { req, stop: x.stop ?? {}, inbox, acked: got, ...(exit ? { exit: true, reason: 'its conversations and native sessions were collected before house rescue' } : {}), ...(issued ? { hostKey: issued } : {}) };
   });
 }
 
@@ -475,7 +509,7 @@ export class HouseRunner {
         let r;
         try { r = this.up(this.env, { now: () => this.now() }, { kind: 'owner' }, { agent, box: at.box, task: hostTask(this.env, boot) }, { kind: 'body-host', seat }); } catch (e) { if (e?.seatFull) throw seatFull(e.message); throw e; }
         // A new house: what was asked of the last one (and what it claimed) isn't this one's, nor is its host's key.
-        hostLocked(this.env, () => { const x = loadHost(this.env, agent, seat); x.house = r.id; delete x.report; delete x.hostHash; delete x.cancel; x.bootHash = keyHash(boot); x.req = {}; x.stop = {}; x.inbox = {}; x.claimed = {}; pruneDraining(this.env, x); writeJson(hostFile(this.env, agent, seat), x); });
+        hostLocked(this.env, () => { const x = loadHost(this.env, agent, seat); x.house = r.id; delete x.report; delete x.hostHash; delete x.cancel; delete x.quiescing; x.bootHash = keyHash(boot); x.req = {}; x.stop = {}; x.inbox = {}; x.claimed = {}; pruneDraining(this.env, x); writeJson(hostFile(this.env, agent, seat), x); });
       }
       if (Date.now() > end) throw new RunnerError(`${agent}'s house ${h.house ?? ''} didn't start its body host in ${this.warmMs / 1000} s`);
       await sleep(this.poll);
@@ -686,6 +720,7 @@ export class HouseRunner {
       const h = loadHost(this.env, body.agent, seat);
       const x = houseRec(h, body.house);
       if (!x) return false;
+      if (existsSync(packedFile(this.env, body.agent, body.house, raw))) return true;
       if (!x.stop?.[raw]?.pack) {
         const session = x.report?.bodies?.[raw]?.session;
         (x.stop ??= {})[raw] = { pack: true, at: this.now().getTime(), ...(session ? { session } : {}) };
@@ -701,7 +736,7 @@ export class HouseRunner {
   }
 
   /** Its session's files, from its house: it's stopped there and its host sends them back. [] when its house is gone. */
-  async pack(body) {
+  async pack(body, { deferAck = false } = {}) {
     const raw = rawOf(body);
     if (!raw) return [];
     // No key here: no slot, at once. It's stopped, and its session stays in its house (thrown away with it).
@@ -717,9 +752,20 @@ export class HouseRunner {
       if (Date.now() > end || !this.rec(body)) throw new RunnerError(`${body.agent}'s house didn't send ${body.id}'s session back`);
       await sleep(this.poll);
     }
-    try {
-      const pack = JSON.parse(this.sealer.open(readFileSync(f)).toString('utf-8'));
-      return pack?.v === 1 && Array.isArray(pack.files) ? pack.files : pack;
-    } finally { rmSync(f, { force: true }); }
+    const pack = JSON.parse(this.sealer.open(readFileSync(f)).toString('utf-8'));
+    const files = pack?.v === 1 && Array.isArray(pack.files) ? pack.files : pack;
+    if (!deferAck) this.ackPack(body);
+    return files;
+  }
+
+  /** The conversation has durably committed its slot: only now discard the received native pack. */
+  ackPack(body) {
+    const raw = rawOf(body);
+    if (!raw) return;
+    hostLocked(this.env, () => {
+      const seat = this.seatFor(body), h = loadHost(this.env, body.agent, seat), x = houseRec(h, body.house);
+      if (x?.stop?.[raw]) { delete x.stop[raw]; writeJson(hostFile(this.env, body.agent, seat), h); }
+      rmSync(packedFile(this.env, body.agent, body.house, raw), { force: true });
+    });
   }
 }

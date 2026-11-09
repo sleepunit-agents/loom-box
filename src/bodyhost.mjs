@@ -58,7 +58,7 @@ function dropKey(env, conversation, key) {
 
 export const SYNC_MS = 2000;
 export const IDLE_S = 600;
-/** A session going back that the runtime hasn't acknowledged in this long is dropped (and its files with it). */
+/** An abandoned transfer may expire after this age only when a fresh controller answer no longer requests it. */
 export const PACK_MS = 120_000;
 
 /**
@@ -126,8 +126,6 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
     await reportUsage(turnsOver);
     const packed = {};
     for (const [id, p] of [...packing]) {
-      // Nobody's taking it (its stop was dropped, the runtime moved on): given up, so the house can idle out.
-      if (now() - p.since > packMs) { packing.delete(id); mine.delete(id); log(`dropped ${id}'s session: nobody took it`); continue; }
       packed[id] = { part: p.next, parts: p.parts.length, data: p.parts[p.next] };
     }
     let got;
@@ -139,6 +137,11 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
     for (const [id, part] of got.acked ?? []) {
       const p = packing.get(id);
       if (p && p.next === part) { p.next += 1; p.since = now(); if (p.next >= p.parts.length) { packing.delete(id); mine.delete(id); } }
+    }
+    // A timeout is not evidence that the receiver stopped waiting: network failures retain the only copy.
+    // A fresh authenticated answer that explicitly removed its stop may abandon an unclaimed transfer.
+    for (const [id, p] of packing) if (!got.stop?.[id] && now() - p.since > packMs) {
+      packing.delete(id); mine.delete(id); log(`dropped ${id}'s session: the runtime no longer asks for it`);
     }
     if (got.exit) { log(`leaving: ${got.reason ?? 'the runtime says so'}`); return; }
     const req = got.req ?? {};
