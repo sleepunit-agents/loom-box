@@ -16,7 +16,7 @@ function world(t) {
   };
   let clock = 1000;
   const options = { dir, sealer, now: () => clock };
-  const source = { agent: 'art', conversation: 'cv-aaaaaaaaaaaa', run: 'run-aaaaaaaaaaaa', reset: null, principal: { for: ['jonathan'], owner: true }, target: { venue: 'comms', place: 'th:aaaaaaaaaa' } };
+  const source = { agent: 'art', conversation: 'cv-aaaaaaaaaaaa', run: 'run-aaaaaaaaaaaa', reset: null, principal: { for: 'jonathan', owner: true, people: [] }, target: { venue: 'comms', place: 'th:aaaaaaaaaa' } };
   const child = { ...structuredClone(source), conversation: 'cv-bbbbbbbbbbbb', run: 'run-bbbbbbbbbbbb', target: { venue: 'wake', place: 'w-123456' } };
   const current = (cv) => cv === source.conversation ? source : cv === child.conversation ? child : null;
   const binding = { wake: 'w-123456', delivery: 'clock:w-123456:one' };
@@ -40,10 +40,11 @@ test('no origin provenance or unbound handle grants a send; fixed child and firi
 test('principal, agent, missing reset and pending reset are refused at binding', (t) => {
   const w = world(t);
   assert.throws(() => w.out.issue({ ...w.source, resetPending: true }), /snapshot/);
+  assert.throws(() => w.out.issue({ ...w.source, principal: { for: null, owner: false, people: [], unknown: true } }), /snapshot/);
   const missing = { ...w.source }; delete missing.reset;
   assert.throws(() => w.out.issue(missing), /snapshot/);
   assert.throws(() => w.out.bind(w.handle, w.binding, w.source, { ...w.child, agent: 'mark' }), /principal/);
-  assert.throws(() => w.out.bind(w.handle, w.binding, w.source, { ...w.child, principal: { for: ['other'] } }), /principal/);
+  assert.throws(() => w.out.bind(w.handle, w.binding, w.source, { ...w.child, principal: { for: 'other' } }), /principal/);
   assert.throws(() => w.out.bind(w.handle, w.binding, { ...w.source, reset: 1 }, w.child), /reset/);
 });
 
@@ -86,12 +87,12 @@ for (const change of ['source reset', 'child reset', 'child run', 'target', 'pri
     if (change === 'child reset') w.child.reset = 1;
     if (change === 'child run') w.child.run = 'run-cccccccccccc';
     if (change === 'target') w.source.target.place = 'th:elsewhere';
-    if (change === 'principal') w.child.principal = { owner: false, for: ['other'] };
+    if (change === 'principal') w.child.principal = { owner: false, for: 'other' };
     if (change === 'pending reset') w.source.resetPending = true;
     await w.out.drain({ current: change === 'deleted child' ? (id) => id === w.child.conversation ? null : w.current(id) : w.current,
       post: () => assert.fail('must not call adapter') });
     // Status authentication still requires the originally bound snapshot.
-    const original = { ...w.child, run: 'run-bbbbbbbbbbbb', reset: null, principal: { for: ['jonathan'], owner: true } };
+    const original = { ...w.child, run: 'run-bbbbbbbbbbbb', reset: null, principal: { for: 'jonathan', owner: true, people: [] } };
     assert.equal(w.out.status(w.handle, original, 'final').state, 'failed');
   });
 }

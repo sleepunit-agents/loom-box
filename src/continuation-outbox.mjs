@@ -20,7 +20,8 @@ const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
  */
 function snapshot(s) {
   if (!s || !cv.test(s.conversation ?? '') || !run.test(s.run ?? '') || !/^[a-z][a-z0-9-]{0,39}$/.test(s.agent ?? '') ||
-      !Object.hasOwn(s, 'reset') || !s.principal || typeof s.target?.venue !== 'string' || typeof s.target?.place !== 'string' || s.resetPending) deny('no authenticated continuation snapshot');
+      !Object.hasOwn(s, 'reset') || !s.principal || s.principal.unknown ||
+      !(s.principal.owner === true || (typeof s.principal.for === 'string' && /^[a-z0-9]+(-[a-z0-9]+)*$/.test(s.principal.for))) || typeof s.target?.venue !== 'string' || typeof s.target?.place !== 'string' || s.resetPending) deny('no authenticated continuation snapshot');
   return structuredClone({ conversation: s.conversation, run: s.run, agent: s.agent, reset: s.reset, principal: s.principal, target: s.target });
 }
 const unchanged = (saved, current) => current && !current.resetPending && same(saved.principal, current.principal) &&
