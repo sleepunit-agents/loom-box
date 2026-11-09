@@ -58,7 +58,7 @@ function validate(j) {
     if (['finished', 'failed'].includes(r.state) && !r.result) broken();
     if (r.result) {
       try { commandResult(r.result); } catch { broken(); }
-      const expected = r.result.outcome === 'unknown' ? 'unknown' : r.result.exitCode === 0 ? 'finished' : 'failed';
+      const expected = r.result.outcome === 'unknown' ? 'unknown' : r.result.outcome === 'not-started' ? 'cancelled' : r.result.exitCode === 0 ? 'finished' : 'failed';
       if (r.state !== expected) broken();
     }
   }
@@ -491,7 +491,7 @@ export function admitAdministration(env, caller, q, o = {}) {
 
 function commandResult(value) {
   const { outcome, stdout = '', stderr = '', exitCode = null, signal = null, truncated = false } = value ?? {};
-  if (!['exited', 'unknown'].includes(outcome) || typeof stdout !== 'string' || typeof stderr !== 'string' ||
+  if (!['exited', 'unknown', 'not-started'].includes(outcome) || typeof stdout !== 'string' || typeof stderr !== 'string' ||
       typeof truncated !== 'boolean' || Buffer.byteLength(stdout) + Buffer.byteLength(stderr) > 256 * 1024 ||
       !(exitCode === null || Number.isInteger(exitCode) && exitCode >= 0 && exitCode <= 255) ||
       !(signal === null || /^SIG[A-Z0-9]{1,16}$/.test(signal)) ||
@@ -519,7 +519,7 @@ export function completeAdministrationCommand(env, caller, q, o = {}) {
     if (saved < at) fail('administration clock moved backwards; result remains unacknowledged', 503);
     j.highWater = saved;
     r.result = { hash: resultHash, sealed, at: saved, outcome: result.outcome, exitCode: result.exitCode, signal: result.signal };
-    r.state = result.outcome === 'unknown' ? 'unknown' : result.exitCode === 0 ? 'finished' : 'failed';
+    r.state = result.outcome === 'unknown' ? 'unknown' : result.outcome === 'not-started' ? 'cancelled' : result.exitCode === 0 ? 'finished' : 'failed';
     return publicOperation(r);
   });
 }

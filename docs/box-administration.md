@@ -217,3 +217,32 @@ can be reconciled from a fresh controller process. An unknown outcome remains
 explicit and cannot be reclaimed for automatic execution. These controller
 tests run no host commands; worker transport, physical admission and stop,
 output capture/upload, shared tools and provider verification remain gates.
+
+The draft now contains a physical execution primitive and child gate, with
+box-private bounded/fsynced journals and real age encryption for input/results.
+It verifies the actual host and UID/GID, records the gate's PID/boot/birth before
+releasing stdin, commits a one-shot execution marker before spawning, and uses
+a conservative monotonic lease deadline. Commands receive a fixed minimal
+environment without box or broker credentials. Output capture is bounded and
+signals target only the recorded operation's process group.
+
+The child gate seals its result itself, so killing the parent worker does not
+discard the only result. A separate sealing phase protects the result writer
+from timeout escalation after the command has exited. Recovery observes the
+same operation and never starts another command. Positive non-execution has a
+separate not-started outcome; an executing gate lost without a result remains
+unknown.
+
+Physical temporary-directory tests verify stdin, credential omission, one side
+effect across retry, refusal/wrong UID/expired admission, bounded output,
+targeted revoke, actual parent-worker SIGKILL with result recovery, gate SIGKILL
+with explicit unknown/no replay, and the actual controller claim/admission/result
+functions around a real command. Admission decisions remain fixtures; these
+tests do not answer a production owner approval.
+
+The prototype still lacks OS-supervisor containment for loss of the gate
+itself. Its unknown result is truthful, but it cannot yet guarantee immediate
+descendant cleanup after that loss. Supported supervisor ownership and crash
+tests, box capability/transport wiring, root identity provisioning, upload
+acknowledgements and the shared CLI/MCP surface remain release gates. Nothing
+advertises or deploys administrative access yet.
