@@ -255,10 +255,12 @@ test('an out-of-quota reading during a resume starts a body on the other harness
   assert.equal(rec.switched.from, 'claude');
   assert.match(rec.switched.why, /Claude Max \(jonathan's\) out of quota/);
   assert.equal(c2.runLog.at(-1).switched.from, 'claude');
-  // One FYI for the switch; the card says "on Codex".
+  // One FYI for the switch; model family does not change the agent card.
   assert.equal(w.fyis(/^Art is answering on Codex: Claude Max \(jonathan's\) is out until /).length, 1);
   assert.equal(readFallbacks(w.env).art.to, 'codex');
-  assert.deepEqual(withFallbacks({}, readFallbacks(w.env), {}, w.clock.now().getTime()).art.readings[0].value, 'on Codex');
+  const reports = { art: { state: 'working', readings: [{ label: 'Jobs', value: '2 running' }] } };
+  assert.deepEqual(withFallbacks(structuredClone(reports), readFallbacks(w.env), {}, w.clock.now().getTime()), reports, 'quota switches add no warning or model reading and preserve real work status');
+  assert.deepEqual(withFallbacks({}, readFallbacks(w.env)), {}, 'a family switch alone creates no agent health report');
   // Still out: the next message resumes the Codex session, and no second FYI.
   w.codex.finish(c2.body);
   await deliver(w.env, w.msg('dm:U1', 'third'), w.o);

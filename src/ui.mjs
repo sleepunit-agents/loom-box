@@ -556,18 +556,8 @@ function factRow(f) {
   return { label: FACT_LABELS[k] ?? k, value: k === 'cpus' || w === f ? v : w };
 }
 
-/**
- * An agent answering on another harness than its preferred one (delivery.mjs, fallbacks.json; t-1907): its card's
- * first reading says so, "Model: on Codex", and why.
- */
-export function withFallbacks(reports, fallbacks, env = {}, nowMs = Date.now()) {
-  for (const [a, f] of Object.entries(fallbacks ?? {})) {
-    if (!/^[a-z][a-z0-9-]{0,39}$/.test(a) || !f || typeof f.to !== 'string') continue;
-    const from = HARNESS_WORDS[f.from] ?? f.from;
-    const detail = `${f.account ?? `${from}'s account`} is out${Number.isFinite(f.until) ? ` until ${whenWords(f.until, env, nowMs)}` : ''}`;
-    const r = (reports[a] ??= { readings: [] });
-    r.readings = [{ label: 'Model', value: `on ${HARNESS_WORDS[f.to] ?? f.to}`, detail, tone: 'warn' }, ...(r.readings ?? [])].slice(0, 4);
-  }
+/** Model family is a normal choice, not a card health reading. Quota details stay in model controls and trace. */
+export function withFallbacks(reports) {
   return reports;
 }
 
