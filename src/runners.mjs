@@ -56,6 +56,10 @@ const dirs = (d, all = false) => { try { return readdirSync(d, { withFileTypes: 
 const readJson = (p) => { try { return JSON.parse(readFileSync(p, 'utf-8')); } catch { return null; } };
 const sleepMs = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 const hex8 = () => randomBytes(4).toString('hex');
+const stableLaunchToken = value => {
+  if (!/^[0-9a-f]{24}$/.test(value ?? '')) throw new RunnerError('invalid durable native launch token');
+  return value;
+};
 
 const lines = (p) => { try { return readFileSync(p, 'utf-8').split('\n').flatMap((l) => { try { const v = JSON.parse(l); return v && typeof v === 'object' ? [v] : []; } catch { return []; } }); } catch { return []; } };
 
@@ -164,8 +168,8 @@ export class ClaudeRunner {
     return found ? lastToolUse(found) : { tool: '', what: '' };
   }
 
-  launch({ brief, model, cwd, env, deny = [], resume }) {
-    const token = this.token();
+  launch({ brief, model, cwd, env, deny = [], resume, launchToken }) {
+    const token = launchToken === undefined ? this.token() : stableLaunchToken(launchToken);
     const nl = brief.indexOf('\n');
     const prompt = nl < 0 ? `${brief}\n${ClaudeRunner.TOKEN_LINE.replace('{token}', token)}\n`
       : `${brief.slice(0, nl)}\n${ClaudeRunner.TOKEN_LINE.replace('{token}', token)}\n${brief.slice(nl + 1)}`;
@@ -214,6 +218,18 @@ export class ClaudeRunner {
   }
 
   start(o) { return this.launch(o); }
+  /** Observe a prior admission, without submitting another daemon request or
+   * reopening (and thereby clearing) an inbox that native work may already use. */
+  recoverLaunch(launchToken, { model, env } = {}) {
+    const token = stableLaunchToken(launchToken);
+    const rows = this.agents(env);
+    if (!rows) return { state: 'pending' };
+    const marker = `(bridge spawn token ${token}:`;
+    const found = [...new Map(rows.filter(a => a?.id && (this.job(a.id)?.intent ?? '').includes(marker)).map(a => [a.id, a])).values()];
+    if (found.length !== 1) return { state: 'pending' };
+    const a = found[0], session = a.sessionId ?? this.job(a.id)?.sessionId;
+    return { state: 'ready', body: { id: a.id, harness: 'claude', model, ...(session ? { slot: { harness: 'claude', session } } : {}) } };
+  }
   resume(slot, o) {
     if (slot?.harness !== 'claude' || !slot.session) throw new RunnerError('a Claude body resumes from a Claude slot (its session)');
     return this.launch({ ...o, resume: slot.session });
@@ -415,11 +431,12 @@ export class CodexRunner {
     return { keep, drop };
   }
 
-  launch({ brief, model, cwd, env, deny = [], resume }) {
+  launch({ brief, model, cwd, env, deny = [], resume, launchToken }) {
     const plan = this.plan(deny, cwd, env);
     if (plan.why) throw new RunnerError(plan.why);
-    const key = this.key();
+    const key = launchToken === undefined ? this.key() : stableLaunchToken(launchToken);
     const dir = join(this.runsDir, key);
+    if (launchToken !== undefined && existsSync(dir)) throw new RunnerError('durable Codex launch already exists; recover its original admission');
     // Its run dir names its home before the home is made, under the homes' lock: a sweep never takes a home a body is
     // starting in (t-1924).
     const home = this.homesLocked(() => {
@@ -550,6 +567,24 @@ export class CodexRunner {
   }
 
   start(o) { return this.launch(o); }
+  /** Recover the stable native run without launching. If its registrar died
+   * between spawn and pid registration, inspect the exact private output path
+   * in proc internally. No argv or brief leaves this method. */
+  recoverLaunch(launchToken, { model } = {}) {
+    const key = stableLaunchToken(launchToken), dir = join(this.runsDir, key);
+    if (!existsSync(dir)) return { state: 'pending' };
+    if (!this.alive(key)) {
+      const found = [];
+      for (const pid of dirs('/proc').filter(p => /^\d+$/.test(p))) {
+        try { if (readFileSync(`/proc/${pid}/cmdline`).includes(Buffer.from(dir))) found.push(Number(pid)); } catch { /* exited or inaccessible: no proof */ }
+      }
+      if (found.length > 1) return { state: 'pending' };
+      if (found.length === 1) writeFileSync(join(dir, 'pid'), String(found[0]) + '\n', { mode: 0o600 });
+    }
+    if (!this.alive(key) && !this.events(key).length) return { state: 'pending' };
+    const slot = this.slotOf({ id: key });
+    return { state: 'ready', body: { id: key, harness: 'codex', model, ...(slot ? { slot } : {}) } };
+  }
   resume(slot, o) {
     if (slot?.harness !== 'codex' || !slot.session) throw new RunnerError('a Codex body resumes from a Codex slot (its thread)');
     return this.launch({ ...o, resume: slot.session });
