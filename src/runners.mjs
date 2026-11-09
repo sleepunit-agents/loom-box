@@ -47,6 +47,7 @@ import { withLock } from './state.mjs';
 import { parse as parseToml, stringify as stringifyToml } from './vendor/smol-toml/index.js';
 
 export class RunnerError extends Error {}
+const neverStarted = message => Object.assign(new RunnerError(message), { nativeNotStarted: true });
 
 /** A harness's session id, as it may appear in a file name: never a path. */
 const SESSION = /^[A-Za-z0-9][A-Za-z0-9._-]{3,127}$/;
@@ -179,7 +180,10 @@ export class ClaudeRunner {
     const before = new Set((this.agents(clean) ?? []).map((a) => a.id));
     const argv = ['--bg', ...(model ? ['--model', model] : []), ...this.statusLine(), ...this.args, ...(deny.length ? ['--disallowedTools', ...deny] : []), ...(resume ? ['--resume', resume] : [])];
     const r = this.run(this.claude, argv, { cwd, env: clean, input: prompt, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 60_000 });
-    if (r.error || r.status !== 0) throw new RunnerError(`claude --bg didn't start: ${(r.stderr || r.error?.message || '').trim().split('\n').pop() || `exit ${r.status}`}`);
+    if (r.error || r.status !== 0) {
+      const message = `claude --bg didn't start: ${(r.stderr || r.error?.message || '').trim().split('\n').pop() || `exit ${r.status}`}`;
+      throw ['ENOENT', 'EACCES', 'ENOEXEC'].includes(r.error?.code) ? neverStarted(message) : new RunnerError(message);
+    }
     // Claim: a new agent whose job intent carries this launch's token.
     const marker = `(bridge spawn token ${token}:`;
     for (let i = 0; i < this.claimPolls; i++) {
@@ -433,7 +437,7 @@ export class CodexRunner {
 
   launch({ brief, model, cwd, env, deny = [], resume, launchToken }) {
     const plan = this.plan(deny, cwd, env);
-    if (plan.why) throw new RunnerError(plan.why);
+    if (plan.why) throw neverStarted(plan.why);
     const key = launchToken === undefined ? this.key() : stableLaunchToken(launchToken);
     const dir = join(this.runsDir, key);
     if (launchToken !== undefined && existsSync(dir)) throw new RunnerError('durable Codex launch already exists; recover its original admission');
@@ -454,7 +458,8 @@ export class CodexRunner {
     try {
       child = this.spawn(this.codex, argv, { cwd, env: e, stdio: ['pipe', out, err], detached: true });
     } finally { closeSync(out); closeSync(err); }
-    if (!child.pid) throw new RunnerError(`codex didn't start (${this.codex})`);
+    child.on?.('error', () => {});
+    if (!child.pid) throw neverStarted(`codex didn't start (${this.codex})`);
     writeFileSync(join(dir, 'pid'), `${child.pid}\n`, { mode: 0o600 });
     child.stdin.on('error', () => {});
     child.stdin.end(brief);

@@ -23,7 +23,7 @@ export function readLaunch(env, id) {
   try {
     const r = JSON.parse(readFileSync(file(env, id), 'utf8'));
     if (r?.v !== 1 || r.id !== id || !['claude', 'codex'].includes(r.harness) || !ID.test(r.intentHash ?? '') ||
-        !/^[0-9a-f]{24}$/.test(r.token ?? '') || !['reserved', 'admitted', 'ready'].includes(r.state)) fail('invalid native launch journal; admission remains held');
+        !/^[0-9a-f]{24}$/.test(r.token ?? '') || !['reserved', 'admitted', 'ready', 'refused'].includes(r.state)) fail('invalid native launch journal; admission remains held');
     return r;
   }
   catch (e) { if (e.code === 'ENOENT') return null; throw e; }
@@ -61,6 +61,17 @@ export function launchWorkerIdentity() {
   return { pid: process.pid, boot, birth: tail[19] };
 }
 const sameWorker = (a, b) => !!a && a.pid === b.pid && a.boot === b.boot && a.birth === b.birth;
+/** false is positive OS evidence of termination; null is a failed observation. */
+export function launchWorkerAlive(worker) {
+  if (!worker || !Number.isInteger(worker.pid) || worker.pid <= 0) return null;
+  try {
+    if (readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim() !== worker.boot) return false;
+    const stat = readFileSync(`/proc/${worker.pid}/stat`, 'utf8');
+    const tail = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/);
+    if (tail[19] !== worker.birth) return false;
+    return !['Z', 'X'].includes(tail[0]);
+  } catch (e) { return ['ENOENT', 'ESRCH'].includes(e.code) ? false : null; }
+}
 
 /** Only a reserved attempt grants permission to enter the native launcher, once.
  * Re-reading even from the same worker is observation, never another admission. */
@@ -94,6 +105,37 @@ export function completeLaunch(env, id, body) {
     }
     if (r.state !== 'admitted') fail('native launch was not admitted');
     Object.assign(r, { state: 'ready', body: receipt, readyAt: Date.now() });
+    save(env, r);
+    return r;
+  });
+}
+
+/** Only a native adapter's positive pre-spawn failure can release the attempt.
+ * Absence, age, a dead worker and daemon timeouts never call this transition. */
+export function refuseLaunch(env, id, reason) {
+  return locked(env, () => {
+    const r = readLaunch(env, id);
+    if (!r || r.state !== 'admitted' || !sameWorker(r.worker, launchWorkerIdentity())) fail('native refusal is not this worker\'s admission');
+    Object.assign(r, { state: 'refused', reason: String(reason).slice(0, 300), refusedAt: Date.now() });
+    save(env, r);
+    return r;
+  });
+}
+
+/** Internal native observer commits an adapter-recovered identity. It has no
+ * permission to reset/relaunch the attempt, and conflicting receipts refuse. */
+export function recoverLaunchReceipt(env, id, body) {
+  if (!body || !BODY.test(body.id ?? '') || !['claude', 'codex'].includes(body.harness) ||
+      (body.slot !== undefined && (!body.slot || body.slot.harness !== body.harness || !BODY.test(body.slot.session ?? '')))) fail('invalid recovered native receipt');
+  const receipt = { id: body.id, harness: body.harness, ...(body.slot ? { slot: { harness: body.harness, session: body.slot.session } } : {}) };
+  return locked(env, () => {
+    const r = readLaunch(env, id);
+    if (!r || r.harness !== body.harness || !['admitted', 'ready'].includes(r.state)) fail('native attempt cannot accept a recovered receipt');
+    if (r.state === 'ready') {
+      if (JSON.stringify(r.body) !== JSON.stringify(receipt)) fail('native attempt has another receipt');
+      return r;
+    }
+    Object.assign(r, { state: 'ready', body: receipt, recoveredAt: Date.now() });
     save(env, r);
     return r;
   });
