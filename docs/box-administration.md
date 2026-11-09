@@ -138,8 +138,9 @@ process birth and UID/GID. Claim tickets, command inputs and results are sealed.
 Admission rechecks authority, identity and expiry; retries preserve the same
 worker and immutable result. Unknown outcomes cannot authorize replay.
 
-The physical worker now requires a systemd user manager by default and refuses
-an unavailable manager. A stable per-operation unit is recorded before submit.
+The physical worker requires the systemd manager for its actual OS identity: a
+user manager for an ordinary worker, the system manager for a root worker. An
+unavailable manager refuses before execution. A stable per-operation unit is recorded before submit.
 The gate is its main process, with control-group cleanup, a bounded runtime and
 stop grace. The lease is obtained before unit creation, so its startup time
 consumes the lease. No command input is released before the actual gate identity
@@ -159,7 +160,20 @@ expiry after worker death. A short lease can correctly expire during startup;
 the tests report that refusal separately from the running-expiry proof.
 
 Remaining release gates are authenticated box capability/transport wiring,
-supported root identity provisioning, result upload acknowledgements, the
+root worker provisioning by the box runner, result upload acknowledgements, the
 shared CLI/MCP surface, and actual owner-app/both-native-harness verification.
 No production approval is answered by these fixtures, no administrator
 capability is advertised, and no sudo policy is broadened.
+
+Authenticated box API routes now expose work observation, claim, admission,
+stop observation and result completion. Caller roles come from the existing
+piece API transport; a body cannot supply its own box identity. An isolated
+HTTP test through the existing remote client verifies wrong-role and other-box
+refusal, observation without admission, revocation, and an intentionally lost
+completion response followed by immutable-result reconciliation.
+
+The OS worker matrix also passes as root, using the host's existing
+noninteractive sudo only to run isolated temporary-directory tests. Root
+workers use the system manager and the same gate/journal implementation.
+This does not yet provision root workers from the box daemon or advertise root
+support to requesting bodies; that remains part of capability wiring.

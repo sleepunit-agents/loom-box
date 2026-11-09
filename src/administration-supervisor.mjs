@@ -1,5 +1,5 @@
 // Supported OS ownership for administrative command gates. A missing user
-// manager refuses admission; it never falls back to an uncontained process.
+// manager refuses admission; root workers use the system manager. Neither falls back to an uncontained process.
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -7,10 +7,12 @@ import { fileURLToPath } from 'node:url';
 import { executionTransaction } from './administration-execution-journal.mjs';
 
 export const administrationUnit = (root, id) => 'loom-admin-' + id.slice(4) + '-' + createHash('sha256').update(root).digest('hex').slice(0, 12) + '.service';
+const managerKind = () => process.getuid() === 0 ? 'systemd-system' : 'systemd-user';
+const managerArgs = () => process.getuid() === 0 ? [] : ['--user'];
 const managerEnv = env => ({ PATH: env.PATH, HOME: env.HOME,
-  XDG_RUNTIME_DIR: '/run/user/' + process.getuid(), DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/' + process.getuid() + '/bus' });
+  ...(process.getuid() === 0 ? {} : { XDG_RUNTIME_DIR: '/run/user/' + process.getuid(), DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/' + process.getuid() + '/bus' }) });
 function call(env, args) {
-  return spawnSync('systemctl', ['--user', ...args], { env: managerEnv(env), encoding: 'utf8', timeout: 3000, maxBuffer: 64 * 1024 });
+  return spawnSync('systemctl', [...managerArgs(), ...args], { env: managerEnv(env), encoding: 'utf8', timeout: 3000, maxBuffer: 64 * 1024 });
 }
 export function administrationSupervisorAvailable(env = process.env) {
   const r = call(env, ['show', '--property=Version', '--value']);
@@ -26,17 +28,17 @@ export function administrationUnitState(env, unit) {
 }
 export function signalAdministrationUnit(env, record, signal) {
   const s = record.supervisor;
-  if (s?.kind !== 'systemd-user' || !s.invocation) return false;
+  if (s?.kind !== managerKind() || !s.invocation) return false;
   const live = administrationUnitState(env, s.unit);
   if (!live || live.invocation !== s.invocation) return false;
   const r = call(env, ['kill', '--kill-whom=all', '--signal=' + signal, s.unit]);
   return r.status === 0;
 }
 export async function startAdministrationUnit({ root, id, env, gateEnv, boot, maxMs }) {
-  if (!administrationSupervisorAvailable(env)) throw Error('administrative commands require an available systemd user manager');
+  if (!administrationSupervisorAvailable(env)) throw Error('administrative commands require an available systemd manager for its OS identity');
   const unit = administrationUnit(root, id);
-  executionTransaction(root, id, r => ({ ...r, supervisor: { kind: 'systemd-user', unit } }));
-  const args = ['--user', '--quiet', '--pipe', '--wait', '--unit=' + unit,
+  executionTransaction(root, id, r => ({ ...r, supervisor: { kind: managerKind(), unit } }));
+  const args = [...managerArgs(), '--quiet', '--pipe', '--wait', '--unit=' + unit,
     '--property=Type=exec', '--property=KillMode=control-group', '--property=TimeoutStopSec=2s',
     '--property=RuntimeMaxSec=' + Math.ceil((maxMs + 30_000) / 1000) + 's',
     ...Object.entries(gateEnv).filter(([, value]) => typeof value === 'string').map(([key, value]) => '--setenv=' + key + '=' + value),
@@ -52,7 +54,7 @@ export async function startAdministrationUnit({ root, id, env, gateEnv, boot, ma
       const stat = readFileSync('/proc/' + live.pid + '/stat', 'utf8');
       const birth = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/)[19];
       if (!/^\d+$/.test(birth ?? '')) throw Error('cannot establish supervised administrative child identity');
-      executionTransaction(root, id, r => ({ ...r, supervisor: { kind: 'systemd-user', unit, invocation: live.invocation } }));
+      executionTransaction(root, id, r => ({ ...r, supervisor: { kind: managerKind(), unit, invocation: live.invocation } }));
       return { child, closed, identity: { pid: live.pid, boot, birth } };
     }
     await new Promise(resolve => setTimeout(resolve, 20));

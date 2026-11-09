@@ -11,6 +11,9 @@ import { world } from './delivery-world.mjs';
 import { verify } from '../src/principal.mjs';
 import { deliveryDir } from '../src/delivery.mjs';
 import { page, act } from '../src/ui.mjs';
+import { createServer } from 'node:http';
+import { api } from '../src/control.mjs';
+import { remoteClient } from '../src/box.mjs';
 
 async function setup(from = { kind: 'person', slug: 'owner' }) {
   const w = world(), caller = { kind: 'agent', agent: 'art' };
@@ -490,4 +493,56 @@ test('results require their exact admitted worker and explicit bounded outcomes'
   assert.equal(unknown.state,'unknown');
   assert.equal(administrationWork(w.env,boxCaller,w.o)[0].state,'unknown');
   assert.equal(claimAdministration(w.env,boxCaller,request,w.o).claimed,false);
+});
+
+test('authenticated box HTTP transport rejects body/other-box callers and reconciles a lost result reply', async t => {
+  const w = await setup(); await w.activate(); const op = w.queue();
+  update(w.env, s => { s.boxes.two = { ...s.boxes.one }; });
+  const roles = { 'fixture-box-one': boxCaller, 'fixture-box-two': { kind: 'piece', subject: 'two' },
+    'fixture-body': { kind: 'agent', agent: 'art' }, 'fixture-owner': { kind: 'owner', who: 'owner' } };
+  let loseCompletion = true, committed = 0;
+  const server = createServer(async (req, res) => {
+    try {
+      let text = ''; for await (const b of req) { text += b; if (Buffer.byteLength(text) > 1024 * 1024) throw Error('fixture input budget'); }
+      const caller = roles[String(req.headers.authorization ?? '').replace(/^Bearer /, '')];
+      const path = new URL(req.url, 'http://fixture').pathname.split('/').at(-1);
+      const answer = await api(w.env, w.o, { caller, path, body: JSON.parse(text || '{}') });
+      if (path === 'administration-complete' && answer.status === 200) {
+        committed++;
+        if (loseCompletion) { loseCompletion = false; res.destroy(); return; }
+      }
+      res.writeHead(answer.status, { 'content-type': 'application/json' }); res.end(JSON.stringify(answer.body));
+    } catch { res.writeHead(500); res.end('{}'); }
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); });
+  const url = 'http://127.0.0.1:' + server.address().port;
+  const client = credential => remoteClient(url, credential, (u, o) => fetch(u, { ...o, signal: AbortSignal.timeout(5000) }));
+  const one = client('fixture-box-one'), two = client('fixture-box-two');
+  const work = await one.call('administration-work');
+  assert.equal(work[0].id, op.id); assert.equal(work[0].state, 'queued');
+  assert.equal(JSON.stringify(work).includes('private-command-input'), false);
+  for (const token of ['fixture-body', 'fixture-owner', 'unknown']) {
+    await assert.rejects(client(token).call('administration-work', { caller: boxCaller }), /40[13]/);
+    await assert.rejects(client(token).call('administration-claim', { operation: op.id, worker: administrativeWorker(), caller: boxCaller }), /40[13]/);
+  }
+  const request = { operation: op.id, worker: administrativeWorker() };
+  await assert.rejects(two.call('administration-claim', request), /404/);
+  const claim = await one.call('administration-claim', request);
+  const q = { ...request, ticket: claim.ticket };
+  assert.equal((await one.call('administration-command', q)).operation.state, 'claimed');
+  assert.equal(w.journal().operations[op.id].admission, undefined);
+  assert.equal((await one.call('administration-admit', q)).authorized, true);
+  await assert.rejects(one.call('administration-command', { ...q, ticket: 'wrong' }), /403/);
+  endAdministration(w.env, { kind: 'owner', who: 'owner' }, { scope: w.scope.id }, w.o);
+  assert.equal((await one.call('administration-command', q)).stop, true);
+  const result = { outcome: 'exited', exitCode: 0, stdout: 'private-http-result' };
+  await assert.rejects(one.call('administration-complete', { ...q, result }));
+  assert.equal(w.journal().operations[op.id].state, 'finished');
+  const retry = await one.call('administration-complete', { ...q, result });
+  assert.equal(retry.state, 'finished'); assert.equal(committed, 2);
+  assert.equal(JSON.stringify(retry).includes('private-http-result'), false);
+  assert.equal(JSON.stringify(w.journal()).includes('private-http-result'), false);
+  assert.equal(administrationResult(w.env, w.caller, { ...w.proof(), operation: op.id }, w.o).result.stdout, result.stdout);
+  assert.equal((await one.call('administration-claim', request)).claimed, false);
 });

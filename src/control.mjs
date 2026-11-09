@@ -1497,6 +1497,17 @@ export function api(env, effects, { caller, path, body }) {
       if (path === 'join-poll') return { status: 200, body: joinPoll(env, effects, caller, b) };
       fail('a box with no credential can only ask to join', 403);
     }
+    const administrationBox = {
+      'administration-work': 'administrationWork', 'administration-claim': 'claimAdministration',
+      'administration-admit': 'admitAdministration', 'administration-command': 'administrationCommandStatus',
+      'administration-complete': 'completeAdministrationCommand',
+    };
+    if (Object.hasOwn(administrationBox, path)) {
+      if (caller.kind !== 'piece' || !BOX_NAME.test(caller.subject ?? '')) fail(`${path} is for boxes`, 403);
+      return import('./administration.mjs').then(m => ({ status: 200,
+        body: path === 'administration-work' ? m.administrationWork(env, caller, effects) : m[administrationBox[path]](env, caller, b, effects),
+      })).catch(apiError);
+    }
     if (BOX_ONLY[path]) {
       if (caller.kind !== 'piece' || !BOX_NAME.test(caller.subject ?? '')) fail(`${path} is for boxes`, 403);
       return { status: 200, body: BOX_ONLY[path](env, effects, caller, b) };

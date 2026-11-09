@@ -489,6 +489,17 @@ export function admitAdministration(env, caller, q, o = {}) {
   });
 }
 
+/** A worker may observe revocation without obtaining another admission receipt. */
+export function administrationCommandStatus(env, caller, q, o = {}) {
+  const boxId = administrativeBox(env, caller, { reporting: true });
+  return transaction(env, o, (j, at) => {
+    const { r, s } = operationFor(j, q.operation, boxId), worker = workerFor(s, q.worker);
+    if (!r.claim || !same(r.claim.worker, worker) || typeof q.ticket !== 'string' || hash(q.ticket) !== r.claim.ticketHash) fail('administrative observation does not match its claim', 403);
+    refresh(env, j, s, at);
+    return { operation: publicOperation(r), stop: s.state !== 'active' || ['cancelled', 'stop-requested'].includes(r.state) };
+  });
+}
+
 function commandResult(value) {
   const { outcome, stdout = '', stderr = '', exitCode = null, signal = null, truncated = false } = value ?? {};
   if (!['exited', 'unknown', 'not-started'].includes(outcome) || typeof stdout !== 'string' || typeof stderr !== 'string' ||
