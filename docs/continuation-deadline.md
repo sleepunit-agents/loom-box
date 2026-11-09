@@ -1,14 +1,16 @@
 # Shared continuation deadline protocol — staged implementation
 
-This is the next implementation contract for runtime148/core675/clock24.
-The runtime now implements sealed version2 issuance/binding/enqueue/drain deadlines,
-clock highwater and expired/indeterminate states. Production issuance deliberately
-refuses without a trusted policy: only tests inject `continuationLifetimeMs` into
-internal delivery dependencies. No body field or environment setting chooses it.
-The proposed30day maximum below remains inactive pending review. There is no
-collector or end-to-end deadline guarantee: core enforcement/reconciliation,
-clock inspection and native admission recheck remain unfinished. Keep all drafts held. Native145 and history676 are separately
-owned; integrate only their completed handoffs.
+This is the staged contract for runtime148/core682/clock24. Runtime version2
+sealed deadlines, core acceptance/fenced reconciliation, authenticated clock
+inspection and completed native-interface admission checks are implemented and
+tested. Production issuance deliberately refuses without a trusted policy; only
+tests inject `continuationLifetimeMs` into internal delivery dependencies. No body
+field or environment setting chooses it. The proposed 30-day maximum remains
+inactive. There is no collector, storage bound, installed continuation proof or
+actual provider/Podman continuation crash proof. Keep all three PRs drafts.
+
+The checkpoint sections below are chronological evidence; later sections supersede
+their statements about work still pending, without erasing their failures.
 
 ## Authority and wire format
 
@@ -202,3 +204,51 @@ Native owner handoff is now complete at merged runtime145 fc786c5d97d278b3da95ce
 needs to consume that completed interface and prove its own native launch path;
 the companion fake runner cannot stand in for that proof. Production issuance,
 collection, merge and installation remain held for this draft.
+
+## Held acceptance review: claimed but unbound recovery (2026-11-09)
+
+Reviewed runtime1ff61c2/corecd0713d/clock3ec64ba, with exact runtime all four
+Node22/24 checks and core all seven checks successful; clock has no configured CI.
+The final isolated-env runtime checkpoint is 1,039 tests: 1,030 pass, nine skip.
+The inherited native-history broad run (26 failures), baseline duplicate-firing
+regressions (two failures before the fix), and earlier failures remain evidence.
+
+The durable firing claim is an admission reservation, not report authority. It
+fixes wake/delivery/conversation/reset/target before native publication, is fsynced,
+and has no release/reassignment or renewal route. A positively unstarted refusal
+can retry the exact queued firing before cutoff. An uncertain start must first
+use the launch journal's recovery/retirement path; it cannot treat a lost receipt
+as a positive refusal or grant report authority to uncertain input. Owner hold
+keeps the sealed queued firing and prevents replacement.
+
+Five added acceptance checks exercise this distinction. Four actually SIGKILL a
+separate interpreter immediately after `checkFiring` returns and before binding,
+using real age-encrypted records. On reopening: exact recovery can bind/enqueue;
+cutoff, source reset and child reset cannot. All retain issuedAt/expiresAt, reject
+rescheduling/another firing, and grant no enqueue authority while unbound. The
+fifth uses delivery/tick plus a fake native runner's explicit `nativeNotStarted`
+refusal: claim stays unbound, a different firing starts nothing, and the exact
+queued retry starts once and can enqueue. This is process-kill storage proof and
+model-free runtime refusal proof, not a native host/provider process-kill test.
+All five fail on unchanged pre-claim461be87 (missing durable firing claim);
+all 65 combined focused tests pass after the fix. The first new refusal fixture
+failed before household owner setup was added; that fixture failure is retained
+in the run evidence, not treated as a production failure.
+
+A claimed grant that cannot recover before cutoff remains sealed and unusable;
+there is deliberately no automatic release or reassignment. A source holder may
+issue a separate new grant, but it cannot adopt the old firing/run/report identity.
+After an uncertain report attempt, reset/deletion is revocation, not proof of
+non-acceptance: retain indeterminate state and prior evidence. No collector may
+turn those rows into absence. Minimal claims, receipts, hashes, deletion journals
+and unresolved legacy state remain retained without a storage bound.
+
+Verdict: the checked model-free claim/refusal behavior satisfies the held draft
+contract; it does not authorize policy activation. Remaining rollout acceptance
+must include actual clock-to-native/provider continuation crash and retry with
+both harnesses (or explicitly narrow supported scope), review of the immutable
+lifetime choice and operational handling of stranded/indeterminate records, and
+an explicit release decision. The 30-day value is a proposal, not a security
+property established by these tests. Collection is separate work after disposition
+and tombstone policy; this task implements no collector. No merge, install,
+production policy change or t2006 change follows from this review.

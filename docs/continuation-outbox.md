@@ -162,3 +162,13 @@ current grant/report set remains sealed and uncollected until those checks and
 review pass. The deletion journal above repairs explicit deletion only.
 
 The next proposed wire/state contract is [Shared continuation deadline protocol](continuation-deadline.md). It specifies core-serialized lost-receipt reconciliation, immutable version2 deadlines, fail-closed legacy grants and deferred collection. This is design only, pending implementation and adversarial review. Exact core f9b1c3d Node22 CI failed the existing live SSE latency assertion (581ms against400ms); Node24 passed. Earlier local deadline failures remain evidence; no broad-green claim.
+
+
+### Current held review checkpoint
+
+The deadline contract now records implemented core/clock/runtime/native-interface
+proofs and claimed-but-unbound crash/refusal acceptance. Earlier "next" and
+"unfinished" sections above are historical checkpoints. See
+[Held acceptance review](continuation-deadline.md#held-acceptance-review-claimed-but-unbound-recovery-2026-11-09)
+for the current verdict and remaining actual-provider/policy gates. Production
+issuance remains refused and no retention collector is enabled.
