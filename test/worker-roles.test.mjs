@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { staticAccounts } from '../src/accounts.mjs';
-import { loadConv, tick } from '../src/delivery.mjs';
+import { loadConv, saveConv, tick } from '../src/delivery.mjs';
 import { readRoles, resolveFor, roleOf, setModelChoice, setModels, setRole } from '../src/models.mjs';
 import { api } from '../src/control.mjs';
 import { spawnCall } from '../src/spawn.mjs';
@@ -255,4 +255,26 @@ test('a failover that finds no room anywhere keeps the job\'s session, and the j
   c = loadConv(w.env, r.handle);
   assert.equal(c.home, undefined);
   assert.equal(c.spawn.assignment.model, 'opus');
+});
+
+test('a parked session begun under other rules is dropped, never resumed under the current ones', async () => {
+  const w = workers();
+  const r = await w.spawn({ prefer: 'opus', failover: true });
+  let c = loadConv(w.env, r.handle);
+  const session = w.runner.slotOf({ id: c.body.split(':')[1] }).session;
+  w.runner.finish(c.body);
+  w.out(w.max);
+  w.out(w.pro);
+  await w.say(r.handle, 'continue');
+  c = loadConv(w.env, r.handle);
+  assert.ok(c.home, 'parked by the failover that found no room');
+  // As if it had begun in a guest venue: not the rules it runs under now.
+  c.home.rules = { ...(c.home.rules ?? {}), guest: true };
+  saveConv(w.env, c);
+  w.clock.advance(3601_000);
+  await w.say(r.handle, 'continue now');
+  const last = w.runs().at(-1);
+  assert.equal(last[0], 'start', 'a fresh body');
+  assert.notEqual(last[2], session);
+  assert.equal(loadConv(w.env, r.handle).home, undefined, 'the parked session is dropped');
 });

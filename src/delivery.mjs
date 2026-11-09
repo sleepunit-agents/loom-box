@@ -2329,7 +2329,11 @@ async function routeOf(env, c0, op, rules, d, cant = []) {
     if (op.type === 'resume' && op.slot?.harness === h) return { how: 'resume', file: slotFile(env, op.cv), avoid: keep };
     // No slot, and its session parked as home on its own harness (a failover that found no room anywhere): that
     // session resumed, never a fresh body beside it.
-    if (!op.slot && c0.home?.harness === h && existsSync(homeFile(env, op.cv))) return { how: 'resume', file: homeFile(env, op.cv), home: true, avoid: keep };
+    // Only under the rules and seat it began with, as every resume (a home that doesn't carry is dropped, never resumed).
+    if (!op.slot && c0.home?.harness === h && existsSync(homeFile(env, op.cv))) {
+      if (sameRules(c0.home.rules ?? {}, rules) && carriesSession(c0.home.rules?.seat, rules.seat, op.cv)) return { how: 'resume', file: homeFile(env, op.cv), home: true, job: true, avoid: keep };
+      dropHome(env, op.cv);
+    }
     // A slot on another harness (an older job's) is parked as its home, never left as an orphan file.
     if (op.type === 'resume' && op.slot) parkSlot(env, op);
     return { how: 'start', avoid: keep };
@@ -2347,6 +2351,17 @@ async function routeOf(env, c0, op, rules, d, cant = []) {
   // Its harness has no room: the slot is kept as its home (to go back to), and a fresh body starts elsewhere.
   parkSlot(env, op);
   return { how: 'start', avoid: [...new Set([...avoid, ...(h ? [h] : [])])], parked: true, ...(chosen && chosen !== h ? { chosen } : {}) };
+}
+
+/** A parked home that can't be resumed under the current rules: its session file and record gone, never resumed. */
+function dropHome(env, cv) {
+  locked(env, () => {
+    const c = loadConv(env, cv);
+    rmSync(homeFile(env, cv), { force: true });
+    if (!c?.home) return;
+    delete c.home;
+    saveConv(env, c);
+  });
 }
 
 /** A slot whose harness has no room, kept as the conversation's home (its session, to go back to or as lineage). */
@@ -2377,7 +2392,9 @@ function jobModel(c) {
 function quotaNotes(c0, way) {
   const out = [];
   const note = (text) => out.push({ key: `quota-${randomBytes(6).toString('hex')}`, note: true, kind: 'message', text });
-  if (way.choiceReturn) {
+  if (way.job) {
+    note('(The runtime: this job resumes its own session after its model was out of quota. Nothing ran elsewhere meanwhile; messages refused then were answered as refused, so read your digests for what is still asked.)');
+  } else if (way.choiceReturn) {
     note(`(The runtime: the owner selected ${harnessWords(way.choiceReturn)}. This resumes the conversation's saved session; read its digests for what happened while it answered elsewhere.)`);
   } else if (way.home) {
     note(`(The runtime: this conversation went on without this session for a while: since ${c0.fallback?.since ?? c0.home?.saved ?? 'then'}, it was answered on ${harnessWords(c0.fallback?.to ?? 'another harness')}, because this harness's account was out of quota. Read conversation({id: "${c0.conversation}"}) (its digests) for what was said meanwhile before you answer.)`);
