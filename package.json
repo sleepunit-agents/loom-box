@@ -232,13 +232,13 @@
         ]
       },
       "spawn": {
-        "description": "Start a fresh body of yourself with a brief. Its final report returns here. Principal and house rules carry over. Use action say to steer it, result to fetch its report. If the asking conversation is ambiguous, use loom runtime spawn from your shell.",
+        "description": "Hand an independent job to a fresh body of yourself: it runs with its own model, account and lifecycle, and its final report returns here. Principal and house rules carry over. action roles lists the kinds of work you can ask for (they change: read them, don't assume); pass role to have the runtime pick the model, and the job keeps that model on every resume. action say steers it, result fetches its report. Work inside your own job (a few parallel lookups or edits) can still use your harness's own subagents: they share your job's model and account. If the asking conversation is ambiguous, use loom runtime spawn from your shell.",
         "input_schema": {
           "type": "object",
           "properties": {
             "action": {
               "type": "string",
-              "description": "start (default), say or result"
+              "description": "start (default), say, result, or roles (the work roles you can ask for)"
             },
             "brief": {
               "type": "string",
@@ -247,6 +247,14 @@
             "prefer": {
               "type": "string",
               "description": "Preferred model"
+            },
+            "role": {
+              "type": "string",
+              "description": "A work role from action roles; the runtime picks an eligible model"
+            },
+            "failover": {
+              "type": "boolean",
+              "description": "Allow the job to move once to another eligible model if its own runs out of quota (default: it waits)"
             },
             "title": {
               "type": "string",

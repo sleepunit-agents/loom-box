@@ -130,7 +130,111 @@ export function setModels(env, { list, agent, allow, prefer }) {
       agents[agent] = { ...agents[agent], ...checkAgentModels(next, { allow, prefer }) };
     }
     s.models = { list: next, agents };
+    // …and from every role; a role left with nothing eligible stays, and says so when asked for (roleOf, resolveFor).
+    if (s.roles?.list?.length) {
+      const before = JSON.stringify(s.roles.list);
+      s.roles.list = s.roles.list.map((r) => (r.models ? { ...r, models: r.models.filter((id) => next.some((m) => m.id === id)) } : r));
+      if (JSON.stringify(s.roles.list) !== before) {
+        const changed = { at: new Date().toISOString(), by: 'owner', what: 'the model list dropped models some roles named', version: s.roles.version + 1 };
+        s.roles = { ...s.roles, version: changed.version, changed, log: [...(s.roles.log ?? []), changed].slice(-ROLE_LOG) };
+      }
+    }
     return s.models;
+  });
+}
+
+// Worker roles (t-2036): the kinds of work an agent can ask the runtime for (coding, review, a light task…), each
+// with the concrete models eligible for it. A role is not an agent: an agent asks for a role for a job it hands off
+// (spawn.mjs), and the runtime picks the model. The catalog is the owner's, versioned: a job records the version it
+// was admitted under, so a later edit never changes a running job. Nothing here is a closed list: roles are added and
+// removed by the owner, and bodies read the catalog (`loom runtime roles`) rather than knowing it.
+// A role never widens what an agent may use: its eligible models are intersected with the agent's `allow`, and every
+// account, quota and grant rule still applies.
+export const ROLE_ID = /^[a-z][a-z0-9-]{0,39}$/;
+const ROLE_TEXT = 400;
+const ROLE_LOG = 20;
+
+/** A role, checked against the model list: {id, description, models?: [id], families?: [family], needs?, input?, output?, dossier?}. */
+export function checkRole(list, r) {
+  if (!r || typeof r !== 'object') fail('a role is {id, description, models}');
+  if (!ROLE_ID.test(r.id ?? '')) fail(`a role's id is like coding or light-task: ${JSON.stringify(r.id)}`);
+  if (typeof r.description !== 'string' || !r.description.trim() || r.description.length > ROLE_TEXT) fail(`${r.id}: description is 1 to ${ROLE_TEXT} characters`);
+  const ids = new Set(list.map((m) => m.id));
+  const out = { id: r.id, description: r.description.trim() };
+  if (r.models !== undefined) {
+    if (!Array.isArray(r.models) || r.models.length > 32) fail(`${r.id}: models is a list of model ids, most wanted first`);
+    const bad = r.models.find((id) => !ids.has(id));
+    if (bad) fail(`${r.id}: ${bad} isn't in the model list`);
+    out.models = [...new Set(r.models)];
+  }
+  if (r.families !== undefined) {
+    if (!Array.isArray(r.families) || r.families.length > 8) fail(`${r.id}: families is a list of model families`);
+    const bad = r.families.find((f) => !FAMILY.test(f ?? ''));
+    if (bad !== undefined) fail(`${r.id}: family ${JSON.stringify(bad)} is anthropic, openai, google, mistral or local:<name>`);
+    out.families = [...new Set(r.families)];
+  }
+  if (!out.models?.length && !out.families?.length) fail(`${r.id}: name the models (or families) eligible for it`);
+  for (const k of ['input', 'output', 'needs']) {
+    if (r[k] === undefined) continue;
+    if (typeof r[k] !== 'string' || !r[k].trim() || r[k].length > ROLE_TEXT) fail(`${r.id}: ${k} is 1 to ${ROLE_TEXT} characters`);
+    out[k] = r[k].trim();
+  }
+  if (r.dossier !== undefined) {
+    if (!ROLE_ID.test(r.dossier)) fail(`${r.id}: dossier is a dossier's name, like code or review`);
+    out.dossier = r.dossier;
+  }
+  if (r.failover !== undefined) {
+    if (typeof r.failover !== 'boolean') fail(`${r.id}: failover is true or false`);
+    out.failover = r.failover;
+  }
+  return out;
+}
+
+/** The models eligible for a role, most wanted first: its named models, then its families' in the list's order. */
+export function eligibleOf(list, role) {
+  const named = (role.models ?? []).map((id) => list.find((m) => m.id === id)).filter(Boolean);
+  const more = list.filter((m) => (role.families ?? []).includes(m.family) && !named.includes(m));
+  return [...named, ...more];
+}
+
+/** The catalog: {version, roles: [{…role, eligible: [id]}], changed?, log}. */
+export function rolesOf(s) {
+  const { list } = modelsOf(s);
+  const r = s.roles ?? { version: 0, list: [], log: [] };
+  return { version: r.version, roles: r.list.map((x) => ({ ...x, eligible: eligibleOf(list, x).map((m) => m.id) })), ...(r.changed ? { changed: r.changed } : {}), log: r.log ?? [] };
+}
+export const readRoles = (env) => rolesOf(load(env));
+
+/** One role of the catalog, with its version, or a 404 naming the ones there are. */
+export function roleOf(s, id) {
+  const cat = rolesOf(s);
+  const r = cat.roles.find((x) => x.id === id);
+  if (!r) fail(`no role ${JSON.stringify(id)}: the roles are ${cat.roles.map((x) => x.id).join(', ') || 'none yet (the owner adds them: loom runtime roles set)'}`, 404);
+  return { ...r, version: cat.version };
+}
+
+/** The owner adds or replaces a role, or removes one; each edit is a new version, logged with who and why. */
+export function setRole(env, { role, remove, why, by = 'owner' }) {
+  if (why !== undefined && (typeof why !== 'string' || why.length > ROLE_TEXT)) fail(`why is at most ${ROLE_TEXT} characters`);
+  return update(env, (s) => {
+    const { list } = modelsOf(s);
+    const cur = s.roles ?? { version: 0, list: [], log: [] };
+    let next, what;
+    if (remove !== undefined) {
+      if (!cur.list.some((x) => x.id === remove)) fail(`no role ${JSON.stringify(remove)}`, 404);
+      next = cur.list.filter((x) => x.id !== remove);
+      what = `removed ${remove}`;
+    } else {
+      const r = checkRole(list, role);
+      const had = cur.list.some((x) => x.id === r.id);
+      if (!had && cur.list.length >= 64) fail('the catalog holds at most 64 roles');
+      next = had ? cur.list.map((x) => (x.id === r.id ? r : x)) : [...cur.list, r];
+      what = `${had ? 'changed' : 'added'} ${r.id}`;
+    }
+    const version = cur.version + 1;
+    const changed = { at: new Date().toISOString(), by, what, ...(why ? { why } : {}), version };
+    s.roles = { version, list: next, changed, log: [...(cur.log ?? []), changed].slice(-ROLE_LOG) };
+    return rolesOf(s);
   });
 }
 
@@ -289,22 +393,43 @@ export async function fetchScorecards(env, { kind, since, fetchImpl = fetch } = 
 }
 
 /** Resolve with what the runtime has: its list (only `harness`'s models, if named), the agent's settings, the accounts provider, loom's scorecards. */
-export async function resolveFor(env, { agent, venue, venueKind: told, prefer = [], harness, conversation, avoid = [], accounts, now = new Date(), fetchImpl } = {}) {
+//   role   a worker role's id (t-2036): only its eligible models, most wanted first after `prefer`
+//   pin    a worker job's assigned model (t-2038): that model and no other; a job is never moved by a preference,
+//          a new model or a quota reset. Out of quota, it waits (the 409 a caller treats as out of quota).
+export async function resolveFor(env, { agent, venue, venueKind: told, prefer = [], harness, conversation, avoid = [], accounts, now = new Date(), fetchImpl, role, pin } = {}) {
   if (!AGENT.test(agent ?? '')) fail('which agent');
   const kind = venueKind(venue, told);
-  const { list: all, agents } = readModels(env);
+  const s = load(env);
+  const { list: everything, agents } = modelsOf(s);
+  let all = everything;
+  const head = [];
+  if (pin) {
+    all = everything.filter((m) => m.id === pin);
+    if (!all.length) fail(`its assigned model ${pin} is no longer in the runtime's model list`, 410);
+    head.push(`assigned model ${pin}: a worker job keeps the model it started on`);
+  } else if (role) {
+    // A job's role as it was admitted ({id, version, eligible}), or a role's id read from the catalog now.
+    const r = typeof role === 'object' ? role : roleOf(s, role);
+    all = r.eligible.map((id) => everything.find((m) => m.id === id)).filter(Boolean);
+    if (!all.length) fail(`role ${r.id} has no eligible model left in the runtime's model list`, 409);
+    prefer = [...prefer, ...r.eligible];
+    head.push(`role ${r.id} (catalog v${r.version}): eligible ${r.eligible.join(', ')}`);
+  }
   // A resume keeps its harness: its slot is that harness's session.
   const list = harness ? all.filter((m) => m.harness === harness) : all;
-  if (!list.length) fail(`the runtime has no ${harness} model`, 409);
+  if (!list.length) fail(`the runtime has no ${harness} model${pin || role ? ` for ${pin ? `assigned model ${pin}` : `role ${role}`}` : ''}`, 409);
   let listed = null;
   // `none` is a household that doesn't want quota read; off the control plane there are no box reports to read.
   try { listed = accounts.kind === 'none' ? null : accounts.list(); } catch { listed = null; }
   const since = sinceDay(now);
   const cards = await fetchScorecards(env, { kind, since, fetchImpl });
-  const choice = readModelChoice(env, agent, conversation).effective;
+  // A pinned job has its model already: the owner's harness choice applies when a job is assigned, not after.
+  const choice = pin ? 'auto' : modelChoiceOf(s, agent, conversation).effective;
   const r = resolveModel({ agent, kind, models: list, all, settings: agents[agent] ?? {}, accounts: listed,
     scorecards: cards.rows, prefer, since, avoid, harnessChoice: choice, now: now.getTime() });
   if (choice !== 'auto') r.why.unshift(`owner preference: ${choice}${conversation ? ' for this conversation' : ''}`);
+  r.why.unshift(...head);
+  if (role && !pin) r.role = typeof role === 'object' ? role.id : role;
   if (cards.error) r.why.push(cards.error);
   return r;
 }

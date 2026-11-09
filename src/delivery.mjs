@@ -368,12 +368,13 @@ function noteHarness(env, agent, r, d) {
 }
 
 /** Whether a harness has a model with room for this conversation's agent now (the resolver's hard limits). */
-async function roomOn(env, c, harness, d) {
+async function roomOn(env, c, harness, d, pin) {
   try {
-    await resolveFor(env, { agent: c.agent, venue: c.venue, venueKind: c.kind, harness, accounts: d.accounts, now: d.now(), fetchImpl: d.fetchImpl });
+    await resolveFor(env, { agent: c.agent, venue: c.venue, venueKind: c.kind, harness, pin, accounts: d.accounts, now: d.now(), fetchImpl: d.fetchImpl });
     return true;
   } catch (e) {
-    if (e instanceof StateError && e.status === 409) return false;
+    // 410: a pinned model gone from the list has no room either.
+    if (e instanceof StateError && (e.status === 409 || e.status === 410)) return false;
     throw e;
   }
 }
@@ -1628,6 +1629,13 @@ export function commitStartedConversation(env, op, { run, senderHash, bodyRules,
     // `claude --bg` gives every session its daemon's environment, not this launch's (t-1830).
     if (localKey !== undefined) keepKey(env, op.cv, localKey);
     c.bodyRules = bodyRules;
+    // A worker job's assignment (t-2038): the model it first ran on, kept for every later run. An older job (spawned
+    // before assignments) gets one here, from the body it runs now. A failover re-pins it, the move kept as lineage.
+    if (c.spawn && r.model && (!c.spawn.assignment || (way.failover && c.spawn.assignment.model !== r.model))) {
+      const a = { model: r.model, harness: r.harness, family: r.family, at: new Date(at).toISOString(), ...(c.spawn.role ? { role: c.spawn.role.id, roleVersion: c.spawn.role.version } : {}) };
+      if (c.spawn.assignment) c.spawn.lineage = [...(c.spawn.lineage ?? []), { ...c.spawn.assignment, until: new Date(at).toISOString(), why: 'out of quota; failover allowed' }].slice(-8);
+      c.spawn.assignment = a;
+    }
     if (!r.inputUncertain) ack(c, op.msgs);
     delete c.retryAt; delete c.startFails; delete c.retryReason; delete c.startStatus;
     c.sendKey = senderHash;
@@ -1992,9 +2000,9 @@ async function executeOne(env, op, d, mem) {
     bodyDeps.launch = preparedLaunch(env, op, d, { local, runKey, snapshot: () => launchSnapshot ??= {
       run, senderHash: keyHash(runKey).toString('hex'), bodyRules: savedBodyRules(rules, now()),
       ...(c0.nativeRecovery ? { nativeRecovery: c0.nativeRecovery.id } : {}),
-      way: { how: way.how, home: !!way.home, ...(way.file ? { file: way.file } : {}) },
+      way: { how: way.how, home: !!way.home, ...(way.file ? { file: way.file } : {}), ...(way.failover ? { failover: true } : {}) },
     } });
-    const base = { activity: c0.spawn?.interactive === true, agent: c0.agent, venue: c0.venue, venueKind: c0.kind, prefer: c0.spawn?.prefer ? [c0.spawn.prefer] : [], cwd: local ? lb.cwd : d.cwd, deny: rules.deny, guest: rules.guest, ...(local ? { local: true } : {}), ...(rules.seat ? { seat: rules.seat } : {}) };
+    const base = { activity: c0.spawn?.interactive === true, agent: c0.agent, venue: c0.venue, venueKind: c0.kind, prefer: c0.spawn?.prefer ? [c0.spawn.prefer] : [], cwd: local ? lb.cwd : d.cwd, deny: rules.deny, guest: rules.guest, ...(local ? { local: true } : {}), ...(rules.seat ? { seat: rules.seat } : {}), ...jobModel(c0) };
     // Out of quota (t-1907): which session this run continues, on which harness. Its home slot, when the harness it
     // switched away from has room again; its own slot, when that one's harness has room; else a fresh body elsewhere.
     // A deny list Codex can't keep (a tool within a server, a built-in: runners.mjs, codexDeny) keeps this body off
@@ -2014,6 +2022,8 @@ async function executeOne(env, op, d, mem) {
       if (why) { cant = ['codex']; cantWhy = String(why).replace(CODEX_WONT, ''); }
     }
     way = await routeOf(env, c0, op, rules, d, cant);
+    // An allowed failover (t-2038): the job moves once, to another model its role allows, and is pinned there.
+    if (way.failover) { delete base.pin; if (c0.spawn?.role) base.role = c0.spawn.role; }
     const notes = quotaNotes(c0, way);
     let briefContext = c0;
     if (c0.nativeRecovery?.report && sameRules(c0.nativeRecovery.reportRules ?? {}, rules) && carriesSession(c0.nativeRecovery.reportRules?.seat, rules.seat, op.cv)) {
@@ -2046,7 +2056,7 @@ async function executeOne(env, op, d, mem) {
         if (way.home) rmSync(slotFile(env, op.cv), { force: true });
       });
     }
-    const snapshot = launchSnapshot ?? { run, senderHash: keyHash(runKey).toString('hex'), bodyRules: savedBodyRules(rules, now()), way: { how: way.how, home: !!way.home }, ...(c0.nativeRecovery ? { nativeRecovery: c0.nativeRecovery.id } : {}) };
+    const snapshot = launchSnapshot ?? { run, senderHash: keyHash(runKey).toString('hex'), bodyRules: savedBodyRules(rules, now()), way: { how: way.how, home: !!way.home, ...(way.failover ? { failover: true } : {}) }, ...(c0.nativeRecovery ? { nativeRecovery: c0.nativeRecovery.id } : {}) };
     const keep = commitStartedConversation(env, op, snapshot, r, pending, now(), local ? runKey : undefined);
     if (!keep) endAndForget(env, r, d);
     else { finishLaunchAck(env, op.cv, d); noteHarness(env, c0.agent, r, d); }
@@ -2281,6 +2291,19 @@ async function interruptOp(env, op, d) {
 async function routeOf(env, c0, op, rules, d, cant = []) {
   const now = d.now().getTime();
   const avoid = [...new Set([...(c0.quota?.from ? [c0.quota.from] : []), ...cant])];
+  // A worker job keeps its assigned model (t-2038): never a return home, never a switch because a preference changed
+  // or another account has room. Its own model out of quota, it waits (resolveFor's 409, said as out of quota), unless
+  // its spawn allowed a failover: then it starts once on another eligible model, its slot kept as lineage, no return.
+  const pin = c0.spawn?.assignment?.model;
+  if (pin) {
+    const h = c0.spawn.assignment.harness;
+    if (c0.spawn.failover && !(await roomOn(env, c0, h, d, pin))) {
+      if (op.type === 'resume') parkSlot(env, op);
+      return { how: 'start', avoid: [...new Set([...avoid.filter((x) => x !== h), h])], failover: true };
+    }
+    if (op.type === 'resume' && op.slot?.harness === h) return { how: 'resume', file: slotFile(env, op.cv) };
+    return { how: 'start', avoid: avoid.filter((x) => x !== h) };
+  }
   const home = c0.home && Date.parse(c0.home.until) > now && existsSync(homeFile(env, op.cv)) ? c0.home : null;
   const choice = readModelChoice(env, c0.agent, c0.conversation).effective;
   const chosen = choice !== 'auto' && !avoid.includes(choice) && await roomOn(env, c0, choice, d) ? choice : null;
@@ -2292,6 +2315,13 @@ async function routeOf(env, c0, op, rules, d, cant = []) {
   const h = op.slot?.harness;
   if (h && (!chosen || h === chosen) && !avoid.includes(h) && await roomOn(env, c0, h, d)) return { how: 'resume', file: slotFile(env, op.cv) };
   // Its harness has no room: the slot is kept as its home (to go back to), and a fresh body starts elsewhere.
+  parkSlot(env, op);
+  return { how: 'start', avoid: [...new Set([...avoid, ...(h ? [h] : [])])], parked: true, ...(chosen && chosen !== h ? { chosen } : {}) };
+}
+
+/** A slot whose harness has no room, kept as the conversation's home (its session, to go back to or as lineage). */
+function parkSlot(env, op) {
+  const h = op.slot?.harness;
   locked(env, () => {
     const c = loadConv(env, op.cv);
     if (!c) return;
@@ -2301,7 +2331,16 @@ async function routeOf(env, c0, op, rules, d, cant = []) {
     delete c.slot;
     saveConv(env, c);
   });
-  return { how: 'start', avoid: [...new Set([...avoid, ...(h ? [h] : [])])], parked: true, ...(chosen && chosen !== h ? { chosen } : {}) };
+}
+
+/**
+ * A worker job's model (t-2036, t-2038): its assigned model once it has run (pin), else its role as admitted. Only
+ * spawned jobs: a live conversation keeps its preferred-primary and fallback policy (routeOf).
+ */
+function jobModel(c) {
+  if (!c.spawn) return {};
+  if (c.spawn.assignment?.model) return { pin: c.spawn.assignment.model };
+  return c.spawn.role ? { role: c.spawn.role } : {};
 }
 
 /** What a run is told of a switch, a return home, or a refused turn's retry: runtime notes, ahead of its messages. */

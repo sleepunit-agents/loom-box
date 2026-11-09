@@ -1526,6 +1526,15 @@ export function api(env, effects, { caller, path, body }) {
     }
     // On whose behalf a body acts (principal.mjs, t-1943): proven as send is, answered with a signed statement a piece
     // checks on loom's machine. Never the owner by default.
+    // The worker roles a body may ask for (models.mjs, t-2036): any agent or owner reads the catalog; only the
+    // household's owner edits it (a scoped owner token can't: the catalog is the household's).
+    if (path === 'roles') {
+      return import('./models.mjs').then((m) => {
+        if (b.role === undefined && b.remove === undefined) return { status: 200, body: m.readRoles(env) };
+        if (!householdOwner(caller)) fail('only the household\'s owner edits the roles', 403);
+        return { status: 200, body: m.setRole(env, { role: b.role, remove: b.remove, why: b.why, by: actor(caller) }) };
+      }).catch(apiError);
+    }
     if (path === 'spawn') {
       if (caller.kind !== 'agent') fail('spawn through the API is a body\'s', 403);
       return import('./spawn.mjs').then(async (m) => ({ status: 200, body: await m.spawnCall(env, caller, b, { detach: true }) })).catch(apiError);
