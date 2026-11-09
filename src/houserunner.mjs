@@ -703,7 +703,9 @@ export class HouseRunner {
     // No key here: no slot, at once. It's stopped, and its session stays in its house (thrown away with it).
     if (!this.canSeal()) { this.end(body); return null; }
     const f = packedFile(this.env, body.agent, body.house, raw);
-    if (this.alive(body) === false && !existsSync(f)) return [];
+    // The native process can end a sync before its host sends the pack. Only
+    // termination of the house proves there is no host left to return it.
+    if (!this.pending(body) && !existsSync(f)) return [];
     const asked = existsSync(f) || this.requestPack(body);
     if (!asked) return [];
     const end = Date.now() + this.claimMs;

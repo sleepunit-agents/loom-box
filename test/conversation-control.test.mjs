@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { deliver, loadConv, ownerConversationControl, tick } from '../src/delivery.mjs';
 import { detectLoop, judge } from '../src/loops.mjs';
-import { hasAge, houseWorld, sleep, until, world } from './delivery-world.mjs';
+import { bodyInHouse, hasAge, houseWorld, sleep, until, world } from './delivery-world.mjs';
 import { load } from '../src/state.mjs';
 import { hostOf } from '../src/houserunner.mjs';
 
@@ -87,6 +87,8 @@ test('conversation control refuses bodies and unrelated owners before any change
 
 test('a disconnected house keeps its interrupt pending and later returns its packed session', { skip: !hasAge }, async () => {
   const w = houseWorld();
+  let nativeStopped = false;
+  w.local.stopped = () => nativeStopped;
   const base = world();
   const o = { ...base.o, runner: () => w.hr, sealer: w.sealer, accounts: w.accounts, now: () => new Date() };
   const first = deliver(w.env, base.msg('remote-control', 'work', { from: { kind: 'person', slug: 'jonathan' } }), o);
@@ -109,9 +111,31 @@ test('a disconnected house keeps its interrupt pending and later returns its pac
     w.hr.now = oldNow;
     w.setDrop(() => false);
     await until(() => w.ended.length > 0);
+    await until(() => w.hr.status({ id: ref.split(':')[1], house: 'h-1', agent: 'art' }) === 'ended');
+    await tick(w.env, o);
+    assert.equal(loadConv(w.env, conversation).body, ref, 'native exit is not acknowledgement that its session pack arrived');
+    assert.equal(loadConv(w.env, conversation).control.state, 'pending');
+    nativeStopped = true;
     await sleep(200); // The host has sent its pack, received the ack and forgotten the native body.
     await until(async () => { await tick(w.env, o); return loadConv(w.env, conversation).control.state === 'held'; });
     assert.ok(loadConv(w.env, conversation).slot);
     assert.equal(loadConv(w.env, conversation).body, undefined);
   } finally { w.setDrop(() => false); await w.kill(); await host; }
+});
+
+test('direct collection waits for the receipt after the native body reports ended', { skip: !hasAge }, async () => {
+  const w = houseWorld();
+  let stopped = false;
+  w.local.stopped = () => stopped;
+  const { body, host } = await bodyInHouse(w);
+  try {
+    w.hr.requestPack(body);
+    await until(() => w.hr.status(body) === 'ended');
+    let answered = false;
+    const collecting = w.hr.pack(body).then(files => { answered = true; return files; });
+    await sleep(50);
+    assert.equal(answered, false, 'the still-live house can return its session after native exit');
+    stopped = true;
+    assert.ok((await collecting).length);
+  } finally { await w.kill(); await host; }
 });
