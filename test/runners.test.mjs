@@ -34,6 +34,18 @@ const rx = (p) => new RegExp(p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
 
 const BRIEF = 'You are Art, in a DM with Loren.\nSECRET-ISH MESSAGE TEXT: what did we decide?';
 
+test('Codex interruption lets the harness cancel a detached tool and flush its state', async () => {
+  const h = harness();
+  const r = new CodexRunner({ codex: join(here, 'fake-codex.mjs'), runsDir: join(h.D, 'runs'), codexHome: realCodexHome(h.D), systemDir: join(h.D, 'etc-codex') });
+  const b = r.start({ brief: 'diagnostic', model: 'm', cwd: h.D, env: { ...h.env, FAKE_DETACHED_TOOL: '1' } });
+  await until(() => existsSync(join(h.D, 'tool-started')));
+  r.end(b);
+  await until(() => r.stopped(b));
+  await new Promise(resolve => setTimeout(resolve, 750));
+  assert.equal(existsSync(join(h.D, 'orphan-finished')), false, 'the interrupted tool must not keep doing work');
+  assert.equal(existsSync(join(h.D, 'interrupt-flushed')), true, 'the harness completed graceful cancellation');
+});
+
 test('Claude Code: a body starts with its brief on stdin (never argv), is found by its spawn token, and has a slot', () => {
   const h = harness();
   const r = new ClaudeRunner({ claude: join(here, 'fake-claude.mjs'), jobsDir: join(h.D, 'jobs'), args: ['--dangerously-skip-permissions'], inboxDir: h.inbox, usageDir: join(h.D, 'usage'), sleep: () => {} });

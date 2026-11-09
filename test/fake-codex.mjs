@@ -5,6 +5,7 @@
 // rollout under $CODEX_HOME/sessions, as Codex does, with a token_count reading.
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { spawn } from 'node:child_process';
 
 const D = process.env.FAKE_HARNESS;
 const args = process.argv.slice(2);
@@ -14,6 +15,11 @@ appendFileSync(join(D, 'briefs.log'), JSON.stringify(brief) + '\n');
 const r = args.indexOf('resume');
 const say = (e) => process.stdout.write(JSON.stringify(e) + '\n');
 const thread = r >= 0 ? args[r + 1] : `th-${process.pid}`;
+let tool;
+if (process.env.FAKE_DETACHED_TOOL) {
+  tool = spawn(process.execPath, ['-e', `const fs=require('node:fs'); const p=process.argv[1]; fs.writeFileSync(p+'/tool-started','1'); setTimeout(()=>fs.writeFileSync(p+'/orphan-finished','1'),600);`, D], { detached: true, stdio: 'ignore' });
+  tool.unref();
+}
 say({ type: 'thread.started', thread_id: thread });
 if (process.env.FAKE_ROLLOUT && process.env.CODEX_HOME) {
   const day = join(process.env.CODEX_HOME, 'sessions', '2026', '11', '06');
@@ -31,4 +37,11 @@ const tick = () => {
   setTimeout(tick, 50);
 };
 process.on('SIGTERM', () => process.exit(143));
+process.on('SIGINT', () => {
+  if (tool) {
+    try { process.kill(-tool.pid, 'SIGTERM'); } catch { /* already gone */ }
+    writeFileSync(join(D, 'interrupt-flushed'), '1');
+  }
+  process.exit(130);
+});
 tick();
