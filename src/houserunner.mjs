@@ -595,8 +595,11 @@ export class HouseRunner {
       return !!h && h.agent === body.agent && ['wanted', 'starting', 'running', 'stopping'].includes(h.state);
     } catch { return true; } // An unreadable control plane cannot prove termination either.
   }
-  /** Its harness is still there: its house's host reports it. */
-  alive(body) { const e = this.entry(body); return !!e && e.status !== 'ended'; }
+  /** Its host reports it alive/ended; a live house with no fresh report is unknown. */
+  alive(body) {
+    const e = this.entry(body);
+    return e ? e.status !== 'ended' : this.pending(body) ? undefined : false;
+  }
   slotOf(body) { const s = this.entry(body)?.session; return s ? { harness: this.harness, session: s } : null; }
   /** How its turn went, as its house's host reports it: null from a host that doesn't say. */
   turn(body) { return this.entry(body)?.turn ?? null; }
@@ -663,7 +666,7 @@ export class HouseRunner {
     // No key here: no slot, at once. It's stopped, and its session stays in its house (thrown away with it).
     if (!this.canSeal()) { this.end(body); return null; }
     const f = packedFile(this.env, body.agent, body.house, raw);
-    if (!this.alive(body) && !existsSync(f)) return [];
+    if (this.alive(body) === false && !existsSync(f)) return [];
     const asked = hostLocked(this.env, () => {
       const seat = this.seatFor(body);
       const h = loadHost(this.env, body.agent, seat);

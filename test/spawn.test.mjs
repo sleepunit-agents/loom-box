@@ -180,7 +180,9 @@ test('a stale house report keeps the same spawn open until it reconnects with it
   w.runner.remote = true;
   w.runner.pending = b => house.pending(b);
   const status = w.runner.status;
+  const alive = w.runner.alive;
   let outage = false;
+  w.runner.alive = b => outage ? house.alive(b) : alive(b);
   w.runner.status = b => outage ? 'unknown' : status(b);
   w.runner.final = () => outage ? null : 'REPORT-AFTER-RECONNECT';
   const r = await start(w);
