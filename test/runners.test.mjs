@@ -66,6 +66,7 @@ test('Claude Code: a turn that ended on "I\'ll check back" (state working, tempo
   set({ state: 'working', tempo: 'idle', detail: 'PR #38 still untouched; round 23 check armed', inFlight: { tasks: 0, queued: 0, kinds: [], drainableMonitors: 0 } });
   assert.equal(r.status(b), 'idle');
   assert.equal(r.turn(b).failed, false);
+  assert.equal(r.stopped(b), false, 'an idle turn still needs a stop acknowledgement');
   // Idle, but with a background task or a monitor of its own still going: not over.
   set({ inFlight: { tasks: 1, queued: 0 } });
   assert.equal(r.status(b), 'working');
@@ -99,6 +100,7 @@ test('Claude Code: fed mid-turn through its inbox (the hook\'s layout and lock);
   // End: stopped, and its inbox closed (the hook then hands over nothing).
   r.end(again, h.env);
   assert.equal(r.status(again), 'idle');
+  assert.equal(r.stopped(again), true);
   assert.ok(existsSync(join(h.inbox, again.id, 'closed')));
   assert.equal(r.feed(again, { text: 'x' }).fed, false);
   assert.throws(() => r.resume({ harness: 'codex', session: 'x' }, {}), RunnerError);

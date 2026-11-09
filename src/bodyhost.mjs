@@ -167,10 +167,20 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
     for (const id of [...stopped.keys()]) if (!got.stop?.[id]) stopped.delete(id);
     for (const [id, s] of Object.entries(got.stop ?? {})) {
       const b = mine.get(id);
-      if (!b || b.ended || (stopped.has(id) && stopped.get(id) === s.at)) continue;
-      stopped.set(id, s.at);
+      if (!b || b.ended || (stopped.get(id) === s.at && b.stopPending !== s.at)) continue;
       const r = runner(b.harness);
-      try { r.end({ id }); } catch { /* already gone */ }
+      if (b.stopPending !== s.at) {
+        stopped.set(id, s.at);
+        b.stopPending = s.at;
+        try { r.end({ id }); } catch { /* observe before collecting its files */ }
+      }
+      // A stop request is not an acknowledgement. Codex exits asynchronously and
+      // may flush its rollout after SIGTERM; never snapshot or delete it mid-write.
+      let status;
+      try { status = r.status({ id }); } catch { continue; }
+      if (status !== 'idle' && status !== 'ended') continue;
+      if (r.stopped) { try { if (!r.stopped({ id })) continue; } catch { continue; } }
+      delete b.stopPending;
       if (b.cv) dropKey(env, b.cv, b.key);
       heard.delete(id);
       b.ended = true;

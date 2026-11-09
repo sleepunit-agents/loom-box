@@ -7,7 +7,8 @@
 //                                            harness allows it. Where it doesn't, or the turn is over, the caller
 //                                            waits for the turn to end, or resumes.
 //   resume(slot, {brief, model, cwd, env}) → a body, continuing the session the slot names.
-//   end(body, env?)                        → stops it; never throws for a body that's already gone.
+//   end(body, env?)                        → requests its stop; never throws for a body that's already gone.
+//   stopped(body)                          → confirms it has stopped writing its session, before packing or deletion.
 //   status(body)                           → 'working' (mid-turn), 'idle' (its turn ended; resumable), 'ended'
 //                                            or 'unknown'.
 //   slotOf(body)                           → the slot that resumes it ({harness, session}), once the harness says.
@@ -223,6 +224,10 @@ export class ClaudeRunner {
     const job = this.job(body.id);
     if (!job) return 'unknown';
     return turnOver(job) ? 'idle' : 'working';
+  }
+
+  stopped(body) {
+    return ['done', 'stopped', 'failed', 'blocked'].includes(this.job(body.id)?.state);
   }
 
   /**
@@ -578,6 +583,8 @@ export class CodexRunner {
     if (!Number.isInteger(pid) || pid <= 0) return false;
     try { return readFileSync(`/proc/${pid}/cmdline`).includes(Buffer.from(dir)); } catch { return false; }
   }
+
+  stopped(body) { return !this.alive(body.id); }
 
   status(body) {
     if (!existsSync(join(this.runsDir, body.id))) return 'unknown';
