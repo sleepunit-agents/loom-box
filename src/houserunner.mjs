@@ -174,7 +174,7 @@ function releaseLocked(env, agent, seat, nowMs) {
   for (const other of seatsOf(env, agent)) {
     if (other === OWNER_SEAT || other === seat) continue;
     const h = loadHost(env, agent, other);
-    if (!h.house || s.houses[h.house]?.state !== 'running' || !freshRec(h, h.house, nowMs) || h.draining) continue;
+    if (!h.house || s.houses[h.house]?.session || s.houses[h.house]?.state !== 'running' || !freshRec(h, h.house, nowMs) || h.draining) continue;
     if (Object.values(h.report.bodies ?? {}).some((b) => b.status !== 'ended')) continue;
     if (Object.keys(h.req ?? {}).length || Object.keys(h.stop ?? {}).length || Object.keys(h.inbox ?? {}).length) continue;
     // Just handed to a start (warm, then launch's request): not empty, it's about to have a body.
