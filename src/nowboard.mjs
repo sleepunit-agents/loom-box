@@ -169,7 +169,7 @@ export function bridgesOf(dir, nowS = Date.now() / 1000) {
 }
 
 /** Every agent's board under the base: {agent: [bridge…]}, the agents whose board has a bridge. */
-export function boards(env, nowS = Date.now() / 1000) {
+export function boards(env, nowS = Date.now() / 1000, adapters = adapterStatuses(env)) {
   let names = [];
   try { names = readdirSync(nowBase(env)); } catch { /* Adapters may have no legacy board. */ }
   const out = {};
@@ -179,7 +179,7 @@ export function boards(env, nowS = Date.now() / 1000) {
     const bs = bridgesOf(join(nowBase(env), n), nowS);
     if (bs.length) out[m[1]] = bs;
   }
-  return mergeAdapters(out, adapterStatuses(env), nowS);
+  return mergeAdapters(out, adapters, nowS);
 }
 
 export function adapterStatuses(env) {
@@ -269,7 +269,7 @@ const watchFile = (env) => join(dataDir(env), 'now-watch.json');
  * best-effort: a watch file that can't be had leaves the states as they are, with no FYI.
  */
 export function watchBridges(env, nowS = Date.now() / 1000, s = undefined, o = {}) {
-  const all = boards(env, nowS);
+  const all = boards(env, nowS, o.adapters);
   let st = s;
   if (st === undefined) { try { st = load(env); } catch { st = null; } }
   const darkS = darkAfterS(env);
@@ -354,8 +354,8 @@ const withWhom = (t) => {
 const why = (w) => String(w?.why ?? w?.reason ?? w?.hold ?? '').slice(0, 80);
 
 /** The manifest's part: an alert for each bridge actually down (dark or looping), the FYIs, and each agent's doing. */
-export function nowManifest(env, nowS = Date.now() / 1000, s = undefined, conversations = []) {
-  const { all, notices } = watchBridges(env, nowS, s);
+export function nowManifest(env, nowS = Date.now() / 1000, s = undefined, conversations = [], adapters = undefined) {
+  const { all, notices } = watchBridges(env, nowS, s, { adapters });
   const asks = [];
   const agents = {};
   const jobs = {};
