@@ -181,7 +181,7 @@ describe('the board on the runtime\'s page and in its manifest', () => {
     writeFileSync(join(env.LOOM_RUNTIME_NOW_DIR, 'art-now', 'convs.json'), '{"at": 1}');
     assert.deepEqual(bridgesOf(join(env.LOOM_RUNTIME_NOW_DIR, 'art-now')), []);
     assert.deepEqual(talking(join(env.LOOM_RUNTIME_NOW_DIR, 'art-now')), {});
-    assert.deepEqual(nowManifest(env), { asks: [], agents: {}, jobs: {}, notices: [] });
+    assert.deepEqual(nowManifest(env), { asks: [], agents: {}, jobs: {}, notices: [], activityUnknown: [] });
     assert.equal(manifest(env).tile.label, 'Boxes');
   });
 });

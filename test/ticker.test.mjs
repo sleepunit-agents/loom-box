@@ -49,3 +49,21 @@ test('retained offline and starting work never masquerades as a fresh observatio
  w.runner.status=()=> 'unknown';
  assert.equal(rows()[0].activity,undefined);
 });
+
+
+test('agent idle needs complete bridge and remote knowledge, not an empty doing list', async () => {
+ const { idleUncertain } = await import('../src/ui.mjs');
+ const s={services:{},houses:{},remotes:{}};
+ assert.equal(idleUncertain('art',s,{}, {}, {}),false);
+ assert.equal(idleUncertain('art',s,{}, {}, {activityUnknown:['art']}),true);
+ s.services.bridge={agent:'art',name:'discord',want:'up'};
+ assert.equal(idleUncertain('art',s,{}, {}, {}),true);
+ const adapters={discord:{mode:'live',agents:['art']}};
+ assert.equal(idleUncertain('art',s,{},adapters,{}),false);
+ s.remotes.art={name:'box',want:'up',state:'running'};
+ assert.equal(idleUncertain('art',s,{},adapters,{}),true);
+ assert.equal(idleUncertain('art',s,{'box:box':false},adapters,{}),false);
+ assert.equal(idleUncertain('art',s,{'box:box':true},adapters,{}),true);
+ s.remotes.art.state='starting';
+ assert.equal(idleUncertain('art',s,{'box:box':false},adapters,{}),true);
+});

@@ -411,7 +411,9 @@ export function nowManifest(env, nowS = Date.now() / 1000, s = undefined, conver
     }));
     if (doing.length) agents[agent] = doing.slice(0, DOING_MAX);
   }
-  return { asks: asks.slice(0, ASKS_MAX), agents, jobs, notices };
+  // Legacy bridges have no current-tool observation contract, even when their board is empty.
+  const activityUnknown = Object.entries(all).filter(([, bs]) => bs.some(b => !b.adapter)).map(([agent]) => agent);
+  return { asks: asks.slice(0, ASKS_MAX), agents, jobs, notices, activityUnknown };
 }
 
 /** The Now page: the old status board's tiles (bridges, talking, waiting, quota), then a row per agent. */
