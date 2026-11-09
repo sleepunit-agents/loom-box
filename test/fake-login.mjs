@@ -71,5 +71,9 @@ if (as === 'codex' && args === 'app-server') {
   process.exit(1);
 } else if (as === 'codex' && args === 'login --device-auth') {
   process.stdout.write('1. Open this link in your browser and sign in to your account\n   https://auth.openai.com/codex/device\n\n2. Enter this one-time code (expires in 15 minutes)\n   ABCD-EFGH1\n');
-  setTimeout(() => { writeFileSync(marker, '{"fake":true}'); process.exit(0); }, Number(process.env.FAKE_LOGIN_DEVICE_MS || 300));
+  const confirm = () => {
+    if (process.env.FAKE_LOGIN_DEVICE_GATE && !existsSync(process.env.FAKE_LOGIN_DEVICE_GATE)) return setTimeout(confirm, 25);
+    writeFileSync(marker, '{"fake":true}'); process.exit(0);
+  };
+  setTimeout(confirm, Number(process.env.FAKE_LOGIN_DEVICE_MS || 300));
 } else if (!['claude', 'codex'].includes(as)) process.exit(2);

@@ -41,6 +41,7 @@ import { pieceName } from './piece.mjs';
 import { bodyBox } from './placement.mjs';
 import { isParts } from './briefs.mjs';
 import { RunnerError } from './runners.mjs';
+import { MAX_SESSION_BYTES, safeRel } from './sessions.mjs';
 import { GONE, part, redact, UNPRINTABLE_ONE } from './redact.mjs';
 import { cardTime } from './activity.mjs';
 import { ageSealer } from './sealed.mjs';
@@ -91,12 +92,14 @@ export function sweepTransfers(env, nowMs = Date.now(), fileNowMs = Date.now()) 
   const parts = join(hostsDir(env), 'parts');
   for (const a of ls(parts)) for (const h of ls(join(parts, a))) for (const id of ls(join(parts, a, h))) {
     const dir = join(parts, a, h, id);
+    if (existsSync(join(dir, 'offline.json'))) continue;
     const at = readJson(join(dir, 'at.json'));
     if (typeof at !== 'number' || nowMs - at >= PARTS_MS) rmSync(dir, { recursive: true, force: true });
   }
   const packed = join(hostsDir(env), 'packed');
   for (const a of ls(packed)) for (const h of ls(join(packed, a))) for (const f of ls(join(packed, a, h))) {
     const p = join(packed, a, h, f);
+    if (f.endsWith('.offline.json') || existsSync(offlinePin(p))) continue;
     // By its file's own time: a packed file is a file, and its clock is the disk's.
     try { if (fileNowMs - statSync(p).mtimeMs >= 2 * CLAIM_MS) rmSync(p, { force: true }); } catch { /* gone */ }
   }
@@ -125,6 +128,7 @@ function seatsOf(env, agent) {
 // Every path is the agent's and the house's own, and an id is checked before it names one.
 const safe = (agent, house, id) => AGENT_NAME.test(agent ?? '') && HOUSE.test(house ?? '') && BODY_ID.test(id ?? '');
 const packedFile = (env, agent, house, id) => { if (!safe(agent, house, id)) throw new StateError('not a body of a house', 400); return join(hostsDir(env), 'packed', agent, house, `${id}.age`); };
+const offlinePin = file => file + '.offline.json';
 const partDir = (env, agent, house, id) => { if (!safe(agent, house, id)) throw new StateError('not a body of a house', 400); return join(hostsDir(env), 'parts', agent, house, id); };
 /**
  * A body's id, as the runtime knows it: its house's id, then the id the house's harness gave it. House ids are never
@@ -238,7 +242,7 @@ export function sweepSeats(env) {
       try { s = load(env); } catch { return; }
       pruneDraining(env, h);
       const live = h.house && LIVE.has(s.houses[h.house]?.state);
-      if (!live && !h.draining && !Object.keys(h.req ?? {}).length) rmSync(join(hostsDir(env), n), { force: true });
+      if (!live && !h.draining && !Object.keys(h.req ?? {}).length && !retainOfflineHouse(env, h.house, h, s)) rmSync(join(hostsDir(env), n), { force: true });
     });
   }
 }
@@ -247,13 +251,23 @@ const houseRec = (h, house) => (house && h.house === house ? h : (house && h.dra
 const freshRec = (x, house, now) => !!x?.report && now - x.report.at < HOST_STALE_MS && x.report.house === house;
 const fresh = (h, now) => freshRec(h, h.house, now);
 /** What's one house's in the record (the rest is the agent's). */
-const PER_HOUSE = ['report', 'hostHash', 'bootHash', 'req', 'stop', 'inbox', 'claimed', 'cancel', 'quiescing', 'admissionProtocol'];
+const PER_HOUSE = ['report', 'hostHash', 'bootHash', 'req', 'stop', 'inbox', 'claimed', 'cancel', 'quiescing', 'admissionProtocol', 'offlineCollection'];
+function retainOfflineHouse(env, house, record, s) {
+  if (s.houses[house]?.nativeHistory?.v === 1 && !s.houses[house].nativeHistory.complete) return true;
+  const collection = record.offlineCollection;
+  if (!collection) return false;
+  if (!collection.complete) return true;
+  return collection.entries.some(e => {
+    const id = collection.done[e.key]?.bodyId ?? e.transfer?.bodyId ?? e.bodyId;
+    return id && existsSync(offlinePin(packedFile(env, record.agent ?? s.houses[house]?.agent, house, id)));
+  });
+}
 /** Draining houses that are over (or gone from the state): nothing of theirs is left to finish. */
 function pruneDraining(env, h) {
   if (!h.draining) return;
   let s;
   try { s = load(env); } catch { return; }
-  for (const id of Object.keys(h.draining)) if (!LIVE.has(s.houses[id]?.state)) delete h.draining[id];
+  for (const id of Object.keys(h.draining)) if (!LIVE.has(s.houses[id]?.state) && !retainOfflineHouse(env, id, { agent: h.agent, ...h.draining[id] }, s)) delete h.draining[id];
   if (!Object.keys(h.draining).length) delete h.draining;
 }
 /** Down and body-sync share this lock: an unauthenticated host cannot acquire work between stop admission and state change. */
@@ -381,6 +395,7 @@ export function bodySync(env, caller, body, o = {}) {
     const startingUnknown = malformedStarting || (x.admissionProtocol === true && !caps.includes('native-admission'));
     if (caps.includes('native-admission')) x.admissionProtocol = true;
     const current = load(env).houses?.[house];
+    if (current?.nativeHistory?.plan) return { exit: true, reason: 'its box is collecting this physically stopped house' };
     const stopping = current?.state === 'stopping' && !current.job && !current.session;
     if (stopping) {
       x.quiescing ??= { at: now, conversations: [], seen: [] };
@@ -489,6 +504,146 @@ export function bodySync(env, caller, body, o = {}) {
   });
 }
 
+// A box's offline collection uses the same host lock, receipt journal and
+// sealed native packs as the live host. The control plane authenticates the
+// allocated box and freezes publication before entering this function.
+export function nativeCollectionExchange(env, { agent, house, plan, requiredHost }, q, o = {}) {
+  const sealer = o.sealer ?? ageSealer(env, join(dataDir(env), 'delivery'));
+  const fail = message => { throw new StateError(message, 409); };
+  return hostLocked(env, () => {
+    const found = recordOfHouse(env, agent, house);
+    if (!found) {
+      if (requiredHost) fail('the native host record is unavailable; collection remains pending');
+      return { plan, entries: [], complete: q.phase === 'finish' };
+    }
+    const { h, seat } = found, x = houseRec(h, house);
+    if (!x.offlineCollection) {
+      const entries = new Map();
+      const addBody = (id, harness, session, attempt) => {
+        if (!BODY_ID.test(id ?? '') || !['claude', 'codex'].includes(harness)) fail('native collection has an invalid body identity');
+        const key = `body:${id}`, old = entries.get(key);
+        if (old && (old.harness !== harness || old.session && session && old.session !== session)) fail('native collection identities conflict');
+        const entry = old ?? { key, bodyId: id, harness, attempts: [] };
+        if (session) entry.session = session;
+        if (attempt && !entry.attempts.includes(attempt)) entry.attempts.push(attempt);
+        entries.set(key, entry);
+      };
+      for (const c of listConvs(env)) {
+        if (c.agent !== agent || typeof c.body !== 'string') continue;
+        const [harness, id] = c.body.split(':');
+        if (id?.startsWith(`${house}-`)) {
+          const raw = id.slice(house.length + 1), report = x.report?.bodies?.[raw];
+          addBody(raw, harness, report?.session);
+        }
+      }
+      for (const [id, b] of Object.entries(x.report?.bodies ?? {})) {
+        if (b.status !== 'ended' || x.stop?.[id]?.pack) addBody(id, b.harness, b.session);
+      }
+      for (const request of Object.values(x.req ?? {})) {
+        if (!request.launch) fail('legacy native request needs explicit reconciliation before offline collection');
+        const record = readHouseLaunch(env, request.launch);
+        if (!record || record.agent !== agent || record.house !== house || record.seat !== seat) fail('native collection request belongs to another house');
+        if (record.state === 'refused') continue;
+        if (record.state === 'ready') addBody(rawOf(record.body), record.harness, record.body.slot?.session, record.id);
+        else entries.set(`attempt:${record.id}`, { key: `attempt:${record.id}`, harness: record.harness, attempts: [record.id] });
+      }
+      x.offlineCollection = { v: 1, plan, entries: [...entries.values()], done: {} };
+      writeJson(hostFile(env, agent, seat), h);
+    }
+    const collection = x.offlineCollection;
+    if (collection.plan !== plan) fail('native collection plan changed');
+    const transferDir = key => partDir(env, agent, house, 'nc-' + createHash('sha256').update(plan + '\0' + key).digest('hex').slice(0, 40));
+    const result = () => ({ plan, complete: collection.complete === true, entries: collection.entries.map(e => ({ ...e, received: !!collection.done[e.key] })) });
+    if (q.phase === 'plan') return result();
+    if (q.phase === 'finish') {
+      if (collection.entries.some(e => !collection.done[e.key])) fail('native session collection has not been acknowledged');
+      // A worker may have died after committing its receipt but before
+      // deleting duplicate encrypted parts. Finish is retryable cleanup too.
+      for (const entry of collection.entries) rmSync(transferDir(entry.key), { recursive: true, force: true });
+      collection.complete = true; writeJson(hostFile(env, agent, seat), h);
+      return result();
+    }
+    const entry = collection.entries.find(e => e.key === q.key);
+    if (!entry) fail('native collection entry belongs to another plan');
+    if (q.phase === 'refuse') {
+      if (entry.bodyId || entry.attempts.length !== 1 || q.nativeNotStarted !== true) fail('a native body cannot be refused as unstarted');
+      if (collection.done[entry.key]) {
+        if (!collection.done[entry.key].refused) fail('native collection already has a body');
+        return { plan, received: true };
+      }
+      const record = readHouseLaunch(env, entry.attempts[0]);
+      if (!record || record.state === 'ready') fail('native collection already has a receipt');
+      keepHouseLaunchReceipt(env, record, { nativeNotStarted: true, error: 'its stopped house confirms this native attempt was not started' });
+      collection.done[entry.key] = { refused: true };
+      writeJson(hostFile(env, agent, seat), h);
+      return { plan, received: true };
+    }
+    if (q.phase !== 'part') fail('unknown native collection operation');
+    if (!BODY_ID.test(q.bodyId ?? '') || entry.bodyId && q.bodyId !== entry.bodyId || entry.session && q.session !== entry.session ||
+        !/^[A-Za-z0-9][A-Za-z0-9._-]{3,127}$/.test(q.session ?? '') || !/^[0-9a-f]{64}$/.test(q.sha256 ?? '')) fail('native collection identity changed');
+    if (!Number.isSafeInteger(q.part) || !Number.isSafeInteger(q.parts) || q.parts < 1 || q.parts > 64 || q.part < 0 || q.part >= q.parts || typeof q.data !== 'string' || q.data.length > PART_CHARS) fail('invalid native collection part');
+    const signature = { bodyId: q.bodyId, session: q.session, sha256: q.sha256, parts: q.parts, inputConfirmed: q.inputConfirmed === true };
+    if (entry.transfer && JSON.stringify(entry.transfer) !== JSON.stringify(signature)) fail('native collection transfer changed');
+    if (collection.done[entry.key]) {
+      if (collection.done[entry.key].sha256 !== q.sha256) fail('native collection already has another receipt');
+      return { plan, part: q.part, received: true, complete: true };
+    }
+    entry.transfer = signature;
+    const dir = transferDir(entry.key);
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    writeJson(join(dir, 'offline.json'), { v: 1, plan, key: entry.key });
+    const partFile = join(dir, `${q.part}.age`);
+    if (existsSync(partFile)) {
+      if (sealer.open(readFileSync(partFile)).toString() !== q.data) fail('native collection part changed');
+    } else writeFileSync(partFile, sealer.seal(Buffer.from(q.data)), { mode: 0o600 });
+    writeJson(hostFile(env, agent, seat), h);
+    const parts = Array.from({ length: q.parts }, (_, i) => join(dir, `${i}.age`));
+    if (!parts.every(f => existsSync(f))) return { plan, part: q.part, received: true, complete: false };
+    const encoded = parts.map(f => sealer.open(readFileSync(f)).toString()).join('');
+    const whole = Buffer.from(encoded, 'base64');
+    if (whole.length > 12 * 1024 * 1024 || whole.toString('base64') !== encoded || createHash('sha256').update(whole).digest('hex') !== q.sha256) fail('native collection content changed');
+    let files;
+    try { files = JSON.parse(whole.toString('utf8')); } catch { fail('invalid native session encoding'); }
+    let bytes = 0; const names = new Set();
+    if (!Array.isArray(files) || files.length > 10_000) fail('invalid native session files');
+    for (const f of files) {
+      if (f?.root !== (entry.harness === 'claude' ? 'projects' : 'sessions') || !safeRel(f.rel) || typeof f.data !== 'string') fail('native session file is outside its harness');
+      if (names.has(f.rel)) fail('native session file appears twice');
+      names.add(f.rel);
+      const data = Buffer.from(f.data, 'base64'); bytes += data.length;
+      if (data.toString('base64') !== f.data || bytes > MAX_SESSION_BYTES) fail('invalid native session size');
+    }
+    if (!files.length) fail('offline native collection cannot acknowledge missing history');
+    const nativeBody = { id: q.bodyId, harness: entry.harness, slot: { harness: entry.harness, session: q.session } };
+    for (const attempt of entry.attempts) {
+      const record = readHouseLaunch(env, attempt);
+      if (!record || record.agent !== agent || record.house !== house || record.seat !== seat || record.harness !== entry.harness) fail('native collection receipt belongs to another house');
+      if (record.state === 'ready' && rawOf(record.body) !== q.bodyId) fail('native collection receipt changed body');
+      if (record.state === 'refused') fail('native collection cannot replace a refusal');
+      if (x.claimed?.[q.bodyId] && x.claimed[q.bodyId] !== record.rid) fail('native collection body belongs to another attempt');
+    }
+    const packed = packedFile(env, agent, house, q.bodyId);
+    mkdirSync(dirname(packed), { recursive: true, mode: 0o700 });
+    writeJson(offlinePin(packed), { v: 1, plan, sha256: q.sha256 });
+    const temporary = packed + '.tmp';
+    writeFileSync(temporary, sealer.seal(Buffer.from(JSON.stringify({ v: 1, session: q.session, files }))), { mode: 0o600 });
+    renameSync(temporary, packed);
+    x.report ??= { bodies: {}, done: {}, caps: [] };
+    x.report.bodies ??= {}; x.report.done ??= {};
+    x.report.bodies[q.bodyId] = { ...(x.report.bodies[q.bodyId] ?? {}), harness: entry.harness, session: q.session, status: 'ended', feedable: false };
+    for (const attempt of entry.attempts) {
+      const record = readHouseLaunch(env, attempt);
+      keepHouseLaunchReceipt(env, record, { id: nativeBody.id, inputConfirmed: q.inputConfirmed === true });
+      x.report.done[record.rid] = { id: nativeBody.id, attempt, inputConfirmed: q.inputConfirmed === true };
+      (x.claimed ??= {})[q.bodyId] = record.rid;
+    }
+    collection.done[entry.key] = { sha256: q.sha256, bodyId: q.bodyId, session: q.session };
+    writeJson(hostFile(env, agent, seat), h);
+    rmSync(dir, { recursive: true, force: true });
+    return { plan, part: q.part, received: true, complete: true };
+  });
+}
+
 // ─── The runner interface over a house ──────────────────────────────────────
 
 /**
@@ -550,7 +705,16 @@ export class HouseRunner {
         let r;
         try { r = this.up(this.env, { now: () => this.now() }, { kind: 'owner' }, { agent, box: at.box, task: hostTask(this.env, boot) }, { kind: 'body-host', seat }); } catch (e) { if (e?.seatFull) throw seatFull(e.message); throw e; }
         // A new house: what was asked of the last one (and what it claimed) isn't this one's, nor is its host's key.
-        hostLocked(this.env, () => { const x = loadHost(this.env, agent, seat); x.house = r.id; delete x.report; delete x.hostHash; delete x.cancel; delete x.quiescing; x.bootHash = keyHash(boot); x.req = {}; x.stop = {}; x.inbox = {}; x.claimed = {}; pruneDraining(this.env, x); writeJson(hostFile(this.env, agent, seat), x); });
+        hostLocked(this.env, () => {
+          const x = loadHost(this.env, agent, seat);
+          if (x.house && retainOfflineHouse(this.env, x.house, x, load(this.env))) {
+            (x.draining ??= {})[x.house] = Object.fromEntries(PER_HOUSE.filter(k => k in x).map(k => [k, x[k]]));
+            for (const k of PER_HOUSE) delete x[k];
+          }
+          x.house = r.id; delete x.report; delete x.hostHash; delete x.cancel; delete x.quiescing; delete x.offlineCollection;
+          x.bootHash = keyHash(boot); x.req = {}; x.stop = {}; x.inbox = {}; x.claimed = {};
+          pruneDraining(this.env, x); writeJson(hostFile(this.env, agent, seat), x);
+        });
       }
       if (Date.now() > end) throw new RunnerError(`${agent}'s house ${h.house ?? ''} didn't start its body host in ${this.warmMs / 1000} s`);
       await sleep(this.poll);
@@ -789,7 +953,7 @@ export class HouseRunner {
     const raw = rawOf(body);
     const x = raw ? this.rec(body) : null;
     if (!x) return null;
-    const entry = x.report.bodies[raw] ?? { status: 'ended' };
+    const entry = x.report?.bodies?.[raw] ?? { status: 'ended' };
     try { if (load(this.env).houses?.[body.house]?.collection) return { ...entry, status: 'ended' }; } catch { /* keep the observed report */ }
     return entry;
   }
@@ -798,7 +962,10 @@ export class HouseRunner {
   /** A stale host report is not proof that a running house's body ended. */
   pending(body) {
     try {
+      const raw = rawOf(body);
+      if (raw && existsSync(offlinePin(packedFile(this.env, body.agent, body.house, raw)))) return true;
       const h = load(this.env).houses?.[body.house];
+      if (h?.agent === body.agent && h.nativeHistory?.v === 1 && !h.nativeHistory.complete) return true;
       return !!h && !h.collection && h.agent === body.agent && ['wanted', 'starting', 'running', 'stopping'].includes(h.state);
     } catch { return true; } // An unreadable control plane cannot prove termination either.
   }
@@ -905,13 +1072,19 @@ export class HouseRunner {
     const raw = rawOf(body);
     if (!raw) return [];
     // No key here: no slot, at once. It's stopped, and its session stays in its house (thrown away with it).
-    if (!this.canSeal()) { this.end(body); return null; }
+    if (!this.canSeal()) {
+      if (load(this.env).houses?.[body.house]?.nativeHistory?.v === 1) throw new RunnerError('native collection needs its sealing key');
+      this.end(body); return null;
+    }
     const f = packedFile(this.env, body.agent, body.house, raw);
     // The native process can end a sync before its host sends the pack. Only
     // termination of the house proves there is no host left to return it.
     if (!this.pending(body) && !existsSync(f)) return [];
     const asked = existsSync(f) || this.requestPack(body);
-    if (!asked) return [];
+    if (!asked) {
+      if (this.pending(body)) throw new RunnerError('native session collection is still pending');
+      return [];
+    }
     const end = Date.now() + this.claimMs;
     while (!existsSync(f)) {
       if (Date.now() > end || !this.rec(body)) throw new RunnerError(`${body.agent}'s house didn't send ${body.id}'s session back`);
@@ -931,6 +1104,7 @@ export class HouseRunner {
       const seat = this.seatFor(body), h = loadHost(this.env, body.agent, seat), x = houseRec(h, body.house);
       if (x?.stop?.[raw]) { delete x.stop[raw]; writeJson(hostFile(this.env, body.agent, seat), h); }
       rmSync(packedFile(this.env, body.agent, body.house, raw), { force: true });
+      rmSync(offlinePin(packedFile(this.env, body.agent, body.house, raw)), { force: true });
     });
   }
 }

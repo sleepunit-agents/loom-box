@@ -1,4 +1,4 @@
-import { hostStopLock, hasHostSession } from './houserunner.mjs';
+import { hostStopLock, hasHostSession, nativeCollectionExchange } from './houserunner.mjs';
 import { checkLoginExpiry } from './login-expiry.mjs';
 // The control plane's half of the runtime (loom docs/specs/runtime.md): what
 // each caller may ask of it. It runs on the machine loom runs on, reached
@@ -571,7 +571,7 @@ function pollState(env, effects, caller, { facts, sessions, harnesses, usage, lo
  * which the box hands to the house and nothing else (runtime.md,
  * "Credentials": bodies can't fetch secrets; boxes fetch them for houses).
  */
-export function claim(env, effects, caller, { id }) {
+export function claim(env, effects, caller, { id, nativeHistory }) {
   return update(env, (s) => {
     boxOf(s, caller);
     const h = s.houses[id];
@@ -616,13 +616,14 @@ export function claim(env, effects, caller, { id }) {
       h.logins = logins;
       const repoAuth = a.repoSecret ? effects.secret(a.repoSecret, { agent: h.agent, house: h.id }) : null;
       h.state = 'starting'; h.tokenLabel = label; h.updated = now(effects); h.claimedAt = h.updated;
+      if (nativeHistory === 1 && !h.service) h.nativeHistory = { v: 1, complete: false };
       // What it was made from: a build check of this house checks this repo, with this secret, and nothing since.
       h.made = madeOf(a);
       const key = stateKeyOf(h);
       const saved = key ? stateMeta(env, s, key) : undefined;
       // The state itself comes after, a part at a time (state-part): just its shape here.
       const state = saved ? { bytes: saved.bytes, sha256: saved.sha256, parts: partsOf(saved.bytes) } : null;
-      return { id, agent: h.agent, token, secrets, logins, repoAuth, nested: !!a.nested, gpu: !!a.gpu, ports: (a.ports ?? []).map(parsePortGrant).filter(Boolean), tailnets: (a.tailnets ?? []).map(parseTailnetGrant).filter(Boolean), ...(h.service ? { service: h.service } : {}), ...(h.slot ? { slot: h.slot } : {}), ...(key ? { state } : {}) };
+      return { id, agent: h.agent, token, secrets, logins, repoAuth, nested: !!a.nested, gpu: !!a.gpu, ports: (a.ports ?? []).map(parsePortGrant).filter(Boolean), tailnets: (a.tailnets ?? []).map(parseTailnetGrant).filter(Boolean), ...(h.nativeHistory ? { nativeHistory: { v: 1 } } : {}), ...(h.service ? { service: h.service } : {}), ...(h.slot ? { slot: h.slot } : {}), ...(key ? { state } : {}) };
     } catch (err) {
       // The house stays waiting; the token it was about to get goes (or is queued to).
       revokeOrQueue(s, effects, label);
@@ -742,11 +743,49 @@ export function collectionStatus(env, effects, caller, { id, phase }) {
     boxOf(s, caller);
     const h = s.houses[id];
     if (!h || h.box !== caller.subject) fail(`no house ${id} for this box`, 404);
-    if (!['metadata', 'state', 'report', 'cleanup'].includes(phase)) fail('which collection phase');
+    if (!['metadata', 'native', 'state', 'report', 'cleanup'].includes(phase)) fail('which collection phase');
     if (TERMINAL.has(h.state)) fail('the house has already completed collection', 409);
     h.collection = { phase, at: now(effects) };
     return { id, collection: h.collection };
   });
+}
+
+/** A stopped house's own box, never its agent token, collects native history.
+ * Release the state lock before taking the host lock (host sync uses the
+ * opposite read direction). Collection freezes publication before planning. */
+export function nativeCollection(env, effects, caller, body) {
+  const context = update(env, s => {
+    boxOf(s, caller);
+    const h = s.houses[body.id];
+    if (!h || h.box !== caller.subject) fail('no such native history for this box', 404);
+    if (h.nativeHistory?.v !== 1) fail('this house did not provision durable native history', 409);
+    if (h.nativeHistory.complete) {
+      if (!['plan', 'not-started'].includes(body.phase) && body.plan !== h.nativeHistory.plan) fail('native collection plan changed', 409);
+      return { complete: true, plan: h.nativeHistory.plan };
+    }
+    if (body.phase === 'not-started') {
+      if (body.physical !== 'not-started' || h.state !== 'starting' || h.started || h.nativeHistory.plan) fail('native start absence is not established', 409);
+      h.nativeHistory.complete = true;
+      h.nativeHistory.nativeNotStarted = true;
+      return { complete: true };
+    }
+    if (body.phase === 'plan') {
+      if (!['gone', 'stopped'].includes(body.physical) || !LIVE.has(h.state)) fail('native collection requires physical house termination', 409);
+      h.nativeHistory.plan ??= randomBytes(16).toString('hex');
+      h.collection = { phase: 'native', at: now(effects) };
+    }
+    if (!h.nativeHistory.plan || body.phase !== 'plan' && body.plan !== h.nativeHistory.plan) fail('native collection plan changed', 409);
+    return { agent: h.agent, house: h.id, plan: h.nativeHistory.plan, requiredHost: isHostHouse(h, s) };
+  });
+  if (context.complete) return { complete: true, entries: [], ...(context.plan ? { plan: context.plan } : {}) };
+  const result = nativeCollectionExchange(env, context, body, { sealer: effects.sealer });
+  if (body.phase === 'finish' && result.complete) update(env, s => {
+    boxOf(s, caller);
+    const h = s.houses[body.id];
+    if (!h || h.box !== caller.subject || h.nativeHistory?.plan !== context.plan) fail('native collection ownership changed', 409);
+    h.nativeHistory.complete = true;
+  });
+  return result;
 }
 
 /** The box reports on a house. Ending one revokes its token. */
@@ -756,6 +795,7 @@ export function report(env, effects, caller, { id, state, exit, log, build }) {
     const h = s.houses[id];
     if (!h || h.box !== caller.subject) fail(`no house ${id} for this box`, 404);
     if (!NEXT[h.state]?.has(state)) fail(`house ${id} can't go from ${h.state} to ${state}`, 409);
+    if (TERMINAL.has(state) && h.nativeHistory?.v === 1 && !h.nativeHistory.complete) fail('native history collection must finish before this house ends', 409);
     // The image the box just ran it from (box.mjs, image): this house's build, and, as the newest build its agent's
     // repo makes, the agent's current one (unless a box has said a newer one since this house's checkout).
     // Only a box that may host the agent, for a house it claimed (and so built): a build that actually ran.
@@ -1441,7 +1481,7 @@ const OWNER_ONLY = {
 };
 /** The box's own owner's (assertBoxOwner): its logins and Update now. */
 export const BOX_OWNER_ONLY = { 'login-start': loginStart, 'login-code': loginCode, 'login-cancel': loginCancel, 'box-update-now': boxUpdateNow };
-const BOX_ONLY = { hello, poll, claim, report, 'collection-status': collectionStatus, 'build-check': buildCheck, 'build-report': buildReport, 'save-state': saveState, 'state-part': statePart, 'remote-report': remoteReport, 'login-report': loginReport };
+const BOX_ONLY = { hello, poll, claim, report, 'native-collection': nativeCollection, 'collection-status': collectionStatus, 'build-check': buildCheck, 'build-report': buildReport, 'save-state': saveState, 'state-part': statePart, 'remote-report': remoteReport, 'login-report': loginReport };
 
 /** One API call, as loom's piece API hands it over: {caller, path, body} → {status, body}. */
 export function api(env, effects, { caller, path, body }) {

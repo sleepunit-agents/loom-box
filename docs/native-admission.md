@@ -268,3 +268,42 @@ reconcile outstanding admission receipts, and retain the original history until
 those acknowledgements are durable. Normal house cleanup must wait for that
 transaction. The draft must not deploy merely because the storage unit tests
 pass; actual host SIGKILL and fresh-controller resume proofs are still required.
+
+## Box-authenticated core collection transaction
+
+A box can explicitly negotiate `nativeHistory: 1` when claiming a non-service
+house. That house cannot report terminal completion until `native-collection`
+has finished. The separate positive `not-started` operation is for a box that
+never entered container launch; it is refused after collection began or a
+running house was reported. A box integration must track that actual boundary,
+not infer it from a missing receipt.
+
+Only the allocated box credential can open or upload a collection plan. An
+agent's house token, an owner token, or another box cannot use this door. Opening
+the plan requires the box's physical stopped/gone observation and freezes new
+publication. The stable plan covers bound conversation bodies, live host bodies
+and published requests that have no receipt yet. Legacy requests and missing
+host metadata remain held for explicit reconciliation. Late host reports cannot
+replace an offline collection plan.
+
+Each body's upload fixes its native identity, session, content hash, part count
+and input-confirmation disposition. Parts and completed packs are sealed through
+the existing native session storage. A recovered published attempt uses the same
+house launch receipt journal; an uncertain input stays uncertain. Only a
+positive unstarted attempt may become a refusal. An empty or malformed offline
+history cannot silently become an empty continuity slot.
+
+Partial offline uploads and received packs are pinned against ordinary transfer
+sweeps. Delivery remains pending while the original history is being collected,
+and while a received pack has not been consumed into its conversation's durable
+slot. A temporarily unavailable decryption key cannot convert it into an empty
+slot after the house itself ends. Warming another house preserves the old plan
+and receipts in its own draining record. Acknowledging the committed slot clears
+the received pack and its pin.
+
+The box-side provision/collection client is still to be wired. Before activation
+it must verify a native-history host capability, provision the private mount,
+interpret admission journals offline, upload these parts, persist the complete
+acknowledgement, and only then clean up. UI collection wording and older-house
+cutover also need the new phase. Actual host-process SIGKILL, resume and sender
+proofs remain required; these core transaction tests do not replace them.
