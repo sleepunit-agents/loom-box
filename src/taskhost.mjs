@@ -18,7 +18,7 @@ export async function upTask(env, effects, caller, body) {
     const p = bodyPrincipal(env, body, { caller: who });
     if (!p.ok || !parent || (body.agent && body.agent !== parent.agent)) fail(p.reason || 'a body asks for its own agent’s task', 403);
     body = { ...body, agent: parent.agent };
-    actsFor = copy(parent.actsFor);
+    actsFor = parent.actsFor ? copy(parent.actsFor) : { owner: false, people: p.people ?? [], unknown: true };
     source = { origin: parent.conversation,
       floor: { guest: parent.bodyRules?.guest === true, deny: parent.bodyRules?.deny ?? [] },
       ruleSource: parent.spawn?.ruleSource ?? { conversation: parent.conversation, agent: parent.agent, venue: parent.venue, place: parent.place, label: parent.label, kind: parent.kind,
