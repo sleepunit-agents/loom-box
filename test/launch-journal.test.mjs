@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { readFileSync, statSync } from 'node:fs';
+import { readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { admitLaunch, completeLaunch, launchAttempt, readLaunch, reserveLaunch } from '../src/launch-journal.mjs';
 import { scratch } from './scratch.mjs';
@@ -29,6 +29,7 @@ test('even the same worker receives native admission only once; a receipt cannot
   reserveLaunch(env, request);
   assert.equal(admitLaunch(env, id).admitted, true);
   assert.equal(admitLaunch(env, id).admitted, false);
+  assert.throws(() => completeLaunch(env, id, { id: 'native-1234', harness: 'codex', slot: { harness: 'claude', session: 'session-1234' } }), /continuation receipt/);
   const body = { id: 'native-1234', harness: 'codex', brief: 'must not persist', env: { secret: 'must not persist' } };
   const ready = completeLaunch(env, id, body);
   assert.deepEqual(ready.body, { id: 'native-1234', harness: 'codex' });
@@ -36,6 +37,16 @@ test('even the same worker receives native admission only once; a receipt cannot
   assert.throws(() => completeLaunch(env, id, { ...body, id: 'native-5678' }), /another receipt/);
   assert.equal(admitLaunch(env, id).admitted, false);
   assert.doesNotMatch(readFileSync(join(env.LOOM_BOX_DATA, 'launches', id + '.json'), 'utf8'), /must not persist/);
+});
+
+test('a corrupt durable record holds admission instead of treating it as a fresh attempt', () => {
+  const { env, id, request } = setup();
+  const original = reserveLaunch(env, request);
+  const path = join(env.LOOM_BOX_DATA, 'launches', id + '.json');
+  writeFileSync(path, JSON.stringify({ ...original, token: null }));
+  assert.throws(() => reserveLaunch(env, request), /admission remains held/);
+  assert.throws(() => admitLaunch(env, id), /admission remains held/);
+  assert.equal(JSON.parse(readFileSync(path, 'utf8')).token, null, 'uncertain record is never overwritten');
 });
 
 test('independent actual worker processes race for one admission; death never grants another', async () => {

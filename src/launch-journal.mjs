@@ -20,7 +20,12 @@ export function launchAttempt(conversation, operation) {
 }
 
 export function readLaunch(env, id) {
-  try { return JSON.parse(readFileSync(file(env, id), 'utf8')); }
+  try {
+    const r = JSON.parse(readFileSync(file(env, id), 'utf8'));
+    if (r?.v !== 1 || r.id !== id || !['claude', 'codex'].includes(r.harness) || !ID.test(r.intentHash ?? '') ||
+        !/^[0-9a-f]{24}$/.test(r.token ?? '') || !['reserved', 'admitted', 'ready'].includes(r.state)) fail('invalid native launch journal; admission remains held');
+    return r;
+  }
   catch (e) { if (e.code === 'ENOENT') return null; throw e; }
 }
 
@@ -51,7 +56,9 @@ export function reserveLaunch(env, { id, harness, intentHash }) {
 export function launchWorkerIdentity() {
   const stat = readFileSync('/proc/self/stat', 'utf8');
   const tail = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/);
-  return { pid: process.pid, boot: readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim(), birth: tail[19] };
+  const boot = readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
+  if (!/^[0-9a-f-]{36}$/.test(boot) || !/^\d+$/.test(tail[19] ?? '')) fail('cannot establish native worker OS identity');
+  return { pid: process.pid, boot, birth: tail[19] };
 }
 const sameWorker = (a, b) => !!a && a.pid === b.pid && a.boot === b.boot && a.birth === b.birth;
 
@@ -72,9 +79,10 @@ export function admitLaunch(env, id) {
 /** The worker commits a native identity before returning it to its registrar. */
 export function completeLaunch(env, id, body) {
   if (!body || !BODY.test(body.id ?? '') || !['claude', 'codex'].includes(body.harness)) fail('invalid native launch receipt');
+  if (body.slot !== undefined && (!body.slot || body.slot.harness !== body.harness || !BODY.test(body.slot.session ?? ''))) fail('invalid native continuation receipt');
   // Only the receipt fields, never arbitrary caller data (brief/env/key).
   const receipt = { id: body.id, harness: body.harness,
-    ...(body.slot?.harness === body.harness && typeof body.slot.session === 'string' && BODY.test(body.slot.session) ? { slot: { harness: body.harness, session: body.slot.session } } : {}) };
+    ...(body.slot ? { slot: { harness: body.harness, session: body.slot.session } } : {}) };
   const worker = launchWorkerIdentity();
   return locked(env, () => {
     const r = readLaunch(env, id);
