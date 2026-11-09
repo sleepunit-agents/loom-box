@@ -62,3 +62,37 @@ and quota routing after confirmed refusal. Every uncertain boundary must keep
 the original attempt and no second native work; confirmed refusal must retain
 the existing autonomous retry capability. Repeat live Codex stop/resume only
 after source, pins and deployed controller agree.
+
+## Prepared delivery commit
+
+The journal/supervisor alone does not fix delivery. Before entering any native
+launcher, persist a prepared conversation record containing the attempt id,
+selected body metadata and record generation, run id, sender-key hash, body
+rules, route/slot metadata, and the original sealed queue entries. Keep the
+actual sender key in the existing private key file, never plain conversation
+metadata. A recovery must bind that same receipt and prepared record, rather
+than resolve another model or invent another run key.
+
+A live registrar retains ownership regardless of age. A dead registrar with
+prepared state schedules recovery of that same operation. A reserved attempt
+can be cancelled atomically before retry: its late worker must lose admission.
+Once admitted, cancellation cannot erase it. Missing journals after a submitted
+attempt are uncertainty, not evidence that no native work exists. OS boot and
+process birth identify the registrar; PID existence alone permits reuse mistakes.
+
+A recovered native identity without a worker receipt carries inputUncertain.
+Do not acknowledge original messages as fully delivered from that identity.
+Bind enough metadata to stop/save the native writer through the common retirement
+transaction, then resume with the original queued work and its actual native
+context. If the owner interrupted meanwhile, keep it held. Never replay while
+that writer remains live. The Codex prompt pipe is flushed before a normal
+receipt commits; a worker lost before that receipt cannot retroactively prove
+full input delivery.
+
+Remote work needs the same stable attempt mapped to its house request and the
+body-host journal. Host and house PID namespaces differ: only the native host
+observes its own worker. Older hosts need a capability check and drain/update
+path before receiving this protocol. Legacy unprepared starts also need explicit
+reconciliation or a physical execution barrier; new records cannot prove their
+absence after the fact. The unfinished draft must not deploy until these cases
+and the two delivery exclusion regressions pass.
