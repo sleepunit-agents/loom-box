@@ -96,3 +96,21 @@ await import(${JSON.stringify(native)});
     const record=readLaunch(env,id);if(record?.body)runnerFor('claude',env).end(record.body,env);
   }
 });
+
+test('an allocated native house refuses work before admission when its older box did not mount durable history', async () => {
+  const home = scratch('native-unprovisioned-house-'), attempt = 'e'.repeat(64);
+  const env = { HOME: home, HOUSE_ID: 'h-1', LOOM_LOGIN_CODEX: '/fixture/login', LOOM_BOX_DATA: join(home, 'data'), CODEX_HOME: join(home, 'codex'), LOOM_RUNTIME_CODEX_RUNS: join(home, 'runs') };
+  mkdirSync(env.CODEX_HOME); writeFileSync(join(env.CODEX_HOME, 'config.toml'), '');
+  const native = runnerFor('codex', env, { codex: '/fixture-missing-native', systemDir: join(home, 'etc') });
+  let receipt;
+  await runBodyHost({ env, runner: () => native, hostKey: 'boot', idleS: 0, beats: 2, sleep: async () => {},
+    client: async (path, body) => {
+      if (path !== 'body-sync') return {};
+      if (body.report.done.r1) receipt = body.report.done.r1;
+      return { req: { r1: { attempt, harness: 'codex', brief: 'must remain unadmitted' } } };
+    },
+  });
+  assert.equal(receipt?.nativeNotStarted, true);
+  assert.match(receipt.error, /provisioned durable native history/);
+  assert.equal(readLaunch(env, attempt), null, 'an unbacked house cannot even enter native admission');
+});

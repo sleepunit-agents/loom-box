@@ -39,12 +39,14 @@
 // HOUSE_ID and HOUSE_AGENT are always set; nothing from the box's own
 // environment or filesystem goes in.
 import { SECRET_NAME } from './state.mjs';
+import { posix } from 'node:path';
+import { NATIVE_HISTORY_MOUNT } from './native-history.mjs';
 import { LOGIN_HARNESSES, LOGIN_MOUNT } from './logins.mjs';
 
 export class HouseFileError extends Error {}
 
 const ENV_NAME = /^[A-Z_][A-Z0-9_]{0,63}$/;
-const RESERVED_ENV = new Set(['LOOM_URL', 'HOUSE_ID', 'HOUSE_AGENT', 'HOUSE_TASK', 'HOUSE_SERVICE', 'HOUSE_SESSION', 'PATH', 'HOME', 'LD_PRELOAD', 'LD_LIBRARY_PATH']);
+const RESERVED_ENV = new Set(['LOOM_URL', 'HOUSE_ID', 'HOUSE_AGENT', 'HOUSE_TASK', 'HOUSE_SERVICE', 'HOUSE_SESSION', 'LOOM_RUNTIME_NATIVE_HISTORY', 'PATH', 'HOME', 'LD_PRELOAD', 'LD_LIBRARY_PATH']);
 const MOUNT_KINDS = new Set(['state', 'nested', 'mirror']);
 const REL_PATH = /^[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*$/;
 const ABS_PATH = /^\/[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*$/;
@@ -273,6 +275,13 @@ export function runArgs(house, { id, agent, loomUrl, task, service, session, ima
   }
   for (const [k, v] of Object.entries(house.env)) args.push('-e', `${k}=${v}`);
   args.push('-e', `LOOM_URL=${loomUrl}`, '-e', `HOUSE_ID=${id}`, '-e', `HOUSE_AGENT=${agent}`);
+  if (dirs.native) {
+    for (const target of Object.values(house.mounts)) {
+      const at = posix.normalize(target).replace(/\/$/, '') || '/';
+      if (at === '/' || at === NATIVE_HISTORY_MOUNT || at.startsWith(NATIVE_HISTORY_MOUNT + '/') || NATIVE_HISTORY_MOUNT.startsWith(at + '/')) throw new HouseFileError('a house mount overlaps its native history directory');
+    }
+    args.push('-v', `${dirs.native}:${NATIVE_HISTORY_MOUNT}`, '-e', `LOOM_RUNTIME_NATIVE_HISTORY=${NATIVE_HISTORY_MOUNT}`);
+  }
   if (house.task === 'env') args.push('-e', `HOUSE_TASK=${task}`);
   // A session house waits for someone to attach, instead of working a task.
   if (session) args.push('-e', 'HOUSE_SESSION=1');

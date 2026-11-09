@@ -17,6 +17,7 @@ import { ClaudeRunner, CodexRunner, nativeRunnerConfiguration } from './runners.
 import { launchInjectedNative, superviseNativeLaunch } from './native-launch.mjs';
 import { cancelReservedLaunch } from './launch-journal.mjs';
 import { LOGIN_HARNESSES } from './logins.mjs';
+import { nativeHistoryRoot } from './native-history.mjs';
 
 /**
  * Whether this house has its box's login for a harness: the box sets the login's env only for the harnesses the house
@@ -69,6 +70,7 @@ export const PACK_MS = 120_000;
  * Resolves when the host leaves.
  */
 export async function runBodyHost({ client, runner, env = process.env, hostKey, cwd = process.cwd(), now = () => Date.now(), sleep = (ms) => new Promise((r) => setTimeout(r, ms)), idleS = IDLE_S, beats = Infinity, packMs = PACK_MS, log = () => {} }) {
+  const history = nativeHistoryRoot(env);
   // Its own key, in memory only: the boot key from its task, traded on its first sync for the host's key.
   let key = hostKey;
   // A body's environment is the house's, less what's the host's alone: its task (which carried the boot key).
@@ -136,17 +138,22 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
     }
     let got;
     const sent = acks;
-    try { got = await client('body-sync', { hostKey: key, report: { bodies, done, packed, inboxAck: sent, caps: ['parts', 'native-admission'], starting: [...new Set([...launching.keys(), ...uncertain.keys(), ...Object.keys(done)])] } }); } catch (e) { log(`sync failed: ${e.message}`); await sleep(SYNC_MS); continue; }
+    try { got = await client('body-sync', { hostKey: key, report: { bodies, done, packed, inboxAck: sent, caps: ['parts', 'native-admission', ...(history ? ['native-history'] : [])], starting: [...new Set([...launching.keys(), ...uncertain.keys(), ...Object.keys(done)])] } }); } catch (e) { log(`sync failed: ${e.message}`); await sleep(SYNC_MS); continue; }
     if (typeof got.hostKey === 'string') key = got.hostKey;
     // Answered: what it acknowledged is the runtime's to forget now. (A lost answer: they go again next beat.)
     if (acks === sent) acks = {};
     for (const [id, part] of got.acked ?? []) {
       const p = packing.get(id);
-      if (p && p.next === part) { p.next += 1; p.since = now(); if (p.next >= p.parts.length) { packing.delete(id); mine.delete(id); } }
+      if (p && p.next === part) { p.next += 1; p.since = now(); if (p.next >= p.parts.length) {
+        if (p.cleanup) dropSession(runner(p.cleanup.harness), p.cleanup.slot, { id });
+        packing.delete(id); mine.delete(id);
+      } }
     }
+    for (const id of got.restart ?? []) { const p = packing.get(id); if (p) { p.next = 0; p.since = now(); } }
     // A timeout is not evidence that the receiver stopped waiting: network failures retain the only copy.
     // A fresh authenticated answer that explicitly removed its stop may abandon an unclaimed transfer.
     for (const [id, p] of packing) if (!got.stop?.[id] && now() - p.since > packMs) {
+      if (p.cleanup) dropSession(runner(p.cleanup.harness), p.cleanup.slot, { id });
       packing.delete(id); mine.delete(id); log(`dropped ${id}'s session: the runtime no longer asks for it`);
     }
     if (got.exit) { log(`leaving: ${got.reason ?? 'the runtime says so'}`); return; }
@@ -167,6 +174,7 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
           if (q.attempt && !/^[0-9a-f]{64}$/.test(q.attempt)) throw Object.assign(new Error('invalid durable native attempt'), { nativeNotStarted: true });
           if (!houseHasLogin(env, q.harness)) throw new Error(`this house doesn't declare the ${q.harness} harness (its house file's "harnesses"), so it has no ${q.harness} login: add it there`);
           const r = runner(q.harness);
+          if (env.HOUSE_ID && !history && (r instanceof ClaudeRunner || r instanceof CodexRunner)) throw Object.assign(new Error('this box has not provisioned durable native history; update the box runtime before starting native work'), { nativeNotStarted: true });
           const cv = q.key && CV.test(q.conversation ?? '') ? q.conversation : null;
           // A brief in parts names the agent's own files (briefs.mjs): read here, from its repo (this house's cwd).
           // A file that isn't there fails the start: never a body without what its brief must carry.
@@ -236,11 +244,11 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
           // ownership so the next beat retries without another native stop.
           if (!(e instanceof SessionSizeError)) continue;
         }
-        dropSession(r, slot, { id });
+        if (!history) dropSession(r, slot, { id });
         const all = Buffer.from(JSON.stringify(files)).toString('base64');
         const parts = [];
         for (let i = 0; i < all.length || i === 0; i += PART_CHARS) parts.push(all.slice(i, i + PART_CHARS));
-        packing.set(id, { parts, next: 0, since: now() });
+        packing.set(id, { parts, next: 0, since: now(), ...(history ? { cleanup: { harness: b.harness, slot } } : {}) });
       } else {
         // A plain stop leaves nothing: its session's files go (only a pack keeps them, sealed, in a slot).
         dropSession(r, (() => { try { return r.slotOf({ id }); } catch { return null; } })(), { id });

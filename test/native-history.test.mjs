@@ -143,3 +143,11 @@ test('the actual Codex adapter writes a stand-in native rollout through the dura
   assert.equal(got.files.length, 1);
   assert.match(Buffer.from(got.files[0].data, 'base64').toString(), /token_count/);
 });
+
+test('native constructor overrides cannot redirect durable history or persist generated credentials', () => {
+  const w = world();
+  assert.throws(() => runnerFor('codex', w.env, { runsDir: join(w.home, 'elsewhere') }), /override durable/);
+  assert.throws(() => runnerFor('codex', w.env, { homesDir: join(w.history, 'credentials') }), /persist credential/);
+  assert.throws(() => runnerFor('claude', w.env, { projectsDir: join(w.home, 'elsewhere') }), /override durable/);
+  assert.deepEqual(runnerFor('claude', w.env, { args: ['--selected-fixture-option'] }).args, ['--selected-fixture-option']);
+});

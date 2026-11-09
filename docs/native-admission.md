@@ -261,13 +261,10 @@ limits fail without publishing a partial snapshot or deleting the source.
 model, stop a model or sweep credential homes. Missing native identity/history
 remains uncertain. A collected body returns only its own native session files.
 
-These are preparation and collection primitives, not an activated recovery
-path yet. The box must provision the mount, authenticate collection as the
-allocated house's box, transfer/seal and acknowledge each selected session,
-reconcile outstanding admission receipts, and retain the original history until
-those acknowledgements are durable. Normal house cleanup must wait for that
-transaction. The draft must not deploy merely because the storage unit tests
-pass; actual host SIGKILL and fresh-controller resume proofs are still required.
+The box provisions this mount for newly claimed non-service houses and runs
+collection before terminal reporting or cleanup. The code remains a draft:
+actual host SIGKILL and fresh-controller resume proofs are still required
+before activation.
 
 ## Box-authenticated core collection transaction
 
@@ -301,9 +298,33 @@ slot after the house itself ends. Warming another house preserves the old plan
 and receipts in its own draining record. Acknowledging the committed slot clears
 the received pack and its pin.
 
-The box-side provision/collection client is still to be wired. Before activation
-it must verify a native-history host capability, provision the private mount,
-interpret admission journals offline, upload these parts, persist the complete
-acknowledgement, and only then clean up. UI collection wording and older-house
-cutover also need the new phase. Actual host-process SIGKILL, resume and sender
-proofs remain required; these core transaction tests do not replace them.
+The box-side client now provisions private per-house history before claiming,
+requires the negotiated version, and verifies the host capability before
+publishing work. Native adapters also refuse allocated houses without a history
+mount before admission; an older box with a newer image cannot silently start
+unbacked native work. House environment and secret selectors cannot override
+this provisioning or mount an overlapping path.
+
+After physical termination the client snapshots missing entries, recovers only
+the matching native token or session through the existing adapters, and retries
+immutable multipart uploads. Container PIDs are never interpreted as box PIDs.
+A reserved/refused launch journal can establish that no admission happened; an
+admitted journal without recoverable history remains held. Completion is
+acknowledged and persisted in the box's ending receipt before normal cleanup.
+Lost acknowledgements and box restarts retry this same transaction. The UI calls
+this phase “saving conversation history.”
+
+The live host also retains original native files until core acknowledges the
+complete pack. Missing earlier parts cause an explicit transfer restart rather
+than an acknowledgement of the last part alone. Offline collection adopts
+already sealed live-host packs, covering a host exit after the final upload.
+Unknown house metadata cannot prove termination, and delivery yields promptly
+while the box is collecting history.
+
+Tests cover both adapters' offline decoding, immutable multipart retries,
+reserved and admitted attempts, existing core packs, missing metadata, and box
+restart after lost part/final acknowledgements. These use model-free native
+executables or a fake container engine. Actual host-process SIGKILL, native
+resume and sender proofs remain required. So do explicit policies for admitted
+work with no native history, oversized offline packs and pending Claude inbox
+files, plus older-house cutover reconciliation. This draft is not deployable.

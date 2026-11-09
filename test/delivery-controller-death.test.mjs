@@ -63,6 +63,8 @@ for(const boundary of ['reserved-before-publication','before-house-receipt','aft
   const houseEnv={PATH:process.env.PATH,HOME:house,LOOM_URL:server.url,LOOM_TOKEN_FILE:join(house,'token'),HOUSE_ID:'h-1',HOUSE_AGENT:'art',FAKE_HARNESS:house,
     LOOM_RUNTIME_CLAUDE:join(here,'fake-claude.mjs'),LOOM_RUNTIME_CLAUDE_JOBS:join(house,'jobs'),LOOM_RUNTIME_CODEX:join(here,'fake-codex.mjs'),LOOM_RUNTIME_CODEX_RUNS:join(house,'runs'),
     ...(harness==='claude'?{CLAUDE_SECURESTORAGE_CONFIG_DIR:join(house,'login')}:{LOOM_LOGIN_CODEX:join(house,'login')})};
+  houseEnv.LOOM_RUNTIME_NATIVE_HISTORY=join(house,'native');mkdirSync(houseEnv.LOOM_RUNTIME_NATIVE_HISTORY);
+  houseEnv.CLAUDE_CONFIG_DIR=house;
   const marker=join(root,'ready-before-conversation-commit.json');
   const program=`import{readFileSync,writeFileSync,renameSync}from'node:fs';import{deliver}from${JSON.stringify(new URL('../src/delivery.mjs',import.meta.url).href)};import{HouseRunner}from${JSON.stringify(new URL('../src/houserunner.mjs',import.meta.url).href)};import{readHouseLaunch}from${JSON.stringify(new URL('../src/house-launch-journal.mjs',import.meta.url).href)};
 const boundary=${JSON.stringify(boundary)},marker=${JSON.stringify(marker)};

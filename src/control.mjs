@@ -553,7 +553,7 @@ function pollState(env, effects, caller, { facts, sessions, harnesses, usage, lo
       bodyHosts: mine.filter((h) => h.state === 'running' && !h.collection && isHostHouse(h, s)).map((h) => ({ id: h.id, agent: h.agent, known: !!h.build })),
       // Taken by this box and not over: one the box doesn't have (it restarted) is lost.
       active: mine.filter((h) => ['starting', 'running', 'stopping'].includes(h.state)).map((h) => h.id),
-      activeInfo: Object.fromEntries(mine.filter((h) => ['starting', 'running', 'stopping'].includes(h.state)).map(h => [h.id, { id: h.id, agent: h.agent, service: h.service ?? null, slot: h.slot ?? null, stateful: !!(h.service || h.slot) }])),
+      activeInfo: Object.fromEntries(mine.filter((h) => ['starting', 'running', 'stopping'].includes(h.state)).map(h => [h.id, { id: h.id, agent: h.agent, service: h.service ?? null, slot: h.slot ?? null, stateful: !!(h.service || h.slot), ...(h.nativeHistory?.v === 1 ? { nativeHistory: { v: 1 } } : {}) }])),
       // Its box sessions: up or down, as the owner wants them.
       remotes: Object.entries(s.remotes ?? {}).filter(([, r]) => r.box === caller.subject)
         .map(([agent, r]) => ({ agent, dir: r.dir, name: r.name, want: r.want, state: r.state })),

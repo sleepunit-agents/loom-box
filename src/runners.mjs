@@ -34,7 +34,7 @@
 // the bridges piece's inbox hook reads (<inbox dir>/<id8>/pending.jsonl, under flock), so a house whose harness
 // has that hook hears follow-ups mid-turn. With no inbox dir, a body can't be fed.
 import { spawn as nodeSpawn, spawnSync } from 'node:child_process';
-import { nativeHistoryEnv } from './native-history.mjs';
+import { nativeHistoryEnv, validateNativeHistoryOptions } from './native-history.mjs';
 import { createHash, randomBytes } from 'node:crypto';
 import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -734,6 +734,7 @@ export function configuredNativeRunner(harness, configuration, env = process.env
 /** The runner from runtime settings and explicit dependency injection. */
 export function runnerFor(harness, env = process.env, opts = {}) {
   env = nativeHistoryEnv(harness, env);
+  validateNativeHistoryOptions(harness, env, opts);
   const argv = (v) => { try { const a = JSON.parse(v); return Array.isArray(a) && a.every((x) => typeof x === 'string') ? a : []; } catch { return []; } };
   const inboxDir = env.LOOM_RUNTIME_INBOX_DIR || undefined;
   if (harness === 'claude') {

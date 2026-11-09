@@ -6,6 +6,7 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { HISTORY_DIRS, historyPaths } from './native-history.mjs';
 import { ClaudeRunner, CodexRunner } from './runners.mjs';
 import { packSession } from './sessions.mjs';
+import { readLaunch } from './launch-journal.mjs';
 
 const stat = file => { try { return lstatSync(file); } catch (e) { if (e.code === 'ENOENT') return null; throw e; } };
 const inside = (root, file) => { const rel = relative(resolve(root), resolve(file)); return rel === '' || !rel.startsWith('../') && rel !== '..' && !isAbsolute(rel); };
@@ -63,4 +64,34 @@ export function offlineNativeSession(snapshot, { harness, id, session }) {
   const files = packSession(runner, slot, { id });
   if (!files.length) throw Error('native session history is not collected yet');
   return { harness, id, session: slot.session, files };
+}
+
+/** A physically stopped house cannot admit a reserved worker later. For an
+ * admitted attempt, recover only its stable token's files, never host PIDs. */
+export function offlineNativeAttempt(snapshot, { house, attempt, harness }) {
+  if (!/^h-[0-9]{1,9}$/.test(house ?? '') || !/^[0-9a-f]{64}$/.test(attempt ?? '') || !['claude', 'codex'].includes(harness)) throw Error('invalid offline native attempt');
+  let record;
+  try { record = readLaunch({ HOUSE_ID: house, LOOM_RUNTIME_NATIVE_HISTORY: snapshot }, attempt); }
+  catch { throw Error('native admission journal could not be decoded'); }
+  if (!record || record.harness !== harness) throw Error('native admission history is unavailable or belongs to another harness');
+  if (['reserved', 'refused'].includes(record.state)) return { nativeNotStarted: true, harness, attempt };
+  let id, session;
+  if (record.state === 'ready') {
+    if (record.body?.harness !== harness || record.body.slot && record.body.slot.harness !== harness) throw Error('native admission receipt changed harness');
+    id = record.body.id; session = record.body.slot?.session;
+  } else if (harness === 'codex') id = record.token;
+  else {
+    const jobs = historyPaths(snapshot)['claude-jobs'];
+    const found = [];
+    for (const name of readdirSync(jobs)) {
+      if (!/^[A-Za-z0-9-]{4,64}$/.test(name)) continue;
+      let job;
+      try { job = JSON.parse(readFileSync(join(jobs, name, 'state.json'), 'utf8')); }
+      catch (error) { if (error.code === 'ENOENT') continue; throw Error('native job state could not be decoded'); }
+      if (job.intent?.split('\n')[1] === ClaudeRunner.TOKEN_LINE.replace('{token}', record.token)) found.push({ id: name, session: job.sessionId });
+    }
+    if (found.length !== 1) throw Error('native admission does not identify exactly one collected job');
+    ({ id, session } = found[0]);
+  }
+  return { ...offlineNativeSession(snapshot, { harness, id, ...(session ? { session } : {}) }), inputConfirmed: record.state === 'ready' && record.input === 'confirmed' };
 }

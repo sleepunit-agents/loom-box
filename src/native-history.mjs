@@ -73,3 +73,18 @@ export function nativeHistoryEnv(harness, env) {
   }
   return env;
 }
+
+/** Explicit constructor injection cannot bypass the mounted storage contract. */
+export function validateNativeHistoryOptions(harness, env, options) {
+  const root = nativeHistoryRoot(env);
+  if (!root) return;
+  const selectors = harness === 'claude'
+    ? { jobsDir: env.LOOM_RUNTIME_CLAUDE_JOBS, projectsDir: env.LOOM_RUNTIME_CLAUDE_PROJECTS }
+    : { runsDir: env.LOOM_RUNTIME_CODEX_RUNS, sessionsDir: env.LOOM_RUNTIME_CODEX_SESSIONS };
+  for (const [key, expected] of Object.entries(selectors)) {
+    if (options[key] !== undefined && (typeof options[key] !== 'string' || canonical(options[key]) !== canonical(expected))) throw Error('native constructor cannot override durable history storage');
+  }
+  if (harness === 'codex') for (const key of ['codexHome', 'homesDir']) {
+    if (options[key] !== undefined && (typeof options[key] !== 'string' || inside(root, options[key]))) throw Error('native constructor cannot persist credential homes in history');
+  }
+}
