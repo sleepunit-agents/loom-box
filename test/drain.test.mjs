@@ -319,14 +319,27 @@ test('a box checks a warm body host\'s repo without building: the tag the next h
   assert.notEqual(b, a);
   assert.match(b, /^loom-house-art:[0-9a-f]{20}$/);
 
+  // Boot-time code outside the image context participates only when explicitly watched.
+  const watched = { context: 'house', containerfile: 'house/Containerfile', watch: ['README'] };
+  writeFileSync(join(repo, 'house', 'house.json'), JSON.stringify({ build: watched }));
+  git('commit', '-qam', 'watch boot code');
+  const boot1 = buildNow(env, c);
+  assert.equal(boot1, buildTagAt(repo, 'HEAD', 'art', watched));
+  writeFileSync(join(repo, 'README'), 'changed hook code\n'); git('commit', '-qam', 'hook fix');
+  const boot2 = buildNow(env, c);
+  assert.notEqual(boot2, boot1, 'hook-only change rotates the warm house');
+  writeFileSync(join(repo, 'state.json'), '{}\n'); git('add', '-A'); git('commit', '-qm', 'state export');
+  assert.equal(buildNow(env, c), boot2, 'unwatched state changes do not rotate it');
+  assert.throws(() => buildTagAt(repo, 'HEAD', 'art', { ...watched, watch: ['missing'] }), /no such path/);
+
   // The runner's side: each body host's house checked when first seen, then at the harness status's pace.
   const calls = [];
   let now = 0;
   let poll = { bodyHosts: [{ id: 'h-4', agent: 'art', known: false }] };
-  const client = { async call(path, body) { calls.push([path, body]); if (path === 'poll') return poll; if (path === 'build-check') return { ...c, id: body.id, known: false }; if (path === 'build-report') return { outdated: true, build: OLD, current: b }; return {}; } };
+  const client = { async call(path, body) { calls.push([path, body]); if (path === 'poll') return poll; if (path === 'build-check') return { ...c, id: body.id, known: false }; if (path === 'build-report') return { outdated: true, build: OLD, current: boot2 }; return {}; } };
   const r = runner(env, client, { loomUrl: 'http://loom.test/mcp', log: () => {}, status: () => null, upgrade: () => null, sweep: () => [], runtime: () => ({}), clock: () => now, houseImage: (id) => (id === 'h-4' ? OLD : null), buildOf: (x) => buildNow(env, x) });
   await r.tick();
-  assert.deepEqual(calls.filter(([p]) => p.startsWith('build')), [['build-check', { id: 'h-4' }], ['build-report', { id: 'h-4', house: OLD, current: b }]]);
+  assert.deepEqual(calls.filter(([p]) => p.startsWith('build')), [['build-check', { id: 'h-4' }], ['build-report', { id: 'h-4', house: OLD, current: boot2 }]]);
   calls.length = 0;
   now += 60_000;
   poll = { bodyHosts: [{ id: 'h-4', agent: 'art', known: true }] };

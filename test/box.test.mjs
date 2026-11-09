@@ -619,3 +619,11 @@ test('shutdown cancels a held image build before starting a container', async ()
   assert.equal(house(h.id).state, 'failed');
   assert.equal(existsSync(join(fake, 'runs', `loom-house-${h.id}.json`)), false);
 });
+
+ test('build.watch accepts bounded repository paths and refuses paths outside the repository', () => {
+  const parse = (watch) => parseHouseFile(JSON.stringify({ ...HOUSE, build: { ...HOUSE.build, watch } }));
+  assert.deepEqual(parse(['bin', '.claude', 'bin']).build.watch, ['.claude', 'bin']);
+  for (const watch of ['bin', [null], ['../private'], ['/etc'], Array(65).fill('bin')]) {
+    assert.throws(() => parse(watch), /build.watch/);
+  }
+});

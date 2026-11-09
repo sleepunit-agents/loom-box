@@ -188,7 +188,9 @@ export function parseHouseFile(text) {
   if (!isObj(h.build) || !relOk(h.build.containerfile) || !relOk(h.build.context)) {
     fail('build needs a containerfile and a context, each a path inside the repo');
   }
-  for (const k of Object.keys(h.build)) if (!['containerfile', 'context'].includes(k)) fail(`build has an unknown key: ${k}`);
+  for (const k of Object.keys(h.build)) if (!['containerfile', 'context', 'watch'].includes(k)) fail(`build has an unknown key: ${k}`);
+
+  if (h.build.watch !== undefined && (!Array.isArray(h.build.watch) || h.build.watch.length > 64 || !h.build.watch.every(relOk))) fail('build.watch is up to 64 paths inside the repo');
 
   const services = {};
   if (h.services !== undefined) {
@@ -206,7 +208,7 @@ export function parseHouseFile(text) {
     if (!Array.isArray(h.attach) || !h.attach.length || h.attach.length > 16 || !h.attach.every((c) => typeof c === 'string' && c.length <= 400)) fail('attach is a list of up to 16 strings');
     attach = h.attach;
   }
-  return { build: { containerfile: h.build.containerfile, context: h.build.context }, ...runSpec(h, '', { task: true }), services, attach };
+  return { build: { containerfile: h.build.containerfile, context: h.build.context, ...(h.build.watch !== undefined ? { watch: [...new Set(h.build.watch)].sort() } : {}) }, ...runSpec(h, '', { task: true }), services, attach };
 }
 
 /** What runs for one house: the house itself, or one of its services. */
