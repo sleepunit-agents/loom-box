@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
-import { launchAttempt, readLaunch, reserveLaunch } from '../src/launch-journal.mjs';
+import { admitLaunch, completeLaunch, launchAttempt, readLaunch, reserveLaunch } from '../src/launch-journal.mjs';
 import { superviseNativeLaunch } from '../src/native-launch.mjs';
 import { configuredNativeRunner, nativeRecoveryConfiguration, nativeRunnerConfiguration, runnerFor } from '../src/runners.mjs';
 import { scratch } from './scratch.mjs';
@@ -124,4 +124,28 @@ test('worker termination after real native admission recovers identity but prese
     assert.equal(w.argv().filter(a => a.args?.[0] === 'exec').length, 1);
     assert.equal(runnerFor('codex', w.env).alive(recovered.id), true);
   } finally { if (worker.child.exitCode === null) worker.child.kill('SIGKILL'); await cleanup(w); }
+});
+
+for (const failure of ['fork-throws', 'helper-exits-before-admission']) test(`a ${failure} refuses its reservation without native work`, async () => {
+  const w = setup('codex');
+  const spawnWorker = failure === 'fork-throws'
+    ? () => { throw Error('fixture fork failure'); }
+    : (_exe, _argv, options) => spawn(process.execPath, ['-e', 'process.stdin.resume(); process.stdin.on("end", () => process.exit(1));'], options);
+  await assert.rejects(superviseNativeLaunch(w.env, w.request, { pollMs: 5, spawnWorker }), error => error.nativeNotStarted === true);
+  assert.equal(readLaunch(w.env, w.request.id).state, 'refused');
+  assert.equal(w.argv().length, 0);
+});
+
+
+test('a failed helper cannot cancel a worker already admitted by another registrar', async () => {
+  const w = setup('codex');
+  const native = { id: 'fixture1234', harness: 'codex', slot: { harness: 'codex', session: 'fixture-session' } };
+  const result = await superviseNativeLaunch(w.env, w.request, { pollMs: 5, spawnWorker() {
+    assert.equal(admitLaunch(w.env, w.request.id).admitted, true);
+    setTimeout(() => completeLaunch(w.env, w.request.id, native, { inputConfirmed: true }), 20);
+    throw Error('the losing registrar could not fork its helper');
+  } });
+  assert.equal(result.id, native.id);
+  assert.equal(readLaunch(w.env, w.request.id).state, 'ready');
+  assert.equal(w.argv().length, 0);
 });

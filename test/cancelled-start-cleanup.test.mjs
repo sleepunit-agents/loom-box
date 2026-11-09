@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { appendFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { deliver, deliveryDir, loadConv, saveConv, tick } from '../src/delivery.mjs';
 import { startBody, readBody } from '../src/bodies.mjs';
@@ -101,4 +101,24 @@ test('a late delivery receipt cannot overwrite or stop a newer native generation
   assert.deepEqual(readBody(w.env, newer.body), newer);
   assert.equal(w.log.filter(row => row[0] === 'end').length, 0);
   assert.equal(existsSync(w.runner.transcript(newer.slot.session)), true);
+});
+
+
+test('a stale receipt cannot replace corrupt metadata whose generation cannot be verified', async () => {
+  const w = world();
+  const cv = cvOf('art', 'slack', 'corrupt-new-generation');
+  const start = w.runner.start.bind(w.runner);
+  let file;
+  w.runner.start = options => {
+    const native = start(options);
+    const c = loadConv(w.env, cv); c.starting.op = 'newer-owner'; saveConv(w.env, c);
+    const dir = join(w.env.LOOM_BOX_DATA, 'bodies'); mkdirSync(dir, { recursive: true });
+    file = join(dir, `${native.harness}-${native.id}.json`);
+    writeFileSync(file, '{unreadable-generation');
+    return native;
+  };
+  await deliver(w.env, w.msg('corrupt-new-generation', 'old input'), w.o);
+  assert.equal(readFileSync(file, 'utf8'), '{unreadable-generation');
+  assert.equal(w.log.filter(row => row[0] === 'end').length, 0);
+  assert.equal(loadConv(w.env, cv).body, undefined);
 });

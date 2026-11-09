@@ -1849,7 +1849,10 @@ async function executeOne(env, op, d, mem) {
       if (!ours(current, op) || (current.starting.prepared && current.starting.prepared.bodySpec.metadata.instance !== prepared.metadata.instance)) {
         const ref = `${native.harness}:${native.id}`;
         let existing;
-        try { existing = readBody(env, ref); } catch { /* a new orphan needs its own cleanup record */ }
+        try { existing = readBody(env, ref); } catch (error) {
+          // Corruption is not proof that no newer generation owns this writer.
+          if (existsSync(join(dataDir(env), 'bodies', `${native.harness}-${native.id}.json`))) throw Object.assign(error, { nativePending: true });
+        }
         // A stale receipt must never replace a newer incarnation. The common
         // stale-operation path will decline its bind; cleanup checks instance.
         if (existing && existing.instance !== prepared.metadata.instance) return { ...prepared.metadata, body: ref, started: at };
