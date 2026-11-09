@@ -179,8 +179,8 @@ export const shownTask = (t) => (typeof t === 'string' ? t.replace(/(--host-key 
 
 /** A house as an answer shows it: never its token's label, and whose work it's for (t-1952: `seat`) only to an owner. */
 function houseView(h, { seat = false } = {}) {
-  const { tokenLabel: _t, seat: st, ...rest } = h;
-  return { ...rest, task: shownTask(rest.task), ...(seat && st !== undefined ? { seat: st } : {}) };
+  const { tokenLabel: _t, taskActsFor: _p, taskSource: _s, taskFromHouse: _f, seat: st, ...rest } = h;
+  return { ...rest, task: h.job && !seat ? `Task ${h.id}` : shownTask(rest.task), ...(seat && st !== undefined ? { seat: st } : {}) };
 }
 
 // ------------------------------------------------------------- the owner's
@@ -381,7 +381,7 @@ export function up(env, effects, caller, { agent, box, needs, task, session, slo
     const where = placeHouse(s, a, { box: box || undefined, needs: n }, env);
     const id = nextHouseId(s);
     const at = now(effects);
-    s.houses[id] = { id, agent: a, box: where, task: t, needs: n, state: 'wanted', created: at, updated: at, by: actor(caller), ...(sess ? { session: true } : {}), ...(sl ? { slot: sl } : {}), ...(hostHouse ? { kind: 'body-host', seat } : {}) };
+    s.houses[id] = { id, agent: a, box: where, task: t, needs: n, state: 'wanted', created: at, updated: at, by: actor(caller), ...(sess ? { session: true } : {}), ...(sl ? { slot: sl } : {}), ...(hostHouse ? { kind: 'body-host', seat } : { ...(own.taskSource ? { taskSource: own.taskSource } : {}), ...(caller.kind === 'agent' && caller.house ? { taskFromHouse: caller.house } : {}), taskActsFor: own.actsFor ?? (caller.kind === 'owner' ? { owner: true, people: [], unknown: false } : { owner: false, people: [], unknown: true }) }) };
     return { id, agent: a, box: where, boxName: boxLabelOf(s, where), state: 'wanted', ...(sess ? { session: true } : {}), ...(sl ? { slot: sl } : {}) };
   });
 }
@@ -1493,8 +1493,15 @@ export function api(env, effects, { caller, path, body }) {
       if (caller.kind !== 'agent') fail('run is a body\'s, as its own agent (the owner uses `loom runtime` at loom\'s machine)', 403);
       return import('./gates-api.mjs').then(async (m) => ({ status: 200, body: await m.runFor(env, caller, b.argv, undefined, undefined, undefined, { key: b.key, session: b.session }) })).catch(apiError);
     }
-    if (path === 'up') return { status: 200, body: up(env, effects, caller, b) };
-    if (path === 'down') return { status: 200, body: down(env, effects, caller, b) };
+    if (path === 'up') {
+      if (b.conversation === undefined && b.key === undefined && typeof b.session !== 'string') return { status: 200, body: up(env, effects, caller, b) };
+      return import('./taskhost.mjs').then(async m => ({ status: 200, body: await m.upTask(env, effects, caller, b) })).catch(apiError);
+    }
+    if (path === 'task-bootstrap' || path === 'task-status') return import('./taskhost.mjs').then(async m => ({ status: 200, body: await (path === 'task-bootstrap' ? m.bootstrapTask(env, caller) : m.taskStatus(env, caller)) })).catch(apiError);
+    if (path === 'down') {
+      if (!load(env).houses?.[b.id]?.job) return { status: 200, body: down(env, effects, caller, b) };
+      return import('./taskhost.mjs').then(async m => ({ status: 200, body: await m.downTask(env, effects, caller, b) })).catch(apiError);
+    }
     if (path === 'list' || path === '') return { status: 200, body: list(env, caller) };
     if (path === 'usage') return { status: 200, body: usage(env, effects, caller, b) };
     if (path === 'service-up') return { status: 200, body: serviceUp(env, effects, caller, b) };

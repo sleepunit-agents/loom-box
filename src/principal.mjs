@@ -139,7 +139,7 @@ export function principalOf(env, c) {
 // ─── Seats: whose house a body runs in (t-1952) ────────────────────────────
 
 /** A house's seat: `owner`, `p-<person>` (one non-owner person's) or `u-<conversation>` (an unknown principal's). */
-export const SEAT = /^(owner|p-[a-z0-9]+(-[a-z0-9]+)*|u-cv-[0-9a-f]{12})$/;
+export const SEAT = /^(owner|p-[a-z0-9]+(-[a-z0-9]+)*|u-cv-[0-9a-f]{12}|j-h-[0-9]{1,9})$/;
 export const OWNER_SEAT = 'owner';
 
 /**
@@ -173,7 +173,7 @@ export function otherSeatHouses(s, agent, seat) {
   const LIVE = new Set(['wanted', 'starting', 'running', 'stopping']);
   const of = (h) => (typeof h?.seat === 'string' && SEAT.test(h.seat) ? h.seat : OWNER_SEAT);
   const host = (h) => h.kind === 'body-host' || /^loom-runtime body-host /.test(String(h.task ?? ''));
-  return Object.values(s?.houses ?? {}).filter((h) => h.agent === agent && LIVE.has(h.state) && host(h) && of(h) !== OWNER_SEAT && of(h) !== seat);
+  return Object.values(s?.houses ?? {}).filter((h) => h.agent === agent && LIVE.has(h.state) && host(h) && of(h) !== OWNER_SEAT && !/^j-h-[0-9]{1,9}$/.test(of(h)) && of(h) !== seat);
 }
 
 /** The cap on an agent's houses for other people (LOOM_RUNTIME_SEAT_HOUSES, default 4). */
@@ -181,7 +181,7 @@ export const SEAT_HOUSES = 4;
 export const seatCap = (env) => { const v = setting(env ?? {}, 'SEAT_HOUSES'); const n = Number(v); return v !== undefined && Number.isInteger(n) && n >= 1 && n <= 64 ? n : SEAT_HOUSES; };
 /** Why a house for `seat` can't be had at the cap, or null. The owner's is never capped. */
 export function seatCapProblem(env, s, agent, seat) {
-  if (seat === OWNER_SEAT) return null;
+  if (seat === OWNER_SEAT || /^j-h-[0-9]{1,9}$/.test(seat)) return null;
   // Counted by seat: a seat's draining house and its new one are one seat's.
   const seats = new Set(otherSeatHouses(s, agent, seat).map((h) => h.seat)).size;
   const cap = seatCap(env);

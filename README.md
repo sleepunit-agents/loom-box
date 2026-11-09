@@ -653,6 +653,7 @@ A box never reads loom's stores, and loom never reaches into a box. The box poll
 | `report` | a box | how a house is going; ending one revokes its token |
 | `up`, `down`, `list` | owner, agent | ask for, stop and see houses (an agent only its own) |
 | `body-sync` | an agent's house | its body host's report in; bodies to start, stop and feed out (its own agent's, its own house's only) |
+| `task-bootstrap`, `task-status` | the allocated task house | register that house with common delivery and read its collected result; no service, session or other house can claim it |
 | `send` | an agent | a body's message out, in its own agent's conversation, with its run's `LOOM_BODY_KEY` |
 | `principal` | an agent | on whose behalf the body holding a conversation acts, proven as `send` is: a signed statement for approvals and the clock (t-1943) |
 | `add-box`, `revoke-box`, `may-host`, `set-primary`, `set-agent` | owner | enrollment and config |
@@ -753,3 +754,11 @@ and, when known, `retryAfter` as an ISO timestamp for the earliest available acc
 reset. Its reason includes why another harness was excluded (for example the local
 Codex opt-in), rather than implying every household account is exhausted. The clock
 can wait for that reset without creating a failure-alert retry chain.
+
+### Tasks in an already allocated house
+
+A model-task entrypoint may run `loom-runtime task-host` instead of launching a native harness. The runtime reads the task from that house’s control record, registers the existing house as a dedicated job host, and runs the prompt through ordinary delivery, model/account choice, quota fallback, policy, native hooks, reports and session collection. It does not allocate a second warm house: the requested box, requirements and saved-state slot remain the box’s original allocation. A JSON `{prompt, model}` task treats `model` as its preference through that resolver.
+
+`up` carries a body’s conversation/run proof when available. A verified parent’s principal and standing restrictions follow the task; an unproved agent call is unknown, never promoted to owner. The allocating house or a proved continuation can cancel its job. Only that raw-task house can bootstrap or inspect its completion; services, interactive session houses and unrelated callers cannot claim a task host. Bootstrap retries reuse one conversation and boot credential until the first body sync trades the credential. Established host credentials are never returned.
+
+The entrypoint returns the common final report only after delivery has collected the session, then performs its existing Git rescue and lets the box save its state slot. A task whose allocated house terminates fails explicitly rather than silently moving onto an unconstrained box. Native task entrypoints must be updated together with their runtime pin; older native entrypoints retain their previous behavior until replaced. Explicit script tasks and interactive attachment require their own applicable execution path; `task-host` is for model prompts, not arbitrary shell commands.
