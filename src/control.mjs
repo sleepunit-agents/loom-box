@@ -10,7 +10,7 @@ import { checkLoginExpiry } from './login-expiry.mjs';
 // doesn't name exactly one box, it says why and starts nothing.
 import { OWNER_SEAT, SEAT, isOwnerSeat, principalOf, seatCapProblem, seatPerson } from './principal.mjs';
 import { ownCommit } from './version.mjs';
-import { pieceName, setting } from './piece.mjs';
+import { pieceName } from './piece.mjs';
 import { randomBytes } from 'node:crypto';
 import { chmodSync, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -19,7 +19,7 @@ import { joinPoll, joinRequest } from './enroll.mjs';
 import { checkDark, noteReport } from './watch.mjs';
 import { MAX_PARTS, PART_RAW, drop, partsOf, putPart, putWhole, readPart } from './blobs.mjs';
 import { parsePortGrant, parseTailnetGrant } from './house.mjs';
-import { CODE, LOGIN_NAMES, scrubCliOutput } from './logins.mjs';
+import { CODE, LOGIN_NAMES, machineClaudeEnabled, scrubCliOutput } from './logins.mjs';
 import { boxOwner, mayHaveLogin, mayUseLogin, membersOf, ownersAllow } from './owners.mjs';
 
 const TERMINAL = new Set(['done', 'failed', 'stopped', 'lost']);
@@ -726,7 +726,7 @@ function pollState(env, effects, caller, { facts, sessions, harnesses, machineHa
     // Once: the box asks (joined with --report-only), and the owner's word after that stands, off included.
     if (reportOnly === true && !b.local && !b.reportOnlyAsked) { b.reportOnly = true; b.reportOnlyAsked = true; }
     const ro = !!b.reportOnly;
-    if (b.local && machineHarnesses !== undefined) b.machineHarnesses = setting(env, 'MACHINE_CLAUDE_LOGIN') === 'on'
+    if (b.local && machineHarnesses !== undefined) b.machineHarnesses = machineClaudeEnabled(env)
       ? stamp(harnessReport({ claude: machineHarnesses?.claude }) ?? {}, now(effects)) : {};
     if (hs) b.harnesses = stamp(hs, now(effects));
     // The household's own salt for account keys (accounts.mjs): made once, never shown.
@@ -1630,7 +1630,7 @@ export function loginStart(env, effects, { box, harness, scope }) {
     const id = resolveBox(s, box);
     const b = s.boxes[id];
     if (b.revoked) fail(`${boxNameOf(s, id)} is revoked`, 409);
-    if (scope === 'machine' && (!b.local || setting(env, 'MACHINE_CLAUDE_LOGIN') !== 'on' || harness !== 'claude' || !b.machineHarnesses?.claude?.installed)) fail('Machine Claude login is not enabled on this box', 409);
+    if (scope === 'machine' && (!b.local || !machineClaudeEnabled(env) || harness !== 'claude' || !b.machineHarnesses?.claude?.installed)) fail('Machine Claude login is not enabled on this box', 409);
     if (scope !== 'machine' && b.harnesses && b.harnesses[harness] && !b.harnesses[harness].installed) fail(`${boxNameOf(s, id)} doesn't have ${harness} installed`, 409);
     s.logins ??= {};
     expireLogins(s, effects);
@@ -1692,7 +1692,7 @@ export function loginReport(env, effects, caller, { id, state, link, userCode, k
     const b = boxOf(s, caller);
     const l = s.logins?.[id];
     if (!l || l.box !== caller.subject) fail(`no login ${id} for this box`, 404);
-    if (b.local && machineHarnesses !== undefined) b.machineHarnesses = setting(env, 'MACHINE_CLAUDE_LOGIN') === 'on'
+    if (b.local && machineHarnesses !== undefined) b.machineHarnesses = machineClaudeEnabled(env)
       ? stamp(harnessReport({ claude: machineHarnesses?.claude }) ?? {}, now(effects)) : {};
     if (hs) b.harnesses = stamp(hs, now(effects));
     if (['done', 'failed'].includes(l.state)) return { ok: true };

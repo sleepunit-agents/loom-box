@@ -12,6 +12,7 @@
 // What the box reports up (control.mjs, poll): per harness {installed, loggedIn, method, plan, account}, where
 // `account` is a short hash of what the status command says identifies the account (Claude: orgId and email), so
 // boxes signed in to one account share its quota. The email itself never leaves the box.
+import { setting } from './piece.mjs';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readSync, rmSync } from 'node:fs';
@@ -499,6 +500,9 @@ export function tailOf(path, max = TAIL_BYTES) {
 // The local daemon's login is private to this machine, never the shared house login.
 // Opted in only on loom's control plane. The native CLI reads its own trusted config;
 // it is NEVER pointed at the shared login directory (whose contents houses can change).
+export function machineClaudeEnabled(env) {
+  try { return JSON.parse(setting(env, 'LOCAL_BODIES') || 'null')?.machineClaudeLogin === true; } catch { return false; }
+}
 export function machineClaudeEnv(env) {
   return Object.fromEntries(['HOME', 'PATH', 'XDG_RUNTIME_DIR', 'LANG'].filter((k) => env[k]).map((k) => [k, env[k]]));
 }

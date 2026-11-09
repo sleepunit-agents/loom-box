@@ -10,7 +10,7 @@ import { deriveAccounts } from '../src/accounts.mjs';
 import { machineClaudeStatus, startLogin } from '../src/logins.mjs';
 import { runner } from '../src/box.mjs';
 const DAY = 86400000;
-const setup = () => { const HOME = scratch('machine-login-'); return { HOME, LOOM_RUNTIME_MACHINE_CLAUDE_LOGIN: 'on', PATH: process.env.PATH, LOOM_BOX_HOME: join(HOME, 'state'), LOOM_BOX_LOCAL_NAME: 'local', XDG_RUNTIME_DIR: join(HOME, 'run') }; };
+const setup = () => { const HOME = scratch('machine-login-'); return { HOME, LOOM_RUNTIME_LOCAL_BODIES: '{"machineClaudeLogin":true}', PATH: process.env.PATH, LOOM_BOX_HOME: join(HOME, 'state'), LOOM_BOX_LOCAL_NAME: 'local', XDG_RUNTIME_DIR: join(HOME, 'run') }; };
 const st = (days) => ({ installed: true, loggedIn: true, method: 'claude.ai', loginExpiresAt: new Date(Date.now() + days * DAY).toISOString() });
 const fx = { now: () => new Date(), alert: () => {} };
 const call = (env, caller, path, body) => api(env, fx, { caller, path, body });
@@ -56,7 +56,7 @@ test('remote boxes cannot report or start machine logins; disabled runner refuse
   await box.tick();
   await new Promise((r) => setImmediate(r));
   assert.equal(load(env).logins[id].state, 'failed');
-  env.LOOM_RUNTIME_MACHINE_CLAUDE_LOGIN = 'off';
+  env.LOOM_RUNTIME_LOCAL_BODIES = '{}' ;
   assert.equal(call(env, owner, 'login-start', { box: 'local', harness: 'claude', scope: 'machine' }).status, 409);
 });
 test('native status uses trusted machine home, strips provider overrides, never mounts or reads shared credentials', () => {

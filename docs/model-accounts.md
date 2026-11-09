@@ -277,7 +277,7 @@ window and 0.5% of a daily or weekly one, the same for each job already running 
 
 The legacy machine daemon uses the native CLI's private `~/.claude` login,
 not the shared house login. Renewing one never renews the other. On loom's
-own box only, `LOOM_RUNTIME_MACHINE_CLAUDE_LOGIN=on` adds **Claude on this
+own box only, `"machineClaudeLogin":true` in `LOOM_RUNTIME_LOCAL_BODIES` adds **Claude on this
 machine** to its Model logins panel. Its separate expiry warning leads to
 that row; Renew login runs the native CLI's own login against its own trusted
 config. The same owner-only flow takes the provider code. Status uses only
