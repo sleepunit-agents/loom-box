@@ -718,6 +718,8 @@ test('a completed slot retains its only state when upload fails, then retries af
   const saved=ok(api(env,fx,{caller:owner,path:'saved-state',body:{agent:'art',name:'upload-recovery',slot:true}}));
   const contents=spawnSync('tar',['-xzOf','-','./cursor'],{input:Buffer.from(saved.state,'base64'),encoding:'utf8'});
   assert.equal(contents.stdout,`loom-house-${h.id};`);
+  assert.equal(existsSync(join(env.LOOM_BOX_DATA,'houses',h.id,'ending.json')),false,'the stale active snapshot must not recreate a completed collection');
+  assert.equal(fresh.houses.has(h.id),false);
 });
 
 

@@ -644,6 +644,7 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
   }
 
   const unknownContainers = new Set();
+  const recentlyCollected = new Set();
   let collectionsScanned = false;
   /** Inspection errors are not absence; a created container can still be starting. */
   function physical(id) {
@@ -698,6 +699,7 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
       clean({ id: d.id }, e.dir, d.secretNames);
       rmSync(endingFile(e.dir), { force: true });
       if (d.removeDir) rmSync(e.dir, { recursive: true, force: true });
+      recentlyCollected.add(d.id);
       houses.delete(d.id);
       log(`${d.id} ${d.state} (exit ${d.code ?? -1})`);
     } catch (error) {
@@ -887,6 +889,8 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
 
   async function reconcile(want) {
     const active = new Set(want.active ?? []);
+    // A completion can land while this poll is in flight. Keep its tombstone until a later poll observes the terminal state.
+    for (const id of recentlyCollected) if (!active.has(id)) recentlyCollected.delete(id);
     // An acknowledged physical exit may still owe state or a terminal report after a runner restart.
     const root = pathJoin(dataDir(env), 'houses');
     // Discover old receipts once per runner. New receipts are already owned in houses; scanning every historical log on each poll adds avoidable I/O.
@@ -913,7 +917,7 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
       } else if (e.pendingExit && !e.stopAt) await ended(...e.pendingExit);
     }
     for (const id of active) {
-      if (houses.has(id)) continue;
+      if (houses.has(id) || recentlyCollected.has(id)) continue;
       const seen = physical(id), h = { id, ...(want.activeInfo?.[id] ?? {}) };
       if (seen.state === 'running') { unknownContainers.delete(id); adopt(id, h); continue; }
       if (seen.state === 'unknown') {
@@ -926,7 +930,7 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
       houses.set(id, { dir, adopted: true, stopAck: true, ...((want.stop ?? []).includes(id) ? { stopAt: Date.now(), controlStop: true } : {}) });
       await ended({ ...h, recoveryMissing: true, recoveryState: (want.stop ?? []).includes(id) ? 'stopped' : 'failed', recoveryLog: 'the box no longer has this house (it restarted while the house was up)' }, dir, secretNamesOf(id), seen.code ?? null, null, true);
     }
-    for (const h of want.start || []) if (!closing && !houses.has(h.id)) await start(h);
+    for (const h of want.start || []) if (!closing && !houses.has(h.id) && !recentlyCollected.has(h.id)) await start(h);
     if (closing) return want;
     await checkBuilds(want.bodyHosts);
     await sessions(want.remotes);
