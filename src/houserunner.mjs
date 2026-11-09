@@ -384,7 +384,11 @@ export function bodySync(env, caller, body, o = {}) {
         const whole = Buffer.from(files.map((f) => sealer.open(readFileSync(f)).toString()).join(''), 'base64');
         const f = packedFile(env, agent, house, id);
         mkdirSync(dirname(f), { recursive: true, mode: 0o700 });
-        writeFileSync(f, sealer.seal(whole), { mode: 0o600 });
+        // Keep the native session identity with its files. The host may forget
+        // the body after this acknowledgement, before a later tick retires it.
+        const session = bodies[id]?.session ?? x.stop[id]?.session;
+        const kept = session ? Buffer.from(JSON.stringify({ v: 1, session, files: JSON.parse(whole.toString('utf8')) })) : whole;
+        writeFileSync(f, sealer.seal(kept), { mode: 0o600 });
         rmSync(dir, { recursive: true, force: true });
       }
     }
@@ -600,7 +604,17 @@ export class HouseRunner {
     const e = this.entry(body);
     return e ? e.status !== 'ended' : this.pending(body) ? undefined : false;
   }
-  slotOf(body) { const s = this.entry(body)?.session; return s ? { harness: this.harness, session: s } : null; }
+  slotOf(body) {
+    let s = this.entry(body)?.session;
+    if (!s) {
+      const raw = rawOf(body);
+      try {
+        const pack = JSON.parse(this.sealer.open(readFileSync(packedFile(this.env, body.agent, body.house, raw))).toString('utf8'));
+        if (pack?.v === 1 && typeof pack.session === 'string') s = pack.session;
+      } catch { /* no acknowledged pack yet */ }
+    }
+    return s ? { harness: this.harness, session: s } : null;
+  }
   /** How its turn went, as its house's host reports it: null from a host that doesn't say. */
   turn(body) { return this.entry(body)?.turn ?? null; }
   final(body) {
@@ -669,7 +683,8 @@ export class HouseRunner {
       const x = houseRec(h, body.house);
       if (!x) return false;
       if (!x.stop?.[raw]?.pack) {
-        (x.stop ??= {})[raw] = { pack: true, at: this.now().getTime() };
+        const session = x.report?.bodies?.[raw]?.session;
+        (x.stop ??= {})[raw] = { pack: true, at: this.now().getTime(), ...(session ? { session } : {}) };
         writeJson(hostFile(this.env, body.agent, seat), h);
       }
       return true;
@@ -696,6 +711,9 @@ export class HouseRunner {
       if (Date.now() > end || !this.rec(body)) throw new RunnerError(`${body.agent}'s house didn't send ${body.id}'s session back`);
       await sleep(this.poll);
     }
-    try { return JSON.parse(this.sealer.open(readFileSync(f)).toString('utf-8')); } finally { rmSync(f, { force: true }); }
+    try {
+      const pack = JSON.parse(this.sealer.open(readFileSync(f)).toString('utf-8'));
+      return pack?.v === 1 && Array.isArray(pack.files) ? pack.files : pack;
+    } finally { rmSync(f, { force: true }); }
   }
 }

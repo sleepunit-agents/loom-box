@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { deliver, loadConv, ownerConversationControl, tick } from '../src/delivery.mjs';
 import { detectLoop, judge } from '../src/loops.mjs';
-import { hasAge, houseWorld, until, world } from './delivery-world.mjs';
+import { hasAge, houseWorld, sleep, until, world } from './delivery-world.mjs';
 import { load } from '../src/state.mjs';
 import { hostOf } from '../src/houserunner.mjs';
 
@@ -109,6 +109,7 @@ test('a disconnected house keeps its interrupt pending and later returns its pac
     w.hr.now = oldNow;
     w.setDrop(() => false);
     await until(() => w.ended.length > 0);
+    await sleep(200); // The host has sent its pack, received the ack and forgotten the native body.
     await until(async () => { await tick(w.env, o); return loadConv(w.env, conversation).control.state === 'held'; });
     assert.ok(loadConv(w.env, conversation).slot);
     assert.equal(loadConv(w.env, conversation).body, undefined);
