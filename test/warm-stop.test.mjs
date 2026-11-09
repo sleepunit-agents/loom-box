@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { down, poll } from '../src/control.mjs';
+import { down, poll, report } from '../src/control.mjs';
 import { deliver, loadConv, ownerConversationControl, tick } from '../src/delivery.mjs';
 import { hostOf } from '../src/houserunner.mjs';
 import { load, update } from '../src/state.mjs';
@@ -52,7 +52,8 @@ for(const phase of ['working','launching','queued']) for(const harness of ['clau
     assert.equal(want().stop.includes('h-1'),false,'Git rescue must finish naturally after session drain');
     drop=false;await until(()=>h.left());await host;
     assert.equal(h.ended.length,phase==='queued'?1:2);assert.equal(Object.keys(load(h.env).houses).length,1,'no replacement work while stopping');
-    update(h.env,s=>{s.houses['h-1'].state='stopped'});
+    const ended=report(h.env,{revoke(){}},{kind:'box',subject:box},{id:'h-1',state:'done',exit:0});
+    assert.equal(ended.state,'stopped','a clean cooperative owner Down is a stop even though the container exits naturally');
     await ownerConversationControl(h.env,{kind:'owner'},{conversation:a.conversation,action:'resume'},{...o,detach:true,spawnWorker(){}});
     assert.equal(loadConv(h.env,a.conversation).control,undefined,'resume becomes available after the physical house finishes');
   }finally{h.setRequestDrop(()=>false);h.setDrop(()=>false);if(host&&!h.left()){await h.kill();await host}await first;}
