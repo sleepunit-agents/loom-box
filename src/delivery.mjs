@@ -1881,7 +1881,7 @@ async function interruptOp(env, op, d) {
       const body = bodyOf(op.body, rec);
       if (runner.remote) {
         runner.requestPack(body);
-        if (!runner.packReady(body) && runner.alive(body) !== false) return;
+        if (!runner.packReady(body) && runner.pending(body) !== false) return;
       } else {
         if (!c0.control.asked) {
           endBody(env, op.body, { runner: d.runner, now: d.now, bodyEnv: d.bodyEnv() });
