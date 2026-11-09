@@ -417,7 +417,7 @@ export async function resolveFor(env, { agent, venue, venueKind: told, prefer = 
   }
   // A resume keeps its harness: its slot is that harness's session.
   const list = harness ? all.filter((m) => m.harness === harness) : all;
-  if (!list.length) fail(`the runtime has no ${harness} model${pin || role ? ` for ${pin ? `assigned model ${pin}` : `role ${role}`}` : ''}`, 409);
+  if (!list.length) fail(`the runtime has no ${harness} model${pin || role ? ` for ${pin ? `assigned model ${pin}` : `role ${role.id ?? role}`}` : ''}`, 409);
   let listed = null;
   // `none` is a household that doesn't want quota read; off the control plane there are no box reports to read.
   try { listed = accounts.kind === 'none' ? null : accounts.list(); } catch { listed = null; }

@@ -2327,6 +2327,9 @@ async function routeOf(env, c0, op, rules, d, cant = []) {
     // Only a refused turn's own retry is dropped (a pinned job waits for its model instead); `cant` always stays.
     const keep = avoid.filter((x) => x !== h || cant.includes(x));
     if (op.type === 'resume' && op.slot?.harness === h) return { how: 'resume', file: slotFile(env, op.cv), avoid: keep };
+    // No slot, and its session parked as home on its own harness (a failover that found no room anywhere): that
+    // session resumed, never a fresh body beside it.
+    if (!op.slot && c0.home?.harness === h && existsSync(homeFile(env, op.cv))) return { how: 'resume', file: homeFile(env, op.cv), home: true, avoid: keep };
     // A slot on another harness (an older job's) is parked as its home, never left as an orphan file.
     if (op.type === 'resume' && op.slot) parkSlot(env, op);
     return { how: 'start', avoid: keep };

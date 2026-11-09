@@ -237,3 +237,22 @@ test('a job pinned to Codex whose house refuses Codex at the start moves, and is
   assert.equal(w.runs().at(-1)[0], 'resume');
   assert.match(loadConv(w.env, r.handle).body, /^claude:/);
 });
+
+test('a failover that finds no room anywhere keeps the job\'s session, and the job resumes it once its model has room', async () => {
+  const w = workers();
+  const r = await w.spawn({ prefer: 'opus', failover: true });
+  let c = loadConv(w.env, r.handle);
+  const session = w.runner.slotOf({ id: c.body.split(':')[1] }).session;
+  w.runner.finish(c.body);
+  w.out(w.max);
+  w.out(w.pro);
+  await w.say(r.handle, 'continue');
+  c = loadConv(w.env, r.handle);
+  assert.equal(c.spawn.assignment.model, 'opus', 'nothing ran, so nothing moved');
+  w.clock.advance(3601_000);
+  await w.say(r.handle, 'continue now');
+  assert.deepEqual([w.runs().at(-1)[0], w.runs().at(-1)[2]], ['resume', session], 'its own session, not a fresh body');
+  c = loadConv(w.env, r.handle);
+  assert.equal(c.home, undefined);
+  assert.equal(c.spawn.assignment.model, 'opus');
+});
