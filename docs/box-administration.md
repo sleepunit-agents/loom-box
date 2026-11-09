@@ -121,3 +121,32 @@ change recorded in the work, not a child process the runtime claims it can revok
 5. Exercise real in-app Allow and isolated command receipts on an owned box,
    through both harnesses, including revocation and restart boundaries.
 6. Publish matching catalog/runner pins before advertising the capability.
+
+## Implementation status
+
+The draft now has a private, bounded, fsynced administration journal and its
+scope/activation/command-queue engine (`src/administration.mjs`). Requests use
+the existing current native run proof, capture principal/reset authority and
+the box's reported OS identity, and bind the exact work to an immutable target.
+The observed owner decision, approval expiry and fixed lease cutoff are written
+before consumption. A lost consumption reply recovers that same lease; a used
+card without its original activation intent stays explicitly unresolved.
+Payloads are sealed and idempotency keys cannot change a command. Expiry,
+revocation, changed steering or OS identity prevent new work. These are internal
+functions only: the draft does not expose a functioning administration tool or
+execute host commands yet.
+
+The approvals integration must expose the authenticated decision maker (`by` in
+the existing approval record) as well as kind/target/principal. An agent with
+several owners must not let another member grant access to the named box owner's
+OS identity. The engine requires that owner on both allowed and consumed
+receipts. The installed approvals read currently omits this field and omits
+expiry after consumption; do not invent either. Register the new kind for
+piece-only consumption before advertising the tool, so a body cannot consume
+the Yes without enabling its lease.
+
+Remaining gates include actual approval filing/activation and owner UI, box
+capability reporting and physical command admission/receipts, result retrieval,
+the shared CLI/MCP surface, and isolated native-harness/app verification. The
+foundation tests use fake approvals and OS identities; no real host command,
+sudo policy or production lease is enabled by them.
