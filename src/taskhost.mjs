@@ -1,5 +1,6 @@
 // A raw task keeps its allocated house, box, requirements and saved-state slot. Only its execution moves
 // through delivery and the common body host; this is not a second model runner or a placement workaround.
+import { createHash } from 'node:crypto';
 import { StateError, load, update } from './state.mjs';
 import { down, isHostHouse, up } from './control.mjs';
 import { bodyPrincipal, loadConv } from './delivery.mjs';
@@ -49,8 +50,22 @@ function ownTask(env, caller) {
   return h;
 }
 
+/** A deterministic script may hand just its model portion to the same allocated-house runtime. */
+export async function bootstrapScriptTask(env, caller, q = {}, o = {}) {
+  ownTask(env, caller);
+  if (typeof q.brief !== 'string' || !q.brief.trim() || q.brief.length > 200_000) fail('a script brief is nonempty text, at most 200000 characters');
+  return bootstrapTask(env, caller, { ...o, scriptBrief: q.brief });
+}
+
 export async function bootstrapTask(env, caller, o = {}) {
   let h = ownTask(env, caller);
+  const scriptHash = o.scriptBrief === undefined ? null : createHash('sha256').update(o.scriptBrief).digest('hex');
+  // A lost response may replay the same operation; it cannot swap the model task or rerun the script itself.
+  update(env, s => {
+    const current = s.houses[h.id];
+    if ((current.job?.scriptHash && current.job.scriptHash !== scriptHash) || (current.job && !current.job.scriptHash && scriptHash)) fail('this house already bootstrapped a different task', 409);
+    if (scriptHash) current.job ??= { house: h.id, created: h.created || new Date().toISOString(), scriptHash };
+  });
   // Only the entrypoint, before a body exists, gets the boot key. A lost bootstrap response can be retried
   // until the first authenticated body-sync trades it; it never exposes an established host's key.
   const host = registerTaskHost(env, h.agent, h.id, o);
@@ -66,6 +81,7 @@ export async function bootstrapTask(env, caller, o = {}) {
     const task = JSON.parse(h.task);
     if (typeof task?.prompt === 'string') { brief = task.prompt; if (typeof task.model === 'string') prefer = task.model; }
   } catch { /* plain prompt */ }
+  if (o.scriptBrief !== undefined) brief = o.scriptBrief;
   const result = await spawnCall(env, { kind: 'owner' }, { agent: h.agent, brief, prefer, title: `Task ${h.id}` }, {
     ...o, now: () => new Date(h.job.created), detach: o.detach ?? true,
     taskJob: { house: h.id, actsFor: h.taskActsFor ?? { owner: false, people: [], unknown: true }, ...h.taskSource },

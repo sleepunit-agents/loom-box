@@ -62,7 +62,7 @@
 //   loom runtime deliver tick [--conversation <cv>] | deliver run [--every <ms>] | deliver list [--json]
 //   loom runtime deliver stale-runs [--json]   read only: open runs whose body is gone (t-1958)
 //   loom runtime deliver resume|dismiss <cv>   a conversation paused as a loop (loops.mjs): start what waited, or drop it
-//   loom runtime task-host                                  in an already allocated raw-task house: common delivery
+//   loom runtime task-host [--brief-stdin]                  allocated raw task, or a script’s model brief: common delivery
 //   loom runtime session-host                               in a session house: keep its common body host alive
 //   loom runtime body-host [--piece <name>] --host-key <boot key>   in an agent's house, as its task: the bodies delivery asks for
 // Models and accounts (the owner's, on loom's machine):
@@ -596,7 +596,8 @@ async function main(argv, env) {
     case 'task-host': {
       if (!env.HOUSE_ID || !env.LOOM_URL || !env.LOOM_TOKEN_FILE) throw new Fail('task-host runs only in its allocated house');
       const call = pieceCall(env);
-      const boot = await call('task-bootstrap', {});
+      const script = rest.includes('--brief-stdin');
+      const boot = await call(script ? 'script-bootstrap' : 'task-bootstrap', script ? { brief: await readStdin() } : {});
       if (boot.error || !boot.hostKey) throw new Fail(boot.error || 'the runtime did not bootstrap this task');
       let result;
       await runBodyHost({ client: async (p, b) => {
