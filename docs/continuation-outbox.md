@@ -1,83 +1,70 @@
-# Continuation report delivery (integration in progress)
+# Continuation report delivery (draft integration)
 
-This branch supplies an internal capability/outbox state machine. It is deliberately
-exposed through holder-authenticated issue/enqueue/status API routes only.
-No clock binding, drain or CLI is enabled yet; issued grants cannot deliver. It does not authorize historical
-originConversation links, and does not fix originating-thread delivery by itself.
+The runtime issues an opaque capability only after the current holder proves its
+agent, key, session and house through the existing holderProblem boundary. The
+source snapshot comes from runtime state: principal, reset generation and fixed
+venue/place. Unknown principals are refused. Display-only originConversation
+links and historical wakes confer no authority; those need authenticated adoption.
 
-The delivery layer must prove the current source holder with holderProblem (agent,
-key, session and house) before issue. It constructs snapshots from loadConv and
-principalOf, including actsFor.reset (null before a reset), resetPending and the
-immutable conversation venue/place. No snapshot fields come from request JSON.
-An unknown steering principal must be refused at this boundary.
+The clock stores the opaque handle on its created wake. Core accepts this field
+only from the authenticated clock. Runtime seals the exact firing and retains
+an admission snapshot only after successfully starting/resuming the child.
+Queued wakes and warm feeds grant nothing. Enqueue/status recover a binding from
+that sealed admission, so a runtime crash before binding is recoverable. There
+is no body-callable bind route, and a grant cannot bind a second firing or child.
 
-Clock admission must carry the opaque capability on a newly created wake. Trusted
-clock firing and runtime delivery bind the exact wake id, delivery id and admitted
-child run, once. A body cannot call bind. Retries of the same binding are harmless;
-reuse for another wake, delivery or run is refused. Do not use display provenance
-as evidence of a binding. Existing wakes need authenticated issuer adoption.
+The child proves its own current holder to enqueue/read receipts. A report id
+with different text is a conflict. The child supplies no target or snapshot.
+`loom runtime continuation issue` returns a handle; `enqueue --handle cont-…
+--id final` reads text from stdin (or `--text`); `status --handle cont-… --id final`
+returns pending, delivered or failed. Each takes `--conversation cv-…` or uses
+its body's current conversation. The CLI carries its key and harness session in
+the authenticated API body, never in argv. HTTP holder refusals remain failures.
 
-Only the bound child's proven current holder may enqueue or read its receipts. Its
-caller supplies a report id and text, never a destination. Retrying an id with new
-text is a conflict. Do not expose the store to direct house filesystem access.
+The delivery tick drains the sealed outbox. Immediately before each attempt it
+checks source and child principal/reset/target, and the exact child run. A new
+source holder is allowed. Each post uses its stable runtime-generated ref, fixed
+target, bound child run and enqueue-time harness annotation (`on`, when switched).
+It never borrows the source holder's key. All payload fields stay stable across
+retries, even if the source changes holder or the child switches harness.
 
-The delivery tick must drain with current runtime-owned snapshots of both source
-and child. Source holder changes are allowed; source reset, principal or target
-changes invalidate authority. Child run changes invalidate authority. Post uses a
-fixed runtime-issued stable ref and the original destination. It must not call send
-with a borrowed run key. The existing normal send holder gate stays unchanged.
+Only core's adapter is enabled: other adapters lack the required idempotency
+contract and fail permanently without executing their send command. Core's
+companion PR675 binds ref to agent/place/text/run/normalized on in one transaction
+with the encrypted reply. An exact retry returns the original sequence; another
+payload receives HTTP409. A confirmed nonempty core receipt is delivered;
+accepted/pending alone is not. HTTP4xx are permanent except 408/425/429; transport
+loss and 5xx retry. Explicit permanent adapter refusals also stop.
 
-Core's adapter must first accept continuation refs under runtime authentication,
-store their exact payload hash and return the original receipt on exact retries.
-The outbox's test adapter models that required contract; it is not proof that core
-currently implements it. Crash after acceptance before receipt then safely retries.
-Other venue adapters need an equivalent idempotency contract before enabling this
-path for them. Never infer success from accepted/pending alone.
+Every outbox mutation seals its record, fsyncs a private temporary file, renames
+it and fsyncs its directory. The next retry time is persisted before network I/O.
+A SIGKILL after acceptance leaves pending state and retries the identical ref.
+There is no collection/expiry policy yet.
 
-Records, including report text, are sealed using runtime's sealer. Every mutation
-writes a fresh private file, fsyncs it, renames it, and fsyncs the directory. A
-pending attempt records its next retry before I/O. Receipts distinguish pending,
-delivered and permanently failed. Transient errors retry after restart; permanent
-adapter refusals stop. Outbox collection/expiry is still an integration decision.
+## Evidence and remaining gates
 
-Holder-authenticated issuance and receipt/enqueue endpoints now construct snapshots
-from runtime state and enforce the normal holder/session/house proof.
+Focused tests cover holder/session/house proof, admission binding, warm-feed and
+rebind rejection, reset changes, exact payload stability, error classification,
+CLI forwarding and actual tick delivery. The tick regression fails on ac8f31d
+with zero posts instead of one.
 
-Remaining work before merge or installation: exact trusted clock admission and firing binding;
-core stable-ref dedup and negative authorization tests; tick/CLI wiring; actual
-process-kill crash tests against core; full integration and installed live proof.
-This branch must remain draft until those pieces exist together.
+For the cross-repository crash bench, build companion core PR675, then run:
 
-Core companion draft: https://github.com/sleepunit-agents/loom/pull/675
-(`feat/continuation-receipts`, e6f001f2d31e61f0c07831cdd0260b421471ccb2).
-It accepts continuation-<64 hex> under the existing runtime-only adapter route,
-returns the original sequence on identical payload, and returns HTTP409 on
-reference reuse with a different agent/place/text/run/normalized on. The stored
-HMAC and encrypted reply share an IMMEDIATE transaction. Focused core HTTP auth,
-conflict/race and real SIGKILL-after-acceptance tests pass; this is NOT runtime
-outbox integration proof. Both PRs stay draft.
+```
+CONTINUATION_CORE=/path/to/loom node --test test/continuation-core.integration.test.mjs
+```
 
-The next integration must carry the opaque handle in an explicit clock-created
-wake field through core's strict delivery parser (which currently rejects unknown
-keys) and core-authenticated source identity. Do not extend body bind APIs or trust
-principal --wake's local environment as a new authenticated clock boundary. Bind
-only the exact admitted child run; a queued wake is not an admitted run, and a warm
-feed must not silently rebind a grant. Preserve PR145 native admission ownership.
-Keep every emitted core payload field stable across retries. Classify core's
-HTTP409 payload conflict and permanent 4xx refusals rather than catching them as
-transient forever. Non-core adapters remain disabled without equivalent dedup.
+It uses the actual core HTTP auth/adapter/database and two fresh runtime drain
+processes. A proxy withholds the first receipt after core commits, the first
+runtime receives SIGKILL, and the restarted runtime recovers the original receipt
+with one stored reply. Borrowed session and reset-after-queue negatives cannot
+reach that HTTP adapter. It uses a fake harness and test sealer, and does not
+exercise the actual clock process or core-to-runtime piece dispatch. Without the
+companion checkout the test explicitly skips.
 
-Clock/admission checkpoint: companion clock accepts `wake in/at --continuation
-cont-…`, stores only `{handle,wake}`, and forwards it under its piece token.
-Core's strict parser accepts exactly those two fields on a scheduled wake and
-refuses every non-clock caller. Runtime seals the clock firing with its exact
-delivery id. Only a successful start/resume commit retains the admission snapshot
-(run, principal, reset and target); queued deliveries and warm feeds cannot bind.
-The child's holder-authenticated enqueue/status lazily binds from that admission,
-so a crash between admission and binding is recoverable without a body bind API.
-
-Still draft: the clock's existing remove-before-post fire flow is not a durable
-firing journal. A process kill there can lose the wake or regenerate a different
-payload. Prove and fix clock recovery before shipping, alongside tick/CLI,
-permanent adapter refusal classification and actual runtime-outbox process-kill
-proof. No merge/install or full-route delivery claim follows from these tests.
+All three PRs remain draft (runtime148, core675, clock24). Before merge/install:
+prove the complete authenticated clock→core→runtime route and its negatives,
+including the clock's durable firing journal; complete exact-head CI and resolve
+core's Node22 history failure with its owner; review collection/expiry; then
+coordinate installation and live delivery proof. Preserve PR145 native admission
+ownership. No installed or historical-thread delivery is claimed here.

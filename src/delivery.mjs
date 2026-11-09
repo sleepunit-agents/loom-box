@@ -2349,6 +2349,7 @@ export async function tick(env, o = {}, only, mem = new Map()) {
       if (h && !c.control) { c.control = { id: randomBytes(12).toString('hex'), at: d.now().toISOString(), state: c.body || c.starting ? 'pending' : 'held', house: h.house }; saveConv(env, c); }
     }
   });
+  await drainContinuations(env, o);
   discardPass(env, d);
   if (only) await drain(env, only, d, mem);
   const now = d.now().getTime();
@@ -2652,8 +2653,23 @@ export function continuationSnapshot(env, conversation) {
     resetPending: !!c.resetPending, target: { venue: c.venue, place: c.place } };
 }
 
-// Internal holder boundary; API wiring remains disabled until trusted clock binding
-// and core idempotency are integrated. There is deliberately no body-callable bind.
+// Only core currently promises transactional stable-ref deduplication. Resolve
+// the registry afresh, but never rebuild payload fields from a newer body/run.
+export async function drainContinuations(env, o = {}) {
+  const d = depsOf(env, o);
+  const outbox = continuationOutbox({ dir: join(deliveryDir(env), 'continuations'), sealer: d.sealer, now: () => d.now().getTime() });
+  await outbox.drain({ current: (cv) => continuationSnapshot(env, cv), post: async (p) => {
+    // A registry outage is transient; venueOf intentionally swallows that
+    // distinction for ordinary sends, so do not use it for durable reports.
+    const venue = (await d.venues())?.[p.target.venue];
+    if (!coreAdapted(venue)) return { permanent: true, reason: 'continuation destination has no core idempotency contract' };
+    const answer = await d.core.comms({ op: 'post', place: p.target.place, agent: p.agent, ref: p.ref,
+      text: p.text, run: p.run, ...(p.on ? { on: p.on } : {}) });
+    return answer?.ok === true && typeof answer.id === 'string' && answer.id.length > 0 ? { ok: true, posted: true } : answer;
+  } });
+}
+
+// Holder boundary. There is deliberately no body-callable bind.
 export function continuationCall(env, { action, conversation, key, session, handle, id, text }, o = {}) {
   const d = depsOf(env, o), c = loadConv(env, conversation);
   if (!c) throw new StateError('no continuation conversation here', 403);
@@ -2673,7 +2689,11 @@ export function continuationCall(env, { action, conversation, key, session, hand
     const firing = JSON.parse(d.sealer.open(Buffer.from(a.sealed, 'base64')).toString('utf8'));
     if (firing.handle === handle) outbox.bind(handle, { wake: firing.wake, delivery: firing.delivery }, source, a.child);
   }
-  if (action === 'enqueue') return outbox.enqueue(handle, child, source, { id, text });
+  if (action === 'enqueue') {
+    let rec = null;
+    try { rec = c.body ? readBody(env, c.body) : null; } catch { /* no harness annotation */ }
+    return outbox.enqueue(handle, child, source, { id, text }, { on: rec?.switched ? harnessWords(rec.harness) : null });
+  }
   return outbox.status(handle, child, id, source);
 }
 

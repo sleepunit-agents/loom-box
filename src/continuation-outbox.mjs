@@ -80,7 +80,7 @@ export function continuationOutbox({ dir, sealer, now = Date.now }) {
         return { bound: true };
       });
     },
-    enqueue(handle, provenChild, currentSource, { id, text }) {
+    enqueue(handle, provenChild, currentSource, { id, text }, { on = null } = {}) {
       if (!report.test(id ?? '') || typeof text !== 'string' || !text.length || text.length > 40000) throw new StateError('a report needs an id and 1-40000 characters', 400);
       const child = snapshot(provenChild);
       return locked(() => {
@@ -93,7 +93,7 @@ export function continuationOutbox({ dir, sealer, now = Date.now }) {
           if (prior.hash !== digest(text)) throw new StateError('report id already used for different text', 409);
           return receipt(prior);
         }
-        const row = { ref, grant: gid, child, text, hash: digest(text), state: 'pending', attempts: 0, next: now() };
+        const row = { ref, grant: gid, child, on, text, hash: digest(text), state: 'pending', attempts: 0, next: now() };
         save(rid, row);
         return receipt(row);
       });
@@ -125,8 +125,14 @@ export function continuationOutbox({ dir, sealer, now = Date.now }) {
         });
         if (!row) continue;
         let result;
-        try { result = await post({ ref: row.ref, text: row.text, target: row.target, agent: row.agent, conversation: row.conversation }); }
-        catch { continue; } // A crash/timeout after acceptance retries the same ref.
+        try { result = await post({ ref: row.ref, text: row.text, target: row.target, agent: row.agent, conversation: row.conversation, run: row.child.run, on: row.on ?? null }); }
+        catch (e) {
+          // Transport loss, throttling and request timeout can recover. A payload
+          // conflict or other permanent client refusal cannot recover by replay.
+          if (e?.status >= 400 && e.status < 500 && ![408, 425, 429].includes(e.status))
+            result = { permanent: true, reason: e.message };
+          else continue;
+        } // A crash/timeout after acceptance retries the same ref.
         locked(() => {
           const r = read(id);
           if (r.state !== 'pending') return;

@@ -65,3 +65,35 @@ test('only an admitted clock child binds; queued, forged and warm-fed handles gr
   writeFileSync(join(deliveryDir(w.env), 'conversations', `${child.conversation}.json`), JSON.stringify(changed));
   assert.throws(() => continuationCall(w.env, { ...report, id: 'after-reset' }, w.o), /bound/);
 });
+
+test('delivery tick drains admitted reports only through core and seals run/on payload', async () => {
+  const { handOverWake, tick } = await import('../src/delivery.mjs');
+  const w = world();
+  w.env.LOOM_HOME = join(w.env.HOME, 'loom');
+  mkdirSync(w.env.LOOM_HOME, { recursive: true });
+  writeFileSync(join(w.env.LOOM_HOME, 'household.json'), JSON.stringify({ members: [{ person: 'jonathan', agents: '*' }] }));
+  const source = await deliver(w.env, w.msg('drain-source', 'owner', { source: 'loom', venue: 'loom', from: { kind: 'person', slug: 'jonathan' } }), w.o);
+  const args = (cv) => { const c = loadConv(w.env, cv); return { conversation: cv, key: w.runner.envs[c.body.split(':')[1]].LOOM_BODY_KEY, session: w.sessionFor(cv) }; };
+  const grant = continuationCall(w.env, { ...args(source.conversation), action: 'issue' }, w.o);
+  const firing = w.msg('wake:w-abcdef', 'follow up', { source: 'clock', venue: 'wake', id: 'w-abcdef', kind: 'wake', from: { kind: 'schedule' }, continuation: { handle: grant.handle, wake: 'w-abcdef' } });
+  handOverWake(w.env, { agent: 'art', place: firing.place, id: firing.id, for: 'owner' });
+  const child = await deliver(w.env, firing, w.o);
+  const q = { ...args(child.conversation), handle: grant.handle, id: 'final' };
+  const enqueued = continuationCall(w.env, { ...q, action: 'enqueue', text: 'actual tick report' }, w.o);
+  const calls = [];
+  const o = { ...w.o, venues: async () => ({ loom: { adapter: 'core', kind: 'live' }, wake: { kind: 'scheduled' } }), core: { ...w.o.core, comms: async (p) => { calls.push(p); return { ok: true, id: '1' }; } } };
+  await tick(w.env, o);
+  const sent = calls.filter(p => p.ref === enqueued.ref);
+  assert.equal(sent.length, 1);
+  assert.deepEqual(sent[0], { op: 'post', place: loadConv(w.env, source.conversation).place, agent: 'art', ref: enqueued.ref, text: 'actual tick report', run: loadConv(w.env, child.conversation).run });
+  assert.equal(continuationCall(w.env, { ...q, action: 'status' }, w.o).state, 'delivered');
+  await tick(w.env, o);
+  assert.equal(calls.filter(p => p.ref === enqueued.ref).length, 1);
+  continuationCall(w.env, { ...q, action: 'enqueue', id: 'non-core', text: 'must stay private' }, w.o);
+  await tick(w.env, { ...o, venues: () => { throw new Error('registry offline'); } });
+  assert.equal(continuationCall(w.env, { ...q, action: 'status', id: 'non-core' }, w.o).state, 'pending');
+  w.clock.advance(3600001);
+  await tick(w.env, { ...o, venues: () => ({ loom: { kind: 'live', send: ['must-not-run'] } }) });
+  assert.equal(continuationCall(w.env, { ...q, action: 'status', id: 'non-core' }, w.o).state, 'failed');
+  assert.equal(calls.filter(p => p.ref?.startsWith('continuation-')).length, 1);
+});

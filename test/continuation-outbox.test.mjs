@@ -108,3 +108,26 @@ test('new source holder is allowed; accepted alone stays pending; permanent refu
   w.advance();
   await w.reload().drain({ current: w.current, post: () => assert.fail('permanent failure retried') });
 });
+
+for (const status of [400, 401, 403, 404, 409, 422, 408, 425, 429, 503]) {
+  test(`HTTP ${status} is classified durably across restart`, async (t) => {
+    const w = world(t); bind(w); queue(w);
+    await w.out.drain({ current: w.current, post: async () => { throw Object.assign(new Error(`refused ${status}`), { status }); } });
+    const permanent = status < 500 && ![408, 425, 429].includes(status);
+    assert.equal(w.reload().status(w.handle, w.child, 'final').state, permanent ? 'failed' : 'pending');
+    w.advance(); let calls = 0;
+    await w.reload().drain({ current: w.current, post: async () => { calls++; return { ok: true, posted: true }; } });
+    assert.equal(calls, permanent ? 0 : 1);
+  });
+}
+
+test('run and harness annotation are sealed at enqueue across holder and harness changes', async (t) => {
+  const w = world(t); bind(w);
+  w.out.enqueue(w.handle, w.child, w.source, { id: 'final', text: 'done' }, { on: 'Codex' });
+  let first;
+  await w.out.drain({ current: w.current, post: async (p) => { first = p; throw new Error('receipt lost'); } });
+  w.source.run = 'run-cccccccccccc';
+  w.out.enqueue(w.handle, w.child, w.source, { id: 'final', text: 'done' }, { on: 'Claude' });
+  w.advance();
+  await w.reload().drain({ current: w.current, post: async (p) => { assert.deepEqual(p, first); assert.equal(p.run, w.child.run); assert.equal(p.on, 'Codex'); return { ok: true, posted: true }; } });
+});
