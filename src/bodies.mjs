@@ -71,7 +71,7 @@ export async function startBody(env, { agent, brief: b, venue, venueKind, prefer
   const d = deps(env, o);
   const text = brief(b);
   if (typeof venue !== 'string' || !/^[a-z][a-z0-9-]{0,39}$/.test(venue)) fail('which venue (wake, relay, session, discord, slack, …)');
-  const pick = await resolveFor(env, { agent, venue, venueKind, prefer, avoid, accounts: d.accounts, now: d.now(), fetchImpl: d.fetchImpl });
+  const pick = await resolveFor(env, { agent, venue, venueKind, prefer, avoid, conversation: o.bodyEnv?.LOOM_BODY_CONVERSATION, accounts: d.accounts, now: d.now(), fetchImpl: d.fetchImpl });
   const runner = d.runner(pick.harness, !!local);
   // A Comms thread's body (venue loom) has its tool steps read as activity cards (activity.mjs); no other venue's is.
   // Whose house (t-1952): a house's runner seats it there; a local one has no houses.

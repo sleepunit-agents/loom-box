@@ -83,6 +83,38 @@ export function modelsOf(s) {
 
 export function readModels(env) { return modelsOf(load(env)); }
 
+/** Owner-selected harnesses: a thread overrides its agent; Auto inherits the agent. */
+export function modelChoiceOf(s, agent, conversation) {
+  const choices = s.modelChoices ?? {};
+  const agentChoice = choices.agents?.[agent] ?? 'auto';
+  const thread = conversation && choices.conversations?.[conversation];
+  const threadChoice = thread?.agent === agent ? thread.harness : 'auto';
+  return { agent, ...(conversation ? { conversation } : {}), agentChoice, threadChoice,
+    effective: threadChoice !== 'auto' ? threadChoice : agentChoice };
+}
+export const readModelChoice = (env, agent, conversation) => modelChoiceOf(load(env), agent, conversation);
+
+/** Low-level owner mutation; API/page callers verify the actual conversation and owner first. */
+export function setModelChoice(env, { agent, conversation, harness }) {
+  if (!AGENT.test(agent ?? '')) fail('which agent');
+  if (!['auto', ...HARNESSES].includes(harness)) fail('model choice is auto, claude or codex');
+  if (conversation !== undefined && !/^cv-[0-9a-f]{12}$/.test(conversation)) fail('which conversation');
+  return update(env, (s) => {
+    const available = modelsOf(s);
+    const allowed = available.agents[agent]?.allow;
+    if (harness !== 'auto' && !available.list.some((m) => m.harness === harness && (!allowed?.length || allowed.includes(m.id)))) fail(`no allowed ${harness} model for ${agent}`);
+    const c = s.modelChoices ??= { agents: {}, conversations: {} };
+    if (conversation) {
+      if (harness === 'auto') delete c.conversations[conversation];
+      else c.conversations[conversation] = { agent, harness };
+    } else {
+      if (harness === 'auto') delete c.agents[agent];
+      else c.agents[agent] = harness;
+    }
+    return modelChoiceOf(s, agent, conversation);
+  });
+}
+
 /** The owner sets the list, an agent's settings, or both. */
 export function setModels(env, { list, agent, allow, prefer }) {
   return update(env, (s) => {
@@ -255,7 +287,7 @@ export async function fetchScorecards(env, { kind, since, fetchImpl = fetch } = 
 }
 
 /** Resolve with what the runtime has: its list (only `harness`'s models, if named), the agent's settings, the accounts provider, loom's scorecards. */
-export async function resolveFor(env, { agent, venue, venueKind: told, prefer = [], harness, avoid = [], accounts, now = new Date(), fetchImpl } = {}) {
+export async function resolveFor(env, { agent, venue, venueKind: told, prefer = [], harness, conversation, avoid = [], accounts, now = new Date(), fetchImpl } = {}) {
   if (!AGENT.test(agent ?? '')) fail('which agent');
   const kind = venueKind(venue, told);
   const { list: all, agents } = readModels(env);
@@ -267,7 +299,17 @@ export async function resolveFor(env, { agent, venue, venueKind: told, prefer = 
   try { listed = accounts.kind === 'none' ? null : accounts.list(); } catch { listed = null; }
   const since = sinceDay(now);
   const cards = await fetchScorecards(env, { kind, since, fetchImpl });
-  const r = resolveModel({ agent, kind, models: list, all, settings: agents[agent] ?? {}, accounts: listed, scorecards: cards.rows, prefer, since, avoid, now: now.getTime() });
+  const choice = readModelChoice(env, agent, conversation).effective;
+  const settings = agents[agent] ?? {};
+  const resolve = (models, universe, order) => resolveModel({ agent, kind, models, all: universe, settings, accounts: listed, scorecards: cards.rows, prefer: order, since, avoid, now: now.getTime() });
+  let r;
+  if (!harness && choice !== 'auto') {
+    const wanted = all.filter((m) => m.harness === choice);
+    try { r = resolve(wanted, wanted, prefer); }
+    catch (e) { if (!(e instanceof StateError && e.status === 409)) throw e; }
+    if (!r) r = resolve(list, all, [...wanted.map((m) => m.id), ...prefer]);
+    r.why.unshift(`owner preference: ${choice}${conversation ? ' for this conversation' : ''}`);
+  } else r = resolve(list, all, prefer);
   if (cards.error) r.why.push(cards.error);
   return r;
 }

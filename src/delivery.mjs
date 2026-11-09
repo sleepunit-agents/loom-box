@@ -83,7 +83,7 @@ import { accountsFrom, accountsOfRecord } from './accounts.mjs';
 import { endBody, readBody, resumeBody, startBody } from './bodies.mjs';
 import { CoreError, coreFrom } from './core.mjs';
 import { HouseRunner, releaseEmptySeatHouses, seatRoom, sweepSeats, sweepTransfers } from './houserunner.mjs';
-import { venueKind as kindOf, resolveFor } from './models.mjs';
+import { venueKind as kindOf, resolveFor, readModelChoice, setModelChoice } from './models.mjs';
 import { pieceName, setting } from './piece.mjs';
 import { dropSession, packSession, restoreFiles } from './sessions.mjs';
 import { ageSealer } from './sealed.mjs';
@@ -91,7 +91,7 @@ import { RulesError, gatesWords, policyOf, rulesFor, sameRules, tierOf } from '.
 import { gatesOf } from './gates.mjs';
 import { loomStore } from './store.mjs';
 import { namesFiles } from './briefs.mjs';
-import { AGENT_NAME, StateError, alive, withLock } from './state.mjs';
+import { AGENT_NAME, StateError, alive, withLock, load } from './state.mjs';
 import { RUNS_KEPT, causeOf, detectLoop, textHash } from './loops.mjs';
 import { STUCK_AFTER_MIN, asData, taskComment, taskOf } from './stuck.mjs';
 import { CODEX_WONT, codexDeny, runnerFor } from './runners.mjs';
@@ -1797,17 +1797,33 @@ async function execute(env, op, d, mem) {
  *   - else a fresh body, avoiding that harness (and the one a refused turn ran on): the slot is parked as its home,
  *     unless it already has one on another harness (then it's dropped: the digests carry it).
  */
+/** A page/API owner's choice, scoped to the real conversation and owned agent. */
+export function ownerModelChoice(env, caller, { agent, conversation, harness } = {}) {
+  if (caller?.kind !== 'owner') throw new StateError('model choice is the agent owner’s', 403);
+  if (agent !== undefined && (typeof agent !== 'string' || !AGENT_NAME.test(agent))) throw new StateError('which agent', 400);
+  if (conversation !== undefined && (typeof conversation !== 'string' || !/^cv-[0-9a-f]{12}$/.test(conversation))) throw new StateError('which conversation', 400);
+  const c = conversation ? loadConv(env, conversation) : null;
+  if (conversation && !c) throw new StateError('no such conversation', 404);
+  if (c && agent && agent !== c.agent) throw new StateError('conversation belongs to another agent', 403);
+  agent = c?.agent ?? agent;
+  if (caller?.kind !== 'owner' || (Array.isArray(caller.agents) && !caller.agents.includes(agent))) throw new StateError('model choice is the agent owner’s', 403);
+  if (!load(env).agents?.[agent]) throw new StateError('no such agent', 404);
+  return harness === undefined ? readModelChoice(env, agent, conversation) : setModelChoice(env, { agent, conversation, harness });
+}
+
 async function routeOf(env, c0, op, rules, d, cant = []) {
   const now = d.now().getTime();
   const avoid = [...new Set([...(c0.quota?.from ? [c0.quota.from] : []), ...cant])];
   const home = c0.home && Date.parse(c0.home.until) > now && existsSync(homeFile(env, op.cv)) ? c0.home : null;
-  if (home && sameRules(home.rules ?? {}, rules) && carriesSession(home.rules?.seat, rules.seat, op.cv) && !avoid.includes(home.harness)
+  const choice = readModelChoice(env, c0.agent, c0.conversation).effective;
+  const chosen = choice !== 'auto' && !avoid.includes(choice) && await roomOn(env, c0, choice, d) ? choice : null;
+  if (home && (!chosen || home.harness === chosen) && sameRules(home.rules ?? {}, rules) && carriesSession(home.rules?.seat, rules.seat, op.cv) && !avoid.includes(home.harness)
     && !(Number.isFinite(c0.fallback?.until) && now < c0.fallback.until * 1000) && await roomOn(env, c0, home.harness, d)) {
     return { how: 'resume', file: homeFile(env, op.cv), home: true };
   }
   if (op.type !== 'resume') return { how: 'start', avoid };
   const h = op.slot?.harness;
-  if (h && !avoid.includes(h) && await roomOn(env, c0, h, d)) return { how: 'resume', file: slotFile(env, op.cv) };
+  if (h && (!chosen || h === chosen) && !avoid.includes(h) && await roomOn(env, c0, h, d)) return { how: 'resume', file: slotFile(env, op.cv) };
   // Its harness has no room: the slot is kept as its home (to go back to), and a fresh body starts elsewhere.
   locked(env, () => {
     const c = loadConv(env, op.cv);
@@ -1818,7 +1834,7 @@ async function routeOf(env, c0, op, rules, d, cant = []) {
     delete c.slot;
     saveConv(env, c);
   });
-  return { how: 'start', avoid: [...new Set([...avoid, ...(h ? [h] : [])])], parked: true };
+  return { how: 'start', avoid: [...new Set([...avoid, ...(h ? [h] : [])])], parked: true, ...(chosen && chosen !== h ? { chosen } : {}) };
 }
 
 /** What a run is told of a switch, a return home, or a refused turn's retry: runtime notes, ahead of its messages. */
@@ -1827,6 +1843,8 @@ function quotaNotes(c0, way) {
   const note = (text) => out.push({ key: `quota-${randomBytes(6).toString('hex')}`, note: true, kind: 'message', text });
   if (way.home) {
     note(`(The runtime: this conversation went on without this session for a while: since ${c0.fallback?.since ?? c0.home?.saved ?? 'then'}, it was answered on ${harnessWords(c0.fallback?.to ?? 'another harness')}, because this harness's account was out of quota. Read conversation({id: "${c0.conversation}"}) (its digests) for what was said meanwhile before you answer.)`);
+  } else if (way.chosen) {
+    note(`(The runtime: the owner selected ${harnessWords(way.chosen)} for this conversation. Read its digests before continuing.)`);
   } else if (way.how === 'start' && (way.parked || c0.home || way.avoid?.length)) {
     const from = c0.quota?.from ?? c0.home?.harness ?? way.avoid?.[0];
     note(`(The runtime: this conversation's session ran on ${harnessWords(from)}, whose account is out of quota for now, so you're answering on another harness. Its digests carry what was said: read them first.)`);
