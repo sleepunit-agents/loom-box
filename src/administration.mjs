@@ -432,17 +432,19 @@ function workerFor(scope, worker) {
 /** Polling is observation, never a command claim or permission to spawn. */
 export function administrationWork(env, caller, o = {}) {
   const boxId = administrativeBox(env, caller);
+  const initial = read(env);
+  if (!Object.values(initial.operations).some(r => initial.scopes[r.scope]?.box === boxId)) return [];
   return transaction(env, o, (j, at) => {
     for (const s of Object.values(j.scopes)) if (s.box === boxId) refresh(env, j, s, at);
     return Object.values(j.operations).filter(r => j.scopes[r.scope].box === boxId &&
-      ['queued', 'claimed', 'admitted', 'stop-requested', 'unknown'].includes(r.state)).map(publicOperation);
+      ['queued', 'claimed', 'admitted', 'stop-requested', 'unknown'].includes(r.state)).map(r => ({ ...publicOperation(r), identity: j.scopes[r.scope].identity }));
   });
 }
 
 /** One immutable worker owns the command claim. A dead or unobserved worker
  * never grants a different worker the right to replay a possibly effective command. */
 export function claimAdministration(env, caller, q, o = {}) {
-  const boxId = administrativeBox(env, caller), sealer = o.sealer ?? ageSealer(env, deliveryDir(env));
+  const boxId = administrativeBox(env, caller, { reporting: true }), sealer = o.sealer ?? ageSealer(env, deliveryDir(env));
   return transaction(env, o, (j, at) => {
     const { r, s } = operationFor(j, q.operation, boxId);
     const worker = workerFor(s, q.worker);
@@ -466,7 +468,7 @@ export function claimAdministration(env, caller, q, o = {}) {
     refresh(env, j, s, ready);
     if (s.state !== 'active') return { claimed: false, operation: publicOperation(r) };
     r.state = 'claimed';
-    return { claimed: true, operation: publicOperation(r), worker, ticket, payload, until: s.activation.until };
+    return { claimed: true, operation: publicOperation(r), worker, ticket, payload, conversation: s.conversation, principalOwner: s.authority.principal.owner === true, until: s.activation.until };
   });
 }
 

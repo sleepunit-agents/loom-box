@@ -46,7 +46,7 @@ export async function reconcileAdministration({ root, id, client, env = process.
     }
     if (answer.operation?.id !== id || executionHash(answer.worker) !== executionHash(record.worker) ||
         !/^[0-9a-f]{64}$/.test(answer.ticket ?? '') || executionHash(answer.payload) !== answer.operation.payloadHash) throw Error('administrative claim response changed its command or worker');
-    claim = { worker: record.worker, ticket: answer.ticket, payload: answer.payload };
+    claim = { worker: record.worker, ticket: answer.ticket, payload: answer.payload, conversation: answer.conversation, principalOwner: answer.principalOwner === true };
     const sealed = sealer.seal(Buffer.from(JSON.stringify(claim))).toString('base64');
     record = tx(r => {
       if (r.state !== 'claiming') return r;
@@ -68,7 +68,7 @@ export async function reconcileAdministration({ root, id, client, env = process.
     observed = observeAdministrationExecution({ root: executions, id, env });
   } else {
     observed = await runAdministrationCommand({ root: executions, id, env, supervisor, payload: claim.payload,
-      execution: { host: own.host, uid: own.uid, gid: own.gid },
+      execution: { host: own.host, uid: own.uid, gid: own.gid, conversation: claim.conversation, principalOwner: claim.principalOwner === true },
       admit: request => {
         if (executionHash(request.worker) !== executionHash(record.worker)) throw Error('administrative admission moved to another worker');
         return call('administration-admit', proof);

@@ -56,9 +56,9 @@ function fakeLoom(env, fx, boxId) {
   const srv = createServer((req, res) => {
     let body = '';
     req.on('data', (d) => { body += d; });
-    req.on('end', () => {
+    req.on('end', async () => {
       const path = req.url.replace(/^\/api\/box\//, '');
-      const r = api(env, fx, { caller: { kind: 'piece', subject: boxId }, path, body: body ? JSON.parse(body) : {} });
+      const r = await api(env, fx, { caller: { kind: 'piece', subject: boxId }, path, body: body ? JSON.parse(body) : {} });
       res.writeHead(r.status, { 'content-type': 'application/json' });
       res.end(JSON.stringify(r.body));
     });

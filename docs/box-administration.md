@@ -124,77 +124,53 @@ change recorded in the work, not a child process the runtime claims it can revok
 
 ## Implementation status
 
-This remains an undeployed draft. The private bounded journal, immutable scope,
-sealed command queue, and recovery of approval activation are implemented. The
-existing delivery tick files and activates approvals without a model turn.
-Approval cards include every scope field as ASCII JSON; oversized cards refuse
-rather than truncate authority. The box owner's page lists existing access and
-provides a named-owner revoke action. Other members receive no private scope
-inventory. These changes depend on approvals PR 16 for decision provenance,
-piece-only consumption and recovery of original terminal filing answers.
+This remains an undeployed draft. Durable scopes, sealed command inputs/results,
+approval filing and activation from the existing delivery tick, and named-owner
+status/revocation controls are implemented. Cards include the complete scope as
+ASCII JSON; oversized requests refuse rather than truncate authority.
+Approvals PR 16 supplies authenticated decision provenance, piece-only spending
+and recovery of the original terminal filing answer.
 
-Controller operations bind each command to one worker's host, PID, boot,
-process birth and UID/GID. Claim tickets, command inputs and results are sealed.
-Admission rechecks authority, identity and expiry; retries preserve the same
-worker and immutable result. Unknown outcomes cannot authorize replay.
+The normal box loop now reports validated execution capabilities and reconciles
+administrative work alongside houses. It uses a fixed credential-free helper
+for both runner and root jobs; root provisioning uses existing noninteractive
+sudo, without changing policy. The parent retains its box credential and
+forwards only operation-bound administration RPC. The same bridge supports the
+async in-process local client and the existing authenticated remote client.
+A stable enrollment namespace and private inventories recover unacknowledged
+uploads after a daemon restart. Dispatch is bounded to two administrative jobs.
 
-The physical worker requires the systemd manager for its actual OS identity: a
-user manager for an ordinary worker, the system manager for a root worker. An
-unavailable manager refuses before execution. A stable per-operation unit is recorded before submit.
-The gate is its main process, with control-group cleanup, a bounded runtime and
-stop grace. The lease is obtained before unit creation, so its startup time
-consumes the lease. No command input is released before the actual gate identity
-and one-shot execution marker are durable. A conservative monotonic deadline
-also applies inside the gate. Commands receive a minimal environment without
-broker credentials. The gate seals bounded output independently of the worker;
-a separate sealing phase protects the only result writer from worker escalation.
+Report-only boxes advertise no execution capability; a fresh one performs no
+privilege probes. A box with prior work may still recover its receipts.
+Insecure channels dispatch nothing. Unsupported or malformed capabilities
+clear the stored profile, so an unsupported identity cannot be offered by
+accident. Manager availability also checks the ordinary worker's actual UID/GID;
+root units explicitly preserve their approved primary group.
 
-The direct-process adapter is explicitly a test fixture, never an automatic
-production fallback. Default tests exercise that fixture plus refusal of an
-unavailable manager. On a Linux host with a user manager, run
-`npm run test:administration-supervisor` for real transient-unit checks.
-Verified boundaries include worker SIGKILL with result recovery, gate SIGKILL
-with descendant cleanup and unknown/no replay, targeted revoke, actual
-controller admission/results around a harmless command, and running lease
-expiry after worker death. A short lease can correctly expire during startup;
-the tests report that refusal separately from the running-expiry proof.
+Claims bind one worker's host, PID, boot, process birth and UID/GID. A
+pre-admission cancellation fences a late admission, while admitted work is
+observed rather than transferred. Worker identity persists before claim;
+ticket and payload are sealed before admission. Only an exact result hash
+acknowledgement marks an upload complete, and local receipts are retained.
 
-Remaining release gates are authenticated box capability/transport wiring,
-root worker provisioning by the box runner, result upload acknowledgements, the
-shared CLI/MCP surface, and actual owner-app/both-native-harness verification.
-No production approval is answered by these fixtures, no administrator
-capability is advertised, and no sudo policy is broadened.
+The physical gate runs as the main process of an owned systemd unit with
+control-group cleanup and bounded runtime. It records identity and a one-shot
+marker before command input, and enforces a conservative monotonic lease.
+The gate seals bounded output independently, surviving worker death.
+Commands receive the runtime Node and trusted host PATH through a small
+environment allowlist, without broker credentials or valid native body keys.
+Owner permission context comes from the authenticated scope; non-owner
+commands carry an unproved context instead of defaulting to owner permissions.
 
-Authenticated box API routes now expose work observation, claim, admission,
-stop observation and result completion. Caller roles come from the existing
-piece API transport; a body cannot supply its own box identity. An isolated
-HTTP test through the existing remote client verifies wrong-role and other-box
-refusal, observation without admission, revocation, and an intentionally lost
-completion response followed by immutable-result reconciliation.
+Default tests cover refusal and a direct-process fixture. On a supported host,
+`npm run test:administration-supervisor` exercises real user/system units and
+the normal loop. Verified boundaries include worker/gate SIGKILL, descendant
+cleanup, actual running lease expiry after worker death, lost and mismatched
+acknowledgements, stale-claim cancellation, and normal runner/root provisioning.
+The normal-loop restart test verifies two upload attempts and exactly one
+command effect. Production owner approvals are never answered by these fixtures.
 
-The OS worker matrix also passes as root, using the host's existing
-noninteractive sudo only to run isolated temporary-directory tests. Root
-workers use the system manager and the same gate/journal implementation.
-This does not yet provision root workers from the box daemon or advertise root
-support to requesting bodies; that remains part of capability wiring.
-
-The durable box client now saves its worker identity before claiming, and seals
-the claim ticket and immutable payload before admission. Results remain local
-until the controller acknowledges the exact output hash; a mismatched or lost
-reply leaves the same result available for retry from another process. Calls
-use explicit abortable observation deadlines.
-
-A stale claim can be cancelled only through a journal compare-and-set before
-admission. Cancellation fences a late admission; an admission that won first
-cannot be called absent or transferred to a new worker. The client uses this
-boundary to retire dead unadmitted claimants rather than replay their commands.
-Known non-execution is explicit in status.
-
-HTTP/client tests run actual harmless commands through the same physical
-executor, including claim reply loss, completion reply loss, a mismatched
-acknowledgement, fresh-process upload, and stale-worker cancellation. This
-matrix also passes with real user-manager and root-system-manager units.
-The library is not yet connected to the normal box poll/reconciliation loop:
-worker provisioning, truthful capability reporting and shared body tools remain.
-Local input/result receipts are retained; automatic retention cleanup is not
-enabled.
+Remaining release gates are the shared body CLI/MCP surface, actual owner-app
+and both-native-harness verification, review and compatible release pins.
+Automatic receipt retention cleanup is not enabled. No administrative
+capability is deployed by this draft.

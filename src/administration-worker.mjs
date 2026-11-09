@@ -115,7 +115,9 @@ export async function runAdministrationCommand({ root, id, payload, execution, e
       checking = true;
       try { if (await isStopped()) stop(); } catch { /* the independent lease deadline still holds */ }
       finally { checking = false; }
-    }, 100);
+    // Revocation remains bounded without rewriting the controller's durable
+    // journal ten times per second for every running host command.
+    }, 1000);
     await closed;
     return observeAdministrationExecution({ root, id, env });
   } catch (error) {

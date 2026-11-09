@@ -15,8 +15,19 @@ function call(env, args) {
   return spawnSync('systemctl', [...managerArgs(), ...args], { env: managerEnv(env), encoding: 'utf8', timeout: 3000, maxBuffer: 64 * 1024 });
 }
 export function administrationSupervisorAvailable(env = process.env) {
+  if (process.getuid() !== process.geteuid() || process.getgid() !== process.getegid()) return false;
   const r = call(env, ['show', '--property=Version', '--value']);
-  return r.status === 0 && /^\d/.test(r.stdout.trim());
+  if (r.status !== 0 || !/^\d/.test(r.stdout.trim())) return false;
+  if (process.getuid() !== 0) {
+    const manager = spawnSync('busctl', ['--user', 'call', 'org.freedesktop.DBus', '/org/freedesktop/DBus', 'org.freedesktop.DBus', 'GetConnectionUnixProcessID', 's', 'org.freedesktop.systemd1'], { env: managerEnv(env), encoding: 'utf8', timeout: 3000 });
+    const pid = /^u ([1-9][0-9]*)\s*$/.exec(manager.stdout ?? '')?.[1];
+    if (manager.status !== 0 || !pid) return false;
+    try {
+      const status = readFileSync('/proc/' + pid + '/status', 'utf8');
+      if (Number(/^Uid:\s+\d+\s+(\d+)/m.exec(status)?.[1]) !== process.getuid() || Number(/^Gid:\s+\d+\s+(\d+)/m.exec(status)?.[1]) !== process.getgid()) return false;
+    } catch { return false; }
+  }
+  return true;
 }
 export function administrationUnitState(env, unit) {
   if (!/^loom-admin-[0-9a-f]{32}-[0-9a-f]{12}\.service$/.test(unit ?? '')) throw Error('invalid administrative supervisor unit');
@@ -40,6 +51,7 @@ export async function startAdministrationUnit({ root, id, env, gateEnv, boot, ma
   executionTransaction(root, id, r => ({ ...r, supervisor: { kind: managerKind(), unit } }));
   const args = [...managerArgs(), '--quiet', '--pipe', '--wait', '--unit=' + unit,
     '--property=Type=exec', '--property=KillMode=control-group', '--property=TimeoutStopSec=2s',
+    ...(process.getuid() === 0 ? ['--property=Group=' + process.getgid()] : []),
     '--property=RuntimeMaxSec=' + Math.ceil((maxMs + 30_000) / 1000) + 's',
     ...Object.entries(gateEnv).filter(([, value]) => typeof value === 'string').map(([key, value]) => '--setenv=' + key + '=' + value),
     process.execPath, fileURLToPath(new URL('./administration-command-gate.mjs', import.meta.url))];

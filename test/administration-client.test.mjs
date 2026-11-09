@@ -14,9 +14,9 @@ import { reconcileAdministration, readAdministrationRequest } from '../src/admin
 import { requestAdministration, administrationApproval, advanceAdministration, queueAdministration, administrationResult } from '../src/administration.mjs';
 import { launchWorkerIdentity } from '../src/launch-journal.mjs';
 
-async function fixture(t, lose) {
+async function fixture(t, lose, from = { kind: 'person', slug: 'owner' }, principalOutput = false) {
   const w = world(), caller = { kind: 'agent', agent: 'art' }, root = join(w.env.HOME, 'box-client');
-  const { conversation } = await deliver(w.env, w.msg('dm:admin-client', 'Isolated client test', { from: { kind: 'person', slug: 'owner' } }), w.o);
+  const { conversation } = await deliver(w.env, w.msg('dm:admin-client', 'Isolated client test', { from }), w.o);
   const c = loadConv(w.env, conversation), raw = c.body.split(':')[1];
   const proof = { conversation, key: w.runner.envs[raw].LOOM_BODY_KEY, session: w.sessionFor(conversation) };
   const identity = process.getuid() === 0 ? 'root' : 'runner';
@@ -26,11 +26,11 @@ async function fixture(t, lose) {
   administrationApproval(w.env, scope.id, 'a-12345678', w.o);
   const journal = () => JSON.parse(readFileSync(join(w.env.LOOM_BOX_DATA, 'administration/journal.json'), 'utf8'));
   let used = false;
-  await advanceAdministration(w.env, scope.id, { check: async () => ({ id: 'a-12345678', agent: 'art', for: 'owner', kind: 'box-administration', target: journal().scopes[scope.id].target,
+  await advanceAdministration(w.env, scope.id, { check: async () => ({ id: 'a-12345678', agent: 'art', for: scope.principal.owner ? 'owner' : scope.principal.for ?? '?', kind: 'box-administration', target: journal().scopes[scope.id].target,
     state: used ? 'used' : 'allowed', decidedBy: 'owner', expires: new Date(w.clock.now().getTime() + 60000).toISOString() }), use: async () => { used = true; } }, w.o);
   const marker = join(w.env.HOME, 'effects');
   const op = queueAdministration(w.env, caller, { ...proof, scope: scope.id, requestKey: 'client-command', intent: 'Inspect the isolated fixture',
-    argv: [process.execPath, '-e', 'require("fs").appendFileSync(' + JSON.stringify(marker) + ',"one\\n");process.stdout.write("private-client-output")'], stdin: 'private-client-input', timeoutMs: 10000 }, w.o);
+    argv: [process.execPath, '-e', 'require("fs").appendFileSync(' + JSON.stringify(marker) + ',"one\\n");process.stdout.write(' + (principalOutput ? 'JSON.stringify({principal:process.env.APPROVALS_LOCAL_PRINCIPAL,conversation:process.env.LOOM_BODY_CONVERSATION,key:process.env.LOOM_BODY_KEY})' : '"private-client-output"') + ')'], stdin: 'private-client-input', timeoutMs: 10000 }, w.o);
   const calls = {};
   let lost = false;
   const server = createServer(async (req, res) => {
@@ -104,6 +104,14 @@ test('a dead claimant is fenced before admission instead of transferring its com
   assert.equal(w.journal().operations[w.op.id].admission, undefined);
   assert.equal(w.calls['administration-admit'], undefined);
   assert.equal(existsSync(w.marker), false);
+});
+
+test('host execution does not turn an approved non-owner principal into the owner', async t => {
+  const w = await fixture(t, undefined, { kind: 'agent', id: 'mark' }, true);
+  assert.equal((await reconcileAdministration({ ...w.config, client: w.client })).state, 'uploaded');
+  const context = JSON.parse(administrationResult(w.env, w.caller, { ...w.proof, operation: w.op.id }, w.o).result.stdout);
+  assert.equal(context.principal, 'unknown'); assert.equal(context.conversation, w.proof.conversation);
+  assert.equal(context.key, 'non-native-administration-command'); assert.notEqual(context.key, w.proof.key);
 });
 
 test('a mismatched completion acknowledgement retains the local result for an exact retry', async t => {

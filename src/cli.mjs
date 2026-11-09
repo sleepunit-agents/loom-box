@@ -132,7 +132,7 @@ function ownerAtTerminal(prompt, want) {
     return !!want && line.trim() === want;
   } finally { closeSync(fd); }
 }
-import { addBox, api, down, list, remoteDown, remoteUp, revokeBox, setAgent, setBoxWatch, setPrimary, up } from './control.mjs';
+import { addBox, api, inProcessBoxClient, down, list, remoteDown, remoteUp, revokeBox, setAgent, setBoxWatch, setPrimary, up } from './control.mjs';
 import { watchOf } from './watch.mjs';
 import { healthWords } from './health.mjs';
 import { realEffects } from './effects.mjs';
@@ -448,7 +448,7 @@ async function main(argv, env) {
         // loom's own machine: the control plane in-process, as its own box.
         const effects = realEffects(env);
         const caller = { kind: 'piece', subject: localBoxName(env) };
-        client = { async call(path, body) { const r = api(env, effects, { caller, path, body }); if (r.status !== 200) throw new BoxError(`${path}: ${r.body.error}`); return r.body; } };
+        client = inProcessBoxClient(env, effects, caller);
         loomUrl = setting(env, 'LOOM_URL') || 'http://127.0.0.1:8787/mcp';
       } else {
         const c = loadConfig(env);

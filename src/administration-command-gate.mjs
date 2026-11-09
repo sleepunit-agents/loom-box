@@ -1,7 +1,7 @@
 // One private child gate per administrative operation. This helper stays alive
 // to seal its result even if the box worker disappears.
 import { spawn } from 'node:child_process';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { executionHash, executionTransaction, monotonicMs, readExecution } from './administration-execution-journal.mjs';
 import { launchWorkerIdentity } from './launch-journal.mjs';
 import { ageSealer } from './sealed.mjs';
@@ -59,7 +59,14 @@ try {
   child = spawn(payload.argv[0], payload.argv.slice(1), {
     cwd: payload.cwd, detached: true, stdio: ['pipe', 'pipe', 'pipe'],
     // No box token, run key, broker credentials or model environment reaches the command.
-    env: { PATH: '/usr/local/bin:/usr/bin:/bin', HOME: process.env.HOME, LANG: 'C.UTF-8' },
+    env: { PATH: dirname(process.execPath) + ':' + (process.env.PATH || '/usr/local/bin:/usr/bin:/bin'), HOME: process.env.HOME, LANG: 'C.UTF-8',
+      APPROVALS_LOCAL_PRINCIPAL: r.execution.principalOwner === true ? 'owner' : 'unknown',
+      // A non-owner command must not become an owner CLI call merely because
+      // it runs on the host. No real native body proof is lent to a command.
+      ...(r.execution.principalOwner === true ? {} : {
+        LOOM_BODY_CONVERSATION: /^cv-[0-9a-f]{12}$/.test(r.execution.conversation ?? '') ? r.execution.conversation : 'cv-000000000000',
+        LOOM_BODY_KEY: 'non-native-administration-command',
+      }) },
   });
   child.stdin.on('error', () => {});
   child.stdout.on('data', capture(output)); child.stderr.on('data', capture(errors));

@@ -37,7 +37,7 @@ test('a physical command runs once, receives stdin, and seals input and output w
   q.payload.argv = [process.execPath, '-e', 'const f=require("fs");let s="";process.stdin.on("data",b=>s+=b);process.stdin.on("end",()=>{f.appendFileSync(' + JSON.stringify(marker) + ',"one\\n");process.stdout.write(s+":"+String(process.env.LOOM_FAKE_BOX_TOKEN));});'];
   q.payload.stdin = 'private-command-stdin';
   const result = await runAdministrationCommand(q);
-  assert.equal(result.result.outcome, 'exited'); assert.equal(result.result.exitCode, 0);
+  assert.equal(result.result.outcome, 'exited', result.result.stderr); assert.equal(result.result.exitCode, 0);
   assert.equal(result.result.stdout, 'private-command-stdin:undefined');
   const again = await runAdministrationCommand(q);
   assert.deepEqual(again, result); assert.equal(readFileSync(marker, 'utf8'), 'one\n');
