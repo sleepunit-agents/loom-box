@@ -1446,6 +1446,9 @@ export function api(env, effects, { caller, path, body }) {
       if (caller.kind !== 'agent') fail('body-sync is a body host\'s, in its agent\'s house', 403);
       return import('./houserunner.mjs').then((m) => ({ status: 200, body: m.bodySync(env, caller, b) })).catch(apiError);
     }
+    if (path === 'conversation-origins') {
+      return import('./delivery.mjs').then((m) => ({ status: 200, body: m.conversationOrigins(env, caller, b) })).catch(apiError);
+    }
     if (path === 'model-choice') {
       return import('./delivery.mjs').then((m) => ({ status: 200, body: m.ownerModelChoice(env, caller, b) })).catch(apiError);
     }

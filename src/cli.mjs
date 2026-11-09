@@ -578,7 +578,7 @@ async function main(argv, env) {
         const who = flag(rest, '--for');
         const id = flag(rest, '--id');
         if (!AGENT_NAME.test(agent ?? '') || typeof place !== 'string' || !place || place.length > 200) throw new Fail('principal --wake --agent <agent> --place <place> --id <delivery id> --for owner|<slug>|-');
-        try { handOverWake(env, { agent, place, id, for: who }); } catch (e) { throw new Fail(e.message); }
+        try { handOverWake(env, { agent, place, id, for: who, origin: flag(rest, '--origin-conversation') }); } catch (e) { throw new Fail(e.message); }
         out({ ok: true });
         return;
       }
