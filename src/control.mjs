@@ -1,3 +1,4 @@
+import { checkLoginExpiry } from './login-expiry.mjs';
 // The control plane's half of the runtime (loom docs/specs/runtime.md): what
 // each caller may ask of it. It runs on the machine loom runs on, reached
 // through loom's piece API (POST /api/<piece>/<path>: box, or runtime under its new name) by boxes and bodies, and
@@ -458,6 +459,7 @@ const SESSION_KEY = /^(box:[^\0]{1,120}|house:h-\d{1,9})$/;
 
 export function poll(env, effects, caller, body = {}) {
   const out = pollState(env, effects, caller, body);
+  try { checkLoginExpiry(env, Date.parse(now(effects)), effects.alert ? { alert: effects.alert } : {}); } catch { /* next poll */ }
   // What the box says of itself (keeping-watch.md): its boot, and its units' sample when it has a new one. Kept apart
   // from the state file, and never fails the poll.
   const { boot, units, health } = body ?? {};
@@ -1120,6 +1122,7 @@ function harnessReport(v) {
     const r = v[h];
     if (!r || typeof r !== 'object') continue;
     out[h] = { installed: !!r.installed, loggedIn: !!r.installed && !!r.loggedIn,
+      ...(typeof r.loginExpiresAt === 'string' && Number.isFinite(Date.parse(r.loginExpiresAt)) ? { loginExpiresAt: new Date(r.loginExpiresAt).toISOString() } : {}),
       ...(word(r.method) ? { method: word(r.method) } : {}), ...(word(r.plan) ? { plan: word(r.plan) } : {}),
       ...(typeof r.account === 'string' && ACCOUNT.test(r.account) ? { account: r.account } : {}),
       ...(typeof r.unhealthy === 'string' ? { unhealthy: r.unhealthy.replace(/[^\x20-\x7e]/g, '?').slice(0, 120) } : {}) };
@@ -1153,7 +1156,7 @@ function usageReport(v, nowS) {
 }
 
 /** A box's harnesses, for a list: states only. */
-export const harnessesOf = (b, full = false) => Object.fromEntries(Object.entries(b.harnesses ?? {}).map(([k, v]) => [k, { installed: !!v.installed, loggedIn: !!v.loggedIn, ...(v.unhealthy ? { unhealthy: v.unhealthy } : {}), ...(v.method ? { method: v.method } : {}), ...(v.plan ? { plan: v.plan } : {}), ...(full && v.account ? { account: v.account } : {}), ...(v.checked ? { checked: v.checked } : {}) }]));
+export const harnessesOf = (b, full = false) => Object.fromEntries(Object.entries(b.harnesses ?? {}).map(([k, v]) => [k, { installed: !!v.installed, loggedIn: !!v.loggedIn, ...(v.unhealthy ? { unhealthy: v.unhealthy } : {}), ...(v.method ? { method: v.method } : {}), ...(v.plan ? { plan: v.plan } : {}), ...(full && v.account ? { account: v.account } : {}), ...(v.loginExpiresAt ? { loginExpiresAt: v.loginExpiresAt } : {}), ...(v.checked ? { checked: v.checked } : {}) }]));
 
 /** A box's list of the logins its runner has: {run, ids}, checked; null from a box that doesn't say. */
 function runningReport(v) {

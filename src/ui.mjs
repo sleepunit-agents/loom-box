@@ -1,3 +1,4 @@
+import { checkLoginExpiry, loginExpiryAsks, loginExpiry } from './login-expiry.mjs';
 // The Boxes tab on loom's page (loom docs/extensions.md, "The page"): the
 // boxes, what each has and may host, the houses asked for, and the owner's
 // controls. Data only; loom renders it. Every action is the owner's (the page
@@ -209,6 +210,7 @@ function sessionsSection(env, s, view, only) {
 
 export function manifest(env, nowMs = Date.now(), o = {}) {
   const s = load(env);
+  try { checkLoginExpiry(env, nowMs, o.alert ? { alert: o.alert } : {}); } catch { /* next manifest */ }
   // The now board (nowboard.mjs): a bridge actually down is an alert (one restarting, by the runtime's own doing, is
   // not), one back from an outage an FYI, and what each agent's bodies are in is its doing.
   let board = { asks: [], agents: {}, notices: [] };
@@ -239,7 +241,7 @@ export function manifest(env, nowMs = Date.now(), o = {}) {
     // ...and a person a body proposes for an agent's gates (gates.mjs): the household owner's to allow or deny.
     // ...and a conversation paused as a loop (delivery.mjs, loops.mjs): Resume or Dismiss.
     // ...and a unit failing or crash-looping on a box (watch.mjs, keeping-watch.md).
-    asks: [...pendingJoins(s).slice(0, 5).map((j) => joinAsk(j)), ...permsAsks(env), ...board.asks, ...loopAsksOf(env), ...watchAsksOf(env, s)],
+    asks: [...pendingJoins(s).slice(0, 5).map((j) => joinAsk(j)), ...permsAsks(env), ...board.asks, ...loopAsksOf(env), ...watchAsksOf(env, s), ...loginExpiryAsks(s, nowMs)],
     agents: reports,
     // A delivery the runtime gave up on (its body never started, after its retries): the owner hears of it.
     // ...and a relay thread between agents that's run long today: a heads-up, never a stop (relay.mjs).
@@ -1014,7 +1016,6 @@ const loginWords = (st) => [st?.method, st?.plan ? st.plan.charAt(0).toUpperCase
  * in (how, and its plan; "Log in again"), or not (a "Log in" button; after a failed try, why, and "Try again").
  */
 function harnessPanelRows(s, b, nowMs, may = true) {
-  void nowMs;
   const rows = [];
   for (const [h, def] of Object.entries(LOGIN_HARNESSES)) {
     const st = b.harnesses?.[h];
@@ -1025,6 +1026,13 @@ function harnessPanelRows(s, b, nowMs, may = true) {
     const under = mine.find((l) => !['done', 'failed'].includes(l.state));
     const start = { action: 'login-start', fields: { box: b.id, harness: h } };
     if (under) { rows.push({ label: def.label, value: 'Signing in…', tone: 'warn', ...(may ? { page: `login/${under.id}` } : {}) }); continue; }
+    const expiry = loginExpiry(st, nowMs);
+    if (st.loggedIn && expiry) {
+      rows.push({ label: def.label, value: expiry.expired ? 'Login expired' : `Login ends in ${expiry.days} day${expiry.days === 1 ? '' : 's'}`,
+        detail: [loginWords(st), 'Renew this login to keep running'].filter(Boolean).join('; '), tone: expiry.severity,
+        ...(may ? { act: { ...start, label: 'Renew login', tone: 'primary' } } : {}) });
+      continue;
+    }
     if (st.loggedIn) { rows.push({ label: def.label, value: 'Logged in', ...(loginWords(st) ? { detail: loginWords(st) } : {}), tone: 'ok', ...(may ? { act: { ...start, label: 'Log in again' } } : {}) }); continue; }
     const lastFail = mine[0]?.state === 'failed' ? mine[0] : null;
     rows.push({ label: def.label, value: 'Not logged in', detail: lastFail ? `Last try: ${lastFail.error}` : 'Installed; nobody has signed in yet', tone: lastFail ? 'bad' : 'warn',

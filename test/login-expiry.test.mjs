@@ -1,0 +1,55 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { join } from 'node:path';
+import { scratch } from './scratch.mjs';
+import { parseClaudeStatus } from '../src/logins.mjs';
+import { api, harnessesOf } from '../src/control.mjs';
+import { load, update } from '../src/state.mjs';
+import { manifest, page, act } from '../src/ui.mjs';
+import { checkLoginExpiry, loginExpiry } from '../src/login-expiry.mjs';
+const DAY = 86400000, now = Date.parse('2026-11-09T00:00:00Z');
+const status = (days) => ({ installed: true, loggedIn: true, method: 'claude.ai', loginExpiresAt: new Date(now + days * DAY).toISOString() });
+const setup = () => ({ HOME: scratch('loom-expiry-'), LOOM_BOX_HOME: join(scratch('loom-expiry-state-'), 'state'), LOOM_BOX_LOCAL_NAME: 'local' });
+test('CLI status carries only the hard login expiry, never access-token expiry or credentials', () => {
+  const out = parseClaudeStatus(JSON.stringify({ loggedIn: true, loginExpiresAt: status(9).loginExpiresAt, expiresAt: now + 1000, refreshToken: 'private' }));
+  assert.equal(out.loginExpiresAt, status(9).loginExpiresAt);
+  assert.equal(JSON.stringify(out).includes('private'), false);
+  assert.equal(parseClaudeStatus('{"loggedIn":true,"loginExpiresAt":"bad"}').loginExpiresAt, undefined);
+  for (const st of [{}, { ...status(1), loggedIn: false }, { ...status(1), loginExpiresAt: null }, status(11)]) assert.equal(loginExpiry(st, now), null);
+  assert.equal(loginExpiry(status(10), now).severity, 'warn');
+  assert.equal(loginExpiry(status(3), now).severity, 'bad');
+  assert.equal(loginExpiry(status(-1), now).expired, true);
+});
+test('poll preserves deadline; Inbox and box offer renewal on exactly that box through the owner login flow', () => {
+  const env = setup(), alerts = [], fx = { now: () => new Date(now), alert: (_, a) => alerts.push(a) };
+  const r = api(env, fx, { caller: { kind: 'piece', subject: 'local' }, path: 'poll', body: { harnesses: { claude: status(9) } } });
+  assert.equal(r.status, 200, JSON.stringify(r));
+  assert.equal(harnessesOf(load(env).boxes.local).claude.loginExpiresAt, status(9).loginExpiresAt);
+  const m = manifest(env, now, { alert: (_, a) => alerts.push(a) });
+  const ask = m.asks.find((x) => x.label === 'Renew login');
+  assert.equal(ask.page, 'box/local');
+  assert.match(ask.text, /Claude login on local ends in 9 days/);
+  // Page time is wall-clock; use a wall-clock deadline for the row itself below.
+  update(env, (s) => { s.boxes.local.harnesses.claude = { ...status(1), loginExpiresAt: new Date(Date.now() + DAY).toISOString() }; });
+  const row = page(env, { path: 'box/local' }).sections.flatMap((s) => s.blocks).flatMap((b) => b.rows ?? []).find((r) => r.label === 'Claude');
+  assert.equal(row.act.label, 'Renew login');
+  assert.deepEqual(row.act.fields, { box: 'local', harness: 'claude' });
+  const result = act(env, fx, row.act);
+  assert.match(result.page, /^login\/l-/);
+  assert.equal(alerts.length, 1, 'poll and manifest do not double-alert');
+});
+test('warn once, remind daily, escalate at three days and expiry, clear after renewal; revoked boxes never alert', () => {
+  const env = setup(), alerts = [], o = { alert: (_, a) => alerts.push(a) };
+  update(env, (s) => { s.boxes.local.harnesses = { claude: status(9) }; });
+  assert.equal(checkLoginExpiry(env, now, o).length, 1);
+  assert.equal(checkLoginExpiry(env, now + 1000, o).length, 0);
+  assert.equal(checkLoginExpiry(env, now + DAY, o).length, 1);
+  assert.equal(checkLoginExpiry(env, now + 6 * DAY, o)[0].severity, 'bad');
+  assert.match(checkLoginExpiry(env, now + 9 * DAY, o)[0].summary, /has expired/);
+  update(env, (s) => { s.boxes.local.harnesses.claude = status(30); });
+  checkLoginExpiry(env, now, o);
+  assert.deepEqual(load(env).loginExpiryAlerts, {});
+  assert.equal(manifest(env, now, o).asks.some((x) => x.label === 'Renew login'), false);
+  update(env, (s) => { s.boxes.local.harnesses.claude = status(2); s.boxes.local.revoked = true; });
+  assert.equal(checkLoginExpiry(env, now, o).length, 0);
+});
