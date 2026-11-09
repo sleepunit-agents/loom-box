@@ -141,6 +141,7 @@ function keepHouseLaunchReceipt(env, record, receipt) {
     const id = bodyIdOf(record.house, receipt.id);
     if (!BODY_REF.test(id)) throw new RunnerError('house launch receipt has an invalid body id');
     record.state = 'ready';
+    record.input = receipt.inputConfirmed === true ? 'confirmed' : 'uncertain';
     record.body = { id, harness: record.harness, house: record.house, seat: record.seat,
       ...(record.model ? { model: record.model } : {}), ...(record.slot ? { slot: record.slot } : {}),
       ...(receipt.inputConfirmed !== true ? { inputUncertain: true } : {}) };
@@ -697,7 +698,7 @@ export class HouseRunner {
   acknowledgePreparedLaunch(handle) {
     return hostLocked(this.env, () => {
       const record = this.checkedLaunch(handle);
-      if (record.state !== 'ready') return false;
+      if (!['ready', 'refused'].includes(record.state)) return false;
       const h = this.host(record.agent, record.seat), x = houseRec(h, record.house);
       if (x?.req?.[record.rid]?.launch === record.id) {
         delete x.req[record.rid]; writeJson(hostFile(this.env, record.agent, record.seat), h);

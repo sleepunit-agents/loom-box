@@ -73,6 +73,7 @@
 // runs look like a crash loop (a failure streak, the same output again and again, relay ping-pong, start-stop churn)
 // is paused before its next body: what comes is recorded and waits; a note on the conversation says why, and the owner
 // gets one ask with Resume (what waited starts) and Dismiss (what waited is dropped). Nothing else is ever paused.
+import { houseLaunchHandle, readHouseLaunch } from './house-launch-journal.mjs';
 import { spawn as nodeSpawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
@@ -1552,7 +1553,7 @@ const savedBodyRules = (rules, at) => ({ guest: rules.guest, key: rules.key, den
 
 /** The one conversation commit for a native start or its recovered receipt.
  * The snapshot contains no prompt or raw sender key. */
-export function commitStartedConversation(env, op, { run, senderHash, bodyRules, way }, r, pending, at, localKey) {
+export function commitStartedConversation(env, op, { run, senderHash, bodyRules, way, houseLaunch }, r, pending, at, localKey) {
   const keys = op.msgs.map(x => x.key);
   return locked(env, () => {
     const c = loadConv(env, op.cv);
@@ -1569,6 +1570,7 @@ export function commitStartedConversation(env, op, { run, senderHash, bodyRules,
     }
     c.body = r.body;
     c.run = run;
+    if (houseLaunch) c.launchAcks = [...(c.launchAcks ?? []).filter(h => h.id !== houseLaunch.id), houseLaunch];
     // A local body speaks with its run's key as a house's body does: from the keys dir (bodyhost.mjs, keyFile), as
     // `claude --bg` gives every session its daemon's environment, not this launch's (t-1830).
     if (localKey !== undefined) keepKey(env, op.cv, localKey);
@@ -1609,6 +1611,21 @@ export function commitStartedConversation(env, op, { run, senderHash, bodyRules,
   });
 }
 
+function finishLaunchAck(env, cv, d) {
+  for (const handle of loadConv(env, cv)?.launchAcks ?? []) {
+    try {
+      if (!d.runner(handle.harness, false).acknowledgePreparedLaunch(handle)) continue;
+      locked(env, () => {
+        const c = loadConv(env, cv);
+        if (!c) return;
+        c.launchAcks = (c.launchAcks ?? []).filter(h => h.id !== handle.id);
+        if (!c.launchAcks.length) delete c.launchAcks;
+        saveConv(env, c);
+      });
+    } catch (error) { d.warn(`acknowledging ${cv}'s launch: ${error.message}`); }
+  }
+}
+
 function releasePreparedObserver(env, op, d, reason) {
   locked(env, () => {
     const c = loadConv(env, op.cv);
@@ -1625,9 +1642,28 @@ async function recoverPreparedStart(env, op, d) {
   const c = loadConv(env, op.cv), prepared = c?.starting?.prepared;
   if (!prepared || !ours(c, op)) return { pending: true };
   try {
-    let record = readLaunch(env, prepared.id);
-    if (!record || record.intentHash !== prepared.intentHash || record.harness !== prepared.harness) throw Error('the previous native admission receipt cannot be verified');
-    if (record.state === 'reserved') record = cancelReservedLaunch(env, prepared.id).record;
+    let record;
+    if (prepared.mode === 'house') {
+      record = readHouseLaunch(env, prepared.id);
+      if (!record && prepared.phase === 'warming' && !prepared.handle) {
+        // No handle was committed, so this registrar could not publish. Its
+        // OS identity has been proven gone before recovery claimed this op.
+        locked(env, () => { const current = loadConv(env, op.cv); if (ours(current, op)) { abandon(current, d.now().getTime()); saveConv(env, current); } });
+        return;
+      }
+      if (!record || record.harness !== prepared.harness || record.agent !== c.agent || record.seat !== (prepared.snapshot.bodyRules.seat ?? 'owner')) throw Error('the original house reservation cannot be verified');
+      const runner = d.runner(prepared.harness, false), handle = prepared.handle ?? houseLaunchHandle(record);
+      if (!prepared.handle && !['reserved', 'refused'].includes(record.state)) throw Error('the published house handle is missing from its prepared conversation');
+      if (record.state === 'reserved') runner.cancelPreparedLaunch(handle);
+      if (record.state === 'publishing') runner.publishPreparedLaunch(handle);
+      const observed = runner.observePreparedLaunch(handle);
+      record = { ...readHouseLaunch(env, prepared.id), ...(observed.state === 'ready' ? { body: observed.body } : {}) };
+      if (record.state === 'refused') runner.acknowledgePreparedLaunch(handle);
+    } else {
+      record = readLaunch(env, prepared.id);
+      if (!record || record.intentHash !== prepared.intentHash || record.harness !== prepared.harness) throw Error('the previous native admission receipt cannot be verified');
+      if (record.state === 'reserved') record = cancelReservedLaunch(env, prepared.id).record;
+    }
     if (record.state === 'refused') {
       locked(env, () => {
         const current = loadConv(env, op.cv);
@@ -1635,7 +1671,7 @@ async function recoverPreparedStart(env, op, d) {
       });
       return;
     }
-    if (record.state === 'admitted' && launchWorkerAlive(record.worker) === false) {
+    if (prepared.mode !== 'house' && record.state === 'admitted' && launchWorkerAlive(record.worker) === false) {
       const runner = prepared.recoveryConfiguration
         ? configuredNativeRunner(prepared.harness, prepared.recoveryConfiguration, env)
         : d.runner(prepared.harness, !!prepared.bodySpec.metadata.local);
@@ -1657,7 +1693,7 @@ async function recoverPreparedStart(env, op, d) {
       if (prepared.snapshot.way.file) rmSync(prepared.snapshot.way.file, { force: true });
     });
     if (!r) return { pending: true };
-    if (commitStartedConversation(env, op, prepared.snapshot, r, [], d.now().getTime())) noteHarness(env, c.agent, r, d);
+    if (commitStartedConversation(env, op, prepared.snapshot, r, [], d.now().getTime())) { finishLaunchAck(env, op.cv, d); noteHarness(env, c.agent, r, d); }
     else endAndForget(env, r, d);
   } catch (error) {
     d.warn(`recovering ${op.cv}: ${error.message}`);
@@ -1668,6 +1704,36 @@ async function recoverPreparedStart(env, op, d) {
 
 function preparedLaunch(env, op, d, context) {
   return async ({ runner, harness, options, resume, prepared }) => {
+    const attempt = createHash('sha256').update(op.mark + '\0' + harness).digest('hex').slice(0, 12);
+    const id = launchAttempt(op.cv, attempt);
+    if (runner.remote && typeof runner.prepareLaunch === 'function') {
+      locked(env, () => {
+        const c = loadConv(env, op.cv);
+        if (!ours(c, op) || c.control) throw Object.assign(Error('its launch was cancelled before reservation'), { nativeNotStarted: true });
+        c.starting.prepared = { mode: 'house', phase: 'warming', id, harness, bodySpec: prepared, snapshot: context.snapshot() };
+        saveConv(env, c);
+      });
+      let handle, published = false;
+      try {
+        handle = await runner.prepareLaunch(id, options, resume);
+        locked(env, () => {
+          const c = loadConv(env, op.cv);
+          if (!ours(c, op) || c.control) throw Object.assign(Error('its house launch was cancelled before publication'), { nativeNotStarted: true });
+          const snapshot = context.snapshot(); snapshot.houseLaunch = handle;
+          Object.assign(c.starting.prepared, { phase: 'prepared', handle, intentHash: handle.intentHash, snapshot });
+          saveConv(env, c);
+        });
+        runner.publishPreparedLaunch(handle); published = true;
+        return await runner.waitPreparedLaunch(handle);
+      } catch (error) {
+        try {
+          const record = readHouseLaunch(env, id);
+          if (!published && (!record || record.state === 'refused' || (record.state === 'reserved' && runner.cancelPreparedLaunch(handle ?? houseLaunchHandle(record))))) error.nativeNotStarted = true;
+          else if (!error.nativeNotStarted) error.nativePending = true;
+        } catch { error.nativePending = true; }
+        throw error;
+      }
+    }
     if (runner.remote) {
       // The remote protocol is migrated separately. Never mistake this path
       // for a start proven absent merely because its registrar disappears.
@@ -1681,8 +1747,7 @@ function preparedLaunch(env, op, d, context) {
     launchWorkerIdentity(); // refuse unsupported process identity before admission
     const configuration = nativeRunnerConfiguration(runner);
     if (!configuration && !d.injectedRunner) throw Object.assign(Error('the selected native runner cannot be supervised'), { nativeNotStarted: true });
-    const attempt = createHash('sha256').update(op.mark + '\0' + harness).digest('hex').slice(0, 12);
-    const id = launchAttempt(op.cv, attempt);
+
     const intent = { harness, options, ...(resume ? { resume } : {}), ...(configuration ? { configuration } : {}) };
     const intentHash = createHash('sha256').update(JSON.stringify(intent)).digest('hex');
     reserveLaunch(env, { id, harness, intentHash });
@@ -1901,15 +1966,20 @@ async function executeOne(env, op, d, mem) {
     const snapshot = launchSnapshot ?? { run, senderHash: keyHash(runKey).toString('hex'), bodyRules: savedBodyRules(rules, now()), way: { how: way.how, home: !!way.home } };
     const keep = commitStartedConversation(env, op, snapshot, r, pending, now(), local ? runKey : undefined);
     if (!keep) endAndForget(env, r, d);
-    else noteHarness(env, c0.agent, r, d);
+    else { finishLaunchAck(env, op.cv, d); noteHarness(env, c0.agent, r, d); }
   } catch (e) {
     // Once admission may have happened, any later storage/commit failure must
     // retain the prepared attempt for recovery rather than replay its input.
     const prepared = loadConv(env, op.cv)?.starting?.prepared;
-    if (prepared && !e.nativeNotStarted) {
+    if (prepared) {
       try {
-        const receipt = readLaunch(env, prepared.id);
-        if (!receipt || receipt.state !== 'refused') e.nativePending = true;
+        const receipt = prepared.mode === 'house' ? readHouseLaunch(env, prepared.id) : readLaunch(env, prepared.id);
+        if ((!receipt || receipt.state !== 'refused') && !e.nativeNotStarted) e.nativePending = true;
+        else if (prepared.mode === 'house' && receipt?.state === 'refused') {
+          const handle = prepared.handle ?? houseLaunchHandle(receipt);
+          locked(env, () => { const c = loadConv(env, op.cv); if (ours(c, op)) { c.launchAcks = [...(c.launchAcks ?? []).filter(h => h.id !== handle.id), handle]; saveConv(env, c); } });
+          finishLaunchAck(env, op.cv, d);
+        }
       } catch { e.nativePending = true; }
     }
     if (e.nativePending) {
@@ -2525,6 +2595,7 @@ export async function tick(env, o = {}, only, mem = new Map()) {
   try { sweepSeats(env); } catch (e) { d.warn(`sweeping seats: ${e.message}`); }
   const warm = limitsOf(env).warmIdleS * 1000;
   const stuckAfter = stuckAfterOf(env);
+  for (const c of listConvs(env)) if (c.launchAcks?.length) finishLaunchAck(env, c.conversation, d);
   const ops = [];
   locked(env, () => {
     for (const c of listConvs(env)) {

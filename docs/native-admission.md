@@ -125,10 +125,11 @@ An ordinary error string cannot prove that native admission never occurred.
 The explicit between-launch stopping handshake can provide that proof.
 
 A legacy identity receipt carries `inputUncertain`; it cannot acknowledge full
-input delivery. The new controller methods and their tests do not yet connect
-this protocol to delivery or add the native body-host fence. Those integrations,
-restart reconstruction, capability gating, acknowledgement recovery, and physical
-barrier recovery remain required before this draft can deploy.
+input delivery. Conversation delivery now commits prepared house state before
+warming and the exact handle before publication, then binds the original receipt
+through its common generation/run/sender commit. The native house fence and
+capability gate use the shared worker. Authenticated host restart reconstruction,
+legacy-start reconciliation and physical barrier recovery still gate deployment.
 
 ## Resume restoration inside admission
 
@@ -170,6 +171,14 @@ be retried after the bound request was removed. Terminal journal entries are
 never returned as launch requests again. Stop calls use the host's selected body
 environment, with its bootstrap task and host credential excluded.
 
-This does not yet migrate the conversation controller to the new remote methods,
-nor provide authenticated OS-process restart of the host. Those remain shipping
-requirements.
+The conversation controller persists pending acknowledgement handles atomically
+with its receipt commit. Cleanup runs outside the conversation lock, removes only
+acknowledged handles, and retries on subsequent ticks. Later generations append
+to the pending acknowledgements rather than replacing an older failed one.
+Confirmed refusals are acknowledged through the same cleanup path.
+
+Uncertain input binds enough identity to stop and collect the writer through the
+common retirement transaction before replaying the original sealed messages.
+Tests verify restoration of the original native context before another admission,
+and that owner interruption keeps the work and slot held without replay.
+Authenticated OS-process restart of the host remains a shipping requirement.
