@@ -15,7 +15,7 @@ import { addBox, assertBoxOwner, resolveBox, isBoxOwner, boxLabelOf, boxOfCall, 
 import { LOGIN_HARNESSES } from './logins.mjs';
 import { ownCommit, swapCommand } from './version.mjs';
 import { stateAccounts } from './accounts.mjs';
-import { COMMS_VENUE, HARNESS_WORDS, conversationJobs, ownerModelChoice, answerLoop, deliveryNotices, listConvs, loadConv, loopAsks, readFallbacks, resetCardProblem, resetPrincipal, runtimeAs, whenWords, workingConversations } from './delivery.mjs';
+import { COMMS_VENUE, HARNESS_WORDS, conversationJobs, ownerModelChoice, answerLoop, deliveryNotices, listConvs, loadConv, loopAsks, readFallbacks, resetCardProblem, resetPrincipal, runtimeAs, whenWords, workingConversations, nonIdleAgents } from './delivery.mjs';
 import { loomStore } from './store.mjs';
 import { asks as gateAsks, answer as gateAnswer, gatesPage, mergePeople, status as gatesStatus, proposals as gateProposals, PROPOSALS as PROPOSALS_COLLECTION } from './gates.mjs';
 import { GRANTS, KEY as GRANTS_KEY, GrantsError, addGrant, grantPathsOk, grantsProblem, householdOf, setPiece, setRelay, usableBy } from './grants.mjs';
@@ -209,6 +209,18 @@ function sessionsSection(env, s, view, only) {
   return blocks.length > 1 ? { id: 'sessions', title: 'Sessions', blocks } : null;
 }
 
+/** No agent-wide Idle claim while a source cannot account for its current activity. */
+export function idleUncertain(agent, s, busy, adapters, board) {
+  if (!board || board.activityUnknown?.includes(agent)) return true;
+  for (const v of Object.values(s.services ?? {})) {
+    if (v.agent !== agent || v.want !== 'up') continue;
+    if (BRIDGE.test(v.name) && !(adapters[v.name]?.mode === 'live' && adapters[v.name].agents?.includes(agent))) return true;
+    if (v.name === 'remote' && (s.houses[v.house]?.state !== 'running' || busy[`house:${v.house}`] !== false)) return true;
+  }
+  const r = s.remotes?.[agent];
+  return !!(r?.want === 'up' && (r.state !== 'running' || busy[`box:${r.name}`] !== false));
+}
+
 export function manifest(env, nowMs = Date.now(), o = {}) {
   const s = load(env);
   // One adapter snapshot serves both the legacy board and modern delivery ownership.
@@ -217,7 +229,7 @@ export function manifest(env, nowMs = Date.now(), o = {}) {
   try { checkLoginExpiry(env, nowMs, o.alert ? { alert: o.alert } : {}); } catch { /* next manifest */ }
   // The now board (nowboard.mjs): a bridge actually down is an alert (one restarting, by the runtime's own doing, is
   // not), one back from an outage an FYI, and what each agent's bodies are in is its doing.
-  let board = { asks: [], agents: {}, notices: [] };
+  let board = { asks: [], agents: {}, notices: [], activityUnknown: Object.keys(s.agents ?? {}) };
   try { board = nowManifest(env, nowMs / 1000, s, listConvs(env), adapters); } catch { /* a board that can't be read leaves the rest of the manifest */ }
   // An always-on box gone silent is dark (watch.mjs): loom reads this manifest each minute, so it's checked here too.
   try { checkDark(env, s, nowMs, o.alert ? { alert: o.alert } : {}); } catch { /* next time */ }
@@ -225,6 +237,14 @@ export function manifest(env, nowMs = Date.now(), o = {}) {
   try { convs = workingConversations(env); } catch { /* the delivery state unreadable this time: the cards say what else is known */ }
   const busy = { ...reportedBusy(s), ...sessionsBusy(join(stateDir(env), 'session-cpu.json')) };
   const reports = agentReports(s, Date.now(), busy, convs, adapters);
+  try {
+    const busyAgents = nonIdleAgents(env);
+    for (const a of Object.keys(s.agents ?? {})) {
+      if (idleUncertain(a, s, busy, adapters, board) || busyAgents.has(a) || reports[a]?.doing?.length || board.agents[a]?.length || ['unavailable', 'broken'].includes(reports[a]?.state)) continue;
+      reports[a] ??= { readings: [] };
+      reports[a].idle = { observedAt: new Date(nowMs).toISOString(), expiresAt: new Date(nowMs + 30000).toISOString() };
+    }
+  } catch { /* unreadable delivery is not proof of idle */ }
   for (const [a, doing] of Object.entries(board.agents)) reports[a] = { readings: [], ...reports[a], doing: [...(reports[a]?.doing ?? []), ...doing].slice(0, 8) };
   for (const [agent, jobs] of Object.entries(board.jobs ?? {})) {
     reports[agent] ??= { readings: [] };
@@ -671,10 +691,10 @@ export function agentReports(s, nowMs = Date.now(), busy = {}, convs = [], adapt
  * who may see it (loom src/ui/handler.ts atWorkFor), as it does a Comms thread's title (comms.md, rule 4).
  */
 export function convDoing(c) {
-  const since = Number.isFinite(c.since) ? { since: new Date(c.since).toISOString() } : {};
+  const since = { ...(Number.isFinite(c.since) ? { since: new Date(c.since).toISOString() } : {}), ...(c.activity ? { activity: c.activity } : {}) };
   if (c.venue === COMMS_VENUE) return { text: 'In a Comms thread', kind: 'talk', where: 'Comms', conversation: c.conversation, ...since };
   if (c.kind === 'scheduled') return { text: 'On a wake', kind: 'lane', conversation: c.conversation, ...since };
-  return { text: `Working · ${cap(c.venue)}`, kind: 'talk', conversation: c.conversation, ...since };
+  return { text: `Working · ${cap(c.venue)}`, kind: 'talk', ...(['discord', 'slack', 'signal'].includes(c.venue) ? { where: cap(c.venue) } : {}), conversation: c.conversation, ...since };
 }
 
 /** "12 days", "5 hours", "40 minutes": how long, for a box's uptime. */

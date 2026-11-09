@@ -130,7 +130,9 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
       if (status === 'idle' || status === 'ended') {
         try { final = r.final?.({ id, ...(b.slot ? { slot: b.slot } : {}) })?.slice(0, 40000); } catch { /* retry next sync */ }
       }
-      bodies[id] = { harness: b.harness, status, ...(slot?.session ? { session: slot.session } : {}), feedable: !!r.inbox, pending, ...(turn ? { turn } : {}), ...(typeof final === 'string' ? { final } : {}), ...(cards ? { cards } : {}) };
+      let tickerAction;
+      if (status === 'working') { try { tickerAction = r.tickerAction?.({ id, ...(b.slot ? { slot: b.slot } : {}) }); } catch { /* unavailable */ } }
+      bodies[id] = { ...(tickerAction ? { tickerAction, tickerObservedAt: new Date(now()).toISOString() } : {}), harness: b.harness, status, ...(slot?.session ? { session: slot.session } : {}), feedable: !!r.inbox, pending, ...(turn ? { turn } : {}), ...(typeof final === 'string' ? { final } : {}), ...(cards ? { cards } : {}) };
     }
     await reportUsage(turnsOver);
     const packed = {};

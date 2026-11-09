@@ -1,3 +1,4 @@
+import { ACTIONS, observation } from './ticker.mjs';
 // Bodies in the agent's own warm house (loom docs/specs/bridges.md, "Bodies before the one service"; agent-runtime.md,
 // section 5), ported from shuttle's bodies.py: delivery says who to wake and for what; a body host in the agent's
 // house (bodyhost.mjs) wakes them, with that house's harness, its login, its repo, its secrets and its agent's token.
@@ -340,6 +341,7 @@ function cleanReport(r) {
       harness: ['claude', 'codex'].includes(b.harness) ? b.harness : 'unknown',
       status: ['working', 'idle', 'ended', 'unknown'].includes(b.status) ? b.status : 'unknown',
       ...(typeof b.session === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{3,127}$/.test(b.session) ? { session: b.session } : {}),
+      ...(ACTIONS.has(b.tickerAction) && Number.isFinite(Date.parse(b.tickerObservedAt)) ? { tickerAction: b.tickerAction, tickerObservedAt: b.tickerObservedAt } : {}),
       feedable: b.feedable === true,
       pending: Array.isArray(b.pending) ? b.pending.filter((k) => typeof k === 'string' && k.length <= 64).slice(0, 64) : [],
       // A Comms thread's body's tool steps (activity.mjs), checked here as core will check them.
@@ -1063,6 +1065,11 @@ export class HouseRunner {
   }
 
   status(body) { return this.entry(body)?.status ?? 'unknown'; }
+  tickerObservation(body) {
+    const rec = this.rec(body), entry = this.entry(body);
+    if (entry?.status !== 'working') return null;
+    return observation(entry.tickerAction, entry.tickerObservedAt, this.now().getTime());
+  }
   /** A stale host report is not proof that a running house's body ended. */
   pending(body) {
     try {
