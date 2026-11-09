@@ -211,17 +211,20 @@ function sessionsSection(env, s, view, only) {
 
 export function manifest(env, nowMs = Date.now(), o = {}) {
   const s = load(env);
+  // One adapter snapshot serves both the legacy board and modern delivery ownership.
+  // Re-running both adapter CLIs could exceed core's three-second manifest deadline.
+  const adapters = adapterStatuses(env);
   try { checkLoginExpiry(env, nowMs, o.alert ? { alert: o.alert } : {}); } catch { /* next manifest */ }
   // The now board (nowboard.mjs): a bridge actually down is an alert (one restarting, by the runtime's own doing, is
   // not), one back from an outage an FYI, and what each agent's bodies are in is its doing.
   let board = { asks: [], agents: {}, notices: [] };
-  try { board = nowManifest(env, nowMs / 1000, s, listConvs(env)); } catch { /* a board that can't be read leaves the rest of the manifest */ }
+  try { board = nowManifest(env, nowMs / 1000, s, listConvs(env), adapters); } catch { /* a board that can't be read leaves the rest of the manifest */ }
   // An always-on box gone silent is dark (watch.mjs): loom reads this manifest each minute, so it's checked here too.
   try { checkDark(env, s, nowMs, o.alert ? { alert: o.alert } : {}); } catch { /* next time */ }
   let convs = [];
   try { convs = workingConversations(env); } catch { /* the delivery state unreadable this time: the cards say what else is known */ }
   const busy = { ...reportedBusy(s), ...sessionsBusy(join(stateDir(env), 'session-cpu.json')) };
-  const reports = agentReports(s, Date.now(), busy, convs, adapterStatuses(env));
+  const reports = agentReports(s, Date.now(), busy, convs, adapters);
   for (const [a, doing] of Object.entries(board.agents)) reports[a] = { readings: [], ...reports[a], doing: [...(reports[a]?.doing ?? []), ...doing].slice(0, 8) };
   for (const [agent, jobs] of Object.entries(board.jobs ?? {})) {
     reports[agent] ??= { readings: [] };
