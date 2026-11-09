@@ -88,7 +88,7 @@ Timer creation is stubbed so this bench never installs host systemd units.
 All three PRs remain draft (runtime148, core675, clock24). Before merge/install:
 prove the complete authenticated clock→core→runtime route and its negatives,
 with the native harness and executable instead of the test bridge; complete exact-head CI and resolve
-core's Node22 history failure with its owner; review collection/expiry; then
+core's exact-head CI failures while preserving the history owner; review collection/expiry; then
 coordinate installation and live delivery proof. Preserve PR145 native admission
 ownership. No installed or historical-thread delivery is claimed here.
 
@@ -155,3 +155,5 @@ fresh-process replay, reset/deletion at each cleanup boundary, expired-grant
 reissue attempts, and payload conflict after terminal payload collection. The
 current grant/report set remains sealed and uncollected until those checks and
 review pass. The deletion journal above repairs explicit deletion only.
+
+The next proposed wire/state contract is [Shared continuation deadline protocol](continuation-deadline.md). It specifies core-serialized lost-receipt reconciliation, immutable version2 deadlines, fail-closed legacy grants and deferred collection. This is design only, pending implementation and adversarial review. Exact core f9b1c3d Node22 CI failed the existing live SSE latency assertion (581ms against400ms); Node24 passed. Earlier local deadline failures remain evidence; no broad-green claim.
