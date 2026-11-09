@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
-import { bootstrapScriptTask, bootstrapTask, downTask, taskStatus, upTask } from '../src/taskhost.mjs';
+import { bootstrapScriptTask, bootstrapTask, cancelTask, downTask, taskStatus, upTask } from '../src/taskhost.mjs';
 import { api, setAgent } from '../src/control.mjs';
 import { HouseRunner } from '../src/houserunner.mjs';
 import { runBodyHost } from '../src/bodyhost.mjs';
@@ -14,7 +14,7 @@ import { staticAccounts } from '../src/accounts.mjs';
 import { world, fakeRunner, hasAge } from './delivery-world.mjs';
 const until = async fn => { const end = Date.now() + 15000; while (!fn()) { if (Date.now() > end) throw Error('timed out'); await new Promise(r => setTimeout(r, 5)); } };
 
-for (const script of [false, true]) for (const harness of ['claude', 'codex']) test(`an allocated ${script ? 'script' : 'task'} uses ${harness} through common delivery in its original house, with slot and report`, { skip: !hasAge }, async () => {
+for (const cancel of [false, true]) for (const script of [false, true]) for (const harness of ['claude', 'codex']) test(`an allocated ${script ? 'script' : 'task'} uses ${harness} through common delivery in its original house, with slot and ${cancel ? 'cancel acknowledgement' : 'report'}`, { skip: !hasAge }, async () => {
   const w = world();
   w.o.sealer = ageSealer(w.env, deliveryDir(w.env));
   if (harness === 'codex') {
@@ -76,11 +76,16 @@ for (const script of [false, true]) for (const harness of ['claude', 'codex']) t
     assert.equal(principal.ok, true, principal.reason);
     assert.equal(principal.owner, true, 'identity and tools see the task’s real principal in its dedicated house');
 
-    native.finish(raw, { worked: true, failed: false });
-    await until(() => hr.turn({ id: c.body.split(':')[1], agent: 'art', house: 'h-7', seat: 'j-h-7' }));
+    if (cancel) {
+      update(w.env, s => { s.houses['h-7'].state = 'stopping'; });
+      await assert.rejects(bootTask(), /raw-task/, 'shutdown permits collection, never a new bootstrap');
+      await cancelTask(w.env, caller, o); await tick(w.env, o);
+    }
+    else native.finish(raw, { worked: true, failed: false });
+    await until(() => (cancel ? hr.packReady({ id: c.body.split(':')[1], agent: 'art', house: 'h-7', seat: 'j-h-7' }) : hr.turn({ id: c.body.split(':')[1], agent: 'art', house: 'h-7', seat: 'j-h-7' })));
     await tick(w.env, o);
     const result = await taskStatus(w.env, caller, o);
-    assert.deepEqual(result, { done: true, ok: true, report: 'ALLOCATED-HOUSE-REPORT' });
+    assert.deepEqual(result, cancel ? { done: true, ok: false, reason: 'the task was cancelled after its session was collected' } : { done: true, ok: true, report: 'ALLOCATED-HOUSE-REPORT' });
     assert.ok(loadConv(w.env, boot.conversation).slot, 'the common runtime collected the session before house exit');
   } finally { clearTimeout(reportedRunning); leave = true; await host; }
 });
@@ -90,6 +95,7 @@ test('task bootstrap refuses owner, other-agent, service and session callers', a
   update(w.env, s => { s.houses['h-7'] = { id: 'h-7', agent: 'art', state: 'running', task: 'work' }; });
   for (const caller of [{ kind: 'owner' }, { kind: 'agent', agent: 'mark', house: 'h-7' }, { kind: 'agent', agent: 'art', house: 'h-7', service: 'bridge' }]) {
     await assert.rejects(bootstrapTask(w.env, caller, w.o), /task|credential/);
+    await assert.rejects(cancelTask(w.env, caller, w.o), /task|credential/);
   }
   update(w.env, s => { s.houses['h-7'].session = true; });
   await assert.rejects(bootstrapTask(w.env, { kind: 'agent', agent: 'art', house: 'h-7' }, w.o), /raw-task/);

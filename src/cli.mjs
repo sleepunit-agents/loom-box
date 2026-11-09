@@ -596,19 +596,9 @@ async function main(argv, env) {
     case 'task-host': {
       if (!env.HOUSE_ID || !env.LOOM_URL || !env.LOOM_TOKEN_FILE) throw new Fail('task-host runs only in its allocated house');
       const call = pieceCall(env);
-      const script = rest.includes('--brief-stdin');
-      const boot = await call(script ? 'script-bootstrap' : 'task-bootstrap', script ? { brief: await readStdin() } : {});
-      if (boot.error || !boot.hostKey) throw new Fail(boot.error || 'the runtime did not bootstrap this task');
-      let result;
-      await runBodyHost({ client: async (p, b) => {
-        const r = await call(p, b); if (r.error) throw new Fail(r.error);
-        if (p === 'body-sync' && !r.exit) {
-          const status = await call('task-status', {});
-          if (status.done) { result = status; return { ...r, exit: true, reason: 'task report and session collected' }; }
-        }
-        return r;
-      }, runner: h => runnerFor(h, env), env, hostKey: boot.hostKey, idleS: 0,
-      log: m => process.stderr.write(`loom-runtime task-host: ${m}\n`) });
+      const { runTaskClient } = await import('./taskclient.mjs');
+      const result = await runTaskClient({ call, env, brief: rest.includes('--brief-stdin') ? await readStdin() : undefined,
+        runner: h => runnerFor(h, env), log: m => process.stderr.write(`loom-runtime task-host: ${m}\n`) });
       if (result?.report) process.stdout.write(result.report + '\n');
       if (!result?.ok) throw new Fail(result?.reason || 'task host ended before its result was collected');
       return;

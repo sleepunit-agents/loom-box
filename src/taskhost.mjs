@@ -3,7 +3,7 @@
 import { createHash } from 'node:crypto';
 import { StateError, load, update } from './state.mjs';
 import { down, isHostHouse, up } from './control.mjs';
-import { bodyPrincipal, loadConv } from './delivery.mjs';
+import { bodyPrincipal, loadConv, ownerConversationControl } from './delivery.mjs';
 import { registerTaskHost } from './houserunner.mjs';
 import { spawnCall } from './spawn.mjs';
 import { principalOf } from './principal.mjs';
@@ -43,10 +43,10 @@ export async function downTask(env, effects, caller, body) {
   return down(env, effects, caller, body);
 }
 
-function ownTask(env, caller) {
+function ownTask(env, caller, stopping = false) {
   if (caller.kind !== 'agent' || !caller.house || caller.service) fail('a task host uses its own house credential', 403);
   const h = load(env).houses?.[caller.house];
-  if (!h || h.agent !== caller.agent || h.service || h.session || !['starting', 'running'].includes(h.state) || (isHostHouse(h) && !h.job)) fail('this is not a running raw-task house', 403);
+  if (!h || h.agent !== caller.agent || h.service || h.session || !(stopping ? ['starting', 'running', 'stopping'] : ['starting', 'running']).includes(h.state) || (isHostHouse(h) && !h.job)) fail('this is not a running raw-task house', 403);
   return h;
 }
 
@@ -90,11 +90,20 @@ export async function bootstrapTask(env, caller, o = {}) {
   return { hostKey: host.hostKey, conversation: result.handle };
 }
 
+/** The task process may cancel only the job captured for its own allocated house. */
+export async function cancelTask(env, caller, o = {}) {
+  const h = ownTask(env, caller, true);
+  const c = h.job?.conversation ? loadConv(env, h.job.conversation) : null;
+  if (!c?.spawn?.job || c.spawn.job.house !== h.id || c.agent !== h.agent) fail('this house has no task conversation', 409);
+  return ownerConversationControl(env, { kind: 'owner', agents: [h.agent] }, { agent: h.agent, conversation: c.conversation, action: 'interrupt' }, { ...o, detach: o.detach ?? true });
+}
+
 export async function taskStatus(env, caller, o = {}) {
-  const h = ownTask(env, caller);
+  const h = ownTask(env, caller, true);
   if (!h.job?.conversation) return { done: false };
   const c = loadConv(env, h.job.conversation);
   if (!c?.spawn?.job || c.spawn.job.house !== h.id) fail('the task conversation changed', 409);
+  if (c.control?.state === 'held' && !c.body && !c.starting) return { done: true, ok: false, reason: 'the task was cancelled after its session was collected' };
   // Delivery retires the idle task body and collects its session before the house exits and saves its state.
   if (c.body || c.starting || c.queue?.length) return { done: false };
   const result = await spawnCall(env, { kind: 'owner' }, { agent: h.agent, action: 'result', handle: c.conversation }, o);
