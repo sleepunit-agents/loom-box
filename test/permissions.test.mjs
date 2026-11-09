@@ -440,3 +440,25 @@ describe('paths: only a call\'s canonical path is ever granted', () => {
     assert.equal(decide(doc, { agent: 'art', piece: 'clock', path: 'wakes/w-1.json' }).allow, true);
   });
 });
+
+describe('a house reads its effective grants from the runtime', () => {
+  test('wildcard and own paths are combined without exposing other agents or mutation verbs', async () => {
+    const st = memStore();
+    st.put(GRANTS, KEY, { v: 1, pieces: { tasks: { art: ['run'], mark: ['private'], '*': ['read'] }, secrets: { mark: ['*'] } }, relay: { art: ['mark'], mark: ['gabe'] } });
+    const r = await runFor({}, { kind: 'agent', agent: 'art' }, ['grants', 'list', '--json'], st);
+    assert.equal(r.exit, 0, r.stderr);
+    assert.deepEqual(JSON.parse(r.stdout), { agent: 'art', configured: true, pieces: { tasks: ['run', 'read'] }, relay: ['mark'] });
+    for (const args of [['grants', 'list', '--agent', 'mark'], ['grants', 'set', 'tasks', 'art'], ['grants', 'seed']]) {
+      assert.notEqual((await runFor({}, { kind: 'agent', agent: 'art' }, args, st)).exit, 0);
+    }
+  });
+  test('absent configuration is explicit and a broken store is never reported as no grants', async () => {
+    const st = memStore();
+    assert.equal(JSON.parse((await runFor({}, { kind: 'agent', agent: 'art' }, ['grants', 'list'], st)).stdout).configured, false);
+    const broken = { get() { throw new Error('store unavailable'); } };
+    const r = await runFor({}, { kind: 'agent', agent: 'art' }, ['grants', 'list'], broken);
+    assert.equal(r.exit, 1);
+    assert.match(r.stderr, /store unavailable/);
+    assert.throws(() => loomStore({ HOUSE_ID: 'h-test' }, { run() { throw new Error('must not run'); } }).get(GRANTS, KEY), /store lives on loom/);
+  });
+});

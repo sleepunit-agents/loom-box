@@ -600,7 +600,11 @@ async function main(argv, env) {
       return;
     }
     case 'models': return models(rest, env, json);
-    case 'grants': return grantsCli(rest, env);
+    case 'grants': {
+      if (env.LOOM_URL && env.LOOM_TOKEN_FILE) return runAnswer(await pieceCall(env)('run', { argv: ['grants', ...rest] }));
+      if (env.HOUSE_ID) throw new Fail('grants in a house need LOOM_URL and LOOM_TOKEN_FILE; the grants live on loom', 2);
+      return grantsCli(rest, env);
+    }
     case 'trace': {
       const { trace, traceText, traceTool } = await import('./trace.mjs');
       if (rest[0] === 'tool') {
