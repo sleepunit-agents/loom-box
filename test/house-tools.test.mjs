@@ -36,6 +36,16 @@ function login(h, cmd, env = {}) {
   return spawnSync('sh', ['-c', script], { env: { HOME: h.home, PATH: SYS, ...env }, encoding: 'utf8' });
 }
 
+test('the installed Python stop adapter comes from the same runtime checkout', () => {
+  const h = house();
+  try {
+    const r = install(h); assert.equal(r.status, 0, r.stderr);
+    assert.equal(readlinkSync(join(h.home, '.local/bin/loom_host_process.py')), join(ROOT, 'house/loom_host_process.py'));
+    const imported = spawnSync('python3', ['-c', 'from loom_host_process import run_host; assert callable(run_host)'], { env: { PATH: h.path, PYTHONPATH: join(h.home, '.local/bin') }, encoding: 'utf8' });
+    assert.equal(imported.status, 0, imported.stderr);
+  } finally { rmSync(h.home, { recursive: true, force: true }); }
+});
+
 test('it writes the shared wrappers into ~/.local/bin', () => {
   const h = house();
   const r = install(h);

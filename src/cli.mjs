@@ -600,7 +600,7 @@ async function main(argv, env) {
       const result = await runTaskClient({ call, env, brief: rest.includes('--brief-stdin') ? await readStdin() : undefined,
         runner: h => runnerFor(h, env), log: m => process.stderr.write(`loom-runtime task-host: ${m}\n`) });
       if (result?.report) process.stdout.write(result.report + '\n');
-      if (!result?.ok) throw new Fail(result?.reason || 'task host ended before its result was collected');
+      if (!result?.ok) throw new Fail(result?.reason || 'task host ended before its result was collected', result?.cancelled ? 130 : 1);
       return;
     }
     case 'session-host': {

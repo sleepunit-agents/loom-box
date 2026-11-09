@@ -11,6 +11,7 @@
 # Into $HOME/.local/bin:
 #   piece-call     this checkout's house/piece-call (loom's piece API, the house's own token)
 #   loom-runtime   node, by its full path, on this checkout's src/cli.mjs
+#   loom_host_process.py  one signal/acknowledgement adapter for deterministic house parents
 #   taskstore, loom-tasks   loom's tasks piece through piece-call; the house's own
 #                  taskstore build instead when TASKSTORE_DB names a store (a test's
 #                  store: through the piece it would write the one store, t-1520)
@@ -82,6 +83,9 @@ piece wake clock
 piece approvals approvals
 
 [ -n "$pieces_only" ] && exit 0
+
+# Both agent entrypoints import the same stop/acknowledgement implementation.
+ln -sfn "$KIT/house/loom_host_process.py" "$BIN/loom_host_process.py"
 
 put loom-runtime <<EOF
 #!/bin/sh

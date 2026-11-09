@@ -103,7 +103,7 @@ export async function taskStatus(env, caller, o = {}) {
   if (!h.job?.conversation) return { done: false };
   const c = loadConv(env, h.job.conversation);
   if (!c?.spawn?.job || c.spawn.job.house !== h.id) fail('the task conversation changed', 409);
-  if (c.control?.state === 'held' && !c.body && !c.starting) return { done: true, ok: false, reason: 'the task was cancelled after its session was collected' };
+  if (c.control?.state === 'held' && !c.body && !c.starting) return { done: true, ok: false, cancelled: true, reason: 'the task was cancelled after its session was collected' };
   // Delivery retires the idle task body and collects its session before the house exits and saves its state.
   if (c.body || c.starting || c.queue?.length) return { done: false };
   const result = await spawnCall(env, { kind: 'owner' }, { agent: h.agent, action: 'result', handle: c.conversation }, o);

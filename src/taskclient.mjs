@@ -21,7 +21,7 @@ export async function runTaskClient({ call, runner, env, brief, signals = proces
       }
       return r;
     }, runner, env, hostKey: boot.hostKey, idleS: 0, log });
-    if (cancelling && result?.ok) return { done: true, ok: false, reason: 'the task was cancelled' };
+    if (cancelling && result?.ok) return { done: true, ok: false, cancelled: true, reason: 'the task was cancelled' };
     return result ?? { done: false, ok: false, reason: 'task host ended before its result was collected' };
   } finally {
     signals.removeListener('SIGTERM', stop); signals.removeListener('SIGINT', stop);

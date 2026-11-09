@@ -85,7 +85,7 @@ for (const cancel of [false, true]) for (const script of [false, true]) for (con
     await until(() => (cancel ? hr.packReady({ id: c.body.split(':')[1], agent: 'art', house: 'h-7', seat: 'j-h-7' }) : hr.turn({ id: c.body.split(':')[1], agent: 'art', house: 'h-7', seat: 'j-h-7' })));
     await tick(w.env, o);
     const result = await taskStatus(w.env, caller, o);
-    assert.deepEqual(result, cancel ? { done: true, ok: false, reason: 'the task was cancelled after its session was collected' } : { done: true, ok: true, report: 'ALLOCATED-HOUSE-REPORT' });
+    assert.deepEqual(result, cancel ? { done: true, ok: false, cancelled: true, reason: 'the task was cancelled after its session was collected' } : { done: true, ok: true, report: 'ALLOCATED-HOUSE-REPORT' });
     assert.ok(loadConv(w.env, boot.conversation).slot, 'the common runtime collected the session before house exit');
   } finally { clearTimeout(reportedRunning); leave = true; await host; }
 });
