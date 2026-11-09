@@ -44,7 +44,7 @@ for(const phase of ['working','launching','queued']) for(const harness of ['clau
     const file=join(h.env.LOOM_BOX_DATA,'delivery/hosts/art.json');const record=JSON.parse(readFileSync(file,'utf8'));
     for(const stop of Object.values(record.stop??{}))stop.at=Date.now()-61000;
     writeFileSync(file,JSON.stringify(record));upload=false;
-    await until(async()=>{await tick(h.env,o);return [a,b].every(x=>loadConv(h.env,x.conversation).control?.state==='held')});
+    await until(async()=>{w.clock.advance(1001);await tick(h.env,o);return [a,b].every(x=>loadConv(h.env,x.conversation).control?.state==='held')});
     assert.equal(lost,true,'a committed part reply was lost and retried');
     assert.equal(h.left(),false,'a lost final acknowledgement keeps the host alive');
     for(const c of before){const now=loadConv(h.env,c.conversation);if(c.body)assert.ok(now.slot?.session);assert.equal(now.body,undefined)}

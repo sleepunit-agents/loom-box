@@ -157,7 +157,7 @@ const ago = (iso, nowMs = Date.now()) => {
 };
 const toneOf = (state) => ({ running: 'ok', starting: 'ok', wanted: 'warn', stopping: 'warn', failed: 'bad', lost: 'bad' }[state] ?? 'muted');
 /** A house's badge: its state, or, for a running body host's house on an older image than its agent's, that it's draining. */
-const collectionWords = h => ({ metadata: 'waiting to collect state', state: 'saving state', report: 'finishing', cleanup: 'cleaning up' }[h.collection?.phase]);
+const collectionWords = h => ({ metadata: 'waiting to collect state', native: 'saving conversation history', state: 'saving state', report: 'finishing', cleanup: 'cleaning up' }[h.collection?.phase]);
 export const houseBadge = (h) => collectionWords(h) ?? (h.draining && h.state === 'running' ? `draining (${h.draining.reason ?? 'outdated image'})` : h.state);
 const houseTone = (h) => h.collection ? 'warn' : (h.draining && h.state === 'running' ? 'warn' : toneOf(h.state));
 const short = (t, n = 80) => (t.length > n ? `${t.slice(0, n - 1)}…` : t);

@@ -31,6 +31,7 @@
 // host finds its record by its house (from its token), so no house is ever handed another seat's bodies, keys or
 // sessions. Houses for anyone but the owner are capped per agent (seatRoom, LOOM_RUNTIME_SEAT_HOUSES): at the cap a
 // body waits for one to idle out; it never shares one.
+import { houseLaunchHandle, readHouseLaunch, writeHouseLaunch } from './house-launch-journal.mjs';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -40,6 +41,8 @@ import { pieceName } from './piece.mjs';
 import { bodyBox } from './placement.mjs';
 import { isParts } from './briefs.mjs';
 import { RunnerError } from './runners.mjs';
+import { MAX_SESSION_BYTES, safeRel, SessionSizeError, SessionHistoryMissing } from './sessions.mjs';
+import { validPendingInbox } from './native-inbox.mjs';
 import { GONE, part, redact, UNPRINTABLE_ONE } from './redact.mjs';
 import { cardTime } from './activity.mjs';
 import { ageSealer } from './sealed.mjs';
@@ -90,12 +93,14 @@ export function sweepTransfers(env, nowMs = Date.now(), fileNowMs = Date.now()) 
   const parts = join(hostsDir(env), 'parts');
   for (const a of ls(parts)) for (const h of ls(join(parts, a))) for (const id of ls(join(parts, a, h))) {
     const dir = join(parts, a, h, id);
+    if (existsSync(join(dir, 'offline.json'))) continue;
     const at = readJson(join(dir, 'at.json'));
     if (typeof at !== 'number' || nowMs - at >= PARTS_MS) rmSync(dir, { recursive: true, force: true });
   }
   const packed = join(hostsDir(env), 'packed');
   for (const a of ls(packed)) for (const h of ls(join(packed, a))) for (const f of ls(join(packed, a, h))) {
     const p = join(packed, a, h, f);
+    if (f.endsWith('.offline.json') || existsSync(offlinePin(p))) continue;
     // By its file's own time: a packed file is a file, and its clock is the disk's.
     try { if (fileNowMs - statSync(p).mtimeMs >= 2 * CLAIM_MS) rmSync(p, { force: true }); } catch { /* gone */ }
   }
@@ -124,12 +129,34 @@ function seatsOf(env, agent) {
 // Every path is the agent's and the house's own, and an id is checked before it names one.
 const safe = (agent, house, id) => AGENT_NAME.test(agent ?? '') && HOUSE.test(house ?? '') && BODY_ID.test(id ?? '');
 const packedFile = (env, agent, house, id) => { if (!safe(agent, house, id)) throw new StateError('not a body of a house', 400); return join(hostsDir(env), 'packed', agent, house, `${id}.age`); };
+const offlinePin = file => file + '.offline.json';
 const partDir = (env, agent, house, id) => { if (!safe(agent, house, id)) throw new StateError('not a body of a house', 400); return join(hostsDir(env), 'parts', agent, house, id); };
 /**
  * A body's id, as the runtime knows it: its house's id, then the id the house's harness gave it. House ids are never
  * reused, so no house can report an id that's another house's body (another agent's, or its own agent's earlier house).
  */
 export const bodyIdOf = (house, raw) => `${house}-${raw}`;
+
+// Persist an authenticated receipt before its transient host report can vanish.
+// A legacy host's identity alone does not prove that the full input was handed on.
+function keepHouseLaunchReceipt(env, record, receipt) {
+  if (['ready', 'refused', 'terminated'].includes(record.state)) return record;
+  if (!['publishing', 'published'].includes(record.state)) throw new RunnerError('house receipt preceded request publication');
+  if (receipt?.id) {
+    const id = bodyIdOf(record.house, receipt.id);
+    if (!BODY_REF.test(id)) throw new RunnerError('house launch receipt has an invalid body id');
+    record.state = 'ready';
+    record.input = receipt.inputConfirmed === true ? 'confirmed' : 'uncertain';
+    record.body = { id, harness: record.harness, house: record.house, seat: record.seat,
+      ...(record.model ? { model: record.model } : {}), ...(record.slot ? { slot: record.slot } : {}),
+      ...(receipt.inputConfirmed !== true ? { inputUncertain: true } : {}) };
+    delete record.sealed; writeHouseLaunch(env, record);
+  } else if (receipt?.nativeNotStarted === true) {
+    record.state = 'refused'; record.reason = receipt.error; delete record.sealed; writeHouseLaunch(env, record);
+  }
+  return record;
+}
+
 const rawOf = (body) => (body?.house && HOUSE.test(body.house) && String(body.id).startsWith(`${body.house}-`) ? String(body.id).slice(body.house.length + 1) : null);
 
 const readJson = (p) => { try { return JSON.parse(readFileSync(p, 'utf-8')); } catch { return null; } };
@@ -216,22 +243,35 @@ export function sweepSeats(env) {
       try { s = load(env); } catch { return; }
       pruneDraining(env, h);
       const live = h.house && LIVE.has(s.houses[h.house]?.state);
-      if (!live && !h.draining && !Object.keys(h.req ?? {}).length) rmSync(join(hostsDir(env), n), { force: true });
+      if (!live && !h.draining && !Object.keys(h.req ?? {}).length && !retainOfflineHouse(env, h.house, h, s)) rmSync(join(hostsDir(env), n), { force: true });
     });
   }
 }
 /** One house's part of its agent's host record: the record itself for the agent's house, else that house's draining entry. */
 const houseRec = (h, house) => (house && h.house === house ? h : (house && h.draining?.[house]) || null);
+const collectionReceipt = (x, raw) => Object.values(x?.offlineCollection?.done ?? {}).find(receipt => receipt.bodyId === raw);
 const freshRec = (x, house, now) => !!x?.report && now - x.report.at < HOST_STALE_MS && x.report.house === house;
 const fresh = (h, now) => freshRec(h, h.house, now);
 /** What's one house's in the record (the rest is the agent's). */
-const PER_HOUSE = ['report', 'hostHash', 'bootHash', 'req', 'stop', 'inbox', 'claimed', 'cancel', 'quiescing'];
+const PER_HOUSE = ['report', 'hostHash', 'bootHash', 'req', 'stop', 'inbox', 'claimed', 'cancel', 'quiescing', 'admissionProtocol', 'offlineCollection'];
+function retainOfflineHouse(env, house, record, s) {
+  if (s.houses[house]?.nativeHistory?.v === 1 && !s.houses[house].nativeHistory.complete) return true;
+  const collection = record.offlineCollection;
+  if (!collection) return false;
+  if (!collection.complete) return true;
+  return collection.entries.some(e => {
+    const receipt = collection.done[e.key];
+    if ((receipt?.bodyId || receipt?.lost) && receipt.consumed !== true) return true;
+    const id = receipt?.bodyId ?? e.transfer?.bodyId ?? e.bodyId;
+    return id && existsSync(offlinePin(packedFile(env, record.agent ?? s.houses[house]?.agent, house, id)));
+  });
+}
 /** Draining houses that are over (or gone from the state): nothing of theirs is left to finish. */
 function pruneDraining(env, h) {
   if (!h.draining) return;
   let s;
   try { s = load(env); } catch { return; }
-  for (const id of Object.keys(h.draining)) if (!LIVE.has(s.houses[id]?.state)) delete h.draining[id];
+  for (const id of Object.keys(h.draining)) if (!LIVE.has(s.houses[id]?.state) && !retainOfflineHouse(env, id, { agent: h.agent, ...h.draining[id] }, s)) delete h.draining[id];
   if (!Object.keys(h.draining).length) delete h.draining;
 }
 /** Down and body-sync share this lock: an unauthenticated host cannot acquire work between stop admission and state change. */
@@ -314,12 +354,15 @@ function cleanReport(r) {
   const done = {};
   for (const [rid, d] of Object.entries(r?.done ?? {}).slice(0, 64)) {
     if (!RID.test(rid) || !d || typeof d !== 'object') continue;
-    if (typeof d.id === 'string' && BODY_ID.test(d.id)) done[rid] = { id: d.id };
-    else done[rid] = { error: String(d.error ?? 'its host couldn\'t start it').slice(0, 300) };
+    const attempt = r?.caps?.includes('native-admission') && /^[0-9a-f]{64}$/.test(d.attempt ?? '') ? { attempt: d.attempt } : {};
+    if (typeof d.id === 'string' && BODY_ID.test(d.id)) done[rid] = { id: d.id, ...attempt, ...(r?.caps?.includes('native-admission') && d.inputConfirmed === true ? { inputConfirmed: true } : {}) };
+    else done[rid] = { ...attempt, error: String(d.error ?? 'its host couldn\'t start it').slice(0, 300), ...(r?.caps?.includes('native-admission') && d.nativeNotStarted === true ? { nativeNotStarted: true } : {}) };
   }
   // What this host can do beyond the first version's: `parts`, a brief that names the agent's files (briefs.mjs).
-  const caps = Array.isArray(r?.caps) ? r.caps.filter((c) => c === 'parts') : [];
-  return { bodies, done, caps };
+  const caps = Array.isArray(r?.caps) ? r.caps.filter((c) => c === 'parts' || c === 'native-admission' || c === 'native-history') : [];
+  const startingUnknown = caps.includes('native-admission') && (!Array.isArray(r?.starting) || r.starting.some(id => !RID.test(id)));
+  const starting = caps.includes('native-admission') && Array.isArray(r?.starting) ? [...new Set(r.starting.filter(id => RID.test(id)))] : [];
+  return { bodies, done, caps, starting, startingUnknown };
 }
 
 /**
@@ -352,8 +395,11 @@ export function bodySync(env, caller, body, o = {}) {
       x.hostHash = keyHash(issued);
       delete x.bootHash; delete x.bootSealed;
     }
-    const { bodies, done, caps } = cleanReport(body?.report);
+    const { bodies, done, caps, starting, startingUnknown: malformedStarting } = cleanReport(body?.report);
+    const startingUnknown = malformedStarting || (x.admissionProtocol === true && !caps.includes('native-admission'));
+    if (caps.includes('native-admission')) x.admissionProtocol = true;
     const current = load(env).houses?.[house];
+    if (current?.nativeHistory?.plan) return { exit: true, reason: 'its box is collecting this physically stopped house' };
     const stopping = current?.state === 'stopping' && !current.job && !current.session;
     if (stopping) {
       x.quiescing ??= { at: now, conversations: [], seen: [] };
@@ -361,7 +407,7 @@ export function bodySync(env, caller, body, o = {}) {
       for (const [rid, request] of Object.entries(x.req ?? {})) {
         try { const q = JSON.parse(t.open(request.sealed).toString('utf8')); if (/^cv-[0-9a-f]{12}$/.test(q.conversation ?? '')) conversations.add(q.conversation); } catch { /* no text is recovered by guessing */ }
         // A host syncs only between native launch calls: a request absent from done has not run here.
-        if (!done[rid]) done[rid] = { error: 'its house is stopping before this request starts' };
+        if (!done[rid] && !startingUnknown && !starting.includes(rid)) done[rid] = { error: 'its house is stopping before this request starts', nativeNotStarted: true };
       }
       x.quiescing.conversations = [...conversations];
       for (const [id, b] of Object.entries(bodies)) {
@@ -382,7 +428,16 @@ export function bodySync(env, caller, body, o = {}) {
       if (x.claimed[d.id] && x.claimed[d.id] !== rid) done[rid] = { error: `${house} reported ${d.id} for a second request` };
       else x.claimed[d.id] = rid;
     }
-    x.report = { at: now, house, bodies, done, caps };
+    const received = [];
+    for (const [rid, receipt] of Object.entries(done)) {
+      const attempt = x.req?.[rid]?.launch ?? receipt.attempt;
+      if (!attempt) continue;
+      const record = readHouseLaunch(env, attempt);
+      if (!record || record.agent !== agent || record.house !== house || record.seat !== seat || record.rid !== rid) throw new RunnerError('house launch receipt belongs to another request');
+      keepHouseLaunchReceipt(env, record, receipt);
+      if (['ready', 'refused'].includes(record.state)) received.push(rid);
+    }
+    x.report = { at: now, house, bodies, done, caps, starting, startingUnknown };
     // A request given up on whose body the house started late: stopped, never run.
     x.cancel ??= {};
     for (const [rid, at] of Object.entries(x.cancel)) {
@@ -395,7 +450,7 @@ export function bodySync(env, caller, body, o = {}) {
       if (!x.inbox[id].length) delete x.inbox[id];
     }
     // A packed session, in parts: each sealed as it comes (never on disk in the clear), then opened and sealed whole.
-    const got = [];
+    const got = [], restart = [];
     for (const [id, p] of Object.entries(body?.report?.packed ?? {}).slice(0, 8)) {
       if (!BODY_ID.test(id) || !Number.isSafeInteger(p?.part) || !Number.isSafeInteger(p?.parts) || p.part < 0 || p.part >= p.parts) continue;
       // A pack nobody's waiting for any more (its stop was dropped): its parts are acknowledged and thrown away, so its
@@ -403,13 +458,26 @@ export function bodySync(env, caller, body, o = {}) {
       if (!x.stop?.[id]?.pack) { got.push([id, p.part]); continue; }
       if (!Number.isSafeInteger(p?.part) || !Number.isSafeInteger(p?.parts) || p.parts < 1 || p.parts > 64 || p.part < 0 || p.part >= p.parts || typeof p.data !== 'string' || p.data.length > PART_CHARS) continue;
       const dir = partDir(env, agent, house, id);
+      const pending = p.pending ?? null;
+      if (!validPendingInbox(pending)) continue;
+      const omitted = p.omitted ?? null;
+      if (omitted !== null && omitted !== 'size-limit') continue;
       let sealedPart;
       try { sealedPart = sealer.seal(Buffer.from(p.data)); } catch { continue; } // no key: not kept (and not acked)
       mkdirSync(dir, { recursive: true, mode: 0o700 });
       if (!existsSync(join(dir, 'at.json'))) writeJson(join(dir, 'at.json'), now);
+      if (current?.nativeHistory?.v === 1) writeJson(join(dir, 'offline.json'), { v: 1, source: 'host', bodyId: id });
+      const inboxReceipt = join(dir, 'pending.age');
+      if (existsSync(inboxReceipt)) {
+        if (sealer.open(readFileSync(inboxReceipt)).toString() !== JSON.stringify(pending)) continue;
+      } else writeFileSync(inboxReceipt, sealer.seal(Buffer.from(JSON.stringify(pending))), { mode: 0o600 });
+      const omissionReceipt = join(dir, 'omitted.age');
+      if (existsSync(omissionReceipt)) {
+        if (sealer.open(readFileSync(omissionReceipt)).toString() !== JSON.stringify(omitted)) continue;
+      } else writeFileSync(omissionReceipt, sealer.seal(Buffer.from(JSON.stringify(omitted))), { mode: 0o600 });
       writeFileSync(join(dir, `${p.part}.age`), sealedPart, { mode: 0o600 });
-      got.push([id, p.part]);
       const files = Array.from({ length: p.parts }, (_, i) => join(dir, `${i}.age`));
+      let complete = false;
       if (files.every((f) => existsSync(f))) {
         const whole = Buffer.from(files.map((f) => sealer.open(readFileSync(f)).toString()).join(''), 'base64');
         const f = packedFile(env, agent, house, id);
@@ -417,10 +485,16 @@ export function bodySync(env, caller, body, o = {}) {
         // Keep the native session identity with its files. The host may forget
         // the body after this acknowledgement, before a later tick retires it.
         const session = bodies[id]?.session ?? x.stop[id]?.session;
-        const kept = session ? Buffer.from(JSON.stringify({ v: 1, session, files: JSON.parse(whole.toString('utf8')) })) : whole;
+        const packedFiles = JSON.parse(whole.toString('utf8'));
+        if (omitted && (!session || !Array.isArray(packedFiles) || packedFiles.length)) continue;
+        const kept = session ? Buffer.from(JSON.stringify({ v: 1, session, files: packedFiles, pending, ...(omitted ? { omitted } : {}) })) : whole;
+        if (current?.nativeHistory?.v === 1) writeJson(offlinePin(f), { v: 1, source: 'host' });
         writeFileSync(f, sealer.seal(kept), { mode: 0o600 });
         rmSync(dir, { recursive: true, force: true });
+        complete = true;
       }
+      if (p.part !== p.parts - 1 || complete) got.push([id, p.part]);
+      if (!complete && current?.nativeHistory?.v === 1 && files.slice(0, p.part).some(f => !existsSync(f))) restart.push(id);
     }
     // A stop is done once its body is gone from the report (and its pack, if it was asked for, is in).
     for (const id of Object.keys(x.stop ?? {})) {
@@ -432,6 +506,11 @@ export function bodySync(env, caller, body, o = {}) {
     const req = {};
     for (const [rid, r] of Object.entries(x.req ?? {})) {
       if (stopping || done[rid] || x.cancel[rid]) continue;
+      if (r.launch) {
+        const record = readHouseLaunch(env, r.launch);
+        if (!record || record.agent !== agent || record.house !== house || record.seat !== seat || record.rid !== rid) throw new RunnerError('house request journal does not match its publication');
+        if (['ready', 'refused'].includes(record.state)) continue;
+      }
       try { req[rid] = JSON.parse(t.open(r.sealed).toString('utf-8')); } catch { /* its text is gone: never started */ }
     }
     const inbox = {};
@@ -443,8 +522,217 @@ export function bodySync(env, caller, body, o = {}) {
     const wanted = new Set(x.quiescing?.conversations ?? []);
     const outstanding = stopping && listConvs(env).some(c => c.agent === agent && (wanted.has(c.conversation) || belongsToHouse(c, house)) && (c.body || c.starting || c.control?.state !== 'held'));
     const live = Object.values(bodies).some(b => b.status !== 'ended');
-    const exit = stopping && !live && !outstanding && !Object.keys(x.stop ?? {}).length && !Object.keys(req).length;
-    return { req, stop: x.stop ?? {}, inbox, acked: got, ...(exit ? { exit: true, reason: 'its conversations and native sessions were collected before house rescue' } : {}), ...(issued ? { hostKey: issued } : {}) };
+    const exit = stopping && !startingUnknown && !starting.length && !live && !outstanding && !Object.keys(x.stop ?? {}).length && !Object.keys(req).length;
+    return { req, stop: x.stop ?? {}, inbox, acked: got, received, ...(restart.length ? { restart } : {}), ...(stopping ? { stopping: true } : {}), ...(exit ? { exit: true, reason: 'its conversations and native sessions were collected before house rescue' } : {}), ...(issued ? { hostKey: issued } : {}) };
+  });
+}
+
+// A box's offline collection uses the same host lock, receipt journal and
+// sealed native packs as the live host. The control plane authenticates the
+// allocated box and freezes publication before entering this function.
+export function nativeCollectionExchange(env, { agent, house, plan, requiredHost }, q, o = {}) {
+  const sealer = o.sealer ?? ageSealer(env, join(dataDir(env), 'delivery'));
+  const fail = message => { throw new StateError(message, 409); };
+  return hostLocked(env, () => {
+    const found = recordOfHouse(env, agent, house);
+    if (!found) {
+      if (requiredHost) fail('the native host record is unavailable; collection remains pending');
+      return { plan, entries: [], complete: q.phase === 'finish' };
+    }
+    const { h, seat } = found, x = houseRec(h, house);
+    if (!x.offlineCollection) {
+      const entries = new Map();
+      const addBody = (id, harness, session, attempt) => {
+        if (!BODY_ID.test(id ?? '') || !['claude', 'codex'].includes(harness)) fail('native collection has an invalid body identity');
+        const key = `body:${id}`, old = entries.get(key);
+        if (old && (old.harness !== harness || old.session && session && old.session !== session)) fail('native collection identities conflict');
+        const entry = old ?? { key, bodyId: id, harness, attempts: [] };
+        if (session) entry.session = session;
+        if (attempt && !entry.attempts.includes(attempt)) entry.attempts.push(attempt);
+        entries.set(key, entry);
+      };
+      for (const c of listConvs(env)) {
+        if (c.agent !== agent || typeof c.body !== 'string') continue;
+        const [harness, id] = c.body.split(':');
+        if (id?.startsWith(`${house}-`)) {
+          const raw = id.slice(house.length + 1), report = x.report?.bodies?.[raw];
+          addBody(raw, harness, report?.session);
+        }
+      }
+      for (const [id, b] of Object.entries(x.report?.bodies ?? {})) {
+        if (b.status !== 'ended' || x.stop?.[id]?.pack) addBody(id, b.harness, b.session);
+      }
+      for (const request of Object.values(x.req ?? {})) {
+        if (!request.launch) fail('legacy native request needs explicit reconciliation before offline collection');
+        const record = readHouseLaunch(env, request.launch);
+        if (!record || record.agent !== agent || record.house !== house || record.seat !== seat) fail('native collection request belongs to another house');
+        if (record.state === 'refused') continue;
+        if (record.state === 'ready') addBody(rawOf(record.body), record.harness, record.body.slot?.session, record.id);
+        else entries.set(`attempt:${record.id}`, { key: `attempt:${record.id}`, harness: record.harness, attempts: [record.id] });
+      }
+      x.offlineCollection = { v: 1, plan, entries: [...entries.values()], done: {} };
+      for (const entry of x.offlineCollection.entries) if (entry.bodyId) {
+        const packed = packedFile(env, agent, house, entry.bodyId);
+        if (!existsSync(packed)) continue;
+        let kept;
+        try { kept = JSON.parse(sealer.open(readFileSync(packed)).toString('utf8')); } catch { fail('the existing native pack cannot be read'); }
+        const missing = kept?.omitted === 'missing-history' && kept.bodyId === entry.bodyId && kept.plan === plan;
+        if (kept?.v !== 1 || !Array.isArray(kept.files) || !missing && !/^[A-Za-z0-9][A-Za-z0-9._-]{3,127}$/.test(kept.session ?? '') || entry.session && kept.session && entry.session !== kept.session) fail('the existing native pack has no matching identity');
+        if (kept.omitted !== undefined && (!['size-limit', 'missing-history'].includes(kept.omitted) || kept.files.length)) fail('the existing native pack has an invalid omission');
+        if (kept.session) entry.session = kept.session;
+        const sha256 = createHash('sha256').update(JSON.stringify(kept.files)).digest('hex');
+        writeJson(offlinePin(packed), { v: 1, plan, sha256 });
+        x.offlineCollection.done[entry.key] = { inherited: true, bodyId: entry.bodyId, session: kept.session, sha256,
+          pending: validPendingInbox(kept.pending) ? kept.pending : null, ...(missing ? { lost: true } : {}), ...(kept.omitted ? { omitted: kept.omitted } : {}) };
+      }
+      writeJson(hostFile(env, agent, seat), h);
+    }
+    const collection = x.offlineCollection;
+    if (collection.plan !== plan) fail('native collection plan changed');
+    const transferDir = key => partDir(env, agent, house, 'nc-' + createHash('sha256').update(plan + '\0' + key).digest('hex').slice(0, 40));
+    const result = () => ({ plan, complete: collection.complete === true, entries: collection.entries.map(e => ({ ...e, received: !!collection.done[e.key] })) });
+    if (q.phase === 'plan') return result();
+    if (q.phase === 'finish') {
+      if (collection.entries.some(e => !collection.done[e.key])) fail('native session collection has not been acknowledged');
+      // A worker may have died after committing its receipt but before
+      // deleting duplicate encrypted parts. Finish is retryable cleanup too.
+      for (const entry of collection.entries) rmSync(transferDir(entry.key), { recursive: true, force: true });
+      for (const entry of collection.entries) {
+        const bodyId = collection.done[entry.key]?.bodyId;
+        if (bodyId) rmSync(partDir(env, agent, house, bodyId), { recursive: true, force: true });
+      }
+      collection.complete = true; writeJson(hostFile(env, agent, seat), h);
+      return result();
+    }
+    const entry = collection.entries.find(e => e.key === q.key);
+    if (!entry) fail('native collection entry belongs to another plan');
+    if (q.phase === 'loss') {
+      if (q.reason !== 'missing-history' || !validPendingInbox(q.pending ?? null)) fail('invalid native history-loss receipt');
+      if (entry.transfer) fail('an existing native transfer cannot be replaced by a loss receipt');
+      const pending = q.pending ?? null, prior = collection.done[entry.key];
+      if (prior) {
+        if (!prior.lost || JSON.stringify(prior.pending) !== JSON.stringify(pending)) fail('native collection already has a different receipt');
+        return { plan, received: true };
+      }
+      const records = entry.attempts.map(attempt => {
+        const record = readHouseLaunch(env, attempt);
+        if (!record || record.agent !== agent || record.house !== house || record.seat !== seat || record.harness !== entry.harness || record.state === 'refused') fail('native loss belongs to another admission');
+        if (entry.bodyId) {
+          if (!['ready', 'publishing', 'published'].includes(record.state)) fail('native loss cannot change an established disposition');
+          if (record.state === 'ready' && rawOf(record.body) !== entry.bodyId) fail('native loss changed body');
+        } else {
+          if (!['publishing', 'published', 'terminated'].includes(record.state)) fail('native loss cannot replace an established identity');
+          if (record.state === 'terminated' && record.termination.plan !== plan) fail('native termination belongs to another collection');
+        }
+        return record;
+      });
+      let consumed = !entry.bodyId && entry.attempts.length > 0;
+      for (const record of records) {
+        if (entry.bodyId) {
+          keepHouseLaunchReceipt(env, record, { id: entry.bodyId, inputConfirmed: false });
+        } else {
+          if (record.state !== 'terminated') {
+            record.state = 'terminated'; record.termination = { reason: 'missing-history', plan, at: new Date().toISOString() };
+            delete record.sealed; writeHouseLaunch(env, record);
+          }
+          consumed &&= record.termination.consumed === true;
+        }
+      }
+      if (entry.bodyId) {
+        const packed = packedFile(env, agent, house, entry.bodyId);
+        mkdirSync(dirname(packed), { recursive: true, mode: 0o700 });
+        writeJson(offlinePin(packed), { v: 1, plan });
+        const marker = { v: 1, files: [], omitted: 'missing-history', plan, bodyId: entry.bodyId, pending, ...(entry.session ? { session: entry.session } : {}) };
+        const temporary = packed + '.tmp'; writeFileSync(temporary, sealer.seal(Buffer.from(JSON.stringify(marker))), { mode: 0o600 }); renameSync(temporary, packed);
+        x.report ??= { bodies: {}, done: {}, caps: [] }; x.report.bodies ??= {};
+        x.report.bodies[entry.bodyId] = { ...(x.report.bodies[entry.bodyId] ?? {}), harness: entry.harness, status: 'ended', feedable: false };
+      }
+      collection.done[entry.key] = { lost: true, pending, ...(consumed ? { consumed: true } : {}), ...(entry.bodyId ? { bodyId: entry.bodyId } : {}), ...(entry.session ? { session: entry.session } : {}) };
+      writeJson(hostFile(env, agent, seat), h);
+      return { plan, received: true };
+    }
+    if (q.phase === 'refuse') {
+      if (entry.bodyId || entry.attempts.length !== 1 || q.nativeNotStarted !== true) fail('a native body cannot be refused as unstarted');
+      if (collection.done[entry.key]) {
+        if (!collection.done[entry.key].refused) fail('native collection already has a body');
+        return { plan, received: true };
+      }
+      const record = readHouseLaunch(env, entry.attempts[0]);
+      if (!record || ['ready', 'terminated'].includes(record.state)) fail('native collection already has a receipt');
+      keepHouseLaunchReceipt(env, record, { nativeNotStarted: true, error: 'its stopped house confirms this native attempt was not started' });
+      collection.done[entry.key] = { refused: true };
+      writeJson(hostFile(env, agent, seat), h);
+      return { plan, received: true };
+    }
+    if (q.phase !== 'part') fail('unknown native collection operation');
+    if (entry.attempts.some(id => readHouseLaunch(env, id)?.state === 'terminated')) fail('native collection cannot replace a termination receipt');
+    if (!BODY_ID.test(q.bodyId ?? '') || entry.bodyId && q.bodyId !== entry.bodyId || entry.session && q.session !== entry.session ||
+        !/^[A-Za-z0-9][A-Za-z0-9._-]{3,127}$/.test(q.session ?? '') || !/^[0-9a-f]{64}$/.test(q.sha256 ?? '')) fail('native collection identity changed');
+    if (!Number.isSafeInteger(q.part) || !Number.isSafeInteger(q.parts) || q.parts < 1 || q.parts > 64 || q.part < 0 || q.part >= q.parts || typeof q.data !== 'string' || q.data.length > PART_CHARS) fail('invalid native collection part');
+    const pending = q.pending ?? null;
+    if (!validPendingInbox(pending)) fail('invalid native inbox receipt');
+    const omitted = q.omitted ?? null;
+    if (omitted !== null && omitted !== 'size-limit') fail('invalid native session omission');
+    const signature = { bodyId: q.bodyId, session: q.session, sha256: q.sha256, parts: q.parts, inputConfirmed: q.inputConfirmed === true, pending, omitted };
+    if (entry.transfer && JSON.stringify(entry.transfer) !== JSON.stringify(signature)) fail('native collection transfer changed');
+    if (collection.done[entry.key]) {
+      if (collection.done[entry.key].sha256 !== q.sha256) fail('native collection already has another receipt');
+      return { plan, part: q.part, received: true, complete: true };
+    }
+    entry.transfer = signature;
+    const dir = transferDir(entry.key);
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    writeJson(join(dir, 'offline.json'), { v: 1, plan, key: entry.key });
+    const partFile = join(dir, `${q.part}.age`);
+    if (existsSync(partFile)) {
+      if (sealer.open(readFileSync(partFile)).toString() !== q.data) fail('native collection part changed');
+    } else writeFileSync(partFile, sealer.seal(Buffer.from(q.data)), { mode: 0o600 });
+    writeJson(hostFile(env, agent, seat), h);
+    const parts = Array.from({ length: q.parts }, (_, i) => join(dir, `${i}.age`));
+    if (!parts.every(f => existsSync(f))) return { plan, part: q.part, received: true, complete: false };
+    const encoded = parts.map(f => sealer.open(readFileSync(f)).toString()).join('');
+    const whole = Buffer.from(encoded, 'base64');
+    if (whole.length > 12 * 1024 * 1024 || whole.toString('base64') !== encoded || createHash('sha256').update(whole).digest('hex') !== q.sha256) fail('native collection content changed');
+    let files;
+    try { files = JSON.parse(whole.toString('utf8')); } catch { fail('invalid native session encoding'); }
+    let bytes = 0; const names = new Set();
+    if (!Array.isArray(files) || files.length > 10_000) fail('invalid native session files');
+    for (const f of files) {
+      if (f?.root !== (entry.harness === 'claude' ? 'projects' : 'sessions') || !safeRel(f.rel) || typeof f.data !== 'string') fail('native session file is outside its harness');
+      if (names.has(f.rel)) fail('native session file appears twice');
+      names.add(f.rel);
+      const data = Buffer.from(f.data, 'base64'); bytes += data.length;
+      if (data.toString('base64') !== f.data || bytes > MAX_SESSION_BYTES) fail('invalid native session size');
+    }
+    if (!files.length && !omitted) fail('offline native collection cannot acknowledge missing history');
+    if (files.length && omitted) fail('an omitted native session cannot contain files');
+    const nativeBody = { id: q.bodyId, harness: entry.harness, slot: { harness: entry.harness, session: q.session } };
+    for (const attempt of entry.attempts) {
+      const record = readHouseLaunch(env, attempt);
+      if (!record || record.agent !== agent || record.house !== house || record.seat !== seat || record.harness !== entry.harness) fail('native collection receipt belongs to another house');
+      if (record.state === 'ready' && rawOf(record.body) !== q.bodyId) fail('native collection receipt changed body');
+      if (record.state === 'refused') fail('native collection cannot replace a refusal');
+      if (x.claimed?.[q.bodyId] && x.claimed[q.bodyId] !== record.rid) fail('native collection body belongs to another attempt');
+    }
+    const packed = packedFile(env, agent, house, q.bodyId);
+    mkdirSync(dirname(packed), { recursive: true, mode: 0o700 });
+    writeJson(offlinePin(packed), { v: 1, plan, sha256: q.sha256 });
+    const temporary = packed + '.tmp';
+    writeFileSync(temporary, sealer.seal(Buffer.from(JSON.stringify({ v: 1, session: q.session, files, pending, ...(omitted ? { omitted } : {}) }))), { mode: 0o600 });
+    renameSync(temporary, packed);
+    x.report ??= { bodies: {}, done: {}, caps: [] };
+    x.report.bodies ??= {}; x.report.done ??= {};
+    x.report.bodies[q.bodyId] = { ...(x.report.bodies[q.bodyId] ?? {}), harness: entry.harness, session: q.session, status: 'ended', feedable: false };
+    for (const attempt of entry.attempts) {
+      const record = readHouseLaunch(env, attempt);
+      keepHouseLaunchReceipt(env, record, { id: nativeBody.id, inputConfirmed: q.inputConfirmed === true });
+      x.report.done[record.rid] = { id: nativeBody.id, attempt, inputConfirmed: q.inputConfirmed === true };
+      (x.claimed ??= {})[q.bodyId] = record.rid;
+    }
+    collection.done[entry.key] = { sha256: q.sha256, bodyId: q.bodyId, session: q.session, pending, ...(omitted ? { omitted } : {}) };
+    writeJson(hostFile(env, agent, seat), h);
+    rmSync(dir, { recursive: true, force: true });
+    return { plan, part: q.part, received: true, complete: true };
   });
 }
 
@@ -509,7 +797,16 @@ export class HouseRunner {
         let r;
         try { r = this.up(this.env, { now: () => this.now() }, { kind: 'owner' }, { agent, box: at.box, task: hostTask(this.env, boot) }, { kind: 'body-host', seat }); } catch (e) { if (e?.seatFull) throw seatFull(e.message); throw e; }
         // A new house: what was asked of the last one (and what it claimed) isn't this one's, nor is its host's key.
-        hostLocked(this.env, () => { const x = loadHost(this.env, agent, seat); x.house = r.id; delete x.report; delete x.hostHash; delete x.cancel; delete x.quiescing; x.bootHash = keyHash(boot); x.req = {}; x.stop = {}; x.inbox = {}; x.claimed = {}; pruneDraining(this.env, x); writeJson(hostFile(this.env, agent, seat), x); });
+        hostLocked(this.env, () => {
+          const x = loadHost(this.env, agent, seat);
+          if (x.house && retainOfflineHouse(this.env, x.house, x, load(this.env))) {
+            (x.draining ??= {})[x.house] = Object.fromEntries(PER_HOUSE.filter(k => k in x).map(k => [k, x[k]]));
+            for (const k of PER_HOUSE) delete x[k];
+          }
+          x.house = r.id; delete x.report; delete x.hostHash; delete x.cancel; delete x.quiescing; delete x.offlineCollection;
+          x.bootHash = keyHash(boot); x.req = {}; x.stop = {}; x.inbox = {}; x.claimed = {};
+          pruneDraining(this.env, x); writeJson(hostFile(this.env, agent, seat), x);
+        });
       }
       if (Date.now() > end) throw new RunnerError(`${agent}'s house ${h.house ?? ''} didn't start its body host in ${this.warmMs / 1000} s`);
       await sleep(this.poll);
@@ -544,6 +841,137 @@ export class HouseRunner {
     return moved;
   }
 
+  /** Reserve a stable request without handing any work to its host. The caller
+   * persists this public handle with its conversation before publication. */
+  async prepareLaunch(id, o, resume) {
+    if (!/^[0-9a-f]{64}$/.test(id ?? '') || !AGENT_NAME.test(o.agent ?? '')) throw new RunnerError('a house launch needs its durable attempt and agent');
+    const seat = o.seat ?? OWNER_SEAT;
+    if (!SEAT.test(seat)) throw new RunnerError('invalid house launch seat');
+    const parts = isParts(o.brief);
+    const ask = { attempt: id, harness: this.harness, model: o.model, deny: o.deny ?? [], ...(parts ? { parts: o.brief } : { brief: o.brief }), key: o.env?.LOOM_BODY_KEY,
+      ...(o.env?.LOOM_BODY_CONVERSATION ? { conversation: o.env.LOOM_BODY_CONVERSATION } : {}), ...(o.activity ? { activity: true } : {}),
+      ...(resume ? { resume: resume.session, files: o.files ?? [] } : {}) };
+    const intent = JSON.stringify({ agent: o.agent, seat, ask });
+    const intentHash = createHash('sha256').update(intent).digest('hex');
+    const check = old => {
+      if (old.intentHash !== intentHash || old.agent !== o.agent || old.seat !== seat || old.harness !== this.harness) throw new RunnerError('house launch attempt already has another intent');
+      return houseLaunchHandle(old);
+    };
+    const old = readHouseLaunch(this.env, id);
+    if (old) return check(old);
+    const house = await this.warm(o.agent, seat);
+    return hostLocked(this.env, () => {
+      const existing = readHouseLaunch(this.env, id);
+      if (existing) return check(existing);
+      const host = this.host(o.agent, seat);
+      if (host.house !== house || !houseTakes(this.env, house)) throw Object.assign(new RunnerError('its house stopped before launch reservation'), { nativeNotStarted: true });
+      if (!host.report?.caps?.includes('native-admission')) throw Object.assign(new RunnerError('its body host needs the native admission protocol; update its house runtime'), { nativeNotStarted: true, hostUpgradeRequired: true });
+      if (load(this.env).houses[house]?.nativeHistory?.v === 1 && !host.report?.caps?.includes('native-history')) throw Object.assign(new RunnerError('its body host needs durable native history; update its house runtime'), { nativeNotStarted: true, hostUpgradeRequired: true });
+      if (parts && !host.report?.caps?.includes('parts')) throw Object.assign(new RunnerError('its body host cannot read this brief'), { nativeNotStarted: true });
+      const record = { v: 1, id, intentHash, harness: this.harness, agent: o.agent, seat, house, rid: id.slice(0, 16),
+        state: 'reserved', at: this.now().getTime(), sealed: this.transit.seal(Buffer.from(JSON.stringify(ask))),
+        ...(o.model ? { model: o.model } : {}), ...(resume ? { slot: { harness: resume.harness, session: resume.session } } : {}) };
+      writeHouseLaunch(this.env, record);
+      return houseLaunchHandle(record);
+    });
+  }
+
+  checkedLaunch(handle) {
+    const record = readHouseLaunch(this.env, handle?.id);
+    if (!record || JSON.stringify(houseLaunchHandle(record)) !== JSON.stringify(houseLaunchHandle(handle)) || record.harness !== this.harness) throw new RunnerError('house launch handle does not match its sealed request');
+    return record;
+  }
+
+  /** Cancel only a request that has never become visible to the host. An
+   * interrupted two-file publication is recognized from its exact req marker. */
+  cancelPreparedLaunch(handle) {
+    return hostLocked(this.env, () => {
+      const record = this.checkedLaunch(handle);
+      const h = this.host(record.agent, record.seat), x = houseRec(h, record.house);
+      if (record.state === 'reserved' && x?.req?.[record.rid]?.launch === record.id) {
+        record.state = 'published'; writeHouseLaunch(this.env, record);
+      }
+      if (record.state !== 'reserved') return false;
+      record.state = 'refused'; record.reason = 'cancelled before house request publication'; delete record.sealed;
+      writeHouseLaunch(this.env, record);
+      return true;
+    });
+  }
+
+  publishPreparedLaunch(handle) {
+    return hostLocked(this.env, () => {
+      const record = this.checkedLaunch(handle);
+      if (!['reserved', 'publishing'].includes(record.state)) return record.state;
+      const h = this.host(record.agent, record.seat), x = houseRec(h, record.house);
+      if (!x || !houseTakes(this.env, record.house) || x.quiescing) {
+        if (record.state === 'publishing') return record.state;
+        record.state = 'refused'; record.reason = 'its house stopped before request publication'; delete record.sealed;
+        writeHouseLaunch(this.env, record); return record.state;
+      }
+      const request = x.req?.[record.rid];
+      if (request && request.launch !== record.id) throw new RunnerError('house launch request id is already occupied');
+      // Persist irrevocable publication intent first. Losing a transient host
+      // record later can never turn possibly published work back into reserved.
+      record.state = 'publishing'; writeHouseLaunch(this.env, record);
+      (x.req ??= {})[record.rid] = { at: record.at, sealed: record.sealed, launch: record.id };
+      // Recovery can repeat publication only to this same house and request.
+      writeJson(hostFile(this.env, record.agent, record.seat), h);
+      record.state = 'published'; writeHouseLaunch(this.env, record);
+      return record.state;
+    });
+  }
+
+  observePreparedLaunch(handle) {
+    return hostLocked(this.env, () => {
+      const record = this.checkedLaunch(handle);
+      if (record.state === 'ready') return { state: 'ready', body: record.body };
+      if (record.state === 'refused') return { state: 'refused', reason: record.reason };
+      if (record.state === 'terminated') return { state: 'terminated', termination: record.termination };
+      const h = this.host(record.agent, record.seat), x = houseRec(h, record.house);
+      if (['reserved', 'publishing'].includes(record.state)) {
+        if (x?.req?.[record.rid]?.launch !== record.id) return { state: 'pending' };
+        record.state = 'published'; writeHouseLaunch(this.env, record);
+      }
+      const receipt = x?.report?.done?.[record.rid];
+      if (receipt) keepHouseLaunchReceipt(this.env, record, receipt);
+      if (record.state === 'ready') return { state: 'ready', body: record.body };
+      if (record.state === 'refused') return { state: 'refused', reason: record.reason };
+      return { state: 'pending', ...(receipt?.error ? { reason: receipt.error } : {}) };
+    });
+  }
+
+  async waitPreparedLaunch(handle, { claimMs = this.claimMs } = {}) {
+    const end = Date.now() + claimMs;
+    for (;;) {
+      const result = this.observePreparedLaunch(handle);
+      if (result.state === 'ready') return result.body;
+      if (result.state === 'refused') throw Object.assign(new RunnerError(result.reason), { nativeNotStarted: true });
+      if (result.state === 'terminated') throw Object.assign(new RunnerError('its previous native attempt terminated without recoverable history'), { nativePending: true });
+      if (Date.now() > end) throw Object.assign(new RunnerError('its house launch is still uncertain; the original request is retained'), { nativePending: true });
+      await sleep(this.poll);
+    }
+  }
+
+  /** Called after the conversation bound the durable receipt. Removing the
+   * request cannot remove that receipt or authorize another native admission. */
+  acknowledgePreparedLaunch(handle) {
+    return hostLocked(this.env, () => {
+      const record = this.checkedLaunch(handle);
+      if (!['ready', 'refused', 'terminated'].includes(record.state)) return false;
+      const h = this.host(record.agent, record.seat), x = houseRec(h, record.house);
+      if (record.state === 'terminated') {
+        record.termination.consumed = true; writeHouseLaunch(this.env, record);
+        const entry = x?.offlineCollection?.entries.find(e => e.attempts.includes(record.id));
+        const receipt = entry && x.offlineCollection.done[entry.key];
+        if (receipt?.lost) { receipt.consumed = true; writeJson(hostFile(this.env, record.agent, record.seat), h); }
+      }
+      if (x?.req?.[record.rid]?.launch === record.id) {
+        delete x.req[record.rid]; writeJson(hostFile(this.env, record.agent, record.seat), h);
+      }
+      return true;
+    });
+  }
+
   async launch(o, resume) {
     if (!AGENT_NAME.test(o.agent ?? '')) throw new RunnerError('a body in a house is some agent\'s: say which');
     // Whose house (t-1952): the seat delivery gives, by the conversation's principal; none given is the owner's.
@@ -558,7 +986,9 @@ export class HouseRunner {
     // Asked of the house warm() gave, only while it's still the agent's house (not drained since): else warm again.
     let house;
     for (;;) {
-      house = await this.warm(o.agent, seat);
+      // No native request exists until warm succeeds and req is published.
+      try { house = await this.warm(o.agent, seat); }
+      catch (error) { error.nativeNotStarted = true; throw error; }
       const asked = hostLocked(this.env, () => {
         const h = loadHost(this.env, o.agent, seat);
         if (h.house !== house) return false;
@@ -588,7 +1018,7 @@ export class HouseRunner {
           if (rec) this.forgetStop(o.agent, house, d.id, seat);
           return { id, harness: this.harness, model: o.model, house, seat, ...(resume ? { slot: resume } : {}) };
         }
-        if (d?.error) throw new RunnerError(d.error);
+        if (d?.error) throw Object.assign(new RunnerError(d.error), d.nativeNotStarted === true ? { nativeNotStarted: true } : {});
         if (Date.now() > end) {
           // Given up on: should its house start it late, that body is stopped, never run (bodySync, h.cancel).
           hostLocked(this.env, () => { const h = loadHost(this.env, o.agent, seat); const x = houseRec(h, house); if (x) { (x.cancel ??= {})[rid] = this.now().getTime(); writeJson(hostFile(this.env, o.agent, seat), h); } });
@@ -617,14 +1047,17 @@ export class HouseRunner {
     const x = houseRec(this.host(body.agent, this.seatFor(body)), body.house);
     let collecting = false;
     try { collecting = !!load(this.env).houses?.[body.house]?.collection; } catch { /* fresh reports still carry their own facts */ }
-    return x && (collecting || freshRec(x, body.house, this.now().getTime())) ? x : null;
+    // The box's completed physical-stop transaction is durable evidence; it
+    // does not expire with the dead host's final heartbeat.
+    return x && (collecting || x.offlineCollection?.complete === true || freshRec(x, body.house, this.now().getTime())) ? x : null;
   }
 
   entry(body) {
     const raw = rawOf(body);
     const x = raw ? this.rec(body) : null;
     if (!x) return null;
-    const entry = x.report.bodies[raw] ?? { status: 'ended' };
+    const entry = x.report?.bodies?.[raw] ?? { status: 'ended' };
+    if (x.offlineCollection?.complete === true) return { ...entry, status: 'ended', feedable: false };
     try { if (load(this.env).houses?.[body.house]?.collection) return { ...entry, status: 'ended' }; } catch { /* keep the observed report */ }
     return entry;
   }
@@ -633,7 +1066,13 @@ export class HouseRunner {
   /** A stale host report is not proof that a running house's body ended. */
   pending(body) {
     try {
+      const raw = rawOf(body);
+      if (raw && existsSync(offlinePin(packedFile(this.env, body.agent, body.house, raw)))) return true;
+      const receipt = raw && collectionReceipt(houseRec(this.host(body.agent, this.seatFor(body)), body.house), raw);
+      if (receipt && receipt.consumed !== true) return true;
       const h = load(this.env).houses?.[body.house];
+      if (!h) return true; // Missing ownership metadata is not physical termination.
+      if (h?.agent === body.agent && h.nativeHistory?.v === 1 && !h.nativeHistory.complete) return true;
       return !!h && !h.collection && h.agent === body.agent && ['wanted', 'starting', 'running', 'stopping'].includes(h.state);
     } catch { return true; } // An unreadable control plane cannot prove termination either.
   }
@@ -683,9 +1122,24 @@ export class HouseRunner {
    */
   unheard(body) {
     const raw = rawOf(body);
+    // Offline collection ends the authority of the last live report. It may
+    // predate a hook's latest inbox receipt. Only the final collected receipt
+    // can narrow replay; unknown receipts replay all runtime-owned fed copies.
+    const final = this.finalInbox(body);
+    if (final) return final.ready ? final.pending : null;
     const x = raw ? this.rec(body) : null;
     if (!x) return null;
     return [...new Set([...(x.inbox?.[raw] ?? []).map((y) => y.key), ...(x.report.bodies[raw]?.pending ?? [])])];
+  }
+
+  /** Offline retirement waits for a final inbox receipt along with its pack. */
+  finalInbox(body) {
+    const raw = rawOf(body), x = raw ? houseRec(this.host(body.agent, this.seatFor(body)), body.house) : null;
+    if (!x?.offlineCollection) return undefined;
+    const receipt = collectionReceipt(x, raw);
+    if (!receipt) return { ready: false };
+    return { ready: true, lost: receipt.lost === true, pending: Array.isArray(receipt.pending)
+      ? [...new Set([...(x.inbox?.[raw] ?? []).map(y => y.key), ...receipt.pending])] : null };
   }
 
   /** Its follow-ups, gone from the record (the runtime keeps its own copies). */
@@ -739,14 +1193,26 @@ export class HouseRunner {
   async pack(body, { deferAck = false } = {}) {
     const raw = rawOf(body);
     if (!raw) return [];
-    // No key here: no slot, at once. It's stopped, and its session stays in its house (thrown away with it).
-    if (!this.canSeal()) { this.end(body); return null; }
     const f = packedFile(this.env, body.agent, body.house, raw);
+    const collecting = load(this.env).houses?.[body.house];
+    if (!existsSync(f) && !collecting) throw new RunnerError('house metadata is unavailable; native ownership remains held');
+    const owner = houseRec(this.host(body.agent, this.seatFor(body)), body.house);
+    const receipt = collectionReceipt(owner, raw);
+    if (!existsSync(f) && receipt && receipt.consumed !== true) throw new RunnerError('acknowledged native collection pack is unavailable; ownership remains held');
+    if (!existsSync(f) && collecting?.nativeHistory?.v === 1 && collecting.collection?.phase === 'native') throw new RunnerError('native session collection is still pending on its box');
+    // No key here: no slot, at once. It's stopped, and its session stays in its house (thrown away with it).
+    if (!this.canSeal()) {
+      if (load(this.env).houses?.[body.house]?.nativeHistory?.v === 1) throw new RunnerError('native collection needs its sealing key');
+      this.end(body); return null;
+    }
     // The native process can end a sync before its host sends the pack. Only
     // termination of the house proves there is no host left to return it.
     if (!this.pending(body) && !existsSync(f)) return [];
     const asked = existsSync(f) || this.requestPack(body);
-    if (!asked) return [];
+    if (!asked) {
+      if (this.pending(body)) throw new RunnerError('native session collection is still pending');
+      return [];
+    }
     const end = Date.now() + this.claimMs;
     while (!existsSync(f)) {
       if (Date.now() > end || !this.rec(body)) throw new RunnerError(`${body.agent}'s house didn't send ${body.id}'s session back`);
@@ -754,6 +1220,15 @@ export class HouseRunner {
     }
     const pack = JSON.parse(this.sealer.open(readFileSync(f)).toString('utf-8'));
     const files = pack?.v === 1 && Array.isArray(pack.files) ? pack.files : pack;
+    if (pack?.v === 1 && pack.omitted !== undefined && !['size-limit', 'missing-history'].includes(pack.omitted)) throw new RunnerError('invalid native session omission');
+    if (pack?.v === 1 && pack.omitted === 'missing-history') {
+      if (!Array.isArray(pack.files) || pack.files.length || pack.bodyId !== raw || pack.plan !== (owner?.offlineCollection?.plan ?? collecting?.nativeHistory?.plan)) throw new RunnerError('invalid native history-loss receipt');
+      throw new SessionHistoryMissing();
+    }
+    if (pack?.v === 1 && pack.omitted === 'size-limit') {
+      if (!Array.isArray(pack.files) || pack.files.length) throw new RunnerError('invalid native session omission');
+      throw new SessionSizeError(`its session is over ${MAX_SESSION_BYTES / 1024 / 1024} MB`);
+    }
     if (!deferAck) this.ackPack(body);
     return files;
   }
@@ -764,8 +1239,16 @@ export class HouseRunner {
     if (!raw) return;
     hostLocked(this.env, () => {
       const seat = this.seatFor(body), h = loadHost(this.env, body.agent, seat), x = houseRec(h, body.house);
-      if (x?.stop?.[raw]) { delete x.stop[raw]; writeJson(hostFile(this.env, body.agent, seat), h); }
+      const receipt = collectionReceipt(x, raw);
+      if (receipt || x?.stop?.[raw]) {
+        if (receipt) receipt.consumed = true;
+        if (x?.stop?.[raw]) delete x.stop[raw];
+        // The committed consumer receipt, rather than a missing pin/file,
+        // authorizes releasing this body's collection ownership.
+        writeJson(hostFile(this.env, body.agent, seat), h);
+      }
       rmSync(packedFile(this.env, body.agent, body.house, raw), { force: true });
+      rmSync(offlinePin(packedFile(this.env, body.agent, body.house, raw)), { force: true });
     });
   }
 }

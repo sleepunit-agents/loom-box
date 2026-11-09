@@ -26,7 +26,8 @@ import { pruneImages } from '../src/box.mjs';
 import { joinLoom, runner } from '../src/box.mjs';
 import { HouseFileError, NESTED_ARGS, parseHouseFile } from '../src/house.mjs';
 import { scratch } from './scratch.mjs';
-import { load } from '../src/state.mjs';
+import { load, update } from '../src/state.mjs';
+import { HouseRunner, registerTaskHost } from '../src/houserunner.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 let env, fx, revoked, repo, client, r, fake;
@@ -105,7 +106,9 @@ test('a house is a container with exactly its own secrets, env and dirs, and not
   for (const want of ['--rm', '--init', '--name loom-house-h-1', '--hostname art-house', '-i', ...NESTED_ARGS,
     '-e ART_REPO=https://example.com/art.git', '-e LOOM_URL=http://loom.test/mcp', '-e HOUSE_ID=h-1', '-e HOUSE_AGENT=art']) assert.ok(s.includes(want), want);
   const vols = args.filter((_, i) => args[i - 1] === '-v');
-  assert.deepEqual(vols.map((v) => v.split(':').slice(1).join(':')), ['/home/art/.local/state', '/var/lib/containers', '/garage/git/art.git:ro']);
+  assert.deepEqual(vols.map((v) => v.split(':').slice(1).join(':')), ['/run/loom-native-history', '/home/art/.local/state', '/var/lib/containers', '/garage/git/art.git:ro']);
+  assert.equal(vols[0], `${join(env.LOOM_BOX_DATA, 'houses', h.id, 'native')}:/run/loom-native-history`);
+  assert.ok(s.includes('-e LOOM_RUNTIME_NATIVE_HISTORY=/run/loom-native-history'));
   for (const v of vols) assert.ok(v.startsWith(env.LOOM_BOX_DATA), `${v} is the box's own per-house or mirror dir`);
   assert.ok(args.at(-3).startsWith('loom-house-art:'));
   assert.deepEqual(args.slice(-2), ['claude', '-p']);
@@ -789,4 +792,64 @@ test('a lost reply after state upload commits is retried without losing the save
   await box.tick();await until(()=>house(h.id).state==='done');assert.ok(uploads>=2);
   const saved=ok(api(env,fx,{caller:owner,path:'saved-state',body:{agent:'art',name:'upload-reply',slot:true}}));
   assert.equal(spawnSync('tar',['-xzOf','-','./cursor'],{input:Buffer.from(saved.state,'base64'),encoding:'utf8'}).stdout,`loom-house-${h.id};`);
+});
+
+for (const fault of ['upload', 'finish']) test(`native history survives a box restart after ${fault === 'upload' ? 'upload failure' : 'a lost completion acknowledgement'}`, async () => {
+  const logs = [], calls = [];
+  r = runner(env, client, { loomUrl: 'http://loom.test/mcp', log: m => logs.push(m) });
+  agentRepo(repo); setAgent(); podmanCfg({ run: 'sleep' });
+  const h = up('model-free collection lifecycle fixture');
+  await r.tick(); await until(() => house(h.id).state === 'running');
+  await until(() => existsSync(join(fake, 'runs', `loom-house-${h.id}.pid`)));
+  const history = join(env.LOOM_BOX_DATA, 'houses', h.id, 'native');
+  const session = '12345678-1234-1234-1234-123456789abc';
+  const file = join(history, 'codex-sessions/2026/11/09', `rollout-time-${session}.jsonl`);
+  mkdirSync(dirname(file), { recursive: true, mode: 0o700 }); writeFileSync(file, 'the original native context', { mode: 0o600 });
+  const host = registerTaskHost(env, 'art', h.id);
+  update(env, s => { s.houses[h.id].kind = 'body-host'; s.houses[h.id].seat = host.seat; });
+  ok(await api(env, fx, { caller: { kind: 'agent', agent: 'art', house: h.id }, path: 'body-sync', body: { hostKey: host.hostKey,
+    report: { bodies: { deadbeef: { harness: 'codex', status: 'working', session } }, done: {}, caps: ['parts', 'native-admission', 'native-history'], starting: [] } } }));
+  const original = client.call.bind(client); let failed = false;
+  client.call = async (path, body) => {
+    calls.push({ path, phase: body.phase });
+    if (!failed && path === 'native-collection' && body.phase === (fault === 'upload' ? 'part' : 'finish')) {
+      failed = true;
+      if (fault === 'finish') await original(path, body);
+      throw Error('fixture collection response unavailable');
+    }
+    return original(path, body);
+  };
+  try {
+    assert.equal(spawnSync(env.LOOM_BOX_PODMAN, ['stop', `loom-house-${h.id}`], { env: { PATH: env.PATH, HOME: env.HOME }, encoding: 'utf8' }).status, 0);
+    await until(() => failed).catch(() => { throw Error(JSON.stringify({ logs, calls, history: load(env).houses[h.id].nativeHistory })); });
+    assert.equal(existsSync(file), true, 'the only local history remains across a failed acknowledgement');
+    assert.equal(house(h.id).state, 'running', 'the box has not reported successful collection');
+    assert.equal(houseBadge(house(h.id)), 'saving conversation history');
+    const receipt = JSON.parse(readFileSync(join(env.LOOM_BOX_DATA, 'houses', h.id, 'ending.json'), 'utf8'));
+    assert.equal(receipt.native, true); assert.equal(receipt.nativeUploaded, false); assert.equal(receipt.reported, false);
+    const fresh = runner(env, client, { loomUrl: 'http://loom.test/mcp', log: () => {} });
+    await fresh.tick(); await until(() => ['done', 'failed', 'stopped'].includes(house(h.id).state));
+    assert.equal(load(env).houses[h.id].nativeHistory.complete, true);
+    assert.equal(existsSync(history), false, 'cleanup follows the authenticated complete acknowledgement');
+    assert.deepEqual(readdirSync(join(env.LOOM_BOX_DATA, 'houses', h.id)), ['log']);
+    const hr = new HouseRunner(env, 'codex');
+    const files = await hr.pack({ id: `${h.id}-deadbeef`, house: h.id, agent: 'art', harness: 'codex', seat: host.seat }, { deferAck: true });
+    assert.equal(Buffer.from(files[0].data, 'base64').toString(), 'the original native context');
+    assert.equal(readdirSync(join(fake, 'runs')).filter(n => n.endsWith('.json')).length, 1, 'the box never restarts the native house while collecting');
+  } finally {
+    spawnSync(env.LOOM_BOX_PODMAN, ['stop', `loom-house-${h.id}`], { env: { PATH: env.PATH, HOME: env.HOME }, encoding: 'utf8' });
+  }
+});
+
+test('an agent mount cannot hide the box-owned native history directory', async () => {
+  agentRepo(repo, { ...HOUSE, nested: false, mounts: { ...HOUSE.mounts, state: '/run' } });
+  setAgent({ nested: false }); const h = up(); await r.tick();
+  assert.equal(house(h.id).state, 'failed');
+  assert.match(house(h.id).log, /overlaps its native history directory/);
+  assert.equal(existsSync(join(fake, 'runs', `loom-house-${h.id}.json`)), false);
+});
+
+test('native history provisioning cannot be overridden by house environment or secret targets', () => {
+  assert.throws(() => parseHouseFile(JSON.stringify({ ...HOUSE, env: { LOOM_RUNTIME_NATIVE_HISTORY: '/unmounted-history' } })), /isn't allowed/);
+  assert.throws(() => parseHouseFile(JSON.stringify({ ...HOUSE, secrets: { history: { env: 'LOOM_RUNTIME_NATIVE_HISTORY' } } })), /can't be its variable/);
 });

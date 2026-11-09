@@ -34,7 +34,7 @@ test('1. body-sync takes the body host\'s own credential: a body in the house (i
   await w.kill();
 });
 
-test('2a. a body that lost its race (H) is ended with its session gone, not left in the clear', async () => {
+test('2a. an elapsed observer retains the original body and its session', async () => {
   const w = world();
   const B = cvOf('art', 'slack', 'dm:I');
   w.runner.delay = 300;
@@ -46,8 +46,10 @@ test('2a. a body that lost its race (H) is ended with its session gone, not left
   await slow;
   await slowDrain;
   const slowId = w.log.find((l) => l[0] === 'start' && plain(l[2]).endsWith('slow one'))[1];
-  assert.notEqual(loadConv(w.env, B).body, `claude:${slowId}`);
-  assert.equal(existsSync(w.runner.transcript(`s-${slowId}`)), false, 'its transcript is gone');
+  assert.equal(loadConv(w.env, B).body, `claude:${slowId}`);
+  assert.equal(existsSync(w.runner.transcript(`s-${slowId}`)), true, 'the current body keeps its transcript');
+  assert.equal(w.log.filter((l) => l[0] === 'start').length, 1);
+  assert.equal(w.log.filter((l) => l[0] === 'end').length, 0);
 });
 
 test('2b. a body stopped by a cancel (its claim wait ran out) has its session files deleted in its house', ageOnly, async () => {

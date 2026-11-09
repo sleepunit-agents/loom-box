@@ -8,7 +8,7 @@
 //    one too old is given up; a runner going down says so; a runner starting stops the sign-in containers left behind;
 //  - the box's card shows each harness's state up front, and its runtime against loom's ("updating…", why an update
 //    failed and when it tries again, Update now, and the one line for a box still on the old box piece).
-import { test, beforeEach } from 'node:test';
+import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, copyFileSync, cpSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -30,7 +30,7 @@ async function until(f, ms = 10000) {
   while (Date.now() < end) { const v = f(); if (v) return v; await sleep(25); }
   throw new Error('timed out');
 }
-let env, fx, client;
+let env, fx, client, ownedBoxes;
 const call = (path, body = {}) => api(env, fx, { caller: owner, path, body });
 const boxCall = (path, body = {}) => api(env, fx, { caller: { kind: 'piece', subject: 'one' }, path, body });
 const loginPage = (id) => page(env, { path: `login/${id}` });
@@ -42,6 +42,7 @@ const boxCard = () => page(env, { path: 'box/one' }).sections.find((x) => x.id =
 const rowsOf = (card) => card.blocks.find((b) => b.type === 'panel' && b.rows.some((i) => i.label === 'Claude')).rows;
 
 beforeEach(() => {
+  ownedBoxes = [];
   const home = scratch('loom-login-ux-');
   const bin = join(home, 'bin'), clis = join(home, 'clis');
   mkdirSync(join(bin, 'podman-state'), { recursive: true });
@@ -49,22 +50,31 @@ beforeEach(() => {
   copyFileSync(join(here, 'fake-podman.mjs'), join(bin, 'podman'));
   chmodSync(join(bin, 'podman'), 0o755);
   for (const h of ['claude', 'codex']) {
-    writeFileSync(join(clis, h), `#!/bin/sh\nFAKE_LOGIN_AS=${h} exec "${process.execPath}" "${join(here, 'fake-login.mjs')}" "$@"\n`);
+    const gate = h === 'codex' ? ` FAKE_LOGIN_DEVICE_GATE='${join(home, 'device-confirmed').replace(/'/g, "'\\''")}'` : '';
+    writeFileSync(join(clis, h), `#!/bin/sh\nFAKE_LOGIN_AS=${h}${gate} exec "${process.execPath}" "${join(here, 'fake-login.mjs')}" "$@"\n`);
     chmodSync(join(clis, h), 0o755);
   }
   writeFileSync(join(bin, 'podman-state', 'config.json'), JSON.stringify({ cliBin: clis }));
   env = { HOME: home, PATH: process.env.PATH, LOOM_BOX_HOME: join(home, 'state'), LOOM_BOX_DATA: join(home, 'data'), LOOM_BOX_LOCAL_NAME: 'one', LOOM_BOX_PODMAN: join(bin, 'podman'),
-    XDG_RUNTIME_DIR: join(home, 'run'), LOOM_RUNTIME_LOGIN_IMAGE: 'fake:clis', FAKE_LOGIN_DEVICE_MS: '600' };
+    XDG_RUNTIME_DIR: join(home, 'run'), LOOM_RUNTIME_LOGIN_IMAGE: 'fake:clis' };
   fx = { now: () => new Date(), mint: () => 'loom_house_token_aaaaaaaaaaaaaaaa', revoke: () => {}, secret: (n) => `secret:${n}` };
   const myEnv = env, myFx = fx;
   client = { async call(path, body) { const x = api(myEnv, myFx, { caller: { kind: 'piece', subject: 'one' }, path, body }); if (x.status !== 200) throw new Error(x.body.error); return x.body; } };
   ok(call('set-agent', { agent: 'art', repo: 'https://github.com/x/art.git' }));
 });
+afterEach(async () => {
+  const failures = [];
+  for (const box of ownedBoxes) { try { await box.shutdown(); } catch (error) { failures.push(error); } }
+  if (failures.length) throw new AggregateError(failures, 'owned fake sign-in runners did not shut down');
+});
 
 /** A runner on the fake CLIs: their status and login, through the fake podman. */
 let logged = [];
-const boxRunner = (o = {}) => runner(env, client, { loomUrl: 'http://loom.test/mcp', log: (m) => logged.push(m), upgrade: () => null,
-  status: (agents) => harnessStatus(env, { agents }), login: (h, opt) => startLogin(env, h, { ...opt, every: 100 }), sweep: () => [], ...o });
+const boxRunner = (o = {}) => {
+  const box = runner(env, client, { loomUrl: 'http://loom.test/mcp', log: (m) => logged.push(m), upgrade: () => null,
+    status: (agents) => harnessStatus(env, { agents }), login: (h, opt) => startLogin(env, h, { ...opt, every: 100 }), sweep: () => [], ...o });
+  ownedBoxes.push(box); return box;
+};
 
 test('Claude: the page spins through each step by itself and flips to "✓ Claude logged in (claude.ai, Max)"', async () => {
   const box = boxRunner();
@@ -110,6 +120,7 @@ test('Codex: the page shows the code and the link, then flips to logged in by it
   assert.deepEqual(blocksOf(p).find((b) => b.type === 'code'), { type: 'code', label: 'Code to enter', text: 'ABCD-EFGH1' });
   assert.equal(blocksOf(p).find((b) => b.type === 'link' && b.href).href, 'https://auth.openai.com/codex/device');
   assert.deepEqual([calloutOf(p).busy, calloutOf(p).title, p.refresh], [true, 'Waiting for you to enter the code at OpenAI…', 3]);
+  writeFileSync(join(env.HOME, 'device-confirmed'), 'the owner confirmed the device code');
   const done = await until(() => { const x = loginPage(id); return calloutOf(x)?.tone === 'ok' && x; });
   assert.equal(calloutOf(done).title, '✓ Codex logged in (ChatGPT, Pro)', 'its plan, now that the box asks who it is (t-1913)');
   assert.equal(done.refresh, undefined);
@@ -195,11 +206,13 @@ test('a runner that lost a login (its process gone, the runner the same) fails i
   assert.equal(load(env).logins[l3.id].error, 'one stopped answering during the sign-in; start again');
   // A runner going down (a restart, an update) tells loom why for each login it has, and stops its container.
   const box = boxRunner();
-  await box.tick();
-  const id = act(env, fx, { action: 'login-start', fields: { box: 'one', harness: 'codex' } }).page.slice(6);
-  await box.tick();
-  await until(() => load(env).logins[id].state === 'waiting');
-  await box.shutdown();
+  let id;
+  try {
+    await box.tick();
+    id = act(env, fx, { action: 'login-start', fields: { box: 'one', harness: 'codex' } }).page.slice(6);
+    await box.tick();
+    await until(() => load(env).logins[id].state === 'waiting');
+  } finally { await box.shutdown(); }
   assert.equal(load(env).logins[id].error, 'the runtime restarted during the sign-in; start again');
 });
 
