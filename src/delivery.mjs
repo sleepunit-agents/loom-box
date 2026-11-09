@@ -1742,7 +1742,7 @@ async function executeOne(env, op, d, mem) {
       saveConv(env, c);
       return true;
     });
-    if (!keep) endAndForget(env, r.body, d);
+    if (!keep) endAndForget(env, r, d);
     else noteHarness(env, c0.agent, r, d);
   } catch (e) {
     // No model the agent may use has room (t-1907): said plainly, once, and its messages aren't tried again on the
@@ -2046,15 +2046,63 @@ async function quotaOp(env, op, d) {
  * A body ended with nothing kept: stopped, and its harness's session files deleted (in its house, the host does that
  * on a plain stop). Every end either packs into a slot (retire) or comes here: none leaves a transcript behind.
  */
-function endAndForget(env, ref, d) {
+function endAndForget(env, created, d) {
+  const ref = created.body;
   try {
     const rec = readBody(env, ref);
+    if (rec.instance !== created.instance) return; // a resumed Claude job can reuse its id
     const runner = d.runner(rec.harness, rec.local);
-    const body = bodyOf(ref, rec);
-    const slot = (() => { try { return runner.slotOf(body) ?? rec.slot; } catch { return rec.slot; } })();
-    endBody(env, ref, { runner: d.runner, now: d.now, bodyEnv: d.bodyEnv() });
-    if (!runner.remote) dropSession(runner, slot, body);
+    if (runner.remote) {
+      // The house host acknowledges native exit before dropping its files.
+      endBody(env, ref, { runner: d.runner, now: d.now, bodyEnv: d.bodyEnv() });
+      return;
+    }
+    // A cancelled start has no conversation left to own its cleanup. Keep only
+    // its body reference so a runtime restart cannot strand the native writer.
+    const pending = { body: ref, instance: rec.instance, started: rec.started };
+    writeJson(discardFile(env, ref), pending);
+    finishDiscard(env, pending, d);
   } catch (e) { d.warn(`ending ${ref}: ${e.message}`); }
+}
+
+const discardDir = env => join(deliveryDir(env), 'discarding');
+const discardFile = (env, ref) => join(discardDir(env), `${ref.replace(':', '-')}.json`);
+
+function finishDiscard(env, expected, d) {
+  const ref = expected.body;
+  const rec = readBody(env, ref); // validates the reference before it names a file
+  if (rec.instance !== expected.instance || rec.started !== expected.started) {
+    rmSync(discardFile(env, ref), { force: true });
+    return;
+  }
+  const runner = d.runner(rec.harness, rec.local);
+  if (runner.remote) return;
+  const body = bodyOf(ref, rec);
+  if (!rec.ended) endBody(env, ref, { runner: d.runner, now: d.now, bodyEnv: d.bodyEnv() });
+  const stopped = runner.stopped ? runner.stopped(body) === true : ['idle', 'ended'].includes(runner.status(body));
+  if (!stopped) return;
+  const slot = runner.slotOf(body) ?? rec.slot;
+  dropSession(runner, slot, body);
+  rmSync(discardFile(env, ref), { force: true });
+}
+
+function discardPass(env, d) {
+  let entries;
+  try {
+    entries = readdirSync(discardDir(env)).filter(x => x.endsWith('.json'))
+      .map(name => ({ name, value: readJson(join(discardDir(env), name)) }))
+      .filter(x => typeof x.value?.body === 'string')
+      .sort((a, b) => (a.value.checkedAt ?? 0) - (b.value.checkedAt ?? 0)).slice(0, 4);
+  } catch { return; }
+  for (const { name, value } of entries) {
+    const ref = value.body;
+    try {
+      // Rotate uncertain writers too: one bad stop cannot starve later cleanup.
+      const pending = { body: ref, instance: value.instance, started: value.started, checkedAt: d.now().getTime() };
+      writeJson(join(discardDir(env), name), pending);
+      finishDiscard(env, pending, d);
+    } catch (e) { d.warn(`discarding ${ref}: ${e.message}`); }
+  }
 }
 
 /**
@@ -2236,6 +2284,7 @@ async function stopStuck(env, op, d) {
  */
 export async function tick(env, o = {}, only, mem = new Map()) {
   const d = depsOf(env, o);
+  discardPass(env, d);
   if (only) await drain(env, only, d, mem);
   const now = d.now().getTime();
   // Transfers from houses nobody will finish or collect (houserunner.mjs, sweepTransfers).
