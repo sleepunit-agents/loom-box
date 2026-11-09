@@ -721,10 +721,14 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
     while (ending.some((id) => logins.has(id)) && Date.now() < until) await new Promise((res) => setTimeout(res, 50));
   }
 
-  async function shutdown() {
+  async function endStarts() {
     closing = true;
     building.abort();
     if (work) await work;
+  }
+
+  async function shutdown() {
+    await endStarts();
     await endLogins();
     for (const id of houses.keys()) stop(id);
     const until = Date.now() + STOP_GRACE_MS + 5_000;
@@ -830,6 +834,7 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
         .catch((e) => log(`report ${id}: ${e.message}`));
     }
     for (const h of want.start || []) if (!closing && !houses.has(h.id)) await start(h);
+    if (closing) return want;
     await checkBuilds(want.bodyHosts);
     await sessions(want.remotes);
     // On another loom-box than loom's: install that one, between house starts (version.mjs).
@@ -842,7 +847,7 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
     return want;
   }
 
-  return { tick, stop, houses, shutdown, endLogins, run, settled };
+  return { tick, stop, houses, shutdown, endStarts, endLogins, run, settled };
 }
 
 export { dataDir };
