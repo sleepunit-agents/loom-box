@@ -462,10 +462,16 @@ export class CodexRunner {
     if (!child.pid) throw neverStarted(`codex didn't start (${this.codex})`);
     writeFileSync(join(dir, 'pid'), `${child.pid}\n`, { mode: 0o600 });
     child.stdin.on('error', () => {});
-    child.stdin.end(brief);
+    let inputReady;
+    if (launchToken !== undefined) {
+      inputReady = new Promise((resolve, reject) => {
+        child.stdin.once('error', reject);
+        child.stdin.end(brief, error => error ? reject(error) : resolve());
+      });
+    } else child.stdin.end(brief);
     child.unref();
     this.inbox?.open(key, { venue: 'runtime', chan: key, bridge: 'runtime' });
-    return { id: key, harness: 'codex', model, ...(resume ? { slot: { harness: 'codex', session: resume } } : {}) };
+    return { id: key, harness: 'codex', model, ...(inputReady ? { inputReady } : {}), ...(resume ? { slot: { harness: 'codex', session: resume } } : {}) };
   }
 
   /**

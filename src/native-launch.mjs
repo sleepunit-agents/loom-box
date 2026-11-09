@@ -24,7 +24,7 @@ export async function superviseNativeLaunch(env, { id, harness, options, resume 
   for (;;) {
     const record = readLaunch(env, id);
     if (!record) throw new RunnerError('native launch journal disappeared; its admission remains uncertain');
-    if (record.state === 'ready') return { ...record.body, model: options.model };
+    if (record.state === 'ready') return { ...record.body, model: options.model, ...(record.input !== 'confirmed' ? { inputUncertain: true } : {}) };
     if (record.state === 'refused') {
       const error = new RunnerError(record.reason);
       error.nativeNotStarted = true;

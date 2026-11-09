@@ -22,7 +22,10 @@ if (admission.admitted) {
     runner = runnerFor(harness, process.env);
     const o = { ...options, launchToken: record.token };
     const body = resume ? await runner.resume(resume, o) : await runner.start(o);
-    completeLaunch(process.env, id, body);
+    // A native identity alone is not acknowledgement that its prompt pipe was
+    // written. Recovery after worker death retains explicit input uncertainty.
+    if (body.inputReady) await body.inputReady;
+    completeLaunch(process.env, id, body, { inputConfirmed: true });
   } catch (error) {
     // Unknown failures retain admission. The controller's native observer will
     // reconcile the stable token; it cannot treat a lost response as no work.

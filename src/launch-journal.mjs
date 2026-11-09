@@ -88,7 +88,7 @@ export function admitLaunch(env, id) {
 }
 
 /** The worker commits a native identity before returning it to its registrar. */
-export function completeLaunch(env, id, body) {
+export function completeLaunch(env, id, body, { inputConfirmed = false } = {}) {
   if (!body || !BODY.test(body.id ?? '') || !['claude', 'codex'].includes(body.harness)) fail('invalid native launch receipt');
   if (body.slot !== undefined && (!body.slot || body.slot.harness !== body.harness || !BODY.test(body.slot.session ?? ''))) fail('invalid native continuation receipt');
   // Only the receipt fields, never arbitrary caller data (brief/env/key).
@@ -104,7 +104,7 @@ export function completeLaunch(env, id, body) {
       return r;
     }
     if (r.state !== 'admitted') fail('native launch was not admitted');
-    Object.assign(r, { state: 'ready', body: receipt, readyAt: Date.now() });
+    Object.assign(r, { state: 'ready', body: receipt, input: inputConfirmed ? 'confirmed' : 'uncertain', readyAt: Date.now() });
     save(env, r);
     return r;
   });
@@ -135,7 +135,7 @@ export function recoverLaunchReceipt(env, id, body) {
       if (JSON.stringify(r.body) !== JSON.stringify(receipt)) fail('native attempt has another receipt');
       return r;
     }
-    Object.assign(r, { state: 'ready', body: receipt, recoveredAt: Date.now() });
+    Object.assign(r, { state: 'ready', body: receipt, input: 'uncertain', recoveredAt: Date.now() });
     save(env, r);
     return r;
   });

@@ -4,7 +4,8 @@ import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { launchAttempt, readLaunch } from '../src/launch-journal.mjs';
+import { createHash } from 'node:crypto';
+import { launchAttempt, readLaunch, reserveLaunch } from '../src/launch-journal.mjs';
 import { superviseNativeLaunch } from '../src/native-launch.mjs';
 import { runnerFor } from '../src/runners.mjs';
 import { scratch } from './scratch.mjs';
@@ -29,8 +30,8 @@ function setup(harness) {
   const argv = () => existsSync(join(home, 'argv.log')) ? readFileSync(join(home, 'argv.log'), 'utf8').trim().split('\n').map(JSON.parse) : [];
   return { home, env, request, argv };
 }
-function controller(w, pollMs = 10) {
-  const code = `import{readFileSync}from'node:fs';import{superviseNativeLaunch}from${JSON.stringify(new URL('../src/native-launch.mjs', import.meta.url).href)};const q=JSON.parse(readFileSync(0,'utf8'));console.log(JSON.stringify(await superviseNativeLaunch(process.env,q,{pollMs:${pollMs}})));`;
+function controller(w, pollMs = 10, program) {
+  const code = program ?? `import{readFileSync}from'node:fs';import{superviseNativeLaunch}from${JSON.stringify(new URL('../src/native-launch.mjs', import.meta.url).href)};const q=JSON.parse(readFileSync(0,'utf8'));console.log(JSON.stringify(await superviseNativeLaunch(process.env,q,{pollMs:${pollMs}})));`;
   const child = spawn(process.execPath, ['--input-type=module', '-e', code], { env: w.env, stdio: ['pipe', 'pipe', 'pipe'] });
   let stdout = '', stderr = '';
   child.stdout.on('data', b => { stdout += b; });
@@ -88,4 +89,24 @@ test('positive native exec failure is a durable refusal, with no indefinite unce
   w.request.options.env = w.env;
   await assert.rejects(superviseNativeLaunch(w.env, w.request, { pollMs: 10 }), e => e.nativeNotStarted === true);
   assert.equal(readLaunch(w.env, w.request.id).state, 'refused');
+});
+
+test('worker termination after real native admission recovers identity but preserves input uncertainty', async () => {
+  const w = setup('codex');
+  const { harness, options } = w.request;
+  reserveLaunch(w.env, { id: w.request.id, harness, intentHash: createHash('sha256').update(JSON.stringify({ harness, options })).digest('hex') });
+  const code = `import{readFileSync}from'node:fs';import{admitLaunch}from${JSON.stringify(new URL('../src/launch-journal.mjs', import.meta.url).href)};import{runnerFor}from${JSON.stringify(new URL('../src/runners.mjs', import.meta.url).href)};const q=JSON.parse(readFileSync(0,'utf8'));const a=admitLaunch(process.env,q.id);const b=runnerFor(q.harness,process.env).start({...q.options,launchToken:a.record.token});await b.inputReady;console.log(JSON.stringify({id:b.id}));`;
+  const worker = controller(w, 10, code);
+  try {
+    const ended = await worker.done;
+    assert.equal(ended.code, 0, ended.stderr);
+    const original = JSON.parse(ended.stdout);
+    assert.equal(readLaunch(w.env, w.request.id).state, 'admitted', 'worker ended before committing its receipt');
+    const recovered = await superviseNativeLaunch(w.env, w.request, { pollMs: 10 });
+    assert.equal(recovered.id, original.id);
+    assert.equal(recovered.inputUncertain, true, 'no receipt proves prompt delivery after worker death');
+    await wait(() => w.argv().some(a => a.args?.[0] === 'exec'));
+    assert.equal(w.argv().filter(a => a.args?.[0] === 'exec').length, 1);
+    assert.equal(runnerFor('codex', w.env).alive(recovered.id), true);
+  } finally { if (worker.child.exitCode === null) worker.child.kill('SIGKILL'); await cleanup(w); }
 });
