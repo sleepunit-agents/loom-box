@@ -48,7 +48,10 @@ async function cleanup(w) {
   const record = readLaunch(w.env, w.request.id);
   if (record?.body && w.request.harness === 'codex') {
     const runner = configuredNativeRunner('codex', w.request.configuration, w.env);
-    runner.end(record.body);
+    // A receipt confirms the prompt pipe, not native signal-handler readiness.
+    // Complete this owned fake CLI through its explicit protocol; SIGINT and
+    // detached-tool flushing have their own runner test.
+    writeFileSync(join(w.home, 'finish'), '1');
     await wait(() => runner.stopped(record.body));
   }
 }
@@ -244,6 +247,25 @@ test('the private worker input accepts a full supported session pack plus its la
     assert.equal(body.harness, 'codex');
     assert.equal(readLaunch(w.env, w.request.id).state, 'ready');
   } finally { await cleanup(w); }
+});
+
+test('supervisor fixture cleanup completes even before the native signal handler is initialized', async () => {
+  const w = setup('codex'), marker = join(w.home, 'fixture-initializing'), release = join(w.home, 'fixture-initialized');
+  const executable = join(w.home, 'initializing-codex.mjs');
+  writeFileSync(executable, '#!/usr/bin/env node\nimport{existsSync,writeFileSync}from"node:fs";process.on("SIGINT",()=>{});writeFileSync(' + JSON.stringify(marker) + ',"1");while(!existsSync(' + JSON.stringify(release) + '))await new Promise(r=>setTimeout(r,10));await import(' + JSON.stringify(new URL('./fake-codex.mjs', import.meta.url).href) + ');\n');
+  chmodSync(executable, 0o755); w.env.LOOM_RUNTIME_CODEX = executable;
+  const runner = runnerFor('codex', w.env);
+  let body;
+  try {
+    body = await superviseNativeLaunch(w.env, w.request, { pollMs: 5 });
+    await wait(() => existsSync(marker));
+    const ready = setTimeout(() => writeFileSync(release, '1'), 50);
+    try { await cleanup(w); } finally { clearTimeout(ready); }
+    assert.equal(runner.stopped(body), true);
+  } finally {
+    writeFileSync(release, '1'); writeFileSync(join(w.home, 'finish'), '1');
+    if (body) await wait(() => runner.stopped(body));
+  }
 });
 
 test('a stalled read-only native query after worker death does not block the controller event loop', async()=>{
