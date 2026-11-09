@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { launchAttempt, readLaunch, reserveLaunch } from '../src/launch-journal.mjs';
 import { superviseNativeLaunch } from '../src/native-launch.mjs';
-import { configuredNativeRunner, nativeRunnerConfiguration, runnerFor } from '../src/runners.mjs';
+import { configuredNativeRunner, nativeRecoveryConfiguration, nativeRunnerConfiguration, runnerFor } from '../src/runners.mjs';
 import { scratch } from './scratch.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -56,6 +56,9 @@ test('the worker uses the selected native configuration rather than silently reb
   const w = setup('claude');
   const config = nativeRunnerConfiguration(runnerFor('claude', w.env));
   config.args = ['--fixture-selected-native-option'];
+  const observation = nativeRecoveryConfiguration(configuredNativeRunner('claude', config, w.env));
+  assert.equal(observation.jobsDir, config.jobsDir);
+  assert.equal(observation.args, undefined, 'observation metadata excludes private native arguments');
   w.request.configuration = config;
   const body = await superviseNativeLaunch(w.env, w.request, { pollMs: 10 });
   assert.equal(body.harness, 'claude');

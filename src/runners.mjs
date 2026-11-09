@@ -692,7 +692,7 @@ export class CodexRunner {
 /** Where Claude bodies' status lines keep their readings (statusline.mjs): the runner's and `usage statusline`'s. */
 export const usageDirOf = (env = process.env) => env.LOOM_RUNTIME_USAGE_DIR || join(env.HOME || homedir(), '.local', 'state', 'loom-runtime', 'usage');
 
-/** The runner for a harness, from the runtime's settings (LOOM_RUNTIME_CLAUDE, …) and what a test passes in. */
+/** Exact private constructor configuration for the selected launch worker. */
 export function nativeRunnerConfiguration(runner) {
   if (runner instanceof ClaudeRunner && runner.run === spawnSync) return {
     claude: runner.claude, jobsDir: runner.jobsDir, projectsDir: runner.roots.projects,
@@ -707,6 +707,21 @@ export function nativeRunnerConfiguration(runner) {
   return null;
 }
 
+/** Only the selectors needed to observe an existing native identity. Native
+ * arguments and profile contents do not belong in conversation metadata. */
+export function nativeRecoveryConfiguration(runner) {
+  if (runner instanceof ClaudeRunner) return {
+    claude: runner.claude, jobsDir: runner.jobsDir, projectsDir: runner.roots.projects,
+    ...(runner.inbox ? { inboxDir: runner.inbox.dir } : {}),
+  };
+  if (runner instanceof CodexRunner) return {
+    codex: runner.codex, runsDir: runner.runsDir, codexHome: runner.codexHome,
+    sessionsDir: runner.roots.sessions, homesDir: runner.homesDir, systemDir: runner.systemDir,
+    ...(runner.inbox ? { inboxDir: runner.inbox.dir } : {}),
+  };
+  return null;
+}
+
 /** Private launch-worker input; never a new model routing or permissions path. */
 export function configuredNativeRunner(harness, configuration, env = process.env) {
   if (!configuration) return runnerFor(harness, env);
@@ -715,6 +730,7 @@ export function configuredNativeRunner(harness, configuration, env = process.env
   throw new RunnerError('unsupported native launch configuration');
 }
 
+/** The runner from runtime settings and explicit dependency injection. */
 export function runnerFor(harness, env = process.env, opts = {}) {
   const argv = (v) => { try { const a = JSON.parse(v); return Array.isArray(a) && a.every((x) => typeof x === 'string') ? a : []; } catch { return []; } };
   const inboxDir = env.LOOM_RUNTIME_INBOX_DIR || undefined;
