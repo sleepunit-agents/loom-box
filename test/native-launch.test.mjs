@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
@@ -9,6 +9,7 @@ import { admitLaunch, completeLaunch, launchAttempt, readLaunch, reserveLaunch }
 import { superviseNativeLaunch } from '../src/native-launch.mjs';
 import { configuredNativeRunner, nativeRecoveryConfiguration, nativeRunnerConfiguration, runnerFor } from '../src/runners.mjs';
 import { scratch } from './scratch.mjs';
+import { MAX_SESSION_BYTES } from '../src/sessions.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const wait = async fn => {
@@ -148,4 +149,99 @@ test('a failed helper cannot cancel a worker already admitted by another registr
   assert.equal(result.id, native.id);
   assert.equal(readLaunch(w.env, w.request.id).state, 'ready');
   assert.equal(w.argv().length, 0);
+});
+
+
+for (const harness of ['claude', 'codex']) test(`${harness}: only the admitted worker restores resume files; repeated observation preserves a live writer's edits`, async () => {
+  const w = setup(harness);
+  const root = harness === 'claude' ? 'projects' : 'sessions';
+  const rel = 'restore-fixture/session.jsonl';
+  const target = join(runnerFor(harness, w.env).roots[root], rel);
+  const native = new URL(harness === 'claude' ? './fake-claude.mjs' : './fake-codex.mjs', import.meta.url).href;
+  const executable = join(w.home, 'restore-check.mjs');
+  writeFileSync(executable, '#!/usr/bin/env node\nimport{readFileSync}from"node:fs";if(readFileSync('+JSON.stringify(target)+',"utf8")!=="restored-native-context")process.exit(42);await new Promise(r=>setTimeout(r,60));await import('+JSON.stringify(native)+');\n');
+  chmodSync(executable, 0o755);
+  w.env[harness === 'claude' ? 'LOOM_RUNTIME_CLAUDE' : 'LOOM_RUNTIME_CODEX'] = executable;
+  w.request.resume = { harness, session: 'restore-fixture-session' };
+  w.request.files = [{ root, rel, data: Buffer.from('restored-native-context').toString('base64') }];
+  try {
+    const [one, two] = await Promise.all([superviseNativeLaunch(w.env, w.request, { pollMs: 5 }), superviseNativeLaunch(w.env, w.request, { pollMs: 5 })]);
+    assert.equal(one.id, two.id);
+    await wait(() => w.argv().some(a => harness === 'claude' ? a.includes('--bg') : a.args?.[0] === 'exec'));
+    writeFileSync(target, 'native continued writing');
+    const recovered = await superviseNativeLaunch(w.env, w.request, { pollMs: 5 });
+    assert.equal(recovered.id, one.id);
+    assert.equal(readFileSync(target, 'utf8'), 'native continued writing');
+    assert.equal(w.argv().filter(a => harness === 'claude' ? a.includes('--bg') : a.args?.[0] === 'exec').length, 1);
+  } finally { await cleanup(w); }
+});
+
+test('a restore error is a confirmed pre-native refusal, not an indefinitely admitted attempt', async () => {
+  const w = setup('codex');
+  w.request.resume = { harness: 'codex', session: 'restore-fixture-session' };
+  w.request.files = [{ root: 'sessions', rel: '../outside', data: Buffer.from('invalid').toString('base64') }];
+  await assert.rejects(superviseNativeLaunch(w.env, w.request, { pollMs: 5 }), error => error.nativeNotStarted === true);
+  assert.equal(readLaunch(w.env, w.request.id).state, 'refused');
+  assert.equal(w.argv().length, 0);
+});
+
+test('a worker killed during resumed native input keeps restored files and recovers the same writer as input-uncertain', async () => {
+  const w = setup('codex');
+  const rel = 'restore-fixture/session.jsonl';
+  const target = join(runnerFor('codex', w.env).roots.sessions, rel);
+  const marker = join(w.home, 'native-restored-and-writing');
+  const release = join(w.home, 'release-native-input');
+  const executable = join(w.home, 'delayed-native.mjs');
+  const native = new URL('./fake-codex.mjs', import.meta.url).href;
+  writeFileSync(executable, '#!/usr/bin/env node\nimport{existsSync,readFileSync,writeFileSync}from"node:fs";if(readFileSync('+JSON.stringify(target)+',"utf8")!=="restored-native-context")process.exit(42);writeFileSync('+JSON.stringify(target)+',"native writer updated its restored context");writeFileSync('+JSON.stringify(marker)+',"ready");while(!existsSync('+JSON.stringify(release)+'))await new Promise(r=>setTimeout(r,10));await import('+JSON.stringify(native)+');\n');
+  chmodSync(executable, 0o755);
+  w.env.LOOM_RUNTIME_CODEX = executable;
+  w.request.resume = { harness: 'codex', session: 'restore-fixture-session' };
+  w.request.files = [{ root: 'sessions', rel, data: Buffer.from('restored-native-context').toString('base64') }];
+  // Backpressure keeps the worker before input confirmation until the native
+  // fixture starts reading. Killing it in that window cannot prove delivery.
+  w.request.options.brief = 'x'.repeat(1024 * 1024);
+  const registrar = controller(w);
+  try {
+    await wait(() => existsSync(marker));
+    const admitted = readLaunch(w.env, w.request.id);
+    assert.equal(admitted.state, 'admitted');
+    const originalPID = readFileSync(join(w.env.LOOM_RUNTIME_CODEX_RUNS, admitted.token, 'pid'), 'utf8');
+    process.kill(admitted.worker.pid, 'SIGKILL');
+    const result = await registrar.done;
+    assert.equal(result.code, 0, result.stderr);
+    const recovered = JSON.parse(result.stdout);
+    assert.equal(recovered.inputUncertain, true);
+    assert.equal(recovered.id, admitted.token);
+    assert.equal(readFileSync(join(w.env.LOOM_RUNTIME_CODEX_RUNS, recovered.id, 'pid'), 'utf8'), originalPID);
+    writeFileSync(release, 'continue');
+    assert.equal(readFileSync(target, 'utf8'), 'native writer updated its restored context');
+    await wait(() => w.argv().some(a => a.args?.[0] === 'exec'));
+    assert.equal(w.argv().filter(a => a.args?.[0] === 'exec').length, 1);
+    assert.equal(readLaunch(w.env, w.request.id).body.id, recovered.id);
+  } finally {
+    writeFileSync(release, 'continue');
+    if (registrar.child.exitCode === null) registrar.child.kill('SIGKILL');
+    const record = readLaunch(w.env, w.request.id);
+    if (record && !record.body && existsSync(marker)) {
+      const runner = runnerFor('codex', w.env), found = runner.recoverLaunch(record.token);
+      if (found.state === 'ready') { runner.end(found.body); await wait(() => runner.stopped(found.body)); }
+    }
+    await cleanup(w);
+  }
+});
+
+
+test('the private worker input accepts a full supported session pack plus its launch metadata', async () => {
+  const w = setup('codex');
+  const data = Buffer.alloc(MAX_SESSION_BYTES, 120);
+  w.request.resume = { harness: 'codex', session: 'maximum-pack-session' };
+  w.request.files = [{ root: 'sessions', rel: 'maximum-pack/session.jsonl', data: data.toString('base64') }];
+  try {
+    const body = await superviseNativeLaunch(w.env, w.request, { pollMs: 5 });
+    const file = join(runnerFor('codex', w.env).roots.sessions, 'maximum-pack/session.jsonl');
+    assert.equal(readFileSync(file).byteLength, MAX_SESSION_BYTES);
+    assert.equal(body.harness, 'codex');
+    assert.equal(readLaunch(w.env, w.request.id).state, 'ready');
+  } finally { await cleanup(w); }
 });

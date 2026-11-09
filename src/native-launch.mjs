@@ -6,8 +6,8 @@ import { RunnerError, configuredNativeRunner } from './runners.mjs';
 
 /** A restart observes/adopts this same attempt. It never launches another native
  * request merely because an observer or the original registrar went away. */
-export async function superviseNativeLaunch(env, { id, harness, options, resume, configuration }, { pollMs = 100, spawnWorker = spawn } = {}) {
-  const intent = { harness, options, ...(resume ? { resume } : {}), ...(configuration ? { configuration } : {}) };
+export async function superviseNativeLaunch(env, { id, harness, options, resume, configuration, files }, { pollMs = 100, spawnWorker = spawn } = {}) {
+  const intent = { harness, options, ...(resume ? { resume } : {}), ...(configuration ? { configuration } : {}), ...(files !== undefined ? { files } : {}) };
   const intentHash = createHash('sha256').update(JSON.stringify(intent)).digest('hex');
   const first = reserveLaunch(env, { id, harness, intentHash });
   let helperFailed = false;

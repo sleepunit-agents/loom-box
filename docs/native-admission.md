@@ -129,3 +129,20 @@ input delivery. The new controller methods and their tests do not yet connect
 this protocol to delivery or add the native body-host fence. Those integrations,
 restart reconstruction, capability gating, acknowledgement recovery, and physical
 barrier recovery remain required before this draft can deploy.
+
+## Resume restoration inside admission
+
+The shared native worker accepts packed resume files in its private input and
+includes them in the immutable intent hash. Only the admitted worker restores
+them, before invoking the existing native adapter. A controller retry or receipt
+observation never restores files over an already admitted writer. Restore errors
+before entering the native adapter are confirmed refusals. Errors after possible
+native admission retain the restored files and admission for recovery; cleanup
+cannot assume that the native writer stopped.
+
+The worker input bound includes the existing maximum session pack in base64 as
+well as the prompt and launch configuration. Packed files remain outside public
+journal metadata. Both adapter fixtures verify restoration before native entry,
+one native resume under competing controllers, and preservation of subsequent
+native edits. A real worker SIGKILL during resumed Codex input verifies recovery
+of the same OS writer with explicit input uncertainty and its restored files kept.
