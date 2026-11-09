@@ -5,11 +5,12 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { StateError, withLock } from './state.mjs';
+import { nativeHistoryRoot } from './native-history.mjs';
 
 const ID = /^[0-9a-f]{64}$/;
 const BODY = /^[A-Za-z0-9-]{4,64}$/;
 const fail = message => { throw new StateError(message, 409); };
-const root = env => join(env.LOOM_BOX_DATA || join(env.HOME || homedir(), '.local/share/loom-box'), 'launches');
+const root = env => { const native = nativeHistoryRoot(env); return native ? join(native, 'launches') : join(env.LOOM_BOX_DATA || join(env.HOME || homedir(), '.local/share/loom-box'), 'launches'); };
 const checked = id => { if (!ID.test(id ?? '')) fail('invalid native launch attempt'); return id; };
 const file = (env, id) => join(root(env), checked(id) + '.json');
 const locked = (env, fn) => withLock(root(env), 'lock', fn, 'native launch admissions', 10_000);

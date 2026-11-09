@@ -239,3 +239,32 @@ recovery of the original transcript, no empty slot receipt, and the explicit
 size limit. These do not close the separate unexpected-house-host-exit gap:
 auto-removed containers and stateless cleanup still require durable native
 history collection before that cleanup can be considered safe.
+
+## Native history preparation for unexpected house exits
+
+`native-history.mjs` prepares an explicitly allocated house's dedicated native
+history mount before constructing the existing runner. Native launch journals
+use that mount too. Claude's actual CLI `jobs` and `projects` directories link
+to it; changing just the collector's projects selector would not preserve the
+CLI's writes. Codex's configured run and session paths link to it while keeping
+the selected constructor paths. Existing nonempty directories or conflicting
+links are refused without deleting their contents. Claude hooks/settings and
+provider credentials remain in the original configuration home. Codex's made
+homes, which can contain credentials, remain outside the history mount.
+
+`native-history-collection.mjs` is a passive reader. After the box has established
+physical house termination, it can make a private bounded plain-file snapshot
+of only the named history directories. Links, special files, changed files and
+limits fail without publishing a partial snapshot or deleting the source.
+`offlineNativeSession` uses the existing adapter's `slotOf`/`sessionFiles` and
+`packSession`; it cannot invoke a CLI, inspect host processes, start/resume a
+model, stop a model or sweep credential homes. Missing native identity/history
+remains uncertain. A collected body returns only its own native session files.
+
+These are preparation and collection primitives, not an activated recovery
+path yet. The box must provision the mount, authenticate collection as the
+allocated house's box, transfer/seal and acknowledge each selected session,
+reconcile outstanding admission receipts, and retain the original history until
+those acknowledgements are durable. Normal house cleanup must wait for that
+transaction. The draft must not deploy merely because the storage unit tests
+pass; actual host SIGKILL and fresh-controller resume proofs are still required.
