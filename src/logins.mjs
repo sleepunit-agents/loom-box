@@ -216,6 +216,7 @@ export function parseClaudeStatus(stdout) {
   if (!d?.loggedIn) return { loggedIn: false };
   const out = { loggedIn: true, method: typeof d.authMethod === 'string' ? d.authMethod.slice(0, 40) : 'unknown' };
   if (typeof d.subscriptionType === 'string' && d.subscriptionType) out.plan = d.subscriptionType.slice(0, 40);
+  if (typeof d.loginExpiresAt === 'string' && Number.isFinite(Date.parse(d.loginExpiresAt))) out.loginExpiresAt = new Date(d.loginExpiresAt).toISOString();
   if (d.orgId || d.email) out.account = accountKey('claude', d.orgId ?? '', d.email ?? '');
   return out;
 }

@@ -75,6 +75,17 @@ to those binaries. It does not log in for them.
   Pro, showed as four accounts).
   A box knows a login exists only because the CLI's status says so. loom never
   opens a credential file.
+- **Renew before a login ends.** When the CLI reports a hard sign-in deadline
+  (Claude's `loginExpiresAt`), the runtime keeps that date with the box's login.
+  Within ten days, Inbox warns which login on which box needs renewal; the box
+  offers **Renew login**, opening its existing owner-only CLI sign-in flow.
+  The warning becomes urgent within three days and says when it has expired.
+  Alerts fire on each urgency change and otherwise daily. A renewed deadline
+  outside the warning window clears the alert automatically. Missing dates
+  remain unknown: loom never infers a hard deadline from an access token, and
+  never reads credentials. Codex currently reports no hard deadline through
+  its status command. Each box's login is renewed separately, even when
+  several boxes share one subscription's quota.
 - **Houses use their box's login.** A house file that says
   `"harnesses": ["claude"]` (what it, or one of its services, runs) gets the
   box's login for those harnesses and no other, mounted at
