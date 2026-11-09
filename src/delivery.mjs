@@ -1537,11 +1537,14 @@ const savedBodyRules = (rules, at) => ({ guest: rules.guest, key: rules.key, den
 
 /** The one conversation commit for a native start or its recovered receipt.
  * The snapshot contains no prompt or raw sender key. */
-function commitStartedConversation(env, op, { run, senderHash, bodyRules, way }, r, pending, at, localKey) {
+export function commitStartedConversation(env, op, { run, senderHash, bodyRules, way }, r, pending, at, localKey) {
   const keys = op.msgs.map(x => x.key);
   return locked(env, () => {
     const c = loadConv(env, op.cv);
     if (!c) return false;
+    // The original registrar may have committed just before recovery observed
+    // its receipt. This is our current body, not a late orphan to stop.
+    if (c.body === r.body && c.run === run) return true;
     if (!ours(c, op)) {
       // This op outlived its marker (another took the conversation): its body isn't the conversation's. Its messages
       // go back on the queue, for whichever body is.
