@@ -103,8 +103,22 @@ do not describe the current implementation as having retention limits.
 
 Core keeps the stable ref and payload hash with the encrypted reply rather than
 in its ordinary short-lived turn idempotency cache. Archival keeps that receipt.
-Explicit thread deletion removes the reply/hash too, but retains a deleted-thread
-tombstone and rejects future posts to that target. It is not a receipt GC scheme.
+Explicit thread deletion commits its deleted-thread tombstone before removing the
+reply/hash. A durable cleanup journal in the same transaction as the tombstone and
+thread removal is replayed by core's startup/minute sweep. Deleted targets reject
+exact retries even while cleanup still has the old receipt. Archival preserves
+receipts. This is deletion recovery, not a receipt GC scheme.
+
+The actual-core bench now kills the runtime after acceptance, sweeps words beyond
+14 days, and retries in a fresh runtime roughly three months later. Live and
+archived targets return the original receipt with one reply row; deleted targets
+remain failed across another runtime restart. A fourth case SIGKILLs core during
+deletion, restarts core, and verifies its tombstone survives, cleanup finishes and
+the retry cannot recreate a reply. This case FAILS against core2b6bbf1: deleting
+messages before committing the tombstone loses dedup and the retry gets a new
+accepted receipt. The companion core repair journals revocation before cleanup.
+Test seams remain the fake native harness/test sealer described above; no installed
+native proof or bounded retention implementation is implied.
 
 Before introducing collection, agree the maximum admission/enqueue/retry lifetime
 together across clock, runtime and core. Never prune pending reports by age alone:
@@ -117,3 +131,27 @@ common retry cutoff, plus deletion/reset tests and a delayed-retry crash proof.
 This review makes no destructive change. Keep expiry/collection open for the
 coordinated shipping review; native admission and history owners still own their
 respective gates.
+
+### Bounded retention acceptance plan (still held)
+
+A collector cannot be added independently. The review must settle one persisted
+absolute authority deadline for issue, clock admission, enqueue and retry; expose
+it to the issuer so a wake beyond it is refused when scheduled. Repeating a firing
+or restarting a process cannot extend it. Existing no-deadline grants must be
+explicitly expired or adopted by their authenticated issuer, never silently given
+a fresh lifetime during upgrade. No body may choose or extend its own deadline.
+
+Core must enforce that same sealed deadline before accepting a new stable ref,
+including a request delayed in flight past cutoff. Keep deadline in the payload
+hash. An expired pending report whose receipt may have been lost is unresolved,
+not known undelivered: retain its stable ref and surface an indeterminate outcome
+until reconciliation. Tombstones must block reuse of an expired grant/report id;
+collection may remove plaintext only after authority is irrevocably terminal.
+Core receipt/hash collection must wait until no accepted retry can reach that ref.
+
+Required tests before choosing collection: exact cutoff on all paths, lost receipt
+then deadline crossing, core network delay beyond cutoff, deadline rollback and
+fresh-process replay, reset/deletion at each cleanup boundary, expired-grant
+reissue attempts, and payload conflict after terminal payload collection. The
+current grant/report set remains sealed and uncollected until those checks and
+review pass. The deletion journal above repairs explicit deletion only.
