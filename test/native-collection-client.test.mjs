@@ -4,11 +4,12 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node
 import { dirname, join } from 'node:path';
 import { api } from '../src/control.mjs';
 import { load, update } from '../src/state.mjs';
-import { HouseRunner } from '../src/houserunner.mjs';
+import { HouseRunner, sweepSeats } from '../src/houserunner.mjs';
 import { collectNativeHistory } from '../src/native-collection-client.mjs';
 import { offlineNativeAttempt } from '../src/native-history-collection.mjs';
 import { ClaudeRunner } from '../src/runners.mjs';
 import { reserveLaunch, admitLaunch } from '../src/launch-journal.mjs';
+import { MAX_SESSION_BYTES, SessionSizeError } from '../src/sessions.mjs';
 import { hasAge, houseWorld } from './delivery-world.mjs';
 const put = (file, data) => { mkdirSync(dirname(file), { recursive: true, mode: 0o700 }); writeFileSync(file, data, { mode: 0o600 }); };
 const wait = async fn => { const end = Date.now() + 10_000; while (!fn()) { if (Date.now() > end) throw Error('native client fixture timed out'); await new Promise(r => setTimeout(r, 10)); } };
@@ -68,6 +69,18 @@ for (const harness of ['claude', 'codex']) test(`${harness}: the box client seal
   assert.deepEqual(w.calls.map(c => c.phase), ['plan', 'part', 'finish']);
 });
 
+for (const harness of ['claude', 'codex']) test(`${harness}: an explicit offline size-limit receipt uses the same typed retirement fallback`, { skip: !hasAge }, async () => {
+  const w = await setup(harness), body = { id: 'h-1-b0000000', house: 'h-1', agent: 'art', harness };
+  const source = transcript(w.root, harness, Buffer.alloc(MAX_SESSION_BYTES + 1), 's-b0000000');
+  await collectNativeHistory(w.options);
+  assert.equal(load(w.env).houses['h-1'].nativeHistory.complete, true);
+  assert.equal(readFileSync(source).length, MAX_SESSION_BYTES + 1, 'the client never discards its original before box cleanup');
+  assert.equal(w.hr.packReady(body), true, 'the omission is a durable acknowledgement, not absent storage');
+  await assert.rejects(w.hr.pack(body, { deferAck: true }), SessionSizeError);
+  assert.equal(w.hr.packReady(body), true, 'only the committed retirement may acknowledge this receipt');
+  w.hr.ackPack(body); assert.equal(w.hr.packReady(body), false);
+});
+
 for (const harness of ['claude', 'codex']) test(`${harness}: offline recovery reads an admitted token without interpreting its worker PID on the box`, { skip: !hasAge }, async () => {
   const w = await setup(harness, false), env = { HOUSE_ID: 'h-1', LOOM_RUNTIME_NATIVE_HISTORY: w.root };
   const ledger = reserveLaunch(env, { id: w.attempt, harness, intentHash: 'a'.repeat(64) });
@@ -91,8 +104,8 @@ test('a reserved native admission becomes a positive refusal only through its ph
   assert.deepEqual(w.calls.map(c => c.phase), ['plan', 'refuse', 'finish']);
 });
 
-for (const lost of ['part', 'finish']) test(`a lost ${lost} acknowledgement recovers from the same durable plan without rereading vanished native files`, { skip: !hasAge }, async () => {
-  const w = await setup('codex'); transcript(w.root, 'codex', 'recover exactly this context', 's-b0000000');
+for (const lost of ['part', 'finish']) for (const oversized of [false, true]) test(`a lost ${lost} acknowledgement recovers the same ${oversized ? 'size-limit receipt' : 'native files'} without rereading vanished history`, { skip: !hasAge }, async () => {
+  const w = await setup('codex'); transcript(w.root, 'codex', oversized ? Buffer.alloc(MAX_SESSION_BYTES + 1) : 'recover exactly this context', 's-b0000000');
   let dropped = false;
   const client = { async call(path, body) { const result = await w.client.call(path, body); if (!dropped && body.phase === lost) { dropped = true; throw Error('fixture response lost'); } return result; } };
   await assert.rejects(collectNativeHistory({ ...w.options, client }), /response lost/);
@@ -100,19 +113,21 @@ for (const lost of ['part', 'finish']) test(`a lost ${lost} acknowledgement reco
   await collectNativeHistory(w.options);
   assert.equal(load(w.env).houses['h-1'].nativeHistory.complete, true);
   assert.equal(w.calls.filter(c => c.phase === 'part').length, 1, 'the already received context is never uploaded or launched again');
+  if (oversized) await assert.rejects(w.hr.pack({ id: 'h-1-b0000000', house: 'h-1', agent: 'art', harness: 'codex' }, { deferAck: true }), SessionSizeError);
 });
 
-test('an existing live-host core receipt is adopted if the host exits after its final upload', { skip: !hasAge }, async () => {
+for (const oversized of [false, true]) test(`an existing live-host ${oversized ? 'size-limit' : 'native context'} receipt is adopted if the host exits after its final upload`, { skip: !hasAge }, async () => {
   const w = await setup('codex');
   const body = { id: 'h-1-b0000000', house: 'h-1', agent: 'art', harness: 'codex' };
   w.hr.requestPack(body);
-  const files = [{ root: 'sessions', rel: '2026/11/09/rollout-time-s-b0000000.jsonl', data: Buffer.from('already sealed by the live host').toString('base64') }];
+  const files = oversized ? [] : [{ root: 'sessions', rel: '2026/11/09/rollout-time-s-b0000000.jsonl', data: Buffer.from('already sealed by the live host').toString('base64') }];
   const result = await api(w.env, {}, { caller: { kind: 'agent', agent: 'art', house: 'h-1' }, path: 'body-sync', body: { hostKey: w.hostKey,
-    report: { bodies: { b0000000: { harness: 'codex', status: 'working', session: 's-b0000000', pending: [] } }, done: {}, caps: ['parts', 'native-admission', 'native-history'], starting: [], packed: { b0000000: { part: 0, parts: 1, pending: ['sealed-pending'], data: Buffer.from(JSON.stringify(files)).toString('base64') } } } } });
+    report: { bodies: { b0000000: { harness: 'codex', status: 'working', session: 's-b0000000', pending: [] } }, done: {}, caps: ['parts', 'native-admission', 'native-history'], starting: [], packed: { b0000000: { part: 0, parts: 1, pending: ['sealed-pending'], ...(oversized ? { omitted: 'size-limit' } : {}), data: Buffer.from(JSON.stringify(files)).toString('base64') } } } } });
   assert.equal(result.status, 200);
   await collectNativeHistory(w.options); // The original transcript has already been dropped locally.
   assert.deepEqual(w.calls.map(c => c.phase), ['plan', 'finish']);
-  assert.deepEqual(await w.hr.pack(body, { deferAck: true }), files);
+  if (oversized) await assert.rejects(w.hr.pack(body, { deferAck: true }), SessionSizeError);
+  else assert.deepEqual(await w.hr.pack(body, { deferAck: true }), files);
   assert.deepEqual(w.hr.unheard(body), ['sealed-pending'], 'the sealed final inbox receipt wins over the last report');
   assert.equal(w.hr.alive(body), false, 'physical-stop collection supersedes even a previously working report');
 });
@@ -147,6 +162,20 @@ test('a final collected native body remains positively ended after its last live
   const fresh = new HouseRunner(w.env, 'codex', { sealer: w.sealer, now: () => new Date(Date.now() + 3600_000) });
   assert.equal(fresh.packReady(body), true);
   assert.equal(fresh.alive(body), false, 'the durable physical-stop collection receipt outlives the host heartbeat');
+});
+
+test('missing offline pack files cannot impersonate a committed consumer acknowledgement', { skip: !hasAge }, async () => {
+  const w = await setup('codex'); transcript(w.root, 'codex', 'only native context', 's-b0000000');
+  await collectNativeHistory(w.options); await w.client.call('report', { id: 'h-1', state: 'failed' });
+  const body = { id: 'h-1-b0000000', house: 'h-1', agent: 'art', harness: 'codex' };
+  const file = join(w.env.LOOM_BOX_DATA, 'delivery/hosts/packed/art/h-1/b0000000.age');
+  rmSync(file); rmSync(file + '.offline.json');
+  w.hr.acknowledgePreparedLaunch(w.handle);
+  assert.equal(Object.keys(w.hr.host('art').req).length, 0);
+  sweepSeats(w.env);
+  assert.ok(w.hr.host('art').offlineCollection, 'the unconsumed receipt also survives ordinary host-record pruning');
+  assert.equal(w.hr.pending(body), true, 'only a durable consumer acknowledgement can release the received native history');
+  await assert.rejects(w.hr.pack(body), /pack is unavailable; ownership remains held/);
 });
 
 test('missing native history and malformed completion responses cannot authorize cleanup', { skip: !hasAge }, async () => {

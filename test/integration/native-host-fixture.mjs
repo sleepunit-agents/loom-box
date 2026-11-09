@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto';
 
 const home = process.env.HOME, args = process.argv.slice(2), harness = process.env.FIXTURE_NATIVE_HARNESS;
 const seed = 'native-host-death-context-v1';
+const padding = process.env.FIXTURE_SESSION_BYTES ? 'x'.repeat(Number(process.env.FIXTURE_SESSION_BYTES)) : '';
 const put = (file, value) => writeFileSync(file, value, { mode: 0o600 });
 const proof = (session, resumed, brief) => put(join(home, 'proof.json'), JSON.stringify({ session, resumed,
   pending: brief.split('PENDING-HOST-DEATH-FOLLOWUP').length - 1,
@@ -28,7 +29,7 @@ if (harness === 'claude') {
   mkdirSync(projects, { recursive: true });
   const file = join(projects, `${session}.jsonl`);
   if (resumed && !readFileSync(file, 'utf8').includes(seed)) throw Error('native Claude context was not restored');
-  if (!resumed) put(file, JSON.stringify({ type: 'assistant', message: { content: seed } }) + '\n');
+  if (!resumed) put(file, JSON.stringify({ type: 'assistant', message: { content: seed + padding } }) + '\n');
   mkdirSync(join(jobs, id), { recursive: true });
   put(join(jobs, id, 'state.json'), JSON.stringify({ state: 'working', intent: brief, sessionId: session }));
   put(agentsFile, JSON.stringify([{ id, kind: 'background', sessionId: session, state: 'running' }]));
@@ -39,7 +40,7 @@ if (harness === 'claude') {
   const dir = join(process.env.CODEX_HOME, 'sessions', '2026', '11', '09'); mkdirSync(dir, { recursive: true });
   const file = join(dir, `rollout-fixture-${session}.jsonl`);
   if (resumed && !readFileSync(file, 'utf8').includes(seed)) throw Error('native Codex context was not restored');
-  if (!resumed) put(file, JSON.stringify({ type: 'session_meta', payload: { id: session } }) + '\n' + JSON.stringify({ type: 'response_item', payload: { content: seed } }) + '\n');
+  if (!resumed) put(file, JSON.stringify({ type: 'session_meta', payload: { id: session } }) + '\n' + JSON.stringify({ type: 'response_item', payload: { content: seed + padding } }) + '\n');
   appendFileSync(file, JSON.stringify({ type: 'event_msg', payload: { type: 'task_started' } }) + '\n');
   proof(session, resumed, brief);
   process.stdout.write(JSON.stringify({ type: 'thread.started', thread_id: session }) + '\n' + JSON.stringify({ type: 'turn.started' }) + '\n');

@@ -17,10 +17,10 @@ function collection(w) {
   const call = (body, who = caller) => api(w.env, { sealer: w.sealer }, { caller: who, path: 'native-collection', body: { id: 'h-1', ...body } });
   return { call, caller, report: state => api(w.env, {}, { caller, path: 'report', body: { id: 'h-1', state } }) };
 }
-function upload(entry, text = 'original native transcript') {
-  const files = [{ root: entry.harness === 'claude' ? 'projects' : 'sessions', rel: `project/${entry.session ?? 'recovered-session'}.jsonl`, data: Buffer.from(text).toString('base64') }];
+function upload(entry, text = 'original native transcript', { omitted = false } = {}) {
+  const files = omitted ? [] : [{ root: entry.harness === 'claude' ? 'projects' : 'sessions', rel: `project/${entry.session ?? 'recovered-session'}.jsonl`, data: Buffer.from(text).toString('base64') }];
   const whole = Buffer.from(JSON.stringify(files)), encoded = whole.toString('base64'), half = Math.floor(encoded.length / 2);
-  const base = { phase: 'part', key: entry.key, bodyId: entry.bodyId ?? 'deadbeef', session: entry.session ?? 'recovered-session', sha256: createHash('sha256').update(whole).digest('hex'), parts: 2 };
+  const base = { phase: 'part', key: entry.key, bodyId: entry.bodyId ?? 'deadbeef', session: entry.session ?? 'recovered-session', sha256: createHash('sha256').update(whole).digest('hex'), parts: 2, ...(omitted ? { omitted: 'size-limit' } : {}) };
   return { files, first: { ...base, part: 0, data: encoded.slice(0, half) }, last: { ...base, part: 1, data: encoded.slice(half) } };
 }
 async function prepared(harness, ready = true) {
@@ -56,6 +56,7 @@ for (const harness of ['claude', 'codex']) test(`${harness}: only its allocated 
   assert.equal(c.call({ ...transfer.first, plan: 'f'.repeat(32) }).status, 409);
   assert.equal(c.call({ ...transfer.first, plan: plan.plan, bodyId: 'foreign-body' }).status, 409);
   assert.equal(c.call({ ...transfer.first, plan: plan.plan, session: 'other-session' }).status, 409);
+  assert.equal(c.call({ ...transfer.first, plan: plan.plan, omitted: 'read-error' }).status, 409, 'an arbitrary read failure cannot masquerade as a size limit');
   assert.equal(ok(c.call({ ...transfer.first, plan: plan.plan })).complete, false);
   const incoming = join(w.env.LOOM_BOX_DATA, 'delivery/hosts/parts/art/h-1');
   const partDir = join(incoming, readdirSync(incoming).find(name => name.startsWith('nc-')));
@@ -64,6 +65,7 @@ for (const harness of ['claude', 'codex']) test(`${harness}: only its allocated 
   assert.equal(c.call({ ...transfer.first, plan: plan.plan, data: 'changed' }).status, 409);
   assert.equal(c.call({ ...transfer.last, plan: plan.plan, inputConfirmed: true }).status, 409, 'input receipt cannot change between parts');
   assert.equal(c.call({ ...transfer.last, plan: plan.plan, pending: ['changed-receipt'] }).status, 409, 'final inbox receipt cannot change between parts');
+  assert.equal(c.call({ ...transfer.last, plan: plan.plan, omitted: 'size-limit' }).status, 409, 'session omission cannot change between parts');
   assert.equal(fresh.packReady(body), false);
   assert.equal(c.call({ phase: 'finish', plan: plan.plan }).status, 409);
   // Another conversation may need a new house while this physically stopped
@@ -124,7 +126,18 @@ for (const refuse of [false, true]) test(`a stopped house reconciles a published
   assert.equal(w.local.startsEntered ?? 0, 0, 'recovery never launches a native model');
 });
 
-for (const harness of ['claude', 'codex']) test(`${harness}: delivery ticking during offline upload holds the original body until its slot is committed`, { skip: !hasAge }, async () => {
+test('a declared size-limit omission cannot contain files or complete a malformed collection', { skip: !hasAge }, async () => {
+  const w = await prepared('codex'), c = collection(w), plan = ok(c.call({ phase: 'plan', physical: 'gone' }));
+  const entry = plan.entries[0], transfer = upload(entry);
+  ok(c.call({ ...transfer.first, plan: plan.plan, omitted: 'size-limit' }));
+  const invalid = c.call({ ...transfer.last, plan: plan.plan, omitted: 'size-limit' });
+  assert.equal(invalid.status, 409); assert.match(invalid.body.error, /cannot contain files/);
+  assert.equal(c.call({ phase: 'finish', plan: plan.plan }).status, 409);
+  assert.equal(w.hr.packReady({ id: `h-1-${entry.bodyId}`, agent: 'art', house: 'h-1' }), false);
+  assert.equal(load(w.env).houses['h-1'].nativeHistory.complete, false);
+});
+
+for (const harness of ['claude', 'codex']) for (const oversized of [false, true]) test(`${harness}: delivery ticking during offline upload holds the original body until its ${oversized ? 'explicit size-limit disposition' : 'slot'} is committed`, { skip: !hasAge }, async () => {
   const local = world(), w = houseWorld({ harness });
   const warnings = [];
   const o = { ...local.o, runner: () => w.hr, accounts: w.accounts, sealer: w.sealer, warn: m => warnings.push(m) };
@@ -145,7 +158,7 @@ for (const harness of ['claude', 'codex']) test(`${harness}: delivery ticking du
   const c = collection(w), plan = ok(c.call({ phase: 'plan', physical: 'gone' }));
   const entry = plan.entries.find(e => e.bodyId === before.body.split(':')[1].slice(4));
   assert.ok(entry, JSON.stringify(plan));
-  const transfer = upload(entry, 'original native history survives partial upload');
+  const transfer = upload(entry, 'original native history survives partial upload', { omitted: oversized });
   transfer.first.pending = transfer.last.pending = [fed[1]];
   await ownerConversationControl(w.env, { kind: 'owner' }, { conversation: start.conversation, action: 'interrupt' }, o);
   ok(c.call({ ...transfer.first, plan: plan.plan }));
@@ -166,7 +179,11 @@ for (const harness of ['claude', 'codex']) test(`${harness}: delivery ticking du
   w.hr.sealer = w.sealer;
   await tick(w.env, o);
   current = loadConv(w.env, start.conversation);
-  assert.equal(current.control.state, 'held', JSON.stringify({ warnings, retiring: current.retiring?.type, starting: !!current.starting, receipt: current.nativeRetirement })); assert.equal(current.slot.session, entry.session);
+  assert.equal(current.control.state, 'held', JSON.stringify({ warnings, retiring: current.retiring?.type, starting: !!current.starting, receipt: current.nativeRetirement }));
+  if (oversized) {
+    assert.equal(current.slot, undefined, 'the shared size policy resumes from digests, never an empty native slot');
+    assert.ok(warnings.some(m => /over 6 MB.*resumes from its digests/.test(m)), 'the shared retirement reports the explicit continuity loss');
+  } else assert.equal(current.slot.session, entry.session);
   assert.equal(current.body, undefined); assert.deepEqual(current.actsFor, before.actsFor);
   assert.deepEqual(current.queue.map(x => x.key), [fed[1]], 'only the final unconsumed follow-up is requeued from sealed runtime copies');
   assert.equal(w.local.startsEntered, 1, 'collection never admits replacement native work');

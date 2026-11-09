@@ -41,7 +41,7 @@ import { pieceName } from './piece.mjs';
 import { bodyBox } from './placement.mjs';
 import { isParts } from './briefs.mjs';
 import { RunnerError } from './runners.mjs';
-import { MAX_SESSION_BYTES, safeRel } from './sessions.mjs';
+import { MAX_SESSION_BYTES, safeRel, SessionSizeError } from './sessions.mjs';
 import { validPendingInbox } from './native-inbox.mjs';
 import { GONE, part, redact, UNPRINTABLE_ONE } from './redact.mjs';
 import { cardTime } from './activity.mjs';
@@ -249,6 +249,7 @@ export function sweepSeats(env) {
 }
 /** One house's part of its agent's host record: the record itself for the agent's house, else that house's draining entry. */
 const houseRec = (h, house) => (house && h.house === house ? h : (house && h.draining?.[house]) || null);
+const collectionReceipt = (x, raw) => Object.values(x?.offlineCollection?.done ?? {}).find(receipt => receipt.bodyId === raw);
 const freshRec = (x, house, now) => !!x?.report && now - x.report.at < HOST_STALE_MS && x.report.house === house;
 const fresh = (h, now) => freshRec(h, h.house, now);
 /** What's one house's in the record (the rest is the agent's). */
@@ -259,7 +260,9 @@ function retainOfflineHouse(env, house, record, s) {
   if (!collection) return false;
   if (!collection.complete) return true;
   return collection.entries.some(e => {
-    const id = collection.done[e.key]?.bodyId ?? e.transfer?.bodyId ?? e.bodyId;
+    const receipt = collection.done[e.key];
+    if (receipt?.bodyId && receipt.consumed !== true) return true;
+    const id = receipt?.bodyId ?? e.transfer?.bodyId ?? e.bodyId;
     return id && existsSync(offlinePin(packedFile(env, record.agent ?? s.houses[house]?.agent, house, id)));
   });
 }
@@ -457,6 +460,8 @@ export function bodySync(env, caller, body, o = {}) {
       const dir = partDir(env, agent, house, id);
       const pending = p.pending ?? null;
       if (!validPendingInbox(pending)) continue;
+      const omitted = p.omitted ?? null;
+      if (omitted !== null && omitted !== 'size-limit') continue;
       let sealedPart;
       try { sealedPart = sealer.seal(Buffer.from(p.data)); } catch { continue; } // no key: not kept (and not acked)
       mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -466,6 +471,10 @@ export function bodySync(env, caller, body, o = {}) {
       if (existsSync(inboxReceipt)) {
         if (sealer.open(readFileSync(inboxReceipt)).toString() !== JSON.stringify(pending)) continue;
       } else writeFileSync(inboxReceipt, sealer.seal(Buffer.from(JSON.stringify(pending))), { mode: 0o600 });
+      const omissionReceipt = join(dir, 'omitted.age');
+      if (existsSync(omissionReceipt)) {
+        if (sealer.open(readFileSync(omissionReceipt)).toString() !== JSON.stringify(omitted)) continue;
+      } else writeFileSync(omissionReceipt, sealer.seal(Buffer.from(JSON.stringify(omitted))), { mode: 0o600 });
       writeFileSync(join(dir, `${p.part}.age`), sealedPart, { mode: 0o600 });
       const files = Array.from({ length: p.parts }, (_, i) => join(dir, `${i}.age`));
       let complete = false;
@@ -476,7 +485,9 @@ export function bodySync(env, caller, body, o = {}) {
         // Keep the native session identity with its files. The host may forget
         // the body after this acknowledgement, before a later tick retires it.
         const session = bodies[id]?.session ?? x.stop[id]?.session;
-        const kept = session ? Buffer.from(JSON.stringify({ v: 1, session, files: JSON.parse(whole.toString('utf8')), pending })) : whole;
+        const packedFiles = JSON.parse(whole.toString('utf8'));
+        if (omitted && (!session || !Array.isArray(packedFiles) || packedFiles.length)) continue;
+        const kept = session ? Buffer.from(JSON.stringify({ v: 1, session, files: packedFiles, pending, ...(omitted ? { omitted } : {}) })) : whole;
         if (current?.nativeHistory?.v === 1) writeJson(offlinePin(f), { v: 1, source: 'host' });
         writeFileSync(f, sealer.seal(kept), { mode: 0o600 });
         rmSync(dir, { recursive: true, force: true });
@@ -566,11 +577,12 @@ export function nativeCollectionExchange(env, { agent, house, plan, requiredHost
         let kept;
         try { kept = JSON.parse(sealer.open(readFileSync(packed)).toString('utf8')); } catch { fail('the existing native pack cannot be read'); }
         if (kept?.v !== 1 || !Array.isArray(kept.files) || !/^[A-Za-z0-9][A-Za-z0-9._-]{3,127}$/.test(kept.session ?? '') || entry.session && entry.session !== kept.session) fail('the existing native pack has no matching identity');
+        if (kept.omitted !== undefined && (kept.omitted !== 'size-limit' || kept.files.length)) fail('the existing native pack has an invalid omission');
         entry.session = kept.session;
         const sha256 = createHash('sha256').update(JSON.stringify(kept.files)).digest('hex');
         writeJson(offlinePin(packed), { v: 1, plan, sha256 });
         x.offlineCollection.done[entry.key] = { inherited: true, bodyId: entry.bodyId, session: kept.session, sha256,
-          pending: validPendingInbox(kept.pending) ? kept.pending : null };
+          pending: validPendingInbox(kept.pending) ? kept.pending : null, ...(kept.omitted ? { omitted: kept.omitted } : {}) };
       }
       writeJson(hostFile(env, agent, seat), h);
     }
@@ -612,7 +624,9 @@ export function nativeCollectionExchange(env, { agent, house, plan, requiredHost
     if (!Number.isSafeInteger(q.part) || !Number.isSafeInteger(q.parts) || q.parts < 1 || q.parts > 64 || q.part < 0 || q.part >= q.parts || typeof q.data !== 'string' || q.data.length > PART_CHARS) fail('invalid native collection part');
     const pending = q.pending ?? null;
     if (!validPendingInbox(pending)) fail('invalid native inbox receipt');
-    const signature = { bodyId: q.bodyId, session: q.session, sha256: q.sha256, parts: q.parts, inputConfirmed: q.inputConfirmed === true, pending };
+    const omitted = q.omitted ?? null;
+    if (omitted !== null && omitted !== 'size-limit') fail('invalid native session omission');
+    const signature = { bodyId: q.bodyId, session: q.session, sha256: q.sha256, parts: q.parts, inputConfirmed: q.inputConfirmed === true, pending, omitted };
     if (entry.transfer && JSON.stringify(entry.transfer) !== JSON.stringify(signature)) fail('native collection transfer changed');
     if (collection.done[entry.key]) {
       if (collection.done[entry.key].sha256 !== q.sha256) fail('native collection already has another receipt');
@@ -643,7 +657,8 @@ export function nativeCollectionExchange(env, { agent, house, plan, requiredHost
       const data = Buffer.from(f.data, 'base64'); bytes += data.length;
       if (data.toString('base64') !== f.data || bytes > MAX_SESSION_BYTES) fail('invalid native session size');
     }
-    if (!files.length) fail('offline native collection cannot acknowledge missing history');
+    if (!files.length && !omitted) fail('offline native collection cannot acknowledge missing history');
+    if (files.length && omitted) fail('an omitted native session cannot contain files');
     const nativeBody = { id: q.bodyId, harness: entry.harness, slot: { harness: entry.harness, session: q.session } };
     for (const attempt of entry.attempts) {
       const record = readHouseLaunch(env, attempt);
@@ -656,7 +671,7 @@ export function nativeCollectionExchange(env, { agent, house, plan, requiredHost
     mkdirSync(dirname(packed), { recursive: true, mode: 0o700 });
     writeJson(offlinePin(packed), { v: 1, plan, sha256: q.sha256 });
     const temporary = packed + '.tmp';
-    writeFileSync(temporary, sealer.seal(Buffer.from(JSON.stringify({ v: 1, session: q.session, files, pending }))), { mode: 0o600 });
+    writeFileSync(temporary, sealer.seal(Buffer.from(JSON.stringify({ v: 1, session: q.session, files, pending, ...(omitted ? { omitted } : {}) }))), { mode: 0o600 });
     renameSync(temporary, packed);
     x.report ??= { bodies: {}, done: {}, caps: [] };
     x.report.bodies ??= {}; x.report.done ??= {};
@@ -667,7 +682,7 @@ export function nativeCollectionExchange(env, { agent, house, plan, requiredHost
       x.report.done[record.rid] = { id: nativeBody.id, attempt, inputConfirmed: q.inputConfirmed === true };
       (x.claimed ??= {})[q.bodyId] = record.rid;
     }
-    collection.done[entry.key] = { sha256: q.sha256, bodyId: q.bodyId, session: q.session, pending };
+    collection.done[entry.key] = { sha256: q.sha256, bodyId: q.bodyId, session: q.session, pending, ...(omitted ? { omitted } : {}) };
     writeJson(hostFile(env, agent, seat), h);
     rmSync(dir, { recursive: true, force: true });
     return { plan, part: q.part, received: true, complete: true };
@@ -998,6 +1013,8 @@ export class HouseRunner {
     try {
       const raw = rawOf(body);
       if (raw && existsSync(offlinePin(packedFile(this.env, body.agent, body.house, raw)))) return true;
+      const receipt = raw && collectionReceipt(houseRec(this.host(body.agent, this.seatFor(body)), body.house), raw);
+      if (receipt && receipt.consumed !== true) return true;
       const h = load(this.env).houses?.[body.house];
       if (!h) return true; // Missing ownership metadata is not physical termination.
       if (h?.agent === body.agent && h.nativeHistory?.v === 1 && !h.nativeHistory.complete) return true;
@@ -1064,7 +1081,7 @@ export class HouseRunner {
   finalInbox(body) {
     const raw = rawOf(body), x = raw ? houseRec(this.host(body.agent, this.seatFor(body)), body.house) : null;
     if (!x?.offlineCollection) return undefined;
-    const receipt = Object.values(x.offlineCollection.done ?? {}).find(d => d.bodyId === raw);
+    const receipt = collectionReceipt(x, raw);
     if (!receipt) return { ready: false };
     return { ready: true, pending: Array.isArray(receipt.pending)
       ? [...new Set([...(x.inbox?.[raw] ?? []).map(y => y.key), ...receipt.pending])] : null };
@@ -1124,6 +1141,8 @@ export class HouseRunner {
     const f = packedFile(this.env, body.agent, body.house, raw);
     const collecting = load(this.env).houses?.[body.house];
     if (!existsSync(f) && !collecting) throw new RunnerError('house metadata is unavailable; native ownership remains held');
+    const receipt = collectionReceipt(houseRec(this.host(body.agent, this.seatFor(body)), body.house), raw);
+    if (!existsSync(f) && receipt && receipt.consumed !== true) throw new RunnerError('acknowledged native collection pack is unavailable; ownership remains held');
     if (!existsSync(f) && collecting?.nativeHistory?.v === 1 && collecting.collection?.phase === 'native') throw new RunnerError('native session collection is still pending on its box');
     // No key here: no slot, at once. It's stopped, and its session stays in its house (thrown away with it).
     if (!this.canSeal()) {
@@ -1145,6 +1164,11 @@ export class HouseRunner {
     }
     const pack = JSON.parse(this.sealer.open(readFileSync(f)).toString('utf-8'));
     const files = pack?.v === 1 && Array.isArray(pack.files) ? pack.files : pack;
+    if (pack?.v === 1 && pack.omitted !== undefined && pack.omitted !== 'size-limit') throw new RunnerError('invalid native session omission');
+    if (pack?.v === 1 && pack.omitted === 'size-limit') {
+      if (!Array.isArray(pack.files) || pack.files.length) throw new RunnerError('invalid native session omission');
+      throw new SessionSizeError(`its session is over ${MAX_SESSION_BYTES / 1024 / 1024} MB`);
+    }
     if (!deferAck) this.ackPack(body);
     return files;
   }
@@ -1155,7 +1179,14 @@ export class HouseRunner {
     if (!raw) return;
     hostLocked(this.env, () => {
       const seat = this.seatFor(body), h = loadHost(this.env, body.agent, seat), x = houseRec(h, body.house);
-      if (x?.stop?.[raw]) { delete x.stop[raw]; writeJson(hostFile(this.env, body.agent, seat), h); }
+      const receipt = collectionReceipt(x, raw);
+      if (receipt || x?.stop?.[raw]) {
+        if (receipt) receipt.consumed = true;
+        if (x?.stop?.[raw]) delete x.stop[raw];
+        // The committed consumer receipt, rather than a missing pin/file,
+        // authorizes releasing this body's collection ownership.
+        writeJson(hostFile(this.env, body.agent, seat), h);
+      }
       rmSync(packedFile(this.env, body.agent, body.house, raw), { force: true });
       rmSync(offlinePin(packedFile(this.env, body.agent, body.house, raw)), { force: true });
     });

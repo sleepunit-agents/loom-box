@@ -2442,7 +2442,7 @@ async function retire(env, cv, ref, d, stop) {
     try {
       files = runner.remote ? await runner.pack(body, { deferAck: true }) : packSession(runner, slot, body);
     } catch (e) {
-      if (runner.remote && runner.pending?.(body) !== false) throw new RetirementPending(pending);
+      if (runner.remote && !(e instanceof SessionSizeError) && runner.pending?.(body) !== false) throw new RetirementPending(pending);
       if (!runner.remote && !(e instanceof SessionSizeError)) {
         d.warn(`keeping ${cv}'s native session until its files can be read (${e.message})`);
         throw new RetirementPending(pending);

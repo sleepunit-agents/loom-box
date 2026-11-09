@@ -90,6 +90,7 @@ test('the explicit session size limit still permits an empty continuity pack', a
     },
   });
   assert.deepEqual(JSON.parse(Buffer.from(packed.data, 'base64').toString()), []);
+  assert.equal(packed.omitted, 'size-limit', 'live house transfer names the same explicit size disposition');
   assert.equal(existsSync(file), false);
 });
 

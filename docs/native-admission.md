@@ -328,9 +328,10 @@ Tests cover both adapters' offline decoding, immutable multipart retries,
 reserved and admitted attempts, existing core packs, missing metadata, and box
 restart after lost part/final acknowledgements. These use model-free native
 executables or a fake container engine; the separate integration proof below
-uses real Podman. Explicit policies for admitted work with no native history and
-oversized offline packs, plus older-house cutover reconciliation and deployed
-provider verification, remain required. This draft is not deployable.
+uses real Podman. Explicit handling for admitted work with no native history,
+older-house cutover reconciliation and deployed provider verification remain
+required. The offline size-limit disposition is defined below. This draft is
+not deployable.
 
 ## Final inbox receipts after host failure
 
@@ -371,10 +372,12 @@ box-side collection client and fresh delivery CLI controllers.
 
 Each case kills the first container with SIGKILL, positively observes that it is
 gone, deletes its ephemeral HOME, collects only the retained native history,
-then resumes through a second house. The native fixture refuses resume unless
-the original context has already been restored. The proof checks the same
-session, exactly one pending follow-up and new turn, unchanged conversation
-principal, a new run/sender key, and a reply posted from inside the new container.
+then continues through a second house. The native fixture refuses a native
+resume unless the original context has already been restored. Ordinary cases
+check that same session; oversized cases check an explicit fresh continuation
+under the shared digest fallback. Every case checks exactly one pending
+follow-up and new turn, unchanged conversation principal, a new run/sender key,
+and a reply posted from inside the new container.
 Both owned containers must be positively absent after cleanup.
 
 This test exposed a real negotiation failure: cleanReport stripped the host's
@@ -385,3 +388,37 @@ also durable evidence after the last heartbeat expires; it forces the old body
 ended even if a prior report called it working. The stale-heartbeat regression
 failed before that correction too. These proofs cover real process/container
 lifecycle and storage, not a provider model's semantic memory after a crash.
+
+## Explicit session-size disposition and consumer acknowledgement
+
+The existing native session budget is 6 MB. Local retirement, live house packing
+and offline collection all use packSession and its SessionSizeError. Only that
+typed exception permits omitting the native session and continuing from the
+conversation's digests. An arbitrary read error or a missing transcript remains
+uncertain and retains its history for retry.
+
+Both live and offline transfers now name the omission as size-limit. It is
+immutable across parts and sealed with the final receipt, native identity and
+inbox IDs. A size-limit receipt contains no native files; an omitted session
+with files or an unrecognized reason is refused. Offline collection can adopt
+an already sealed live omission after host death. Lost part/final acknowledgements
+reuse the committed receipt even if the original container HOME is gone.
+
+HouseRunner raises the same SessionSizeError from that sealed receipt. Common
+retirement reports that native context was too large, durably commits its
+digest fallback and replay queue, then acknowledges the received pack. It never
+creates an empty native continuity slot or labels the admitted work unstarted.
+Real-container cases cover both ordinary resume and size-limit continuation for
+both adapters after physical SIGKILL.
+
+Consumption is a separate durable receipt. A consumer acknowledgement is saved
+in the host journal before received files/pins are removed. Their absence alone
+cannot release ownership or let pruning discard an unconsumed receipt. A
+regression that deleted the files without acknowledging them failed before this
+correction; it now retains ownership and yields an explicit unavailable-pack
+error. A completed C retirement receipt can retry acknowledgement after a crash.
+
+The independent whole-house snapshot budget remains 64 MB/10,000 entries. A
+snapshot failure retains the original source and reports its resource/read
+error; it is not treated as a session-size omission. Missing-history recovery
+and legacy-house reconciliation remain separate acceptance work.

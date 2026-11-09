@@ -135,7 +135,7 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
     await reportUsage(turnsOver);
     const packed = {};
     for (const [id, p] of [...packing]) {
-      packed[id] = { part: p.next, parts: p.parts.length, data: p.parts[p.next], ...(history ? { pending: p.pending } : {}) };
+      packed[id] = { part: p.next, parts: p.parts.length, data: p.parts[p.next], ...(history ? { pending: p.pending } : {}), ...(p.omitted ? { omitted: p.omitted } : {}) };
     }
     let got;
     const sent = acks;
@@ -238,18 +238,19 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
       if (s.pack) {
         const slot = (() => { try { return r.slotOf({ id }); } catch { return null; } })();
         // An empty pack (nothing kept, or too big to keep) is no slot: the runtime starts the next body fresh.
-        let files = [];
+        let files = [], omitted;
         try { files = packSession(r, slot, { id }); } catch (e) {
           log(`packing ${id}: ${e.message}`);
           // A failed read is not an empty session. Keep its files and stop
           // ownership so the next beat retries without another native stop.
           if (!(e instanceof SessionSizeError)) continue;
+          omitted = 'size-limit';
         }
         if (!history) dropSession(r, slot, { id });
         const all = Buffer.from(JSON.stringify(files)).toString('base64');
         const parts = [];
         for (let i = 0; i < all.length || i === 0; i += PART_CHARS) parts.push(all.slice(i, i + PART_CHARS));
-        packing.set(id, { parts, next: 0, since: now(), ...(history ? {
+        packing.set(id, { parts, next: 0, since: now(), ...(omitted ? { omitted } : {}), ...(history ? {
           cleanup: { harness: b.harness, slot }, pending: r.inbox ? nativePendingInbox(r.inbox.dir, id) : [],
         } : {}) });
       } else {

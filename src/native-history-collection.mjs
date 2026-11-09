@@ -5,7 +5,7 @@ import { constants, closeSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, ope
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { HISTORY_DIRS, historyPaths } from './native-history.mjs';
 import { ClaudeRunner, CodexRunner } from './runners.mjs';
-import { packSession } from './sessions.mjs';
+import { packSession, SessionSizeError } from './sessions.mjs';
 import { readLaunch } from './launch-journal.mjs';
 import { nativePendingInbox } from './native-inbox.mjs';
 
@@ -62,9 +62,14 @@ export function offlineNativeSession(snapshot, { harness, id, session }) {
   if (actual?.session && session && actual.session !== session) throw Error('native history belongs to a different session');
   const slot = actual ?? (session ? { harness, session } : null);
   if (!slot?.session) throw Error('native session identity is not collected yet');
-  const files = packSession(runner, slot, { id });
-  if (!files.length) throw Error('native session history is not collected yet');
-  return { harness, id, session: slot.session, files, pending: nativePendingInbox(paths.inboxes, id) };
+  let files, omitted;
+  try { files = packSession(runner, slot, { id }); }
+  catch (error) {
+    if (!(error instanceof SessionSizeError)) throw error;
+    files = []; omitted = 'size-limit';
+  }
+  if (!files.length && !omitted) throw Error('native session history is not collected yet');
+  return { harness, id, session: slot.session, files, pending: nativePendingInbox(paths.inboxes, id), ...(omitted ? { omitted } : {}) };
 }
 
 /** A physically stopped house cannot admit a reserved worker later. For an

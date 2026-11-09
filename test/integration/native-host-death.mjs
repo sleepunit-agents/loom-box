@@ -16,6 +16,7 @@ import { setModels } from '../../src/models.mjs';
 import { deliver, loadConv } from '../../src/delivery.mjs';
 import { HouseRunner, hostOf } from '../../src/houserunner.mjs';
 import { collectNativeHistory } from '../../src/native-collection-client.mjs';
+import { MAX_SESSION_BYTES } from '../../src/sessions.mjs';
 import { cvOf, fakeLoomBin } from '../delivery-world.mjs';
 import { scratch } from '../scratch.mjs';
 
@@ -81,7 +82,7 @@ async function serverFor(env) {
   return { url: `http://127.0.0.1:${server.address().port}/mcp`, close: () => new Promise(r => server.close(r)) };
 }
 
-for (const harness of ['claude', 'codex']) test(`${harness}: real container host SIGKILL collects native history and a fresh CLI resumes with usable sender identity`, { timeout: 120_000 }, async t => {
+for (const harness of ['claude', 'codex']) for (const oversized of [false, true]) test(`${harness}: real container host SIGKILL ${oversized ? 'commits an explicit size-limit fallback' : 'restores the native session'} and preserves usable sender identity`, { timeout: 120_000 }, async t => {
   const root = scratch('native-container-death-'), home = join(root, 'controller'), tag = randomBytes(6).toString('hex');
   const env = { PATH: process.env.PATH, HOME: home, LOOM_HOME: join(home, '.config/loom'), LOOM_BOX_HOME: join(root, 'state'), LOOM_BOX_DATA: join(root, 'data'),
     LOOM_BOX_LOCAL_NAME: 'one', LOOM_RUNTIME_ACCOUNTS: 'none', LOOM_RUNTIME_SCORECARDS: 'off', LOOM_RUNTIME_TOKEN_FILE: join(root, 'runtime-token') };
@@ -121,6 +122,7 @@ for (const harness of ['claude', 'codex']) test(`${harness}: real container host
       CLAUDE_CONFIG_DIR: '/fixture/house', LOOM_RUNTIME_CLAUDE_JOBS: '/fixture/house/jobs', LOOM_RUNTIME_CODEX_RUNS: '/fixture/house/runs',
       LOOM_RUNTIME_CLAUDE: '/runtime/test/integration/native-host-fixture.mjs', LOOM_RUNTIME_CODEX: '/runtime/test/integration/native-host-fixture.mjs',
       LOOM_RUNTIME_INBOX_DIR: '/fixture/house/inbox', LOOM_RUNTIME_NATIVE_HISTORY: '/run/loom-native-history', FIXTURE_NATIVE_HARNESS: harness,
+      ...(oversized && id === 'h-1' ? { FIXTURE_SESSION_BYTES: String(MAX_SESSION_BYTES + 1) } : {}),
       ...(harness === 'claude' ? { CLAUDE_SECURESTORAGE_CONFIG_DIR: '/fixture/house/login' } : { LOOM_LOGIN_CODEX: '/fixture/house/login' }) };
     const boot = /--host-key ([0-9a-f]{48})/.exec(allocated.task)?.[1]; assert.ok(boot);
     const args = ['run', '--rm', '--pull=never', '--name', name, '--network=host',
@@ -152,7 +154,9 @@ for (const harness of ['claude', 'codex']) test(`${harness}: real container host
     const resumedController = tick(cv), second = await house('h-2');
     const resumed = await bound(resumedController, second); assert.equal(resumed.code, 0, resumed.stderr);
     const after = loadConv(env, cv), proof = await wait(() => existsSync(join(second.dir, 'proof.json')) && JSON.parse(readFileSync(join(second.dir, 'proof.json'), 'utf8')), 'restored native proof');
-    assert.equal(proof.resumed, true); assert.equal(proof.session, originalProof.session);
+    assert.equal(proof.resumed, !oversized);
+    if (oversized) assert.notEqual(proof.session, originalProof.session, 'oversized history is explicitly omitted; continuation starts fresh from runtime context');
+    else assert.equal(proof.session, originalProof.session);
     assert.equal(proof.pending, 1); assert.equal(proof.next, 1);
     assert.equal(after.body?.startsWith(`${harness}:h-2-`), true); assert.equal(after.runs, 2);
     assert.deepEqual(after.actsFor, before.actsFor); assert.notEqual(after.run, before.run); assert.notEqual(after.sendKey, before.sendKey);
