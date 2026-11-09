@@ -182,3 +182,21 @@ common retirement transaction before replaying the original sealed messages.
 Tests verify restoration of the original native context before another admission,
 and that owner interruption keeps the work and slot held without replay.
 Authenticated OS-process restart of the host remains a shipping requirement.
+
+## Read-only recovery queries
+
+After native worker death, status discovery also runs in an owned process. The
+observer receives the original constructor configuration, environment and token
+on private stdin and calls only the existing adapter's `recoverLaunch`. It never
+starts, resumes, restores or stops work. Its bounded stdout contains only a
+validated native identity and optional session identity; failures remain pending.
+The supervisor keeps at most one query in flight per caller and backs off pending
+metadata without releasing admission. Normal confirmed-receipt delivery needs no
+observer process.
+
+This keeps a blocked native CLI query out of the shared house host's event loop.
+The same observer is used by local conversation recovery. Regression coverage
+includes a real worker death followed by a blocked Claude query while authenticated
+host sync and shutdown continue. Fork errors, failed exits, malformed/oversized
+replies and wrong-harness identities do not change the admission journal or start
+replacement work.

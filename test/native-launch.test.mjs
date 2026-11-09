@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { admitLaunch, completeLaunch, launchAttempt, readLaunch, reserveLaunch } from '../src/launch-journal.mjs';
-import { superviseNativeLaunch } from '../src/native-launch.mjs';
+import { observeNativeLaunch, superviseNativeLaunch } from '../src/native-launch.mjs';
 import { configuredNativeRunner, nativeRecoveryConfiguration, nativeRunnerConfiguration, runnerFor } from '../src/runners.mjs';
 import { scratch } from './scratch.mjs';
 import { MAX_SESSION_BYTES } from '../src/sessions.mjs';
@@ -244,4 +244,52 @@ test('the private worker input accepts a full supported session pack plus its la
     assert.equal(body.harness, 'codex');
     assert.equal(readLaunch(w.env, w.request.id).state, 'ready');
   } finally { await cleanup(w); }
+});
+
+test('a stalled read-only native query after worker death does not block the controller event loop', async()=>{
+  const w=setup('claude'),marker=join(w.home,'observer-query-started'),release=join(w.home,'observer-query-release'),proof=join(w.home,'observer-query-proof');
+  const executable=join(w.home,'gated-query.mjs'),native=new URL('./fake-claude.mjs',import.meta.url).href;
+  writeFileSync(executable,'#!/usr/bin/env node\nimport{existsSync,writeFileSync}from"node:fs";writeFileSync('+JSON.stringify(marker)+',"querying");const end=Date.now()+2000;while(!existsSync('+JSON.stringify(release)+')&&Date.now()<end)await new Promise(r=>setTimeout(r,10));writeFileSync('+JSON.stringify(proof)+',String(existsSync('+JSON.stringify(release)+')));await import('+JSON.stringify(native)+');\n');
+  chmodSync(executable,0o755);w.env.LOOM_RUNTIME_CLAUDE=executable;
+  const {harness,options}=w.request;
+  reserveLaunch(w.env,{id:w.request.id,harness,intentHash:createHash('sha256').update(JSON.stringify({harness,options})).digest('hex')});
+  const program=`import{readFileSync}from'node:fs';import{admitLaunch}from${JSON.stringify(new URL('../src/launch-journal.mjs',import.meta.url).href)};const q=JSON.parse(readFileSync(0,'utf8'));admitLaunch(process.env,q.id);`;
+  const worker=controller(w,1,program);assert.equal((await worker.done).code,0);
+  const admitted=readLaunch(w.env,w.request.id),id='12345678',session='native-observer-session';
+  mkdirSync(join(w.home,'jobs',id),{recursive:true});
+  writeFileSync(join(w.home,'jobs',id,'state.json'),JSON.stringify({state:'working',sessionId:session,intent:`(bridge spawn token ${admitted.token}: ignore this line)`}));
+  writeFileSync(join(w.home,'agents.json'),JSON.stringify([{id,sessionId:session,state:'running'}]));
+  let beats=0;
+  const heartbeat=setInterval(()=>{if(existsSync(marker)&&++beats>=3)writeFileSync(release,'host still responsive');},5);
+  try{
+    const recovered=await superviseNativeLaunch(w.env,w.request,{pollMs:1});
+    assert.equal(recovered.id,id);
+    assert.equal(recovered.inputUncertain,true);
+    assert.equal(readFileSync(proof,'utf8'),'true','a controller heartbeat released the native query before its timeout');
+    assert.equal(w.argv().filter(a=>a[0]==='--bg').length,0,'observation never starts a replacement model');
+  }finally{clearInterval(heartbeat);writeFileSync(release,'cleanup');}
+});
+
+
+for (const failure of ['fork-error','exit-error','invalid-reply','oversized-reply','wrong-harness']) test(`read-only observer ${failure} cannot refuse or replace admitted native work`, async()=>{
+  const w=setup('claude'),{harness,options}=w.request;
+  reserveLaunch(w.env,{id:w.request.id,harness,intentHash:createHash('sha256').update(JSON.stringify({harness,options})).digest('hex')});
+  admitLaunch(w.env,w.request.id);
+  const before=readLaunch(w.env,w.request.id);
+  const program={
+    'exit-error':'process.exit(2)',
+    'invalid-reply':'process.stdout.write("not a native receipt")',
+    'oversized-reply':'process.stdout.write("x".repeat(70000))',
+    'wrong-harness':'process.stdout.write(JSON.stringify({state:"ready",body:{id:"fixture1234",harness:"codex"}}))',
+  }[failure];
+  const observed=await observeNativeLaunch(w.env,{harness,token:before.token,bodyEnv:{PRIVATE_FIXTURE_VALUE:'private-observer-input'}},{spawnObserver(executable,args,config){
+    assert.equal(args.length,1);
+    assert.match(args[0],/native-launch-observer\.mjs$/);
+    assert.doesNotMatch(JSON.stringify(args),new RegExp(before.token+'|private-observer-input'));
+    if(failure==='fork-error')throw Error('fixture observer could not fork');
+    return spawn(executable,['-e',program],config);
+  }});
+  assert.deepEqual(observed,{state:'pending'});
+  assert.deepEqual(readLaunch(w.env,w.request.id),before,'observation failure did not release or rewrite admission');
+  assert.equal(w.argv().length,0);
 });

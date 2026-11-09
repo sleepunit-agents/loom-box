@@ -2,9 +2,42 @@ import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { admitLaunch, cancelReservedLaunch, completeLaunch, launchWorkerAlive, readLaunch, recoverLaunchReceipt, refuseLaunch, reserveLaunch } from './launch-journal.mjs';
-import { RunnerError, configuredNativeRunner } from './runners.mjs';
+import { RunnerError } from './runners.mjs';
 import { restoreFiles } from './sessions.mjs';
 import { rmSync } from 'node:fs';
+
+/** One owned read-only query at a time for this caller. Query failures carry
+ * no evidence of native absence and never release the admission ledger. */
+export function observeNativeLaunch(env, request, { spawnObserver = spawn } = {}) {
+  return new Promise(resolve => {
+    let payload;
+    try { payload = JSON.stringify(request); if (Buffer.byteLength(payload) > 4 * 1024 * 1024) return resolve({ state: 'pending' }); }
+    catch { return resolve({ state: 'pending' }); }
+    let child;
+    try {
+      child = spawnObserver(process.execPath, [fileURLToPath(new URL('./native-launch-observer.mjs', import.meta.url))], { env, stdio: ['pipe', 'pipe', 'ignore'] });
+    } catch { return resolve({ state: 'pending' }); }
+    let output = '', bytes = 0, overflow = false;
+    child.on('error', () => resolve({ state: 'pending' }));
+    child.stdin.on('error', () => {});
+    child.stdout.on('data', chunk => {
+      bytes += chunk.length;
+      if (bytes > 64 * 1024) { overflow = true; child.kill('SIGKILL'); }
+      else output += chunk;
+    });
+    child.on('close', code => {
+      try {
+        if (code !== 0 || overflow) return resolve({ state: 'pending' });
+        const result = JSON.parse(output);
+        if (result?.state !== 'ready' || result.body?.harness !== request.harness || !/^[A-Za-z0-9-]{4,64}$/.test(result.body?.id ?? '')) return resolve({ state: 'pending' });
+        const body = result.body;
+        if (body.slot && (body.slot.harness !== request.harness || !/^[A-Za-z0-9-]{4,64}$/.test(body.slot.session ?? ''))) return resolve({ state: 'pending' });
+        resolve({ state: 'ready', body: { id: body.id, harness: request.harness, ...(body.slot ? { slot: { harness: request.harness, session: body.slot.session } } : {}) } });
+      } catch { resolve({ state: 'pending' }); }
+    });
+    child.stdin.end(payload);
+  });
+}
 
 /** A restart observes/adopts this same attempt. It never launches another native
  * request merely because an observer or the original registrar went away. */
@@ -27,8 +60,8 @@ export async function superviseNativeLaunch(env, { id, harness, options, resume,
     } catch { helperFailed = true; }
   }
 
-  let runner;
   for (;;) {
+    let delay = pollMs;
     // Cancellation is a journal CAS: it can refuse only a still-reserved
     // attempt. Any worker already admitted keeps ownership, even when this
     // helper failed or its private input pipe closed.
@@ -42,11 +75,11 @@ export async function superviseNativeLaunch(env, { id, harness, options, resume,
       throw error;
     }
     if (record.state === 'admitted' && launchWorkerAlive(record.worker) === false) {
-      runner ??= configuredNativeRunner(harness, configuration, env);
-      const observed = runner.recoverLaunch(record.token, { model: options.model, env: options.env });
+      const observed = await observeNativeLaunch(env, { harness, configuration, token: record.token, model: options.model, bodyEnv: options.env });
       if (observed.state === 'ready') recoverLaunchReceipt(env, id, observed.body);
+      else delay = Math.max(pollMs, 1000); // unavailable native metadata must not create a busy query loop
     }
-    await new Promise(resolve => setTimeout(resolve, pollMs));
+    await new Promise(resolve => setTimeout(resolve, delay));
   }
 }
 

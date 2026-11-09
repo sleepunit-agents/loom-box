@@ -49,3 +49,50 @@ for (const harness of ['claude', 'codex']) test(`${harness}: a real native worke
     if (record?.body) runnerFor(harness, env).end(record.body, env);
   }
 });
+
+test('after actual worker death, a blocked Claude query leaves host sync and shutdown responsive', async()=>{
+  const home=scratch('host-dead-worker-query-'),id='e'.repeat(64),rid='f'.repeat(16),job='1234abcd';
+  const started=join(home,'native-job-admitted'),query=join(home,'query-started'),release=join(home,'release-query'),releaseBg=join(home,'release-bg'),block=join(home,'block-query'),proof=join(home,'query-proof');
+  const executable=join(home,'native-query-gate.mjs'),native=new URL('./fake-claude.mjs',import.meta.url).href;
+  writeFileSync(executable,`#!/usr/bin/env node
+import{existsSync,mkdirSync,readFileSync,writeFileSync}from'node:fs';import{join}from'node:path';
+const args=process.argv.slice(2),home=process.env.FAKE_HARNESS;
+if(args[0]==='--bg'){
+ const prompt=readFileSync(0,'utf8'),session='host-observer-session';mkdirSync(join(home,'jobs',${JSON.stringify(job)}),{recursive:true});
+ writeFileSync(join(home,'jobs',${JSON.stringify(job)},'state.json'),JSON.stringify({state:'working',intent:prompt,sessionId:session}));
+ writeFileSync(join(home,'agents.json'),JSON.stringify([{id:${JSON.stringify(job)},sessionId:session,state:'running'}]));writeFileSync(${JSON.stringify(started)},'ready');
+ while(!existsSync(${JSON.stringify(releaseBg)}))await new Promise(r=>setTimeout(r,10));process.exit(0);
+}
+if(args[0]==='agents'&&existsSync(${JSON.stringify(block)})){
+ writeFileSync(${JSON.stringify(query)},'waiting');const end=Date.now()+2000;
+ while(!existsSync(${JSON.stringify(release)})&&Date.now()<end)await new Promise(r=>setTimeout(r,10));
+ writeFileSync(${JSON.stringify(proof)},String(existsSync(${JSON.stringify(release)})));
+}
+await import(${JSON.stringify(native)});
+`);
+  chmodSync(executable,0o755);
+  const env={...process.env,HOME:home,PATH:dirname(process.execPath)+':'+process.env.PATH,FAKE_HARNESS:home,LOOM_BOX_DATA:join(home,'data'),
+    LOOM_RUNTIME_CLAUDE:executable,LOOM_RUNTIME_CLAUDE_JOBS:join(home,'jobs'),LOOM_RUNTIME_INBOX_DIR:join(home,'inbox'),CLAUDE_SECURESTORAGE_CONFIG_DIR:'/fixture/login'};
+  const request={attempt:id,harness:'claude',model:'opus',brief:'harmless read-only recovery fixture',key:'fixture-key',conversation:'cv-123456abcdef'};
+  let killed=false,queryBeats=0,body,finished=false;
+  try{
+    await runBodyHost({env,hostKey:'fixture-bootstrap',runner:h=>runnerFor(h,env),sleep:()=>new Promise(r=>setTimeout(r,10)),beats:1000,
+      client:async(_path,{report})=>{
+        if(!killed&&existsSync(started)){
+          const record=readLaunch(env,id);assert.equal(record.state,'admitted');
+          writeFileSync(block,'hold observer');process.kill(record.worker.pid,'SIGKILL');killed=true;writeFileSync(releaseBg,'cleanup bg caller');
+        }
+        if(existsSync(query)&&++queryBeats>=3)writeFileSync(release,'authenticated host sync remained active');
+        if(report.done[rid]?.id){body=report.done[rid].id;assert.equal(report.done[rid].inputConfirmed,false);}
+        if(body&&report.bodies[body]?.status==='ended'&&!report.starting.length){finished=true;return{exit:true};}
+        return{req:body||killed?{}:{[rid]:request},...(killed?{stopping:true}:{}),stop:body?{[body]:{at:1,pack:false}}:{},received:body?[rid]:[]};
+      }});
+    assert.equal(finished,true);assert.equal(killed,true);assert.ok(queryBeats>=3);
+    assert.equal(readFileSync(proof,'utf8'),'true','sync released the observer while the native query was still waiting');
+    assert.equal(readLaunch(env,id).body.id,job);
+    assert.equal(readLaunch(env,id).input,'uncertain');
+  }finally{
+    writeFileSync(release,'cleanup');writeFileSync(releaseBg,'cleanup');
+    const record=readLaunch(env,id);if(record?.body)runnerFor('claude',env).end(record.body,env);
+  }
+});

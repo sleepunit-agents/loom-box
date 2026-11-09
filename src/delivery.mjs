@@ -95,9 +95,9 @@ import { namesFiles } from './briefs.mjs';
 import { AGENT_NAME, StateError, alive, withLock, load } from './state.mjs';
 import { RUNS_KEPT, causeOf, detectLoop, textHash } from './loops.mjs';
 import { STUCK_AFTER_MIN, asData, taskComment, taskOf } from './stuck.mjs';
-import { CODEX_WONT, codexDeny, configuredNativeRunner, nativeRecoveryConfiguration, nativeRunnerConfiguration, runnerFor } from './runners.mjs';
+import { CODEX_WONT, codexDeny, nativeRecoveryConfiguration, nativeRunnerConfiguration, runnerFor } from './runners.mjs';
 import { cancelReservedLaunch, launchAttempt, launchWorkerAlive, launchWorkerIdentity, readLaunch, recoverLaunchReceipt, reserveLaunch } from './launch-journal.mjs';
-import { launchInjectedNative, superviseNativeLaunch } from './native-launch.mjs';
+import { launchInjectedNative, observeNativeLaunch, superviseNativeLaunch } from './native-launch.mjs';
 import { raiseAlert } from './alerthook.mjs';
 import { changed as changedCards } from './activity.mjs';
 import { keepKey } from './bodyhost.mjs';
@@ -1672,10 +1672,9 @@ async function recoverPreparedStart(env, op, d) {
       return;
     }
     if (prepared.mode !== 'house' && record.state === 'admitted' && launchWorkerAlive(record.worker) === false) {
-      const runner = prepared.recoveryConfiguration
-        ? configuredNativeRunner(prepared.harness, prepared.recoveryConfiguration, env)
-        : d.runner(prepared.harness, !!prepared.bodySpec.metadata.local);
-      const found = runner.recoverLaunch?.(record.token, { model: prepared.bodySpec.metadata.model, env });
+      const found = prepared.recoveryConfiguration
+        ? await observeNativeLaunch(env, { harness: prepared.harness, configuration: prepared.recoveryConfiguration, token: record.token, model: prepared.bodySpec.metadata.model, bodyEnv: env })
+        : d.runner(prepared.harness, !!prepared.bodySpec.metadata.local).recoverLaunch?.(record.token, { model: prepared.bodySpec.metadata.model, env });
       if (found?.state === 'ready') record = recoverLaunchReceipt(env, prepared.id, found.body);
     }
     if (record.state !== 'ready') {
