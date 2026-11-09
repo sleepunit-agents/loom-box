@@ -18,6 +18,7 @@ import { launchInjectedNative, superviseNativeLaunch } from './native-launch.mjs
 import { cancelReservedLaunch } from './launch-journal.mjs';
 import { LOGIN_HARNESSES } from './logins.mjs';
 import { nativeHistoryRoot } from './native-history.mjs';
+import { nativePendingInbox } from './native-inbox.mjs';
 
 /**
  * Whether this house has its box's login for a harness: the box sets the login's env only for the harnesses the house
@@ -134,7 +135,7 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
     await reportUsage(turnsOver);
     const packed = {};
     for (const [id, p] of [...packing]) {
-      packed[id] = { part: p.next, parts: p.parts.length, data: p.parts[p.next] };
+      packed[id] = { part: p.next, parts: p.parts.length, data: p.parts[p.next], ...(history ? { pending: p.pending } : {}) };
     }
     let got;
     const sent = acks;
@@ -248,7 +249,9 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
         const all = Buffer.from(JSON.stringify(files)).toString('base64');
         const parts = [];
         for (let i = 0; i < all.length || i === 0; i += PART_CHARS) parts.push(all.slice(i, i + PART_CHARS));
-        packing.set(id, { parts, next: 0, since: now(), ...(history ? { cleanup: { harness: b.harness, slot } } : {}) });
+        packing.set(id, { parts, next: 0, since: now(), ...(history ? {
+          cleanup: { harness: b.harness, slot }, pending: r.inbox ? nativePendingInbox(r.inbox.dir, id) : [],
+        } : {}) });
       } else {
         // A plain stop leaves nothing: its session's files go (only a pack keeps them, sealed, in a slot).
         dropSession(r, (() => { try { return r.slotOf({ id }); } catch { return null; } })(), { id });

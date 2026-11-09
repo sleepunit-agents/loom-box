@@ -7,6 +7,7 @@ import { HISTORY_DIRS, historyPaths } from './native-history.mjs';
 import { ClaudeRunner, CodexRunner } from './runners.mjs';
 import { packSession } from './sessions.mjs';
 import { readLaunch } from './launch-journal.mjs';
+import { nativePendingInbox } from './native-inbox.mjs';
 
 const stat = file => { try { return lstatSync(file); } catch (e) { if (e.code === 'ENOENT') return null; throw e; } };
 const inside = (root, file) => { const rel = relative(resolve(root), resolve(file)); return rel === '' || !rel.startsWith('../') && rel !== '..' && !isAbsolute(rel); };
@@ -63,7 +64,7 @@ export function offlineNativeSession(snapshot, { harness, id, session }) {
   if (!slot?.session) throw Error('native session identity is not collected yet');
   const files = packSession(runner, slot, { id });
   if (!files.length) throw Error('native session history is not collected yet');
-  return { harness, id, session: slot.session, files };
+  return { harness, id, session: slot.session, files, pending: nativePendingInbox(paths.inboxes, id) };
 }
 
 /** A physically stopped house cannot admit a reserved worker later. For an

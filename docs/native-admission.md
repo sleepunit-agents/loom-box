@@ -326,5 +326,28 @@ reserved and admitted attempts, existing core packs, missing metadata, and box
 restart after lost part/final acknowledgements. These use model-free native
 executables or a fake container engine. Actual host-process SIGKILL, native
 resume and sender proofs remain required. So do explicit policies for admitted
-work with no native history, oversized offline packs and pending Claude inbox
-files, plus older-house cutover reconciliation. This draft is not deployable.
+work with no native history and oversized offline packs, plus older-house cutover
+reconciliation. This draft is not deployable.
+
+## Final inbox receipts after host failure
+
+Configured native inbox directories now link into the same private history
+mount for both adapters. Offline collection reads only the selected body's
+matching runtime metadata and pending/delivered records. It sends IDs, never
+inbox text: replay uses delivery's existing sealed message copies. Missing,
+malformed, partial, oversized or mismatched receipts remain unknown, which
+conservatively replays all fed copies rather than trusting a stale empty host
+report. A valid empty inbox is a distinct, positive receipt.
+
+Live session packing captures the final inbox after native retirement. Its
+receipt is sealed with the multipart transfer and native pack, so offline
+collection can inherit both if the host dies after upload. Multipart retries
+cannot change the selected pending IDs. Offline receipts stay available across
+new controllers and draining-house handoff.
+
+Common retirement waits for a pending offline receipt. Once collected, that
+final receipt supersedes an earlier provisional live inbox snapshot before
+committing the continuity slot and replay queue. Tests cover both adapters,
+lost/invalid receipts, delivered-versus-pending replay through common delivery,
+and replacement of a provisional snapshot during warm resume. Actual native
+host-kill acceptance must also exercise this path before rollout.

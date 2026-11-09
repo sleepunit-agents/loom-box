@@ -63,6 +63,7 @@ for (const harness of ['claude', 'codex']) test(`${harness}: only its allocated 
   assert.equal(ok(c.call({ ...transfer.first, plan: plan.plan })).complete, false, 'lost part acknowledgements retry exactly');
   assert.equal(c.call({ ...transfer.first, plan: plan.plan, data: 'changed' }).status, 409);
   assert.equal(c.call({ ...transfer.last, plan: plan.plan, inputConfirmed: true }).status, 409, 'input receipt cannot change between parts');
+  assert.equal(c.call({ ...transfer.last, plan: plan.plan, pending: ['changed-receipt'] }).status, 409, 'final inbox receipt cannot change between parts');
   assert.equal(fresh.packReady(body), false);
   assert.equal(c.call({ phase: 'finish', plan: plan.plan }).status, 409);
   // Another conversation may need a new house while this physically stopped
@@ -132,12 +133,20 @@ for (const harness of ['claude', 'codex']) test(`${harness}: delivery ticking du
   await wait(() => load(w.env).houses['h-1']); const host = w.host();
   const start = await first; await drained;
   const before = loadConv(w.env, start.conversation); assert.ok(before.body);
+  for (const text of ['already heard correction', 'still pending correction']) {
+    await deliver(w.env, { ...local.msg('dm:offline-retirement', text), from: { kind: 'person', slug: 'jonathan' } }, o);
+  }
+  const raw = before.body.split(':')[1].slice(4);
+  await wait(() => w.fed.length === 2 && !(w.hr.host('art').inbox?.[raw] ?? []).length);
+  const fed = loadConv(w.env, start.conversation).fed.map(x => x.key);
+  assert.equal(fed.length, 2);
   w.hr.claimMs = 20;
   await w.kill(); await host;
   const c = collection(w), plan = ok(c.call({ phase: 'plan', physical: 'gone' }));
   const entry = plan.entries.find(e => e.bodyId === before.body.split(':')[1].slice(4));
   assert.ok(entry, JSON.stringify(plan));
   const transfer = upload(entry, 'original native history survives partial upload');
+  transfer.first.pending = transfer.last.pending = [fed[1]];
   await ownerConversationControl(w.env, { kind: 'owner' }, { conversation: start.conversation, action: 'interrupt' }, o);
   ok(c.call({ ...transfer.first, plan: plan.plan }));
   await tick(w.env, o);
@@ -159,5 +168,6 @@ for (const harness of ['claude', 'codex']) test(`${harness}: delivery ticking du
   current = loadConv(w.env, start.conversation);
   assert.equal(current.control.state, 'held', JSON.stringify({ warnings, retiring: current.retiring?.type, starting: !!current.starting, receipt: current.nativeRetirement })); assert.equal(current.slot.session, entry.session);
   assert.equal(current.body, undefined); assert.deepEqual(current.actsFor, before.actsFor);
+  assert.deepEqual(current.queue.map(x => x.key), [fed[1]], 'only the final unconsumed follow-up is requeued from sealed runtime copies');
   assert.equal(w.local.startsEntered, 1, 'collection never admits replacement native work');
 });

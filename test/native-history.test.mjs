@@ -19,7 +19,10 @@ for (const harness of ['claude', 'codex']) test(`${harness} native history survi
   const w = world(), session = '12345678-1234-1234-1234-123456789abc', id = 'aabbccddeeff123456789abc';
   put(join(w.home, '.claude', 'settings.json'), 'hooks/config stay here');
   put(join(w.home, '.codex', 'auth.json'), 'private credential stays here');
+  w.env.LOOM_RUNTIME_INBOX_DIR = join(w.home, 'inbox');
   const runner = runnerFor(harness, w.env);
+  runner.inbox.open(id, { venue: 'runtime', chan: id, bridge: 'runtime' });
+  put(join(runner.inbox.dir, id.slice(0, 8), 'pending.jsonl'), JSON.stringify({ id: 'pending-followup', text: 'private follow-up text' }) + '\n');
   if (harness === 'claude') {
     assert.equal(lstatSync(join(w.home, '.claude/projects')).isSymbolicLink(), true);
     // The actual CLI writes at its config directory, through the runtime link.
@@ -49,6 +52,7 @@ for (const harness of ['claude', 'codex']) test(`${harness} native history survi
   const got = offlineNativeSession(snapshot, { harness, id });
   assert.equal(got.session, session);
   assert.equal(got.files.length, 1);
+  assert.deepEqual(got.pending, ['pending-followup'], 'the same native history mount retains inbox receipts after HOME disappears');
   assert.match(Buffer.from(got.files[0].data, 'base64').toString(), /original .* native history/);
   assert.equal(lstatSync(join(snapshot, got.files[0].root === 'projects' ? 'claude-projects' : 'codex-sessions', got.files[0].rel)).mode & 0o777, 0o600);
   assert.throws(() => offlineNativeSession(snapshot, { harness, id, session: 'different-session' }), /different session/);

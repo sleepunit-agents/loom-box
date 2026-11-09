@@ -5,7 +5,7 @@ import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 
 export const NATIVE_HISTORY_MOUNT = '/run/loom-native-history';
-export const HISTORY_DIRS = ['launches', 'claude-jobs', 'claude-projects', 'codex-runs', 'codex-sessions'];
+export const HISTORY_DIRS = ['launches', 'claude-jobs', 'claude-projects', 'codex-runs', 'codex-sessions', 'inboxes'];
 export const historyPaths = root => Object.fromEntries(HISTORY_DIRS.map(name => [name, join(root, name)]));
 const stat = file => { try { return lstatSync(file); } catch (e) { if (e.code === 'ENOENT') return null; throw e; } };
 const canonical = file => {
@@ -47,6 +47,11 @@ export function nativeHistoryEnv(harness, env) {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
   }
   const home = env.HOME || homedir();
+  if (env.LOOM_RUNTIME_INBOX_DIR) {
+    const source = env.LOOM_RUNTIME_INBOX_DIR;
+    if (inside(root, source) && canonical(source) !== canonical(paths.inboxes)) throw Error('native inbox selector overlaps another history directory');
+    if (resolve(source) !== resolve(paths.inboxes)) linkHistory(source, paths.inboxes);
+  }
   if (harness === 'claude') {
     const config = env.CLAUDE_CONFIG_DIR || join(home, '.claude');
     if (inside(root, config)) throw Error('native history cannot contain the Claude configuration home');
@@ -78,6 +83,7 @@ export function nativeHistoryEnv(harness, env) {
 export function validateNativeHistoryOptions(harness, env, options) {
   const root = nativeHistoryRoot(env);
   if (!root) return;
+  if (options.inboxDir !== undefined && (typeof options.inboxDir !== 'string' || !env.LOOM_RUNTIME_INBOX_DIR || canonical(options.inboxDir) !== canonical(env.LOOM_RUNTIME_INBOX_DIR))) throw Error('native constructor cannot override durable inbox storage');
   const selectors = harness === 'claude'
     ? { jobsDir: env.LOOM_RUNTIME_CLAUDE_JOBS, projectsDir: env.LOOM_RUNTIME_CLAUDE_PROJECTS }
     : { runsDir: env.LOOM_RUNTIME_CODEX_RUNS, sessionsDir: env.LOOM_RUNTIME_CODEX_SESSIONS };

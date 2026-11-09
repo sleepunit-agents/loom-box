@@ -90,11 +90,34 @@ test('an existing live-host core receipt is adopted if the host exits after its 
   w.hr.requestPack(body);
   const files = [{ root: 'sessions', rel: '2026/11/09/rollout-time-s-b0000000.jsonl', data: Buffer.from('already sealed by the live host').toString('base64') }];
   const result = await api(w.env, {}, { caller: { kind: 'agent', agent: 'art', house: 'h-1' }, path: 'body-sync', body: { hostKey: w.hostKey,
-    report: { bodies: { b0000000: { harness: 'codex', status: 'ended', session: 's-b0000000' } }, done: {}, caps: ['parts', 'native-admission', 'native-history'], starting: [], packed: { b0000000: { part: 0, parts: 1, data: Buffer.from(JSON.stringify(files)).toString('base64') } } } } });
+    report: { bodies: { b0000000: { harness: 'codex', status: 'ended', session: 's-b0000000', pending: [] } }, done: {}, caps: ['parts', 'native-admission', 'native-history'], starting: [], packed: { b0000000: { part: 0, parts: 1, pending: ['sealed-pending'], data: Buffer.from(JSON.stringify(files)).toString('base64') } } } } });
   assert.equal(result.status, 200);
   await collectNativeHistory(w.options); // The original transcript has already been dropped locally.
   assert.deepEqual(w.calls.map(c => c.phase), ['plan', 'finish']);
   assert.deepEqual(await w.hr.pack(body, { deferAck: true }), files);
+  assert.deepEqual(w.hr.unheard(body), ['sealed-pending'], 'the sealed final inbox receipt wins over the last report');
+});
+
+for (const harness of ['claude', 'codex']) test(`${harness}: offline inbox receipts recover follow-ups newer than the last host report`, { skip: !hasAge }, async () => {
+  const w = await setup(harness), id = 'b0000000';
+  transcript(w.root, harness, 'native context', `s-${id}`);
+  const dir = join(w.root, 'inboxes', id);
+  put(join(dir, 'meta.json'), JSON.stringify({ venue: 'runtime', chan: id, bridge: 'runtime' }));
+  put(join(dir, 'pending.jsonl'), [{ id: 'heard', text: 'private inbox text' }, { id: 'unheard', text: 'private inbox text' }].map(x => JSON.stringify(x)).join('\n') + '\n');
+  put(join(dir, 'delivered.jsonl'), JSON.stringify({ id: 'heard' }) + '\n');
+  let leaked = false;
+  const client = { async call(path, body) { leaked ||= JSON.stringify(body).includes('private inbox text'); return w.client.call(path, body); } };
+  const body = { id: `h-1-${id}`, house: 'h-1', agent: 'art', harness };
+  await collectNativeHistory({ ...w.options, client });
+  const fresh = new HouseRunner(w.env, harness, { sealer: w.sealer, now: () => new Date(Date.now() + 3600_000) });
+  assert.deepEqual(fresh.unheard(body), ['unheard'], 'final receipts survive a new controller and stale host report');
+  assert.equal(leaked, false, 'replay selects delivery\'s sealed copies; inbox text never crosses the collection protocol');
+});
+
+test('an offline body without a final inbox receipt replays conservatively instead of trusting its stale empty report', { skip: !hasAge }, async () => {
+  const w = await setup('codex'); transcript(w.root, 'codex', 'native context', 's-b0000000');
+  await collectNativeHistory(w.options);
+  assert.equal(w.hr.unheard({ id: 'h-1-b0000000', house: 'h-1', agent: 'art', harness: 'codex' }), null);
 });
 
 test('missing native history and malformed completion responses cannot authorize cleanup', { skip: !hasAge }, async () => {

@@ -42,6 +42,7 @@ import { bodyBox } from './placement.mjs';
 import { isParts } from './briefs.mjs';
 import { RunnerError } from './runners.mjs';
 import { MAX_SESSION_BYTES, safeRel } from './sessions.mjs';
+import { validPendingInbox } from './native-inbox.mjs';
 import { GONE, part, redact, UNPRINTABLE_ONE } from './redact.mjs';
 import { cardTime } from './activity.mjs';
 import { ageSealer } from './sealed.mjs';
@@ -454,11 +455,17 @@ export function bodySync(env, caller, body, o = {}) {
       if (!x.stop?.[id]?.pack) { got.push([id, p.part]); continue; }
       if (!Number.isSafeInteger(p?.part) || !Number.isSafeInteger(p?.parts) || p.parts < 1 || p.parts > 64 || p.part < 0 || p.part >= p.parts || typeof p.data !== 'string' || p.data.length > PART_CHARS) continue;
       const dir = partDir(env, agent, house, id);
+      const pending = p.pending ?? null;
+      if (!validPendingInbox(pending)) continue;
       let sealedPart;
       try { sealedPart = sealer.seal(Buffer.from(p.data)); } catch { continue; } // no key: not kept (and not acked)
       mkdirSync(dir, { recursive: true, mode: 0o700 });
       if (!existsSync(join(dir, 'at.json'))) writeJson(join(dir, 'at.json'), now);
       if (current?.nativeHistory?.v === 1) writeJson(join(dir, 'offline.json'), { v: 1, source: 'host', bodyId: id });
+      const inboxReceipt = join(dir, 'pending.age');
+      if (existsSync(inboxReceipt)) {
+        if (sealer.open(readFileSync(inboxReceipt)).toString() !== JSON.stringify(pending)) continue;
+      } else writeFileSync(inboxReceipt, sealer.seal(Buffer.from(JSON.stringify(pending))), { mode: 0o600 });
       writeFileSync(join(dir, `${p.part}.age`), sealedPart, { mode: 0o600 });
       const files = Array.from({ length: p.parts }, (_, i) => join(dir, `${i}.age`));
       let complete = false;
@@ -469,7 +476,7 @@ export function bodySync(env, caller, body, o = {}) {
         // Keep the native session identity with its files. The host may forget
         // the body after this acknowledgement, before a later tick retires it.
         const session = bodies[id]?.session ?? x.stop[id]?.session;
-        const kept = session ? Buffer.from(JSON.stringify({ v: 1, session, files: JSON.parse(whole.toString('utf8')) })) : whole;
+        const kept = session ? Buffer.from(JSON.stringify({ v: 1, session, files: JSON.parse(whole.toString('utf8')), pending })) : whole;
         if (current?.nativeHistory?.v === 1) writeJson(offlinePin(f), { v: 1, source: 'host' });
         writeFileSync(f, sealer.seal(kept), { mode: 0o600 });
         rmSync(dir, { recursive: true, force: true });
@@ -562,7 +569,8 @@ export function nativeCollectionExchange(env, { agent, house, plan, requiredHost
         entry.session = kept.session;
         const sha256 = createHash('sha256').update(JSON.stringify(kept.files)).digest('hex');
         writeJson(offlinePin(packed), { v: 1, plan, sha256 });
-        x.offlineCollection.done[entry.key] = { inherited: true, bodyId: entry.bodyId, session: kept.session, sha256 };
+        x.offlineCollection.done[entry.key] = { inherited: true, bodyId: entry.bodyId, session: kept.session, sha256,
+          pending: validPendingInbox(kept.pending) ? kept.pending : null };
       }
       writeJson(hostFile(env, agent, seat), h);
     }
@@ -602,7 +610,9 @@ export function nativeCollectionExchange(env, { agent, house, plan, requiredHost
     if (!BODY_ID.test(q.bodyId ?? '') || entry.bodyId && q.bodyId !== entry.bodyId || entry.session && q.session !== entry.session ||
         !/^[A-Za-z0-9][A-Za-z0-9._-]{3,127}$/.test(q.session ?? '') || !/^[0-9a-f]{64}$/.test(q.sha256 ?? '')) fail('native collection identity changed');
     if (!Number.isSafeInteger(q.part) || !Number.isSafeInteger(q.parts) || q.parts < 1 || q.parts > 64 || q.part < 0 || q.part >= q.parts || typeof q.data !== 'string' || q.data.length > PART_CHARS) fail('invalid native collection part');
-    const signature = { bodyId: q.bodyId, session: q.session, sha256: q.sha256, parts: q.parts, inputConfirmed: q.inputConfirmed === true };
+    const pending = q.pending ?? null;
+    if (!validPendingInbox(pending)) fail('invalid native inbox receipt');
+    const signature = { bodyId: q.bodyId, session: q.session, sha256: q.sha256, parts: q.parts, inputConfirmed: q.inputConfirmed === true, pending };
     if (entry.transfer && JSON.stringify(entry.transfer) !== JSON.stringify(signature)) fail('native collection transfer changed');
     if (collection.done[entry.key]) {
       if (collection.done[entry.key].sha256 !== q.sha256) fail('native collection already has another receipt');
@@ -646,7 +656,7 @@ export function nativeCollectionExchange(env, { agent, house, plan, requiredHost
     mkdirSync(dirname(packed), { recursive: true, mode: 0o700 });
     writeJson(offlinePin(packed), { v: 1, plan, sha256: q.sha256 });
     const temporary = packed + '.tmp';
-    writeFileSync(temporary, sealer.seal(Buffer.from(JSON.stringify({ v: 1, session: q.session, files }))), { mode: 0o600 });
+    writeFileSync(temporary, sealer.seal(Buffer.from(JSON.stringify({ v: 1, session: q.session, files, pending }))), { mode: 0o600 });
     renameSync(temporary, packed);
     x.report ??= { bodies: {}, done: {}, caps: [] };
     x.report.bodies ??= {}; x.report.done ??= {};
@@ -657,7 +667,7 @@ export function nativeCollectionExchange(env, { agent, house, plan, requiredHost
       x.report.done[record.rid] = { id: nativeBody.id, attempt, inputConfirmed: q.inputConfirmed === true };
       (x.claimed ??= {})[q.bodyId] = record.rid;
     }
-    collection.done[entry.key] = { sha256: q.sha256, bodyId: q.bodyId, session: q.session };
+    collection.done[entry.key] = { sha256: q.sha256, bodyId: q.bodyId, session: q.session, pending };
     writeJson(hostFile(env, agent, seat), h);
     rmSync(dir, { recursive: true, force: true });
     return { plan, part: q.part, received: true, complete: true };
@@ -1037,9 +1047,24 @@ export class HouseRunner {
    */
   unheard(body) {
     const raw = rawOf(body);
+    // Offline collection ends the authority of the last live report. It may
+    // predate a hook's latest inbox receipt. Only the final collected receipt
+    // can narrow replay; unknown receipts replay all runtime-owned fed copies.
+    const final = this.finalInbox(body);
+    if (final) return final.ready ? final.pending : null;
     const x = raw ? this.rec(body) : null;
     if (!x) return null;
     return [...new Set([...(x.inbox?.[raw] ?? []).map((y) => y.key), ...(x.report.bodies[raw]?.pending ?? [])])];
+  }
+
+  /** Offline retirement waits for a final inbox receipt along with its pack. */
+  finalInbox(body) {
+    const raw = rawOf(body), x = raw ? houseRec(this.host(body.agent, this.seatFor(body)), body.house) : null;
+    if (!x?.offlineCollection) return undefined;
+    const receipt = Object.values(x.offlineCollection.done ?? {}).find(d => d.bodyId === raw);
+    if (!receipt) return { ready: false };
+    return { ready: true, pending: Array.isArray(receipt.pending)
+      ? [...new Set([...(x.inbox?.[raw] ?? []).map(y => y.key), ...receipt.pending])] : null };
   }
 
   /** Its follow-ups, gone from the record (the runtime keeps its own copies). */

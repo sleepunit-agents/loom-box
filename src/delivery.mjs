@@ -2433,8 +2433,11 @@ async function retire(env, cv, ref, d, stop) {
   }
   const file = slotFile(env, cv);
   if (receiptError) throw new RetirementPending();
+  const finalInbox = runner.remote ? runner.finalInbox?.(body) : undefined;
+  if (!committed && finalInbox?.ready === false) throw new RetirementPending();
   let slot = committed?.slot ?? (() => { try { return runner.slotOf(body) ?? rec.slot; } catch { return rec.slot; } })();
-  let files = [], pending = committed?.pending ?? c?.retiring?.pendingInbox ?? takeInbox(runner, ref, c, rec, true);
+  let files = [], pending = committed?.pending ?? (finalInbox?.ready
+    ? takeInbox(runner, ref, c, rec, true) : c?.retiring?.pendingInbox ?? takeInbox(runner, ref, c, rec, true));
   if (!committed) {
     try {
       files = runner.remote ? await runner.pack(body, { deferAck: true }) : packSession(runner, slot, body);
@@ -2447,6 +2450,9 @@ async function retire(env, cv, ref, d, stop) {
       d.warn(`no session files for ${cv} (${e.message}): it resumes from its digests`); files = null;
     }
     slot ??= (() => { try { return runner.slotOf(body) ?? rec.slot; } catch { return rec.slot; } })();
+    // Collection may have completed while pack() awaited it. Its final receipt
+    // supersedes a provisional snapshot of the last live host report.
+    if (runner.remote && runner.finalInbox?.(body)?.ready) pending = takeInbox(runner, ref, c, rec, true);
     pending ??= takeInbox(runner, ref, c, rec, true);
     let kept = null, prepared = null;
     if (Array.isArray(files) && files.length) {

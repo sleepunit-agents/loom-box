@@ -98,3 +98,34 @@ test('an uncertain remote collection retains its unread snapshot and pending tur
   assert.equal(resumed[4].split('UNREAD-FOLLOWUP').length - 1, 1);
   assert.equal(resumed[4].split('NEXT-TURN').length - 1, 1);
 });
+
+test('a final offline inbox receipt supersedes a provisional live snapshot before warm resume', async () => {
+  const w = world();
+  const { conversation } = await deliver(w.env, w.msg('final-inbox', 'first'), w.o);
+  const first = loadConv(w.env, conversation).body;
+  await deliver(w.env, w.msg('final-inbox', 'HEARD-FOLLOWUP'), w.o);
+  await deliver(w.env, w.msg('final-inbox', 'UNHEARD-FOLLOWUP'), w.o);
+  const keys = loadConv(w.env, conversation).fed.map(x => x.key);
+  w.runner.finish(first, { worked: true, failed: false });
+  let final;
+  Object.assign(w.runner, { remote: true, pending: () => true, finalInbox: () => final,
+    unheard: () => final?.ready ? final.pending : keys, forgetInbox() {} });
+  let packs = 0;
+  w.runner.pack = async body => {
+    if (++packs === 1) throw Error('live host disappeared during collection');
+    return packSession(w.runner, w.runner.slotOf(body), body);
+  };
+  await deliver(w.env, w.msg('final-inbox', 'NEXT-TURN'), w.o);
+  assert.equal(loadConv(w.env, conversation).retiring.pendingInbox.length, 2);
+  final = { ready: false };
+  await tick(w.env, w.o);
+  assert.equal(packs, 1, 'offline retirement waits for its final inbox and native pack');
+  assert.equal(loadConv(w.env, conversation).body, first);
+  final = { ready: true, pending: [keys[1]] };
+  await tick(w.env, w.o);
+  const resumed = w.log.find(x => x[0] === 'resume');
+  assert.ok(resumed);
+  assert.doesNotMatch(resumed[4], /\bHEARD-FOLLOWUP\b/, 'the delivered follow-up is not replayed from the provisional snapshot');
+  assert.equal(resumed[4].split('UNHEARD-FOLLOWUP').length - 1, 1);
+  assert.equal(resumed[4].split('NEXT-TURN').length - 1, 1);
+});

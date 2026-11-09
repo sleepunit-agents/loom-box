@@ -42,7 +42,7 @@ export async function collectNativeHistory({ client, id, root, snapshot, physica
     let complete = false;
     for (let part = 0; part < parts; part++) {
       const receipt = await call({ phase: 'part', plan: plan.plan, key: entry.key, bodyId: native.id, session: native.session,
-        inputConfirmed: native.inputConfirmed === true, sha256, parts, part, data: data.slice(part * PART_CHARS, (part + 1) * PART_CHARS) });
+        inputConfirmed: native.inputConfirmed === true, pending: native.pending, sha256, parts, part, data: data.slice(part * PART_CHARS, (part + 1) * PART_CHARS) });
       if (receipt?.plan !== plan.plan || receipt.part !== part || receipt.received !== true || typeof receipt.complete !== 'boolean') throw Error('native session part was not acknowledged');
       complete = receipt.complete;
     }
