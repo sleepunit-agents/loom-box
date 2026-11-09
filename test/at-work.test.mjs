@@ -48,14 +48,14 @@ test('a wake and a bridge chat say only their venue and kind, never their label 
   const wake = convDoing({ agent: 'art', conversation: 'cv-000000000001', venue: 'wake', kind: 'scheduled', place: 'w-1', label: 'Pond rollup for Loren' });
   assert.deepEqual(wake, { text: 'On a wake', kind: 'lane', conversation: 'cv-000000000001' });
   const slack = convDoing({ agent: 'art', conversation: 'cv-000000000002', venue: 'slack', kind: 'live', place: 'dm:U1', label: 'Loren (dm:U1)', since: Date.parse('2026-11-07T10:00:00Z') });
-  assert.deepEqual(slack, { text: 'Working · Slack', kind: 'talk', conversation: 'cv-000000000002', since: '2026-11-07T10:00:00.000Z' });
+  assert.deepEqual(slack, { text: 'Working · Slack', kind: 'talk', where: 'Slack', conversation: 'cv-000000000002', since: '2026-11-07T10:00:00.000Z' });
   assert.ok(!JSON.stringify([wake, slack]).includes('Loren'));
 });
 
 test('core hears when what is at work moves, and only then', async () => {
   const w = world();
   const calls = [];
-  const o = { core: { changed: async () => { calls.push(1); return { ok: true }; } }, deps: w.o };
+  const o = { nowMs: w.clock.now().getTime(), core: { changed: async () => { calls.push(1); return { ok: true }; } }, deps: w.o };
   await tellAtWork(w.env, o);
   calls.length = 0;
   assert.equal(await tellAtWork(w.env, o), false, 'nothing moved: core isn\'t told');

@@ -187,7 +187,8 @@ export async function tellAtWork(env, o = {}) {
   try {
     const s = loadState(env);
     const houses = Object.entries(s.houses ?? {}).filter(([, h]) => h.agent && !h.service && (h.state === 'running' || h.state === 'starting')).map(([k]) => k).sort().join(',');
-    print = `${workingPrint(o.deps ? workingConversations(env, o.deps) : workingConversations(env))}|${houses}`;
+    // Renew explicit idle observations too; a silent working set must not leave a 30-second observation cached for 45 seconds.
+    print = `${workingPrint(o.deps ? workingConversations(env, o.deps) : workingConversations(env))}|${houses}|${Math.floor((o.nowMs ?? Date.now()) / 10000)}`;
   } catch { return false; }
   if (print === atWork) return false;
   atWork = print;

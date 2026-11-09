@@ -1,3 +1,4 @@
+import { observation } from './ticker.mjs';
 // Delivery (loom docs/specs/agent-runtime.md, section 5): anything addressed to an agent arrives the same way.
 //
 //   a source ──► core ──► deliver {source, id, agent, venue, place, label?, from, kind: message|wake, at, text}
@@ -913,8 +914,26 @@ export function workingConversations(env, d = depsOf(env), now = Date.now()) {
     try { st = isStarting(c, now) ? 'working' : statusOf(env, c, d); } catch { st = 'unknown'; }
     if (st !== 'working') continue;
     const run = (c.runLog ?? []).findLast((x) => x.run === c.run);
-    out.push({ agent: c.agent, conversation: c.conversation, venue: c.venue, kind: c.kind, place: c.place,
+    let activity;
+    try {
+      const rec = readBody(env, c.body), runner = d.runner(rec.harness, rec.local), body = bodyOf(c.body, rec);
+      // Do not turn an offline retention/starting/retiring status into a fresh observation.
+      if (!c.retiring && !c.starting && runner.status(body) === 'working') activity = runner.remote
+        ? runner.tickerObservation?.(body)
+        : observation(runner.tickerAction?.(body), new Date(now).toISOString(), now);
+    } catch { /* unknown is not current activity */ }
+    out.push({ ...(activity ? { activity } : {}), agent: c.agent, conversation: c.conversation, venue: c.venue, kind: c.kind, place: c.place,
       ...(c.label !== undefined ? { label: c.label } : {}), ...(Number.isFinite(run?.at) ? { since: run.at } : c.starting ? { since: c.starting.since } : {}) });
+  }
+  return out;
+}
+
+/** Agents whose delivery status cannot prove idleness. Retention during an outage is not idle. */
+export function nonIdleAgents(env, d = depsOf(env), now = Date.now()) {
+  const out = new Set();
+  for (const c of listConvs(env)) {
+    try { if (isStarting(c, now) || ['working', 'unknown'].includes(statusOf(env, c, d))) out.add(c.agent); }
+    catch { out.add(c.agent); }
   }
   return out;
 }
@@ -936,7 +955,7 @@ export function conversationJobs(env, d = depsOf(env), now = Date.now()) {
 }
 
 /** The working set as one string: it changes when a body starts or ends, nothing else (the tick's word to core). */
-export const workingPrint = (ws) => ws.map((w) => `${w.agent}:${w.conversation}`).sort().join(',');
+export const workingPrint = (ws) => ws.map((w) => `${w.agent}:${w.conversation}${w.activity ? `:${w.activity.action}:${Math.floor(Date.parse(w.activity.observedAt) / 10000)}` : ''}`).sort().join(',');
 
 /**
  * Messages as a body reads them. Who wrote and their tier are the runtime's, out of band: each message is fenced by a
