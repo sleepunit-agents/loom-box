@@ -793,7 +793,7 @@ async function deliverOnce(env, raw, o) {
           else c.control.resume = true;
         }
         // Whom the clock said a wake is for stays with it while it waits (t-1975): a reset re-notes it as that, never more.
-        c.queue.push({ key, id: m.id, at: m.at, from: m.from, kind: m.kind, ...(wake ? { wakeFor: wakeFor ?? '-' } : {}), ...(local ? { local: true } : {}), ...(o.deferPeer === true && m.from.kind === 'agent' ? { untilIdle: true } : {}), ...(tier ? { tier } : {}), ...(owner ? { owner: true } : {}), ...(tierUnread ? { tierUnread: true } : {}), ...(sealed ? { sealed } : { mem: true }) });
+        c.queue.push({ key, id: m.id, at: m.at, from: m.from, kind: m.kind, ...(wake ? { wakeFor: wakeFor ?? '-', ...(wakeFor === undefined ? { noWord: true } : {}) } : {}), ...(local ? { local: true } : {}), ...(o.deferPeer === true && m.from.kind === 'agent' ? { untilIdle: true } : {}), ...(tier ? { tier } : {}), ...(owner ? { owner: true } : {}), ...(tierUnread ? { tierUnread: true } : {}), ...(sealed ? { sealed } : { mem: true }) });
       }
       c.last = d.now().toISOString();
       saveConv(env, c);
@@ -3034,7 +3034,7 @@ export function bodyPrincipal(env, { conversation, key, session }, o = {}) {
 
 /**
  * The waiting messages a reset card lists (t-1975): each one no person is named in, described in words ("a relay from
- * Mark", "a wake with no word from the clock", "a message from a sender loom can't name"), at most 12. Only these are
+ * Mark", "a wake the clock said nothing about", "a message from a sender loom can't name"), at most 12. Only these are
  * what the owner's Allow counts as his (resetActsFor `counted`, by key); a person's message is theirs, never listed.
  */
 const SHOWN_ROOM = 650;
@@ -3055,7 +3055,9 @@ export function shownRows(rows, env = {}) {
   for (const q of rows ?? []) {
     if (!q?.key || q.from?.kind === 'person') continue;
     if (q.from?.kind === 'schedule' && q.wakeFor !== '-') continue;   // the clock's word names whom, or a row from before
-    const words = q.from?.kind === 'schedule' ? 'a wake with no word from the clock'
+    // The clock's word that a wake is no one loom can name (set by work loom couldn't say was yours) isn't the clock
+    // saying nothing (its hand-over failed or expired, t-2009): the card says which.
+    const words = q.from?.kind === 'schedule' ? (q.noWord ? 'a wake the clock said nothing about' : 'a wake set by work loom couldn\'t say was yours')
       : q.from?.kind === 'agent' && /^[a-z][a-z0-9-]{0,39}$/.test(q.from.id ?? '') ? `a relay from ${cap(q.from.id)}` : 'a message from a sender loom can\'t name';
     const w = `${words} (${rowWhen(q.at, env) || 'time unknown'})`;
     // Every row listed fits on the card whole (approvals' 1000 for details, less the conversation's own line): one that
