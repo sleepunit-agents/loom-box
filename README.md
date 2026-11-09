@@ -767,10 +767,10 @@ A spawned job keeps the version it was admitted under, and, from its first run, 
 and harness it ran on. Every later run of that job (a `say`, a resume after a restart) uses that model, whatever changes
 meanwhile: a catalog edit, a new preference, the owner's harness choice, or the primary model's account getting room
 back. This is unlike a live conversation, which falls back when its account is out and goes home when it has room. A
-job whose model is out of quota waits, its session kept (the delivery fails `code: "quota"` with `retryAfter`), unless
+job whose model is out of quota waits, its session kept and its messages queued (`waiting` says why), unless
 it was spawned with `--failover` (or its role sets `"failover": true`): then it moves to another eligible model,
 pinned there, the move kept in `lineage`; it never goes back by itself. A job whose model left the list (or the agent's
-`allow`) holds, its session and messages kept, until the owner restores it. Its rules come before its assignment: a
+`allow`) holds, its session and messages kept, until the owner restores it: failover is for quota only. Its rules come before its assignment: a
 harness its rules can't be kept on (a deny list Codex can't hold, a body on loom's machine without the Codex opt-in) is
 never used, pinned or not, and the job moves. A Claude session is never resumed on Codex: a move is a fresh body, from
 the job's digests. `spawn result` says the job's assignment.

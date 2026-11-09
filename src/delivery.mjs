@@ -2315,15 +2315,21 @@ async function routeOf(env, c0, op, rules, d, cant = []) {
   const pin = c0.spawn?.assignment?.model;
   if (pin) {
     const h = c0.spawn.assignment.harness;
-    const forbidden = cant.includes(h);
-    if (forbidden || (c0.spawn.failover && !(await roomOn(env, c0, h, d, pin)))) {
+    const move = (why) => {
       if (op.type === 'resume') parkSlot(env, op);
-      return { how: 'start', avoid: [...new Set([...avoid, h])], failover: forbidden ? 'rules' : 'quota' };
-    }
-    // Its model gone from the list, or no longer one the agent may use: not quota, so no reset will bring it back. The
-    // job holds, its session and messages kept (never the failed-resume path, which would drop its slot), and says why.
+      return { how: 'start', avoid: [...new Set([...avoid, h])], failover: why };
+    };
+    if (cant.includes(h)) return move('rules');
+    // Its model gone from the list, or no longer one the agent may use: not quota, so no reset brings it back and no
+    // failover is for it. The job holds, its session and messages kept (never the failed-resume path, which would
+    // drop its slot), and says why.
     const gone = await pinGone(env, c0, pin, d);
     if (gone) throw Object.assign(new DeliveryError(`this job's assigned model ${pin} can't run: ${gone}. It waits, its session kept, until that model can run again (or the job is spawned again)`, 503), { held: true });
+    // Out of quota: a failover if its spawn allowed one; else it waits for its model, its messages queued (not failed).
+    if (!(await roomOn(env, c0, h, d, pin))) {
+      if (c0.spawn.failover) return move('quota');
+      throw Object.assign(new DeliveryError(`this job's assigned model ${pin} is out of quota; it waits for it, its session and messages kept`, 503), { held: true });
+    }
     // Only a refused turn's own retry is dropped (a pinned job waits for its model instead); `cant` always stays.
     const keep = avoid.filter((x) => x !== h || cant.includes(x));
     if (op.type === 'resume' && op.slot?.harness === h) return { how: 'resume', file: slotFile(env, op.cv), avoid: keep };

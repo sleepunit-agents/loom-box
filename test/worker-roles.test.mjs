@@ -127,11 +127,14 @@ test('a worker job out of quota waits on its own model, its session kept, never 
   assert.equal(w.runs().length, before, 'no body on Codex: the job waits for its own model');
   assert.equal(c.home, undefined, 'its slot is not parked as a home');
   assert.ok(c.slot, 'its session stays to resume');
-  // The window resets: it resumes its own session on its own model.
+  assert.match(c.waiting, /out of quota; it waits/);
+  assert.ok(c.queue.some((m) => !m.note), 'its message waits, not failed');
+  // The window resets: the tick resumes its own session on its own model, with the message that waited.
   w.clock.advance(3601_000);
   await tick(w.env, w.o);
-  await w.say(r.handle, 'continue again');
-  assert.equal(w.runs().at(-1)[0], 'resume');
+  const last = w.runs().at(-1);
+  assert.equal(last[0], 'resume');
+  assert.match(last[4], /continue/);
   assert.match(loadConv(w.env, r.handle).body, /^claude:/);
 });
 
@@ -277,4 +280,20 @@ test('a parked session begun under other rules is dropped, never resumed under t
   assert.equal(last[0], 'start', 'a fresh body');
   assert.notEqual(last[2], session);
   assert.equal(loadConv(w.env, r.handle).home, undefined, 'the parked session is dropped');
+});
+
+test('with failover allowed, a model that left the list still holds the job rather than moving it', async () => {
+  const w = workers();
+  const r = await w.spawn({ prefer: 'sonnet', failover: true });
+  let c = loadConv(w.env, r.handle);
+  assert.equal(c.spawn.assignment.model, 'sonnet');
+  w.runner.finish(c.body);
+  setModels(w.env, { list: [OPUS, SOL] });
+  const before = w.runs().length;
+  await w.say(r.handle, 'continue');
+  c = loadConv(w.env, r.handle);
+  assert.equal(w.runs().length, before, 'no fresh body elsewhere');
+  assert.equal(c.spawn.assignment.model, 'sonnet');
+  assert.equal(c.home, undefined);
+  assert.match(c.waiting, /assigned model sonnet can't run/);
 });
