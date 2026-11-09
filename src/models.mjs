@@ -83,6 +83,38 @@ export function modelsOf(s) {
 
 export function readModels(env) { return modelsOf(load(env)); }
 
+/** Owner-selected harnesses: a thread overrides its agent; Auto inherits the agent. */
+export function modelChoiceOf(s, agent, conversation) {
+  const choices = s.modelChoices ?? {};
+  const agentChoice = choices.agents?.[agent] ?? 'auto';
+  const thread = conversation && choices.conversations?.[conversation];
+  const threadChoice = thread?.agent === agent ? thread.harness : 'auto';
+  return { agent, ...(conversation ? { conversation } : {}), agentChoice, threadChoice,
+    effective: threadChoice !== 'auto' ? threadChoice : agentChoice };
+}
+export const readModelChoice = (env, agent, conversation) => modelChoiceOf(load(env), agent, conversation);
+
+/** Low-level owner mutation; API/page callers verify the actual conversation and owner first. */
+export function setModelChoice(env, { agent, conversation, harness }) {
+  if (!AGENT.test(agent ?? '')) fail('which agent');
+  if (!['auto', ...HARNESSES].includes(harness)) fail('model choice is auto, claude or codex');
+  if (conversation !== undefined && !/^cv-[0-9a-f]{12}$/.test(conversation)) fail('which conversation');
+  return update(env, (s) => {
+    const available = modelsOf(s);
+    const allowed = available.agents[agent]?.allow;
+    if (harness !== 'auto' && !available.list.some((m) => m.harness === harness && (!allowed?.length || allowed.includes(m.id)))) fail(`no allowed ${harness} model for ${agent}`);
+    const c = s.modelChoices ??= { agents: {}, conversations: {} };
+    if (conversation) {
+      if (harness === 'auto') delete c.conversations[conversation];
+      else c.conversations[conversation] = { agent, harness };
+    } else {
+      if (harness === 'auto') delete c.agents[agent];
+      else c.agents[agent] = harness;
+    }
+    return modelChoiceOf(s, agent, conversation);
+  });
+}
+
 /** The owner sets the list, an agent's settings, or both. */
 export function setModels(env, { list, agent, allow, prefer }) {
   return update(env, (s) => {
@@ -164,7 +196,7 @@ function resolveRoom({ agent, m, accounts, now }) {
  *   now        the clock, for holds and windows past their reset (accounts.mjs, hasRoom)
  *   all        the whole list, when `models` is only some of it (a resume's harness): the preferred pick is from it
  */
-export function resolveModel({ agent, kind, models, all = models, settings = {}, accounts, scorecards = [], prefer = [], since, avoid = [], now = Date.now() }) {
+export function resolveModel({ agent, kind, models, all = models, settings = {}, accounts, scorecards = [], prefer = [], since, avoid = [], harnessChoice = 'auto', now = Date.now() }) {
   const why = [];
   const allowed = settings.allow?.length ? models.filter((m) => settings.allow.includes(m.id)) : models;
   if (!allowed.length) fail(`${agent} may use none of the runtime's models`, 409);
@@ -198,7 +230,8 @@ export function resolveModel({ agent, kind, models, all = models, settings = {},
   // What it would pick with quota ignored (and nothing avoided), from the whole list: a pick on another harness is a
   // fallback. Its room is read as any model's is.
   const allAllowed = settings.allow?.length ? all.filter((m) => settings.allow.includes(m.id)) : all;
-  const preferred = choose(allAllowed.length ? allAllowed : allowed, false);
+  const chosen = allAllowed.filter((m) => m.harness === harnessChoice);
+  const preferred = choose(chosen.length ? chosen : allAllowed.length ? allAllowed : allowed, false);
   if (!room.has(preferred.id)) {
     const sub = resolveRoom({ agent, m: preferred, accounts, now });
     room.set(preferred.id, sub);
@@ -208,7 +241,8 @@ export function resolveModel({ agent, kind, models, all = models, settings = {},
     e.out = allowed.map((m) => room.get(m.id).out).filter(Boolean).filter((o, i, all) => all.findIndex((x) => x.harness === o.harness && x.account === o.account) === i);
     throw e;
   }
-  const pick = choose(usable, true);
+  const wanted = usable.filter((m) => m.harness === harnessChoice);
+  const pick = choose(wanted.length ? wanted : usable, true);
   const r = room.get(pick.id);
   const gone = room.get(preferred.id);
   const fallback = pick.harness !== preferred.harness && !gone.ok
@@ -255,7 +289,7 @@ export async function fetchScorecards(env, { kind, since, fetchImpl = fetch } = 
 }
 
 /** Resolve with what the runtime has: its list (only `harness`'s models, if named), the agent's settings, the accounts provider, loom's scorecards. */
-export async function resolveFor(env, { agent, venue, venueKind: told, prefer = [], harness, avoid = [], accounts, now = new Date(), fetchImpl } = {}) {
+export async function resolveFor(env, { agent, venue, venueKind: told, prefer = [], harness, conversation, avoid = [], accounts, now = new Date(), fetchImpl } = {}) {
   if (!AGENT.test(agent ?? '')) fail('which agent');
   const kind = venueKind(venue, told);
   const { list: all, agents } = readModels(env);
@@ -267,7 +301,10 @@ export async function resolveFor(env, { agent, venue, venueKind: told, prefer = 
   try { listed = accounts.kind === 'none' ? null : accounts.list(); } catch { listed = null; }
   const since = sinceDay(now);
   const cards = await fetchScorecards(env, { kind, since, fetchImpl });
-  const r = resolveModel({ agent, kind, models: list, all, settings: agents[agent] ?? {}, accounts: listed, scorecards: cards.rows, prefer, since, avoid, now: now.getTime() });
+  const choice = readModelChoice(env, agent, conversation).effective;
+  const r = resolveModel({ agent, kind, models: list, all, settings: agents[agent] ?? {}, accounts: listed,
+    scorecards: cards.rows, prefer, since, avoid, harnessChoice: choice, now: now.getTime() });
+  if (choice !== 'auto') r.why.unshift(`owner preference: ${choice}${conversation ? ' for this conversation' : ''}`);
   if (cards.error) r.why.push(cards.error);
   return r;
 }

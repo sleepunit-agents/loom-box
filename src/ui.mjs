@@ -15,7 +15,7 @@ import { addBox, assertBoxOwner, resolveBox, isBoxOwner, boxLabelOf, boxOfCall, 
 import { LOGIN_HARNESSES } from './logins.mjs';
 import { ownCommit, swapCommand } from './version.mjs';
 import { stateAccounts } from './accounts.mjs';
-import { COMMS_VENUE, HARNESS_WORDS, answerLoop, deliveryNotices, loadConv, loopAsks, readFallbacks, resetCardProblem, resetPrincipal, runtimeAs, whenWords, workingConversations } from './delivery.mjs';
+import { COMMS_VENUE, HARNESS_WORDS, ownerModelChoice, answerLoop, deliveryNotices, loadConv, loopAsks, readFallbacks, resetCardProblem, resetPrincipal, runtimeAs, whenWords, workingConversations } from './delivery.mjs';
 import { loomStore } from './store.mjs';
 import { asks as gateAsks, answer as gateAnswer, gatesPage, mergePeople, status as gatesStatus, proposals as gateProposals, PROPOSALS as PROPOSALS_COLLECTION } from './gates.mjs';
 import { GRANTS, KEY as GRANTS_KEY, GrantsError, addGrant, grantPathsOk, grantsProblem, householdOf, setPiece, setRelay, usableBy } from './grants.mjs';
@@ -1175,6 +1175,14 @@ function serviceState(v, nameOf) {
  * its sessions, a house to start; and, for a household owner, how its house is made and its primary box. An agent
  * owner gets the houses and services of an agent of theirs, as on their own page.
  */
+function modelChoiceBlocks(env, agent, caller) {
+  const choice = ownerModelChoice(env, caller, { agent });
+  return [{ type: 'form', action: 'model-choice', submit: 'Save model', hidden: { agent },
+    note: 'Used for new turns. If this model has no quota, another available model can answer.',
+    fields: [{ name: 'harness', label: 'Model', kind: 'segmented', value: choice.agentChoice,
+      options: [{ value: 'auto', label: 'Auto' }, { value: 'claude', label: 'Claude' }, { value: 'codex', label: 'Codex' }] }] }];
+}
+
 function agentTabPage(env, agent, caller, nowMs) {
   const s = load(env);
   const own = Array.isArray(caller.agents) ? caller.agents : null;
@@ -1190,7 +1198,7 @@ function agentTabPage(env, agent, caller, nowMs) {
   const running = live.filter((h) => h.state === 'running').length;
   const draining = live.filter((h) => h.draining && h.state === 'running').length;
   const counts = `${plural(running, 'house')} running · ${plural(svcUp.length, 'service')} up`;
-  const sections = [{ id: 'houses', title: 'Houses', blocks: [
+  const sections = [{ id: 'model', title: 'Model', blocks: modelChoiceBlocks(env, agent, caller) }, { id: 'houses', title: 'Houses', blocks: [
     { type: 'health', tone: svcDown.length ? 'bad' : draining || live.length > running ? 'warn' : live.length ? 'ok' : 'muted',
       text: svcDown.length ? `${andList(svcDown.map((v) => serviceWords(v.name)))} ${svcDown.length === 1 ? 'is' : 'are'} down` : counts,
       detail: svcDown.length ? counts : draining ? `${plural(draining, 'house')} draining to a newer image.` : live.length > running ? `${live.length - running} more starting or waiting for a box.` : live.length ? 'All running.' : 'Nothing running now.' },
@@ -1415,7 +1423,7 @@ function targetOf(env, action, fields) {
 /** Where a box's own action lands: the page of the box it named (by id or name, resolved); else Boxes. */
 const boxPath = (env, name) => { try { return boxPagePath(resolveBox(load(env), name)); } catch { return ''; } };
 
-const AGENT_ACTIONS = new Set(['agent-flag', 'up', 'down', 'service-up', 'service-down', 'service-restart', 'service-move', 'remote-up', 'remote-down', 'set-primary', 'set-agent']);
+const AGENT_ACTIONS = new Set(['agent-flag', 'model-choice', 'up', 'down', 'service-up', 'service-down', 'service-restart', 'service-move', 'remote-up', 'remote-down', 'set-primary', 'set-agent']);
 
 export function act(env, effects, { action, fields: raw = {}, caller: c }, publicUrl) {
   const OWNER = pageCaller(c);
@@ -1424,7 +1432,7 @@ export function act(env, effects, { action, fields: raw = {}, caller: c }, publi
   if (scope && (!AGENT_ACTIONS.has(action) || targetOf(env, action, raw) !== scope)) {
     return { ok: false, message: `This is ${scope}'s page.` };
   }
-  if (Array.isArray(OWNER.agents) && !['up', 'down', 'service-up', 'service-down', 'service-restart'].includes(action)) {
+  if (Array.isArray(OWNER.agents) && !['up', 'down', 'service-up', 'service-down', 'service-restart', 'model-choice'].includes(action)) {
     return { ok: false, message: 'That\'s the household owner\'s to do.' };
   }
   // The page's field names are lowercase (loom's vocabulary); the runtime's are camelCase.
@@ -1457,6 +1465,10 @@ export function act(env, effects, { action, fields: raw = {}, caller: c }, publi
       case 'login-code': { loginCode(env, effects, fields); return { ok: true, message: 'Got it: the box is checking the code.', page: `login/${fields.id}` }; }
       case 'box-update-now': { const r = boxUpdateNow(env, effects, fields); return { ok: true, message: `${r.name} tries loom's runtime on its next poll.`, page: boxPath(env, fields.name) }; }
       case 'login-cancel': { loginCancel(env, effects, fields); return { ok: true, message: 'Cancelled.', page: '' }; }
+      case 'model-choice': {
+        const choice = ownerModelChoice(env, OWNER, fields);
+        return { ok: true, message: `Saved ${who(choice.agent)}'s model preference. New turns use ${choice.effective === 'auto' ? 'Auto' : HARNESS_WORDS[choice.effective]} when available.`, page: '' };
+      }
       case 'set-primary': { const r = setPrimary(env, effects, fields); return { ok: true, message: `${r.agent}'s primary is ${label(r.primary)}.`, page: '' }; }
       case 'set-agent': { const r = setAgent(env, effects, fields); return { ok: true, message: `Saved ${r.agent}'s house.`, page: '' }; }
       case 'up': {

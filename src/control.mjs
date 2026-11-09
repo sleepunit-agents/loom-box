@@ -1446,6 +1446,9 @@ export function api(env, effects, { caller, path, body }) {
       if (caller.kind !== 'agent') fail('body-sync is a body host\'s, in its agent\'s house', 403);
       return import('./houserunner.mjs').then((m) => ({ status: 200, body: m.bodySync(env, caller, b) })).catch(apiError);
     }
+    if (path === 'model-choice') {
+      return import('./delivery.mjs').then((m) => ({ status: 200, body: m.ownerModelChoice(env, caller, b) })).catch(apiError);
+    }
     // A body's message out, as its own agent, proving its run with LOOM_BODY_KEY (delivery.mjs, send): checked and
     // accepted at once ({accepted, ref}); the post runs detached, with its full 15 s, outside this call.
     if (path === 'send') {

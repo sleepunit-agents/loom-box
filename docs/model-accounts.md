@@ -231,3 +231,21 @@ shared by everything on it.
 
 loom explains this. It doesn't enforce it in code. Which work belongs on whose
 subscription is the owner's call.
+
+## Owner model preference
+
+An agent's Houses tab offers Auto, Claude and Codex. A thread can override that
+choice in its Comms menu. Auto on a thread follows its agent's preference; Auto
+on an agent uses the existing model preferences and scorecards. The runtime API
+`model-choice` reads `{agent?, conversation?}` and saves
+`{agent?, conversation?, harness: "auto"|"claude"|"codex"}` for an authenticated
+owner. A conversation's actual agent is read from its record. Agent tokens cannot
+change the choice, and agent owners cannot change another agent's choice.
+
+A saved choice affects new turns and does not interrupt a running turn. It
+prefers models on the selected harness over cross-harness scorecard ranking,
+while retaining the model allow-list, tool restrictions and quota checks. When
+that harness is unavailable the same resolver chooses an available fallback.
+Switching back can resume the conversation's saved session. The preference is
+stored by the runtime in `state.json` under `modelChoices`, separate from model
+allow-lists; it grants no new model or tool access.
