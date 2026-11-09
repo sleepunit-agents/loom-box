@@ -25,8 +25,8 @@ for (const harness of ['claude', 'codex']) test(`an allocated task uses ${harnes
     ] });
   }
   setAgent(w.env, {}, { agent: 'art', repo: 'https://example.com/art.git' });
-  const allocated = { id: 'h-7', agent: 'art', box: 'gpu-box', needs: ['gpu:5090'], slot: 'tending', state: 'running', task: 'Report only.', taskActsFor: { owner: true, people: [], unknown: false } };
-  update(w.env, s => { s.houses['h-7'] = allocated; });
+  const allocated = { id: 'h-7', agent: 'art', box: 'gpu-box', needs: ['gpu:5090'], slot: 'tending', state: 'starting', build: 'loom-house-art:aaaaaaaaaaaabbbbbbbb', task: 'Report only.', taskActsFor: { owner: true, people: [], unknown: false } };
+  update(w.env, s => { s.houses['h-7'] = allocated; s.builds = { art: { id: 'loom-house-art:ccccccccccccdddddddd', at: new Date().toISOString() } }; });
   const hr = new HouseRunner(w.env, harness, { sealer: w.o.sealer, poll: 5, up() { throw Error('must never allocate another house'); } });
   const o = { ...w.o, runner: () => hr, spawnWorker() {}, detach: true };
   const caller = { kind: 'agent', agent: 'art', house: 'h-7' };
@@ -45,6 +45,7 @@ for (const harness of ['claude', 'codex']) test(`an allocated task uses ${harnes
     if (r.status !== 200) throw Error(r.body.error);
     return leave ? { ...r.body, exit: true } : r.body;
   };
+  const reportedRunning = setTimeout(() => update(w.env, s => { s.houses['h-7'].state = 'running'; }), 100);
   const host = runBodyHost({ client, runner: () => native, hostKey: boot.hostKey,
     env: { HOME: join(w.env.HOME, 'house'), CLAUDE_SECURESTORAGE_CONFIG_DIR: '/run/loom/login/claude', LOOM_LOGIN_CODEX: '/run/loom/login/codex' }, idleS: 0, beats: 3000, sleep: () => new Promise(r => setTimeout(r, 5)) });
   try {
@@ -69,7 +70,7 @@ for (const harness of ['claude', 'codex']) test(`an allocated task uses ${harnes
     const result = await taskStatus(w.env, caller, o);
     assert.deepEqual(result, { done: true, ok: true, report: 'ALLOCATED-HOUSE-REPORT' });
     assert.ok(loadConv(w.env, boot.conversation).slot, 'the common runtime collected the session before house exit');
-  } finally { leave = true; await host; }
+  } finally { clearTimeout(reportedRunning); leave = true; await host; }
 });
 
 test('task bootstrap refuses owner, other-agent, service and session callers', async () => {

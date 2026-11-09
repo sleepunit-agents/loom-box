@@ -45,7 +45,7 @@ export async function downTask(env, effects, caller, body) {
 function ownTask(env, caller) {
   if (caller.kind !== 'agent' || !caller.house || caller.service) fail('a task host uses its own house credential', 403);
   const h = load(env).houses?.[caller.house];
-  if (!h || h.agent !== caller.agent || h.service || h.session || h.state !== 'running' || (isHostHouse(h) && !h.job)) fail('this is not a running raw-task house', 403);
+  if (!h || h.agent !== caller.agent || h.service || h.session || !['starting', 'running'].includes(h.state) || (isHostHouse(h) && !h.job)) fail('this is not a running raw-task house', 403);
   return h;
 }
 
@@ -56,7 +56,7 @@ export async function bootstrapTask(env, caller, o = {}) {
   const host = registerTaskHost(env, h.agent, h.id, o);
   update(env, s => {
     const current = s.houses[h.id];
-    if (!current || current.state !== 'running') fail('the task house stopped', 409);
+    if (!current || !['starting', 'running'].includes(current.state)) fail('the task house stopped', 409);
     current.kind = 'body-host'; current.seat = host.seat;
     current.job ??= { house: h.id, created: h.created || new Date().toISOString() };
   });
