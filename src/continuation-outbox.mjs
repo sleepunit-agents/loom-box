@@ -162,12 +162,13 @@ export function continuationOutbox({ dir, sealer, now = Date.now, lifetimeMs = n
     // current returns runtime-owned snapshots, not body input. Recheck both sides
     // immediately before every attempt. A different current source run is fine;
     // a different child run, reset or principal never is.
-    async drain({ current, post }) {
+    async drain({ current, post, reconcile }) {
       for (const name of readdirSync(dir).filter((n) => /^report-[0-9a-f]{64}\.sealed$/.test(n))) {
         const id = name.slice(0, -7);
         const row = locked(() => {
           const r = read(id);
-          if (!r || r.state !== 'pending') return null;
+          if (!r || !['pending', 'indeterminate'].includes(r.state)) return null;
+          const recovering = r.state === 'indeterminate';
           const g = read(r.grant);
           let time;
           try { time = observe(); } catch { return null; } // Hold; no write attempt during clock uncertainty.
@@ -176,21 +177,24 @@ export function continuationOutbox({ dir, sealer, now = Date.now, lifetimeMs = n
           }
           if (r.expiresAt !== g.expiresAt) { r.state = 'indeterminate'; r.reason = 'deadline commitment differs'; save(id, r); return null; }
           if (g.expired || time >= g.expiresAt) {
-            g.expired = true; save(r.grant, g); expireRow(r); save(id, r); return null;
+            g.expired = true; save(r.grant, g); expireRow(r); save(id, r);
+            if (r.state !== 'indeterminate' || !reconcile) return null;
           }
-          if (r.next > time) return null;
+          if (!recovering && r.state === 'pending' && r.next > time) return null;
           const source = g && current(g.source.conversation), child = current(r.child.conversation);
           if (!g || !unchanged(g.source, source) || !unchanged(r.child, child) || child.run !== r.child.run) {
             r.state = r.attempts > 0 ? 'indeterminate' : 'failed'; r.reason = 'continuation authority was reset or changed'; save(id, r); return null;
           }
-          r.attempts += 1;
+          const reconciliation = recovering || r.state === 'indeterminate';
+          if (reconciliation && !reconcile) return null;
+          if (!reconciliation) r.attempts += 1;
           r.next = now() + Math.min(3600000, 1000 * 2 ** Math.min(r.attempts, 12));
           save(id, r);
-          return { ...r, target: g.source.target, agent: g.source.agent, conversation: g.source.conversation };
+          return { ...r, reconciliation, target: g.source.target, agent: g.source.agent, conversation: g.source.conversation };
         });
         if (!row) continue;
         let result;
-        try { result = await post({ ref: row.ref, text: row.text, target: row.target, agent: row.agent, conversation: row.conversation, run: row.child.run, on: row.on ?? null, expiresAt: row.expiresAt }); }
+        try { result = await (row.reconciliation ? reconcile : post)({ ref: row.ref, text: row.text, target: row.target, agent: row.agent, conversation: row.conversation, run: row.child.run, on: row.on ?? null, expiresAt: row.expiresAt }); }
         catch (e) {
           // Transport loss, throttling and request timeout can recover. A payload
           // conflict or other permanent client refusal cannot recover by replay.
@@ -201,7 +205,8 @@ export function continuationOutbox({ dir, sealer, now = Date.now, lifetimeMs = n
         locked(() => {
           const r = read(id);
           if (!['pending', 'indeterminate', 'expired'].includes(r.state)) return;
-          if (result?.ok && result.posted === true) { r.state = 'delivered'; r.posted = true; delete r.reason; }
+          if (result?.ok && (row.reconciliation ? result.state === 'delivered' && typeof result.id === 'string' && result.id.length > 0 : result.posted === true)) { r.state = 'delivered'; r.posted = true; delete r.reason; }
+          else if (row.reconciliation && result?.ok && result.state === 'not-accepted') { r.state = 'expired'; r.reason = 'core fenced acceptance and found no accepted report'; }
           else if (result?.permanent) { r.state = 'indeterminate'; r.reason = String(result.reason ?? 'destination refused report').slice(0, 300); }
           // An accepted/pending response alone never means delivered.
           save(id, r);

@@ -253,3 +253,34 @@ test('runner preflight requires exact sealed deadline, current principal and act
   w.setTime(expiresAt);
   assert.throws(() => w.reload().checkFiring(w.handle, firing, w.source, w.child), /expired/);
 });
+
+for (const answer of [
+  { ok: true, state: 'delivered', id: '42' },
+  { ok: true, state: 'not-accepted' },
+  { ok: true, state: 'unresolved' },
+  { ok: true, state: 'deleted' },
+  { ok: false, permanent: true, reason: 'payload conflict' },
+]) test(`fenced recovery after cutoff: ${answer.state ?? answer.reason}`, async (t) => {
+  const w = world(t); bind(w); queue(w);
+  let original;
+  await w.out.drain({ current: w.current, post: async p => { original = p; throw Error('lost receipt'); } });
+  w.setTime(w.binding.expiresAt);
+  let calls = 0;
+  await w.reload().drain({ current: w.current, post: () => assert.fail('post after cutoff'), reconcile: async p => {
+    calls++; assert.deepEqual(p, original); return answer;
+  } });
+  assert.equal(calls, 1);
+  const status = w.reload().status(w.handle, w.child, 'final', w.source);
+  assert.equal(status.state, answer.state === 'delivered' ? 'delivered' : answer.state === 'not-accepted' ? 'expired' : 'indeterminate');
+  assert.equal(status.attempts, 1);
+});
+
+test('reconciliation transport loss retains indeterminate across restart and retries lookup only', async t => {
+  const w = world(t); bind(w); queue(w);
+  await w.out.drain({ current: w.current, post: async () => { throw Error('lost'); } });
+  w.setTime(w.binding.expiresAt);
+  await w.reload().drain({ current: w.current, post: () => assert.fail('late post'), reconcile: async () => { throw Error('busy'); } });
+  assert.equal(w.reload().status(w.handle, w.child, 'final', w.source).state, 'indeterminate');
+  await w.reload().drain({ current: w.current, post: () => assert.fail('late post'), reconcile: async () => ({ ok: true, state: 'delivered', id: '42' }) });
+  assert.equal(w.reload().status(w.handle, w.child, 'final', w.source).posted, true);
+});

@@ -2666,7 +2666,12 @@ export function continuationSnapshot(env, conversation) {
 export async function drainContinuations(env, o = {}) {
   const d = depsOf(env, o);
   const outbox = continuationOutbox({ dir: join(deliveryDir(env), 'continuations'), sealer: d.sealer, now: () => d.now().getTime(), lifetimeMs: o.continuationLifetimeMs });
-  await outbox.drain({ current: (cv) => continuationSnapshot(env, cv), post: async (p) => {
+  await outbox.drain({ current: (cv) => continuationSnapshot(env, cv), reconcile: async (p) => {
+    const venue = (await d.venues())?.[p.target.venue];
+    if (!coreAdapted(venue)) return { permanent: true, reason: 'continuation destination has no core reconciliation contract' };
+    return d.core.comms({ op: 'reconcile', place: p.target.place, agent: p.agent, ref: p.ref,
+      text: p.text, run: p.run, expiresAt: p.expiresAt, ...(p.on ? { on: p.on } : {}) });
+  }, post: async (p) => {
     // A registry outage is transient; venueOf intentionally swallows that
     // distinction for ordinary sends, so do not use it for durable reports.
     const venue = (await d.venues())?.[p.target.venue];
