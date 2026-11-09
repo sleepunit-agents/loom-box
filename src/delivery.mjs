@@ -640,8 +640,8 @@ export function parseDelivery(raw) {
   if (raw.local === true && (raw.venue !== 'wake' || raw.kind !== 'wake' || raw.from.kind !== 'schedule')) fail('local is only for a wake from a schedule, on venue wake');
   if (raw.continuation !== undefined) {
     const c = raw.continuation;
-    if (!c || typeof c !== 'object' || Array.isArray(c) || Object.keys(c).some((k) => !['handle', 'wake'].includes(k)) ||
-        !/^cont-[0-9a-f]{64}$/.test(c.handle ?? '') || !/^w-[0-9a-f]{6}$/.test(c.wake ?? '')) fail('continuation is an opaque handle and exact wake id');
+    if (!c || typeof c !== 'object' || Array.isArray(c) || Object.keys(c).some((k) => !['handle', 'wake', 'expiresAt'].includes(k)) ||
+        !/^cont-[0-9a-f]{64}$/.test(c.handle ?? '') || !/^w-[0-9a-f]{6}$/.test(c.wake ?? '') || !Number.isSafeInteger(c.expiresAt) || c.expiresAt <= 0) fail('continuation is an opaque handle and exact wake id');
     if (raw.source !== 'clock' || raw.venue !== 'wake' || raw.kind !== 'wake' || raw.from.kind !== 'schedule') throw new DeliveryError('only the authenticated clock may carry a continuation wake', 403);
   }
   return { ...raw };
@@ -1663,7 +1663,15 @@ async function executeOne(env, op, d, mem) {
     if (local && !lb?.agents.includes(c0.agent)) throw new DeliveryError(`the runtime runs no local bodies for ${c0.agent} now (LOOM_RUNTIME_LOCAL_BODIES)`, 403);
     const bodyEnv = d.bodyEnv(runKey, op.cv);
     if (lb?.path) bodyEnv.PATH = lb.path;
-    const bodyDeps = { runner: (h) => d.runner(h, local), accounts: d.accounts, now: d.now, fetchImpl: d.fetchImpl, bodyEnv };
+    const beforeStart = () => {
+      if (!op.msgs.some((x) => x.clockContinuation)) return;
+      const outbox = continuationOutbox({ dir: join(deliveryDir(env), 'continuations'), sealer: d.sealer, now: () => d.now().getTime() });
+      for (const m of op.msgs.filter((x) => x.clockContinuation)) {
+        const firing = JSON.parse(d.sealer.open(Buffer.from(m.clockContinuation, 'base64')).toString('utf8'));
+        outbox.checkFiring(firing.handle, firing, continuationSnapshot(env, outbox.sourceConversation(firing.handle)), continuationSnapshot(env, op.cv));
+      }
+    };
+    const bodyDeps = { beforeStart, runner: (h) => d.runner(h, local), accounts: d.accounts, now: d.now, fetchImpl: d.fetchImpl, bodyEnv };
     const base = { activity: c0.spawn?.interactive === true, agent: c0.agent, venue: c0.venue, venueKind: c0.kind, prefer: c0.spawn?.prefer ? [c0.spawn.prefer] : [], cwd: local ? lb.cwd : d.cwd, deny: rules.deny, guest: rules.guest, ...(local ? { local: true } : {}), ...(rules.seat ? { seat: rules.seat } : {}) };
     // Out of quota (t-1907): which session this run continues, on which harness. Its home slot, when the harness it
     // switched away from has room again; its own slot, when that one's harness has room; else a fresh body elsewhere.
@@ -2669,6 +2677,18 @@ export async function drainContinuations(env, o = {}) {
   } });
 }
 
+// Local clock bridge only; there is no body/API operation for inspecting grants.
+export function inspectClockContinuation(env, { handle, statement, agent, scheduledAt }, o = {}) {
+  if (env.LOOM_PIECE_NAME !== 'clock' || env.HOUSE_ID)
+    throw new StateError('continuation inspection belongs to the local clock', 403);
+  const d = depsOf(env, o);
+  const issuer = verifyStatement(env, statement, d.now().getTime());
+  if (!issuer.ok || issuer.agent !== agent) throw new StateError('no authenticated continuation issuer', 403);
+  const outbox = continuationOutbox({ dir: join(deliveryDir(env), 'continuations'), sealer: d.sealer, now: () => d.now().getTime() });
+  const source = continuationSnapshot(env, outbox.sourceConversation(handle));
+  return outbox.inspect(handle, source, issuer, scheduledAt);
+}
+
 // Holder boundary. There is deliberately no body-callable bind.
 export function continuationCall(env, { action, conversation, key, session, handle, id, text }, o = {}) {
   const d = depsOf(env, o), c = loadConv(env, conversation);
@@ -2687,7 +2707,7 @@ export function continuationCall(env, { action, conversation, key, session, hand
   for (const a of c.continuationAdmissions ?? []) {
     if (a.run !== c.run) continue;
     const firing = JSON.parse(d.sealer.open(Buffer.from(a.sealed, 'base64')).toString('utf8'));
-    if (firing.handle === handle) outbox.bind(handle, { wake: firing.wake, delivery: firing.delivery }, source, a.child);
+    if (firing.handle === handle) outbox.bind(handle, { wake: firing.wake, delivery: firing.delivery, expiresAt: firing.expiresAt }, source, a.child);
   }
   if (action === 'enqueue') {
     let rec = null;

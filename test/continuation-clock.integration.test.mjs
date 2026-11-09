@@ -53,7 +53,7 @@ test('clock fire process reaches authenticated core delivery and binds only its 
   writeFileSync(principal,`const r=await fetch(${JSON.stringify(bridgeUrl)},{method:'POST',body:JSON.stringify({mode:'principal',input:process.argv.slice(2)})});if(!r.ok)process.exit(1);`);
   const tokenFile=join(w.env.HOME,'clock-token');writeFileSync(tokenFile,setup.clockToken);
   const clockDir=join(w.env.HOME,'clock','art');mkdirSync(clockDir,{recursive:true});
-  const entry={id:'w-abcdef',kind:'wake',created:'2026-11-09 00:00:00',at:'2026-11-09 00:00:00',prompt:'complete route',for:'owner',continuation:{handle:grant.handle,wake:'w-abcdef'}};
+  const entry={id:'w-abcdef',kind:'wake',created:'2026-11-09 00:00:00',at:'2026-11-09 00:00:00',prompt:'complete route',for:'owner',continuation:{handle:grant.handle,expiresAt:grant.expiresAt,wake:'w-abcdef'}};
   writeFileSync(join(clockDir,'spool.jsonl'),JSON.stringify(entry)+'\n');
   let holdReceipt=true, accepted;const acceptance=new Promise(r=>accepted=r);const clockBodies=[];
   const proxy=createServer(async(req,res)=>{
@@ -87,17 +87,18 @@ test('clock fire process reaches authenticated core delivery and binds only its 
   assert.equal((await post({...wire,id:'spoof-source',source:'clock'},setup.impostorToken)).status,400);
   assert.equal((await post({...wire,id:'non-clock'},setup.impostorToken)).status,403);
   assert.equal(deliveries.length,1,'non-clock never reaches runtime');
-  const forged={...wire,id:'w-fedcba',place:'wake:w-fedcba',continuation:{handle:'cont-'+'f'.repeat(64),wake:'w-fedcba'}};
+  const forged={...wire,id:'w-fedcba',place:'wake:w-fedcba',continuation:{handle:'cont-'+'f'.repeat(64),expiresAt:grant.expiresAt,wake:'w-fedcba'}};
   const denied=await post(forged,setup.clockToken);
   assert.equal(denied.status,200);
-  assert.equal((await holder('enqueue',{...proof(denied.body.conversation),handle:forged.continuation.handle,id:'forged',text:'no'})).status,403);
+  assert.ok(['queued','failed'].includes(denied.body.body));
+  assert.equal(loadConv(w.env,denied.body.conversation).body,undefined);
   assert.equal((await holder('enqueue',{...q,session:'borrowed'})).status,403);
   assert.equal((await holder('enqueue',{...q,key:'borrowed'})).status,403);
   handOverWake(w.env,{agent:'art',place:'wake:w-123456',id:'w-123456',for:'owner'});
-  const rebound=await post({...wire,id:'w-123456',place:'wake:w-123456',continuation:{handle:grant.handle,wake:'w-123456'}},setup.clockToken);
+  const rebound=await post({...wire,id:'w-123456',place:'wake:w-123456',continuation:{handle:grant.handle,expiresAt:grant.expiresAt,wake:'w-123456'}},setup.clockToken);
   assert.equal(rebound.status,200);
-  const stolen=await holder('enqueue',{...proof(rebound.body.conversation),handle:grant.handle,id:'stolen',text:'no'});
-  assert.equal(stolen.status,403);assert.match(stolen.body.error,/already bound/);
+  assert.ok(['queued','failed'].includes(rebound.body.body));
+  assert.equal(loadConv(w.env,rebound.body.conversation).body,undefined);
   writeFileSync(w.env.LOOM_RUNTIME_TOKEN_FILE,setup.token);
   w.env.LOOM_RUNTIME_LOOM_URL=`http://127.0.0.1:${setup.port}/mcp`;
   // Tick uses the real core client here, including its explicit stored receipt.

@@ -37,7 +37,7 @@ test('only an admitted clock child binds; queued, forged and warm-fed handles gr
     return { conversation, key: w.runner.envs[c.body.split(':')[1]].LOOM_BODY_KEY, session: w.sessionFor(conversation) };
   };
   const grant = continuationCall(w.env, { ...argsFor(source.conversation), action: 'issue' }, w.o);
-  const firing = w.msg('wake:w-abcdef', 'follow up', { source: 'clock', venue: 'wake', id: 'w-abcdef', kind: 'wake', from: { kind: 'schedule' }, continuation: { handle: grant.handle, wake: 'w-abcdef' } });
+  const firing = w.msg('wake:w-abcdef', 'follow up', { source: 'clock', venue: 'wake', id: 'w-abcdef', kind: 'wake', from: { kind: 'schedule' }, continuation: { handle: grant.handle, expiresAt: grant.expiresAt, wake: 'w-abcdef' } });
   assert.equal((await deliver(w.env, { ...firing, source: 'test-source' }, w.o)).status, 403);
   assert.equal((await deliver(w.env, { ...firing, continuation: { ...firing.continuation, target: 'forged' } }, w.o)).status, 400);
   // The principal hand-over is separate: the capability never widens it.
@@ -54,12 +54,13 @@ test('only an admitted clock child binds; queued, forged and warm-fed handles gr
   assert.equal(continuationCall(w.env, report, w.o).state, 'pending');
   const extra = continuationCall(w.env, { ...argsFor(source.conversation), action: 'issue' }, w.o);
   handOverWake(w.env, { agent: 'art', place: firing.place, id: 'second', for: 'owner' });
-  const fed = await deliver(w.env, { ...firing, id: 'second', continuation: { handle: extra.handle, wake: 'w-123456' } }, w.o);
+  const fed = await deliver(w.env, { ...firing, id: 'second', continuation: { handle: extra.handle, expiresAt: extra.expiresAt, wake: 'w-123456' } }, w.o);
   assert.equal(fed.body, 'fed');
   assert.throws(() => continuationCall(w.env, { ...report, handle: extra.handle }, w.o), /bound/);
   handOverWake(w.env, { agent: 'art', place: 'wake:w-654321', id: 'third', for: 'owner' });
-  const other = await deliver(w.env, { ...firing, place: 'wake:w-654321', id: 'third', continuation: { handle: grant.handle, wake: 'w-654321' } }, w.o);
-  assert.throws(() => continuationCall(w.env, { ...argsFor(other.conversation), action: 'enqueue', handle: grant.handle, id: 'final', text: 'stolen' }, w.o), /already bound/);
+  const other = await deliver(w.env, { ...firing, place: 'wake:w-654321', id: 'third', continuation: { handle: grant.handle, expiresAt: grant.expiresAt, wake: 'w-654321' } }, w.o);
+  assert.ok(['queued', 'failed'].includes(other.body));
+  assert.equal(loadConv(w.env, other.conversation).body, undefined);
   const changed = loadConv(w.env, child.conversation);
   changed.actsFor.reset = 'reset-after-admission';
   writeFileSync(join(deliveryDir(w.env), 'conversations', `${child.conversation}.json`), JSON.stringify(changed));
@@ -75,7 +76,7 @@ test('delivery tick drains admitted reports only through core and seals run/on p
   const source = await deliver(w.env, w.msg('drain-source', 'owner', { source: 'loom', venue: 'loom', from: { kind: 'person', slug: 'jonathan' } }), w.o);
   const args = (cv) => { const c = loadConv(w.env, cv); return { conversation: cv, key: w.runner.envs[c.body.split(':')[1]].LOOM_BODY_KEY, session: w.sessionFor(cv) }; };
   const grant = continuationCall(w.env, { ...args(source.conversation), action: 'issue' }, w.o);
-  const firing = w.msg('wake:w-abcdef', 'follow up', { source: 'clock', venue: 'wake', id: 'w-abcdef', kind: 'wake', from: { kind: 'schedule' }, continuation: { handle: grant.handle, wake: 'w-abcdef' } });
+  const firing = w.msg('wake:w-abcdef', 'follow up', { source: 'clock', venue: 'wake', id: 'w-abcdef', kind: 'wake', from: { kind: 'schedule' }, continuation: { handle: grant.handle, expiresAt: grant.expiresAt, wake: 'w-abcdef' } });
   handOverWake(w.env, { agent: 'art', place: firing.place, id: firing.id, for: 'owner' });
   const child = await deliver(w.env, firing, w.o);
   const q = { ...args(child.conversation), handle: grant.handle, id: 'final' };
@@ -96,4 +97,46 @@ test('delivery tick drains admitted reports only through core and seals run/on p
   await tick(w.env, { ...o, venues: () => ({ loom: { kind: 'live', send: ['must-not-run'] } }) });
   assert.equal(continuationCall(w.env, { ...q, action: 'status', id: 'non-core' }, w.o).state, 'indeterminate');
   assert.equal(calls.filter(p => p.ref?.startsWith('continuation-')).length, 1);
+});
+
+test('local clock inspection verifies a signed source statement and refuses bodies and borrowed issuers', async () => {
+  const w = world();
+  const { bodyPrincipal, inspectClockContinuation } = await import('../src/delivery.mjs');
+  const r = await deliver(w.env, w.msg('inspect', 'hello'), w.o);
+  const c = loadConv(w.env, r.conversation);
+  c.actsFor = { owner: true, people: [], unknown: false };
+  c.bodyRules = { ...c.bodyRules, seat: 'owner' };
+  writeFileSync(join(deliveryDir(w.env), 'conversations', `${c.conversation}.json`), JSON.stringify(c));
+  const args = { conversation: c.conversation, key: w.runner.envs[c.body.split(':')[1]].LOOM_BODY_KEY, session: w.sessionFor(c.conversation) };
+  const grant = continuationCall(w.env, { ...args, action: 'issue' }, w.o);
+  const statement = bodyPrincipal(w.env, args, w.o).statement;
+  const query = { handle: grant.handle, statement, agent: 'art', scheduledAt: grant.expiresAt - 1 };
+  assert.throws(() => inspectClockContinuation(w.env, query, w.o), /local clock/);
+  const clockEnv = { ...w.env, LOOM_PIECE_NAME: 'clock' }; delete clockEnv.HOUSE_ID;
+  assert.deepEqual(inspectClockContinuation(clockEnv, query, w.o), grant);
+  assert.throws(() => inspectClockContinuation(clockEnv, { ...query, statement: 'forged' }, w.o), /authenticated/);
+  assert.throws(() => inspectClockContinuation(clockEnv, { ...query, agent: 'mark' }, w.o), /authenticated/);
+  assert.throws(() => inspectClockContinuation({ ...clockEnv, HOUSE_ID: 'body' }, query, w.o), /local clock/);
+  assert.throws(() => inspectClockContinuation(clockEnv, { ...query, scheduledAt: grant.expiresAt }, w.o), /before its deadline/);
+});
+
+for (const change of ['cutoff', 'deadline']) test(`queued continuation rechecks ${change} before the runner starts`, async () => {
+  const w = world();
+  const { handOverWake, tick } = await import('../src/delivery.mjs');
+  const r = await deliver(w.env, w.msg('queued-cutoff', 'hello'), w.o);
+  const c = loadConv(w.env, r.conversation);
+  c.actsFor = { owner: true, people: [], unknown: false };
+  c.bodyRules = { ...c.bodyRules, seat: 'owner' };
+  writeFileSync(join(deliveryDir(w.env), 'conversations', `${c.conversation}.json`), JSON.stringify(c));
+  const grant = continuationCall(w.env, { action: 'issue', conversation: c.conversation, key: w.runner.envs[c.body.split(':')[1]].LOOM_BODY_KEY, session: w.sessionFor(c.conversation) }, w.o);
+  const firing = w.msg('wake:w-abcdef', 'continue', { source: 'clock', venue: 'wake', id: 'w-abcdef', kind: 'wake', from: { kind: 'schedule' }, continuation: { handle: grant.handle, wake: 'w-abcdef', expiresAt: grant.expiresAt + (change === 'deadline' ? 1 : 0) } });
+  handOverWake(w.env, { agent: 'art', place: firing.place, id: firing.id, for: 'owner' });
+  const queued = await deliver(w.env, firing, { ...w.o, detach: true, spawnWorker: () => {} });
+  assert.equal(queued.body, 'queued');
+  if (change === 'cutoff') w.clock.advance(w.o.continuationLifetimeMs);
+  const starts = w.kinds().filter((x) => x === 'start' || x === 'resume').length;
+  await tick(w.env, w.o, queued.conversation);
+  assert.equal(w.kinds().filter((x) => x === 'start' || x === 'resume').length, starts);
+  assert.equal(loadConv(w.env, queued.conversation).body, undefined);
+  assert.equal(loadConv(w.env, queued.conversation).continuationAdmissions, undefined);
 });

@@ -567,6 +567,13 @@ async function main(argv, env) {
       // hand over a wake's principal (only the clock, here, does).
       const { bodyPrincipal, handOverWake, verifyStatement, resetPrincipal } = await import('./delivery.mjs');
       const { AGENT_NAME } = await import('./state.mjs');
+      if (rest.includes('--inspect-continuation')) {
+        const { inspectClockContinuation } = await import('./delivery.mjs');
+        out(inspectClockContinuation(env, { handle: flag(rest, '--inspect-continuation'),
+          statement: (await readStdin()).trim(), agent: flag(rest, '--agent'),
+          scheduledAt: Number(flag(rest, '--scheduled-at')) }));
+        return;
+      }
       if (rest.includes('--verify')) {
         const r = verifyStatement(env, (await readStdin()).trim());
         out(r);

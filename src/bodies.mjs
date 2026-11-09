@@ -76,6 +76,7 @@ export async function startBody(env, { agent, brief: b, venue, venueKind, prefer
   const runner = d.runner(pick.harness, !!local);
   // Comms and interactive terminal bodies expose their native tool steps as activity cards (activity.mjs).
   // Whose house (t-1952): a house's runner seats it there; a local one has no houses.
+  o.beforeStart?.();
   const body = await runner.start({ agent, brief: forRunner(runner, text, cwd), model: pick.model, cwd, env: o.bodyEnv, deny, ...(seat ? { seat } : {}), ...((venue === COMMS_VENUE || activity) ? { activity: true } : {}) });
   const rec = {
     body: `${body.harness}:${body.id}`, agent, venue, kind: pick.kind, ...(place ? { place: String(place).slice(0, 200) } : {}),
@@ -110,6 +111,7 @@ export async function resumeBody(env, { body: ref, slot, agent, venue, venueKind
   const pick = await resolveFor(env, { agent: who, venue: where, venueKind: rec?.kind ?? venueKind, prefer: [...prefer, ...(rec ? [rec.model] : [])], harness: slot.harness, conversation: o.bodyEnv?.LOOM_BODY_CONVERSATION, accounts: d.accounts, now: d.now(), fetchImpl: d.fetchImpl });
   const here = !!(local ?? rec?.local);
   const runner = d.runner(slot.harness, here);
+  o.beforeStart?.();
   const body = await runner.resume(slot, { agent: who, brief: forRunner(runner, brief(b), cwd), model: pick.model, cwd, env: o.bodyEnv, deny, ...(seat ? { seat } : {}), ...(files ? { files } : {}), ...((where === COMMS_VENUE || activity) ? { activity: true } : {}) });
   const next = {
     body: `${body.harness}:${body.id}`, agent: who, venue: where, kind: pick.kind, ...(rec?.place ? { place: rec.place } : {}),

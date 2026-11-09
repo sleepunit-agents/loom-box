@@ -88,6 +88,34 @@ export function continuationOutbox({ dir, sealer, now = Date.now, lifetimeMs = n
         return { handle, expiresAt };
       });
     },
+    // Internal clock preflight. The caller proves the issuer conversation before
+    // calling this; neither a supplied deadline nor a handle proves that identity.
+    inspect(handle, currentSource, issuer, scheduledAt) {
+      return locked(() => {
+        const id = grantId(handle), g = read(id);
+        if (!g || !unchanged(g.source, currentSource)) deny('continuation source was reset or changed');
+        if (issuer?.agent !== g.source.agent || issuer?.conversation !== g.source.conversation ||
+            issuer?.for !== g.source.principal.for || issuer?.owner !== g.source.principal.owner || issuer?.unknown)
+          deny('continuation issuer differs');
+        active(id, g, observe());
+        if (!Number.isSafeInteger(scheduledAt) || scheduledAt < 0 || scheduledAt >= g.expiresAt)
+          deny('continuation must be scheduled before its deadline');
+        if (g.binding) deny('continuation capability is already bound');
+        return { handle, expiresAt: g.expiresAt };
+      });
+    },
+    checkFiring(handle, firing, currentSource, child) {
+      return locked(() => {
+        const id = grantId(handle), g = read(id);
+        if (!g || !unchanged(g.source, currentSource)) deny('continuation source was reset or changed');
+        if (firing.expiresAt !== g.expiresAt) deny('continuation deadline differs');
+        if (child?.agent !== g.source.agent || !same(child?.principal, g.source.principal) || child?.resetPending)
+          deny('continuation principal differs');
+        if (g.binding) deny('continuation capability is already bound');
+        active(id, g, observe());
+        return { expiresAt: g.expiresAt };
+      });
+    },
     // Called by authenticated clock admission, not by a body. Exact retries are
     // harmless; a capability cannot be rebound to a different firing or child run.
     bind(handle, clockBinding, currentSource, provenChild) {
@@ -96,6 +124,7 @@ export function continuationOutbox({ dir, sealer, now = Date.now, lifetimeMs = n
       return locked(() => {
         const id = grantId(handle), g = read(id);
         if (!g || !unchanged(g.source, currentSource)) deny('continuation source was reset or changed');
+        if (g.version === 2 && clockBinding.expiresAt !== g.expiresAt) deny('continuation deadline differs');
         if (child.agent !== g.source.agent || !same(child.principal, g.source.principal)) deny('continuation principal differs');
         const binding = { wake: clockBinding.wake, delivery: clockBinding.delivery, child };
         if (g.binding && !same(g.binding, binding)) deny('continuation capability is already bound');

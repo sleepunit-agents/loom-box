@@ -19,7 +19,7 @@ function world(t) {
   const source = { agent: 'art', conversation: 'cv-aaaaaaaaaaaa', run: 'run-aaaaaaaaaaaa', reset: null, principal: { for: 'jonathan', owner: true, people: [] }, target: { venue: 'comms', place: 'th:aaaaaaaaaa' } };
   const child = { ...structuredClone(source), conversation: 'cv-bbbbbbbbbbbb', run: 'run-bbbbbbbbbbbb', target: { venue: 'wake', place: 'w-123456' } };
   const current = (cv) => cv === source.conversation ? source : cv === child.conversation ? child : null;
-  const binding = { wake: 'w-123456', delivery: 'clock:w-123456:one' };
+  const binding = { wake: 'w-123456', delivery: 'clock:w-123456:one', expiresAt: 1000 + options.lifetimeMs };
   const out = continuationOutbox(options), { handle } = out.issue(source);
   return { options, setTime: (value) => { clock = value; }, dir, source, child, current, binding, out, handle, reload: () => continuationOutbox(options), advance: () => { clock += 3600001; } };
 }
@@ -226,4 +226,30 @@ test('legacy attempted report remains indeterminate, never expired or renewed', 
   }
   await w.reload().drain({ current: w.current, post: () => assert.fail('legacy attempted send') });
   assert.equal(queue(w).state, 'indeterminate');
+});
+
+test('clock inspection authenticates the exact issuer and reads the sealed cutoff without renewal', (t) => {
+  const w = world(t);
+  const issuer = { agent: w.source.agent, conversation: w.source.conversation, ...w.source.principal };
+  const deadline = 1000 + w.options.lifetimeMs;
+  assert.deepEqual(w.out.inspect(w.handle, w.source, issuer, deadline - 1), { handle: w.handle, expiresAt: deadline });
+  assert.throws(() => w.out.inspect(w.handle, w.source, issuer, deadline), /before its deadline/);
+  assert.throws(() => w.out.inspect(w.handle, w.source, issuer, String(deadline - 1)), /before its deadline/);
+  assert.throws(() => w.out.inspect(w.handle, w.source, { ...issuer, conversation: w.child.conversation }, 1001), /issuer differs/);
+  assert.throws(() => w.out.inspect(w.handle, { ...w.source, reset: 'changed' }, issuer, 1001), /reset or changed/);
+  w.setTime(deadline);
+  assert.throws(() => w.out.inspect(w.handle, w.source, issuer, deadline - 1), /expired/);
+  w.setTime(deadline - 1);
+  assert.throws(() => w.reload().inspect(w.handle, w.source, issuer, deadline - 1), /backwards|expired/);
+});
+
+test('runner preflight requires exact sealed deadline, current principal and active grant', (t) => {
+  const w = world(t), expiresAt = 1000 + w.options.lifetimeMs;
+  const firing = { ...w.binding, expiresAt };
+  assert.deepEqual(w.out.checkFiring(w.handle, firing, w.source, w.child), { expiresAt });
+  for (const value of [undefined, String(expiresAt), expiresAt + 1])
+    assert.throws(() => w.out.checkFiring(w.handle, { ...firing, expiresAt: value }, w.source, w.child), /deadline differs/);
+  assert.throws(() => w.out.checkFiring(w.handle, firing, w.source, { ...w.child, principal: { owner: false, for: 'other' } }), /principal differs/);
+  w.setTime(expiresAt);
+  assert.throws(() => w.reload().checkFiring(w.handle, firing, w.source, w.child), /expired/);
 });

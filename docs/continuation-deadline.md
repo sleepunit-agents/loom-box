@@ -145,3 +145,30 @@ tombstones remain retained. Any storage-bound claim needs its own measured polic
    actual clock/native crash route. Only then consider a separate collection change.
 
 No merge/install or native-provider proof follows from writing this contract.
+
+## Clock preflight and runtime runner boundary checkpoint
+
+Clock scheduling now calls the local runtime principal bridge with the signed
+issuer statement on stdin. Runtime requires the local clock context, verifies the
+statement, checks its exact source conversation/agent/principal against the sealed
+grant and current source snapshot, and returns its immutable deadline. Clock
+requires scheduledAt < deadline, saves it beside the handle/wake, and checks again
+before spool/timer commitment. Fire/replay drops expired, legacy or changed sealed
+envelopes without posting. Core and runtime require the integer deadline in the
+clock envelope; core includes it in delivery deduplication hashes.
+
+Queued runtime operations recheck the sealed deadline equality, current source and
+child principal, expiry/highwater and binding immediately before runner start or
+resume, after asynchronous routing/model resolution. This is the runtime runner
+boundary only. A remote runner can still await transport/host work before native
+launch: its host must perform the admission recheck too, through the completed
+native owner handoff. Do not claim that proof or enable production issuance.
+
+Focused evidence includes signed inspection, forged/foreign/body refusal,
+scheduled cutoff equality, sealed deadline mismatch, legacy/expired firing,
+queued cutoff with no runner start, and changed deadline with no runner start.
+The existing cross-repository benches are now explicit unresolved gates: production
+holder issue correctly refuses without trusted policy, and the four core lost-receipt
+benches still use historical fake time against real core cutoff. Adapt them through
+a test-only trusted policy/time seam; do not enable policy in production or relax
+cutoff. Runtime fenced reconciliation and actual SIGKILL crossing cutoff remain next.

@@ -21,7 +21,7 @@ for (const disposition of ['live', 'archive', 'delete', 'delete-crash']) test(`r
   const source = await deliver(w.env, w.msg(setup.place, 'owner', { source: 'loom', venue: 'loom', place: setup.place, from: { kind: 'person', slug: 'jonathan' } }), w.o);
   const args = (cv) => { const c = loadConv(w.env, cv); return { conversation: cv, key: w.runner.envs[c.body.split(':')[1]].LOOM_BODY_KEY, session: w.sessionFor(cv) }; };
   const grant = continuationCall(w.env, { ...args(source.conversation), action: 'issue' }, w.o);
-  const firing = w.msg('wake:w-abcdef', 'follow up', { source: 'clock', venue: 'wake', id: 'w-abcdef', kind: 'wake', from: { kind: 'schedule' }, continuation: { handle: grant.handle, wake: 'w-abcdef' } });
+  const firing = w.msg('wake:w-abcdef', 'follow up', { source: 'clock', venue: 'wake', id: 'w-abcdef', kind: 'wake', from: { kind: 'schedule' }, continuation: { handle: grant.handle, expiresAt: grant.expiresAt, wake: 'w-abcdef' } });
   handOverWake(w.env, { agent: 'art', place: firing.place, id: firing.id, for: 'owner' });
   const child = await deliver(w.env, firing, w.o);
   const q = { ...args(child.conversation), handle: grant.handle, id: 'final' };
