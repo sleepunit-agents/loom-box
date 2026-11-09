@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { deliver, deliveryDir, loadConv, staleRuns } from '../src/delivery.mjs';
+import { deliver, deliveryDir, loadConv, staleRuns, tick } from '../src/delivery.mjs';
 import { cvOf, world } from './delivery-world.mjs';
 
 function household(env) {
@@ -22,6 +22,7 @@ const runOf = (c, ref) => c.runLog.findLast((r) => r.body === ref);
 async function reseated(o = {}) {
   const w = world();
   household(w.env);
+  const end = w.runner.end;
   w.runner.houses = { owner: 'h-1', 'p-loren': 'h-2' };
   if (o.endFails) w.runner.end = () => { throw new Error('its house is unreachable'); };
   if (o.stopOnly) w.runner.end = () => {};
@@ -32,7 +33,7 @@ async function reseated(o = {}) {
   // Her house can't start one now: no next run opens (openRun would close the old one), so the end alone must.
   w.runner.failStart = 'her house is at its cap';
   await deliver(w.env, w.msg('group:G', 'and merge mine too', person('loren')), w.o);
-  return { w, J, first };
+  return { w, J, first, end };
 }
 
 test('a body ended mid-turn (its conversation moved house) closes the run it held', async () => {
@@ -48,16 +49,26 @@ test('a body whose stop was only asked for (its house carries it out later) keep
   // A house's end writes a stop for its host and returns (houserunner.mjs, end): the record says ended, the body works.
   const { w, J, first } = await reseated({ stopOnly: true });
   const c = loadConv(w.env, J);
-  assert.equal(c.body, undefined);
+  assert.equal(c.body, first, 'the runtime retains ownership until the stop is acknowledged');
+  assert.equal(c.retiring.type, 'resume-warm');
   assert.equal(Number.isFinite(runOf(c, first).end), false, 'still mid-turn as its harness says: its run stays open');
+  w.runner.finish(first);
+  await tick(w.env, w.o);
+  assert.equal(loadConv(w.env, J).retiring, undefined);
+  assert.equal(Number.isFinite(runOf(loadConv(w.env, J), first).end), true);
 });
 
 test('a body whose end failed keeps its run open: it may still be mid-turn', async () => {
-  const { w, J, first } = await reseated({ endFails: true });
+  const { w, J, first, end } = await reseated({ endFails: true });
   const c = loadConv(w.env, J);
-  assert.equal(c.body, undefined, 'its record lost the body (as a reseat does)');
+  assert.equal(c.body, first, 'a failed stop must not detach the live body');
+  assert.equal(c.retiring.type, 'resume-warm');
   assert.equal(Number.isFinite(runOf(c, first).end), false, 'its run stays open: the body may still be mid-turn');
-  assert.deepEqual(staleRuns(w.env).map((x) => [x.conversation, x.bodyState]), [[J, 'live']], 'and the dry run says so');
+  assert.deepEqual(staleRuns(w.env), [], 'the body remains owned rather than becoming an orphaned open run');
+  w.runner.end = end;
+  await tick(w.env, w.o);
+  assert.equal(loadConv(w.env, J).retiring, undefined);
+  assert.equal(Number.isFinite(runOf(loadConv(w.env, J), first).end), true);
 });
 
 test('staleRuns lists open runs whose body is gone, and changes nothing', async () => {
