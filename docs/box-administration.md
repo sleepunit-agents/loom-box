@@ -165,3 +165,22 @@ principal's named people, and a deliberately lost successful consumption reply.
 Retry recovered the same lease with one consumption. This verifies the adapter
 boundary; automatic filing/tick activation, production UI and host execution
 remain unimplemented.
+
+Automatic filing and activation now run from the existing delivery tick, with
+at most four slow approval reconciliations per pass and rotation across pending
+scopes. Every lease is refreshed for expiry and authority changes on each pass.
+Filing retries use the immutable target to recover the original card, including
+a terminal answer; approvals PR 16 supplies this administration-specific
+reconciliation rule. A denial cannot turn a lost filing response into another
+request for the same scope.
+
+The card contains all authorization fields as ASCII JSON (Unicode strings are
+escaped to preserve exact paths through display normalization). Oversized cards
+refuse before the scope is saved. No authority field is truncated.
+
+The normal tick was verified against the actual approvals CLI in an isolated
+store: a lost filing reply, a fixture UI Allow, a ten-minute simulated wait, a
+lost successful consumption reply, and retry produced one card, one consumption
+and the original fixed lease. No administrative command ran. Owner revocation
+UI, physical execution and result recovery, shared tools and live-harness
+verification remain required before deployment.

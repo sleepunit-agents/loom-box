@@ -5,7 +5,7 @@ import { spawnSync } from 'node:child_process';
 import { chmodSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { requestAdministration, administrationApproval, advanceAdministration, administrationStatus, queueAdministration, endAdministration, administrationApprovals, ADMINISTRATION_KIND } from '../src/administration.mjs';
-import { deliver, loadConv, saveConv } from '../src/delivery.mjs';
+import { deliver, loadConv, saveConv, tick } from '../src/delivery.mjs';
 import { load, update } from '../src/state.mjs';
 import { world } from './delivery-world.mjs';
 import { verify } from '../src/principal.mjs';
@@ -255,4 +255,50 @@ test('production approval adapter refuses unavailable or malformed receipts', as
   const client = administrationApprovals(w.env, { ...w.o, approvalsRun: async () => { calls++; } });
   await assert.rejects(client.use('a-12345678', w.journal().scopes[w.scope.id]), /no longer eligible/);
   assert.equal(calls, 0);
+});
+
+test('the normal delivery tick reconciles a lost filing reply and activates without a model turn', async () => {
+  const w = await setup();
+  let lost = true, used = false, filings = 0, uses = 0;
+  const warnings = [], starts = w.log.filter(a => a[0] === 'start').length;
+  const options = { ...w.o, warn: message => warnings.push(message), approvalsRun: async args => {
+    if (args[0] === 'request') {
+      filings++;
+      const details = JSON.parse(args[args.indexOf('--details') + 1]);
+      assert.equal(details.work, w.scope.work); assert.equal(details.cwd, w.scope.cwd);
+      assert.deepEqual(details.execution, w.scope.execution);
+      assert.equal(args.includes('--on-behalf'), false);
+      if (lost) { lost = false; return { status: null, error: { code: 'ETIMEDOUT' } }; }
+      return { status: 0, stdout: 'a-12345678: same immutable card' };
+    }
+    if (args[0] === 'use') { uses++; used = true; return { status: 0, stdout: 'used' }; }
+    const s = w.journal().scopes[w.scope.id];
+    return { status: 0, stdout: JSON.stringify({ id: 'a-12345678', agent: s.agent, for: 'owner',
+      kind: ADMINISTRATION_KIND, target: s.target, state: used ? 'used' : 'allowed', decidedBy: 'owner',
+      expires: new Date(w.clock.now().getTime() + 3600_000).toISOString() }) };
+  } };
+  await tick(w.env, options);
+  assert.equal(w.journal().scopes[w.scope.id].state, 'requested');
+  assert.equal(warnings.length, 1);
+  await tick(w.env, options);
+  assert.equal(w.journal().scopes[w.scope.id].state, 'active');
+  assert.equal(filings, 2); assert.equal(uses, 1);
+  assert.equal(w.log.filter(a => a[0] === 'start').length, starts);
+  assert.equal(w.queue().state, 'queued');
+  w.clock.advance(3600_001);
+  await tick(w.env, options);
+  assert.equal(w.journal().scopes[w.scope.id].state, 'expired');
+  assert.equal(Object.values(w.journal().operations)[0].state, 'cancelled');
+});
+
+test('requested scopes with changed authority never file and oversized owner cards refuse before save', async () => {
+  const w = await setup();
+  const before = Object.keys(w.journal().scopes).length;
+  assert.throws(() => w.request({ requestKey: 'oversized-card', cwd: '/' + 'a'.repeat(2000) }), /approval card budget/);
+  assert.equal(Object.keys(w.journal().scopes).length, before);
+  const c = loadConv(w.env, w.conversation); c.actsFor.unknown = true; saveConv(w.env, c);
+  let calls = 0;
+  await tick(w.env, { ...w.o, approvalsRun: async () => { calls++; throw Error('must not file'); } });
+  assert.equal(calls, 0);
+  assert.equal(w.journal().scopes[w.scope.id].state, 'revoked');
 });

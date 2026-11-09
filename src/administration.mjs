@@ -136,6 +136,16 @@ const publicScope = s => ({ id: s.id, agent: s.agent, conversation: s.conversati
 const publicOperation = r => ({ id: r.id, scope: r.scope, intent: r.intent, payloadHash: r.payloadHash,
   state: r.state, created: r.created, timeoutMs: r.timeoutMs });
 
+// The approval page normalizes display text. ASCII JSON escapes preserve the
+// exact strings, including Unicode paths, without a visually different grant.
+// Refuse an oversized card before saving a request; never truncate authority.
+function approvalDetails(s) {
+  const fields = Object.fromEntries(['agent', 'conversation', 'authority', 'box', 'identity', 'work', 'why', 'cwd', 'minutes', 'execution'].map(k => [k, s[k]]));
+  const text = JSON.stringify(fields, null, 1).replace(/[^\x20-\x7e\n]/g, c => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0'));
+  if (text.length > 1000) fail('administration scope exceeds the approval card budget; shorten its work, reason or directory', 400);
+  return text;
+}
+
 /** Persist one immutable scope before filing its approval. The transport uses
  * this stable target to reconcile a lost request response. */
 export function requestAdministration(env, caller, q, o = {}) {
@@ -143,6 +153,7 @@ export function requestAdministration(env, caller, q, o = {}) {
   if (!['runner', 'root'].includes(q.identity) || !Number.isInteger(minutes) || minutes < 1 || minutes > 480) fail('administration needs runner or root identity and 1–480 minutes', 400);
   const fields = { ...ctx, box: q.box, identity: q.identity, work: plain(q.work, 'work description', 400), why: plain(q.why, 'reason', 200), cwd: cwd(q.cwd), minutes };
   fields.execution = box(env, fields);
+  approvalDetails(fields);
   const id = 'adm-' + hash([ctx.agent, ctx.conversation, key(q.requestKey)]).slice(0, 32), scopeHash = hash(fields);
   return transaction(env, o, (j, at) => {
     const old = j.scopes[id];
@@ -174,7 +185,7 @@ function stop(j, scope, state, at) {
   }
 }
 function refresh(env, j, s, at) {
-  if (!['pending', 'activating', 'active'].includes(s.state)) return;
+  if (!['requested', 'pending', 'activating', 'active'].includes(s.state)) return;
   let eligible = current(env, s);
   try { box(env, s); } catch { eligible = false; }
   if (!eligible) stop(j, s, 'revoked', at);
@@ -198,6 +209,26 @@ export function administrationApprovals(env, o = {}) {
     return r.stdout;
   };
   return {
+    async request(scope) {
+      const proof = transaction(env, o, (j, at) => {
+        const live = scopeOf(j, scope.id);
+        refresh(env, j, live, at);
+        if (live.state !== 'requested' || live.scopeHash !== scope.scopeHash) fail('administration scope no longer accepts an approval');
+        return { scope: structuredClone(live), statement: mint(deliveryDir(env), {
+          agent: live.agent, conversation: live.conversation, principal: principalOf(env, loadConv(env, live.conversation)),
+        }, at) };
+      });
+      const s = proof.scope;
+      const text = await call(['request', '--kind', ADMINISTRATION_KIND, '--target', s.target,
+        '--what', 'Complete the scoped work on this box', '--ask', 'Allow this work on the box?',
+        '--why', 'The agent needs host access to complete the work described below.',
+        '--if-yes', 'The agent can run commands for this work until access expires or you revoke it.',
+        '--if-no', 'Host access stays disabled.', '--details', approvalDetails(s),
+        '--minutes', String(s.minutes), '--conversation', s.conversation, '--as', as(s), '--principal', proof.statement]);
+      const id = /^(a-[0-9a-f]{8}):/.exec(text)?.[1];
+      if (!id) fail('administration approval request response cannot be decoded', 503);
+      return id;
+    },
     async check(id, scope) {
       let card;
       const text = await call(['check', id, '--json', '--as', as(scope)]);
@@ -219,6 +250,40 @@ export function administrationApprovals(env, o = {}) {
         '--as', proof.as, '--principal', proof.statement]);
     },
   };
+}
+
+/** Reconcile filing after a lost response using the immutable approval target.
+ * Only this controller can attach the result; body APIs cannot supply card ids. */
+export async function fileAdministrationApproval(env, id, approvals, o = {}) {
+  approvals ??= administrationApprovals(env, o);
+  const s = transaction(env, o, (j, at) => {
+    const live = scopeOf(j, id);
+    refresh(env, j, live, at);
+    return structuredClone(live);
+  });
+  if (s.state !== 'requested') return publicScope(s);
+  const aid = await approvals.request(s);
+  return administrationApproval(env, id, aid, o);
+}
+
+/** Called by the normal runtime delivery tick, without starting another model.
+ * Refresh every lease, then bound slow approval calls and rotate pending work. */
+export async function administrationTick(env, o = {}, only) {
+  const initial = read(env);
+  if (!Object.keys(initial.scopes).length) return;
+  const pending = transaction(env, o, (j, at) => {
+    for (const s of Object.values(j.scopes)) refresh(env, j, s, at);
+    const batch = Object.values(j.scopes).filter(s => (!only || s.conversation === only) && ['requested', 'pending', 'activating'].includes(s.state))
+      .sort((a, b) => (a.checked ?? 0) - (b.checked ?? 0) || a.id.localeCompare(b.id)).slice(0, 4);
+    for (const s of batch) s.checked = at;
+    return batch.map(s => s.id);
+  });
+  for (const id of pending) {
+    try {
+      await fileAdministrationApproval(env, id, undefined, o);
+      await advanceAdministration(env, id, undefined, o);
+    } catch (e) { (o.warn ?? console.warn)('administration ' + id + ': ' + e.message); }
+  }
 }
 
 /** No external call runs under the journal lock. The allowed expiry and fixed
