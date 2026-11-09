@@ -213,3 +213,27 @@ test('a role whose models the agent may not use is refused at spawn', async () =
   setModels(w.env, { agent: 'art', allow: ['opus', 'sonnet'] });
   await assert.rejects(w.spawn({ role: 'coding' }), /may use none of role coding's models \(sol\)/);
 });
+
+test('a job pinned to Codex whose house refuses Codex at the start moves, and is re-pinned so it stays moved', async () => {
+  const w = workers();
+  setRole(w.env, { role: { id: 'coding', description: 'Write and fix code', models: ['sol', 'opus'] } });
+  const r = await w.spawn({ role: 'coding' });
+  let c = loadConv(w.env, r.handle);
+  assert.equal(c.spawn.assignment.model, 'sol');
+  w.codex.finish(c.body);
+  // Only the house's host can tell, at the start (runners.mjs, CODEX_WONT).
+  w.codex.failResume = "codex won't run this body here: Codex would read /home/art/Art/.codex/config.toml too, a config the runtime can't replace";
+  w.codex.failStart = w.codex.failResume;
+  await w.say(r.handle, 'continue');
+  c = loadConv(w.env, r.handle);
+  assert.match(c.body ?? '', /^claude:/);
+  assert.equal(c.spawn.assignment.model, 'opus', 're-pinned where it moved');
+  assert.deepEqual(c.spawn.lineage.map((l) => [l.model, l.why]), [['sol', 'its rules can\'t be kept on that harness']]);
+  // The next message resumes its Claude session: no Codex attempt, no fresh body.
+  w.runner.finish(c.body);
+  const tries = w.runs().length;
+  await w.say(r.handle, 'and again');
+  assert.equal(w.runs().length, tries + 1);
+  assert.equal(w.runs().at(-1)[0], 'resume');
+  assert.match(loadConv(w.env, r.handle).body, /^claude:/);
+});

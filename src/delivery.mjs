@@ -2053,7 +2053,8 @@ async function executeOne(env, op, d, mem) {
         cantWhy = String(e.message).replace(CODEX_WONT, '');
         d.warn(`${op.cv}: ${String(e.message).slice(0, 200)}; starting it off Codex`);
         // A job pinned to Codex moves too: its rules come before its assignment (routeOf).
-        if (base.pin && c0.spawn?.assignment?.harness === 'codex') { delete base.pin; if (c0.spawn.role) base.role = c0.spawn.role; way = { ...way, failover: 'rules' }; }
+        // Its launch snapshot is taken again: the first attempt's says no move, and the commit reads the move from it.
+        if (base.pin && c0.spawn?.assignment?.harness === 'codex') { delete base.pin; if (c0.spawn.role) base.role = c0.spawn.role; way = { ...way, failover: 'rules' }; launchSnapshot = undefined; }
         r = await go([...new Set([...(way.avoid ?? []), 'codex'])]);
       }
     } else {
@@ -2322,11 +2323,11 @@ async function routeOf(env, c0, op, rules, d, cant = []) {
     // Its model gone from the list, or no longer one the agent may use: not quota, so no reset will bring it back. The
     // job holds, its session and messages kept (never the failed-resume path, which would drop its slot), and says why.
     const gone = await pinGone(env, c0, pin, d);
-    if (gone) throw Object.assign(new DeliveryError(`this job's assigned model ${pin} can't run: ${gone}. It waits, its session kept, until the owner restores the model (or spawns the job again)`, 503), { held: true });
+    if (gone) throw Object.assign(new DeliveryError(`this job's assigned model ${pin} can't run: ${gone}. It waits, its session kept, until that model can run again (or the job is spawned again)`, 503), { held: true });
     // Only a refused turn's own retry is dropped (a pinned job waits for its model instead); `cant` always stays.
     const keep = avoid.filter((x) => x !== h || cant.includes(x));
     if (op.type === 'resume' && op.slot?.harness === h) return { how: 'resume', file: slotFile(env, op.cv), avoid: keep };
-    // A slot on another harness (an older job's) is kept as lineage, never orphaned.
+    // A slot on another harness (an older job's) is parked as its home, never left as an orphan file.
     if (op.type === 'resume' && op.slot) parkSlot(env, op);
     return { how: 'start', avoid: keep };
   }
