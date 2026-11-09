@@ -200,3 +200,26 @@ includes a real worker death followed by a blocked Claude query while authentica
 host sync and shutdown continue. Fork errors, failed exits, malformed/oversized
 replies and wrong-harness identities do not change the admission journal or start
 replacement work.
+
+## Delivery controller process-death verification
+
+The delivery integration tests now use separate OS processes for the original
+controller, the house host and its real native-adapter workers, then SIGKILL the
+controller and recover through a fresh ordinary CLI process. The provider CLIs
+are harmless local stand-ins; the core HTTP and piece API fixture authenticates
+separate runtime and house credentials.
+
+Both Claude and Codex cover four boundaries:
+
+- Reserved before publication: no native executable has run. Recovery cancels
+  that reservation before retry, and late publication stays refused.
+- Native work before the controller's house receipt: the authenticated receipt
+  request is held until after controller death, then the original receipt binds.
+- House receipt before conversation commit: recovery preserves the original body
+  generation, run id, sender hash and non-owner principal.
+- Conversation commit before acknowledgement: recovery clears the durable pending
+  acknowledgement without rebinding or incrementing the run.
+
+Every case verifies one native launch and one house, then posts one reply through
+the recovered native session and its original sender proof. These process tests
+do not substitute for real-container host-failure/session-collection verification.
