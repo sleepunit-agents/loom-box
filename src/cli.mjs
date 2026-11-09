@@ -471,7 +471,7 @@ async function main(argv, env) {
         if (keepsHousesOnExit(env)) {
           process.stderr.write(`loom-box: SIGTERM: leaving ${r.houses.size} house(s) running; the next start adopts them\n`);
           // A sign-in under way doesn't outlive this process: loom is told why, and its container stopped.
-          stopping = r.endLogins().finally(() => process.exit(0));
+          stopping = Promise.all([r.endStarts(), r.endLogins()]).finally(() => process.exit(0));
           return;
         }
         process.stderr.write(`loom-box: SIGTERM: stopping ${r.houses.size} house(s) before exit\n`);
@@ -479,7 +479,7 @@ async function main(argv, env) {
       });
       for (;;) {
         if (stopping) return;
-        try { await r.tick(); } catch (err) { process.stderr.write(`loom-box: poll: ${err.message}\n`); }
+        try { await r.tick({ wait: rest.includes('--once') }); } catch (err) { process.stderr.write(`loom-box: poll: ${err.message}\n`); }
         if (rest.includes('--once') || stopping) return;
         await sleep(every);
       }
