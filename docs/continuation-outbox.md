@@ -47,3 +47,22 @@ Remaining work before merge or installation: exact trusted clock admission and f
 core stable-ref dedup and negative authorization tests; tick/CLI wiring; actual
 process-kill crash tests against core; full integration and installed live proof.
 This branch must remain draft until those pieces exist together.
+
+Core companion draft: https://github.com/sleepunit-agents/loom/pull/675
+(`feat/continuation-receipts`, e6f001f2d31e61f0c07831cdd0260b421471ccb2).
+It accepts continuation-<64 hex> under the existing runtime-only adapter route,
+returns the original sequence on identical payload, and returns HTTP409 on
+reference reuse with a different agent/place/text/run/normalized on. The stored
+HMAC and encrypted reply share an IMMEDIATE transaction. Focused core HTTP auth,
+conflict/race and real SIGKILL-after-acceptance tests pass; this is NOT runtime
+outbox integration proof. Both PRs stay draft.
+
+The next integration must carry the opaque handle in an explicit clock-created
+wake field through core's strict delivery parser (which currently rejects unknown
+keys) and core-authenticated source identity. Do not extend body bind APIs or trust
+principal --wake's local environment as a new authenticated clock boundary. Bind
+only the exact admitted child run; a queued wake is not an admitted run, and a warm
+feed must not silently rebind a grant. Preserve PR145 native admission ownership.
+Keep every emitted core payload field stable across retries. Classify core's
+HTTP409 payload conflict and permanent 4xx refusals rather than catching them as
+transient forever. Non-core adapters remain disabled without equivalent dedup.
