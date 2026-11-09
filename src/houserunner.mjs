@@ -565,6 +565,13 @@ export class HouseRunner {
   }
 
   status(body) { return this.entry(body)?.status ?? 'unknown'; }
+  /** A stale host report is not proof that a running house's body ended. */
+  pending(body) {
+    try {
+      const h = load(this.env).houses?.[body.house];
+      return !!h && h.agent === body.agent && ['wanted', 'starting', 'running', 'stopping'].includes(h.state);
+    } catch { return true; } // An unreadable control plane cannot prove termination either.
+  }
   /** Its harness is still there: its house's host reports it. */
   alive(body) { const e = this.entry(body); return !!e && e.status !== 'ended'; }
   slotOf(body) { const s = this.entry(body)?.session; return s ? { harness: this.harness, session: s } : null; }

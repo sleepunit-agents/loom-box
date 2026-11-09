@@ -838,7 +838,15 @@ function statusOf(env, c, d) {
   let rec;
   try { rec = readBody(env, c.body); } catch { return 'unknown'; }
   if (rec.ended) return 'ended';
-  try { return d.runner(rec.harness, rec.local).status(bodyOf(c.body, rec)); } catch { return 'unknown'; }
+  try {
+    const runner = d.runner(rec.harness, rec.local);
+    const body = bodyOf(c.body, rec);
+    let status = 'unknown';
+    try { status = runner.status(body); } catch { /* a failed observation is unknown too */ }
+    // During a host connection outage hold the same run. Starting another body or closing it
+    // would lose a report that the still-running house can deliver when its connection returns.
+    return status === 'unknown' && runner.remote && runner.pending?.(body) ? 'working' : status;
+  } catch { return 'unknown'; }
 }
 
 const isStarting = (c, now) => !!c.starting && alive(c.starting.pid) && now - c.starting.since < STARTING_MS;
