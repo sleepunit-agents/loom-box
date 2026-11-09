@@ -62,6 +62,7 @@
 //   loom runtime deliver tick [--conversation <cv>] | deliver run [--every <ms>] | deliver list [--json]
 //   loom runtime deliver stale-runs [--json]   read only: open runs whose body is gone (t-1958)
 //   loom runtime deliver resume|dismiss <cv>   a conversation paused as a loop (loops.mjs): start what waited, or drop it
+//   loom runtime task-host                                  in an already allocated raw-task house: common delivery
 //   loom runtime body-host [--piece <name>] --host-key <boot key>   in an agent's house, as its task: the bodies delivery asks for
 // Models and accounts (the owner's, on loom's machine):
 //   loom runtime models [--json]                                         the model list and each agent's settings
@@ -337,7 +338,7 @@ async function main(argv, env) {
       const call = ownerOrRemote(env);
       // On loom's own machine, a body asking for "a house" means its own: the household's default agent.
       const agent = flag(rest, '--agent') ?? (env.LOOM_URL && env.LOOM_TOKEN_FILE ? undefined : defaultAgent(env));
-      const r = await call('up', { agent, box: flag(rest, '--box'), needs: flag(rest, '--needs'), task, slot: flag(rest, '--slot') });
+      const r = await call('up', { agent, box: flag(rest, '--box'), needs: flag(rest, '--needs'), task, slot: flag(rest, '--slot'), ...(ownConversation(env) ? bodyProof(env, ownConversation(env)) : {}), ...(ownConversation(env) ? { conversation: ownConversation(env) } : {}) });
       if (json) return out(r);
       process.stdout.write(`${r.id}: ${r.agent} on ${r.boxName ?? r.box} (${r.state})\n`);
       return;
@@ -382,7 +383,7 @@ async function main(argv, env) {
       process.exitCode = attachHere(env, id);
       return;
     }
-    case 'down': { out(await ownerOrRemote(env)('down', { id: positional(rest)[0] })); return; }
+    case 'down': { out(await ownerOrRemote(env)('down', { id: positional(rest)[0], ...(ownConversation(env) ? { conversation: ownConversation(env), ...bodyProof(env, ownConversation(env)) } : {}) })); return; }
     case 'list': {
       const r = await ownerOrRemote(env)('list', {});
       if (json) return out(r);
@@ -590,6 +591,25 @@ async function main(argv, env) {
       const r = remote ? await pieceCall(env, flag(rest, '--piece'))('principal', q) : bodyPrincipal(env, q);
       out(r);
       if (!r.ok) process.exitCode = 1;
+      return;
+    }
+    case 'task-host': {
+      if (!env.HOUSE_ID || !env.LOOM_URL || !env.LOOM_TOKEN_FILE) throw new Fail('task-host runs only in its allocated house');
+      const call = pieceCall(env);
+      const boot = await call('task-bootstrap', {});
+      if (boot.error || !boot.hostKey) throw new Fail(boot.error || 'the runtime did not bootstrap this task');
+      let result;
+      await runBodyHost({ client: async (p, b) => {
+        const r = await call(p, b); if (r.error) throw new Fail(r.error);
+        if (p === 'body-sync' && !r.exit) {
+          const status = await call('task-status', {});
+          if (status.done) { result = status; return { ...r, exit: true, reason: 'task report and session collected' }; }
+        }
+        return r;
+      }, runner: h => runnerFor(h, env), env, hostKey: boot.hostKey, idleS: 0,
+      log: m => process.stderr.write(`loom-runtime task-host: ${m}\n`) });
+      if (result?.report) process.stdout.write(result.report + '\n');
+      if (!result?.ok) throw new Fail(result?.reason || 'task host ended before its result was collected');
       return;
     }
     case 'body-host': {

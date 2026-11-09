@@ -1124,7 +1124,7 @@ function plan(env, cv, d, mem) {
   if (busy.length >= limits.busy) return wait(`every body is busy (${busy.length} of ${limits.busy} mid-turn)`);
   // A house for its principal (t-1952): at the cap on the agent's houses for other people, it waits; never shares one.
   if (!c.local) {
-    const seat = seatOf(principalOf(env, c), cv);
+    const seat = conversationSeat(env, c);
     const full = seatRoom(env, c.agent, seat);
     // Houses that hold no body are let go at once, so the wait is for a house at work, not one idling out.
     if (full) { releaseEmptySeatHouses(env, c.agent, seat, now); return wait(full); }
@@ -1160,10 +1160,12 @@ export async function drain(env, cv, d = depsOf(env), mem = new Map()) {
  * (loom's machine, t-1830) has no house and is the owner's work only: one whose conversation a person other than the
  * owner has written into has moved too (and its next start is refused: execute, localForeign).
  */
+const conversationSeat = (env, c) => c.spawn?.job ? `j-${c.spawn.job.house}` : seatOf(principalOf(env, c), c.conversation);
+
 export function seatMoved(env, c) {
   if (!c?.body) return false;
   if (c.local) return localForeign(env, c);
-  return (c.bodyRules?.seat ?? OWNER_SEAT) !== seatOf(principalOf(env, c), c.conversation);
+  return (c.bodyRules?.seat ?? OWNER_SEAT) !== conversationSeat(env, c);
 }
 
 /**
@@ -1575,7 +1577,7 @@ async function execute(env, op, d, mem) {
     }
     // Whose house it runs in (t-1952): its principal's, as everything it was given was noted before this plan. Its own
     // slot goes with it: a session is this conversation's own, and what's walled off is every other conversation's.
-    if (!c0.local) rules = { ...rules, seat: seatOf(principalOf(env, c0), op.cv) };
+    if (!c0.local) rules = { ...rules, seat: conversationSeat(env, c0) };
     // A body on loom's machine does its owner's work only (t-1830): it shares the runtime account's keys dir and its
     // signing key, so a conversation someone else has written into gets no body there at all (fail closed). Its owner
     // is asked on loom's page whether it's his, when no one else is named in it (t-1975).
@@ -2150,7 +2152,7 @@ export async function tick(env, o = {}, only, mem = new Map()) {
         }
         if (st === 'idle') {
           if (!c.idleSince) { c.idleSince = now; dirty = true; }
-          if (now - c.idleSince >= warm && !c.queue?.length) { c.starting = mark(now); ops.push({ cv: c.conversation, mark: c.starting.op, type: 'evict', body: c.body }); dirty = true; }
+          if ((now - c.idleSince >= warm || (c.spawn?.job && (c.spawn.report || c.spawn.failed))) && !c.queue?.length) { c.starting = mark(now); ops.push({ cv: c.conversation, mark: c.starting.op, type: 'evict', body: c.body }); dirty = true; }
         }
         if (st === 'ended' || st === 'unknown') { c.starting = mark(now); ops.push({ cv: c.conversation, mark: c.starting.op, type: 'retire', body: c.body }); dirty = true; }
       }
@@ -2880,7 +2882,7 @@ export function conversationOrigins(env, caller, { agent, conversations } = {}) 
     if (!c || c.agent !== agent) continue; // An old or foreign id never hides other valid roots in the batch.
     const seen = new Set([cv]);
     for (let n = 0; n < 32; n++) {
-      const parent = c.originConversation ?? c.spawn?.origin;
+      const parent = c.originConversation ?? c.spawn?.origin ?? c.spawn?.job?.origin;
       if (!parent || seen.has(parent)) break;
       const next = loadConv(env, parent);
       if (!next || next.agent !== agent) break;

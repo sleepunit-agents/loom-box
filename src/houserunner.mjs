@@ -239,6 +239,24 @@ const LIVE = new Set([...TAKES, 'stopping']);
 const houseTakes = (env, id) => { try { return TAKES.has(load(env).houses[id]?.state); } catch { return false; } };
 
 /** What a house runs as its task to be the agent's body host. */
+/** Register an already allocated raw-task house, retaining its box, needs and state slot. */
+export function registerTaskHost(env, agent, house, { sealer = ageSealer(env, join(dataDir(env), 'delivery')) } = {}) {
+  const seat = `j-${house}`;
+  return hostLocked(env, () => {
+    const h = loadHost(env, agent, seat);
+    if (h.house && h.house !== house) throw new StateError('the task host changed', 409);
+    if (h.hostHash) throw new StateError('the task host is already running', 409);
+    let boot;
+    if (h.bootSealed) boot = sealer.open(Buffer.from(h.bootSealed, 'base64')).toString();
+    else {
+      boot = randomBytes(24).toString('hex');
+      Object.assign(h, { house, bootHash: keyHash(boot), bootSealed: sealer.seal(Buffer.from(boot)).toString('base64') });
+      writeJson(hostFile(env, agent, seat), h);
+    }
+    return { seat, hostKey: boot };
+  });
+}
+
 export const hostTask = (env, bootKey) => `loom-runtime body-host --piece ${pieceName(env)} --host-key ${bootKey}`;
 
 // ─── The host's sync (the piece API's `body-sync`) ─────────────────────────
@@ -319,7 +337,7 @@ export function bodySync(env, caller, body, o = {}) {
       // The boot key, once: traded for the host's own key, which only the host process holds.
       issued = randomBytes(24).toString('hex');
       x.hostHash = keyHash(issued);
-      delete x.bootHash;
+      delete x.bootHash; delete x.bootSealed;
     }
     const { bodies, done, caps } = cleanReport(body?.report);
     for (const b of Object.values(bodies)) if (typeof b.final === 'string') {
@@ -436,6 +454,7 @@ export class HouseRunner {
         return h.house;
       }
       if (!takes) {
+        if (/^j-h-[0-9]{1,9}$/.test(seat)) throw new RunnerError('the task’s allocated house is no longer running');
         // Never past the cap, and never into another seat's house: the body waits (delivery.mjs asks seatRoom first;
         // this is the same check, for a start that raced past it).
         const full = seatRoom(this.env, agent, seat);

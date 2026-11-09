@@ -47,11 +47,11 @@ export async function spawnCall(env, caller, q = {}, o = {}) {
   const depth = (parent?.spawn?.depth ?? 0) + 1;
   const loop = detectLoop({ spawnDepth: depth });
   if (loop) no(`spawn chain hit the loop guard: ${loop.reason}; return to the asker`);
-  const actsFor = parent ? structuredClone(parent.actsFor) : { owner: true, people: [], unknown: false };
+  const actsFor = o.taskJob ? structuredClone(o.taskJob.actsFor) : parent ? structuredClone(parent.actsFor) : { owner: true, people: [], unknown: false };
   delete actsFor.reset; delete actsFor.resetBy; delete actsFor.resetSig;
   const principal = principalOf(env, { agent, actsFor });
-  const id = `sp-${randomBytes(12).toString('hex')}`;
-  const metadata = { depth, principal, ...(parent ? { origin: parent.conversation, origin_run: parent.run } : {}), floor: parent?.bodyRules ? { guest: parent.bodyRules.guest, deny: parent.bodyRules.deny, readers: parent.bodyRules.readers } : null, parentReset: parent?.actsFor?.reset, ruleSource: parent?.spawn?.ruleSource ?? (parent ? { conversation: parent.conversation, agent, venue: parent.venue, place: parent.place, label: parent.label, kind: parent.kind, persons: [...new Set([...(parent.bodyRules?.persons ?? []), ...(parent.bodyRules?.members ?? []), ...(parent.actsFor?.people ?? []), ...(parent.actsFor?.owners ?? [])])] } : null), prefer: q.prefer, created: d.now().toISOString() };
+  const id = o.taskJob ? `job-${o.taskJob.house}` : `sp-${randomBytes(12).toString('hex')}`;
+  const metadata = { depth, principal, ...(o.taskJob ? { job: { house: o.taskJob.house, ...(o.taskJob.origin ? { origin: o.taskJob.origin } : {}) } } : {}), ...(parent ? { origin: parent.conversation, origin_run: parent.run } : {}), floor: o.taskJob?.floor ?? (parent?.bodyRules ? { guest: parent.bodyRules.guest, deny: parent.bodyRules.deny, readers: parent.bodyRules.readers } : null), parentReset: parent?.actsFor?.reset, ruleSource: o.taskJob?.ruleSource ?? parent?.spawn?.ruleSource ?? (parent ? { conversation: parent.conversation, agent, venue: parent.venue, place: parent.place, label: parent.label, kind: parent.kind, persons: [...new Set([...(parent.bodyRules?.persons ?? []), ...(parent.bodyRules?.members ?? []), ...(parent.actsFor?.people ?? []), ...(parent.actsFor?.owners ?? [])])] } : null), prefer: q.prefer, created: d.now().toISOString() };
   const r = await deliver(env, { source: 'runtime', id, agent, venue: 'spawn', place: id, label: q.title ?? 'Spawn', from: { kind: 'agent', id: agent }, kind: 'message', at: d.now().toISOString(), text: q.brief }, { ...o, spawnInit: { metadata, actsFor, parentBody: parent?.body, parentRun: parent?.run } });
   if (r.status) no(r.error);
   return { handle: r.conversation, ...r };
