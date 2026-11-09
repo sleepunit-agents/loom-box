@@ -13,6 +13,24 @@ import { hasAge, houseWorld } from './delivery-world.mjs';
 const put = (file, data) => { mkdirSync(dirname(file), { recursive: true, mode: 0o700 }); writeFileSync(file, data, { mode: 0o600 }); };
 const wait = async fn => { const end = Date.now() + 10_000; while (!fn()) { if (Date.now() > end) throw Error('native client fixture timed out'); await new Promise(r => setTimeout(r, 10)); } };
 const session = '12345678-1234-1234-1234-123456789abc';
+
+test('a negotiated native-history host survives authenticated report sanitizing and accepts publication', { skip: !hasAge }, async () => {
+  const w = houseWorld({ harness: 'codex' });
+  const preparing = w.hr.prepareLaunch('e'.repeat(64), { agent: 'art', brief: 'native-history handshake regression', model: 'gpt' });
+  await wait(() => load(w.env).houses['h-1']);
+  update(w.env, s => { s.houses['h-1'].nativeHistory = { v: 1, complete: false }; });
+  w.houseEnv.HOUSE_ID = 'h-1';
+  w.houseEnv.LOOM_RUNTIME_NATIVE_HISTORY = join(w.D, 'native'); mkdirSync(w.houseEnv.LOOM_RUNTIME_NATIVE_HISTORY);
+  const host = w.host();
+  try {
+    const handle = await preparing;
+    assert.ok(w.hr.host('art').report.caps.includes('native-history'), 'core must retain the host\'s negotiated capability');
+    w.hr.publishPreparedLaunch(handle);
+    assert.equal((await w.hr.waitPreparedLaunch(handle)).harness, 'codex');
+    assert.equal(w.local.startsEntered, 1);
+  } finally { await w.kill(); await host; }
+});
+
 function transcript(root, harness, value, identity = session) {
   const path = harness === 'claude' ? join(root, 'claude-projects/project', `${identity}.jsonl`) : join(root, 'codex-sessions/2026/11/09', `rollout-time-${identity}.jsonl`);
   put(path, value); return path;
@@ -90,12 +108,13 @@ test('an existing live-host core receipt is adopted if the host exits after its 
   w.hr.requestPack(body);
   const files = [{ root: 'sessions', rel: '2026/11/09/rollout-time-s-b0000000.jsonl', data: Buffer.from('already sealed by the live host').toString('base64') }];
   const result = await api(w.env, {}, { caller: { kind: 'agent', agent: 'art', house: 'h-1' }, path: 'body-sync', body: { hostKey: w.hostKey,
-    report: { bodies: { b0000000: { harness: 'codex', status: 'ended', session: 's-b0000000', pending: [] } }, done: {}, caps: ['parts', 'native-admission', 'native-history'], starting: [], packed: { b0000000: { part: 0, parts: 1, pending: ['sealed-pending'], data: Buffer.from(JSON.stringify(files)).toString('base64') } } } } });
+    report: { bodies: { b0000000: { harness: 'codex', status: 'working', session: 's-b0000000', pending: [] } }, done: {}, caps: ['parts', 'native-admission', 'native-history'], starting: [], packed: { b0000000: { part: 0, parts: 1, pending: ['sealed-pending'], data: Buffer.from(JSON.stringify(files)).toString('base64') } } } } });
   assert.equal(result.status, 200);
   await collectNativeHistory(w.options); // The original transcript has already been dropped locally.
   assert.deepEqual(w.calls.map(c => c.phase), ['plan', 'finish']);
   assert.deepEqual(await w.hr.pack(body, { deferAck: true }), files);
   assert.deepEqual(w.hr.unheard(body), ['sealed-pending'], 'the sealed final inbox receipt wins over the last report');
+  assert.equal(w.hr.alive(body), false, 'physical-stop collection supersedes even a previously working report');
 });
 
 for (const harness of ['claude', 'codex']) test(`${harness}: offline inbox receipts recover follow-ups newer than the last host report`, { skip: !hasAge }, async () => {
@@ -118,6 +137,16 @@ test('an offline body without a final inbox receipt replays conservatively inste
   const w = await setup('codex'); transcript(w.root, 'codex', 'native context', 's-b0000000');
   await collectNativeHistory(w.options);
   assert.equal(w.hr.unheard({ id: 'h-1-b0000000', house: 'h-1', agent: 'art', harness: 'codex' }), null);
+});
+
+test('a final collected native body remains positively ended after its last live report expires', { skip: !hasAge }, async () => {
+  const w = await setup('codex'); transcript(w.root, 'codex', 'native context', 's-b0000000');
+  await collectNativeHistory(w.options);
+  await w.client.call('report', { id: 'h-1', state: 'failed' });
+  const body = { id: 'h-1-b0000000', house: 'h-1', agent: 'art', harness: 'codex' };
+  const fresh = new HouseRunner(w.env, 'codex', { sealer: w.sealer, now: () => new Date(Date.now() + 3600_000) });
+  assert.equal(fresh.packReady(body), true);
+  assert.equal(fresh.alive(body), false, 'the durable physical-stop collection receipt outlives the host heartbeat');
 });
 
 test('missing native history and malformed completion responses cannot authorize cleanup', { skip: !hasAge }, async () => {

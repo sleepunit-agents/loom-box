@@ -181,7 +181,9 @@ Uncertain input binds enough identity to stop and collect the writer through the
 common retirement transaction before replaying the original sealed messages.
 Tests verify restoration of the original native context before another admission,
 and that owner interruption keeps the work and slot held without replay.
-Authenticated OS-process restart of the host remains a shipping requirement.
+Full host termination and authenticated replacement are covered below. That
+proof does not claim in-place adoption after an arbitrary supervisor restarts
+only the host inside a still-running house namespace.
 
 ## Read-only recovery queries
 
@@ -262,9 +264,10 @@ model, stop a model or sweep credential homes. Missing native identity/history
 remains uncertain. A collected body returns only its own native session files.
 
 The box provisions this mount for newly claimed non-service houses and runs
-collection before terminal reporting or cleanup. The code remains a draft:
-actual host SIGKILL and fresh-controller resume proofs are still required
-before activation.
+collection before terminal reporting or cleanup. The explicit real-container
+proof below covers host SIGKILL and fresh-controller resume with model-free
+native executables. The code remains a draft until its other acceptance gates
+are met.
 
 ## Box-authenticated core collection transaction
 
@@ -324,10 +327,10 @@ while the box is collecting history.
 Tests cover both adapters' offline decoding, immutable multipart retries,
 reserved and admitted attempts, existing core packs, missing metadata, and box
 restart after lost part/final acknowledgements. These use model-free native
-executables or a fake container engine. Actual host-process SIGKILL, native
-resume and sender proofs remain required. So do explicit policies for admitted
-work with no native history and oversized offline packs, plus older-house cutover
-reconciliation. This draft is not deployable.
+executables or a fake container engine; the separate integration proof below
+uses real Podman. Explicit policies for admitted work with no native history and
+oversized offline packs, plus older-house cutover reconciliation and deployed
+provider verification, remain required. This draft is not deployable.
 
 ## Final inbox receipts after host failure
 
@@ -349,5 +352,36 @@ Common retirement waits for a pending offline receipt. Once collected, that
 final receipt supersedes an earlier provisional live inbox snapshot before
 committing the continuity slot and replay queue. Tests cover both adapters,
 lost/invalid receipts, delivered-versus-pending replay through common delivery,
-and replacement of a provisional snapshot during warm resume. Actual native
-host-kill acceptance must also exercise this path before rollout.
+and replacement of a provisional snapshot during warm resume. The real-container
+host-kill proof also carries one pending follow-up through native resume.
+
+## Real-container host termination and native resume
+
+Run the explicit integration test against an existing local house image:
+
+```sh
+LOOM_NATIVE_HOST_IMAGE=<local-house-image> node --test test/integration/native-host-death.mjs
+```
+
+This is outside the default unit suite because it requires real rootless Podman
+and a local Node24 house image. It never pulls/builds an image or calls a model
+provider. Its isolated native CLI fixtures use the actual ClaudeRunner and
+CodexRunner, admission workers, body-host CLI, authenticated core API,
+box-side collection client and fresh delivery CLI controllers.
+
+Each case kills the first container with SIGKILL, positively observes that it is
+gone, deletes its ephemeral HOME, collects only the retained native history,
+then resumes through a second house. The native fixture refuses resume unless
+the original context has already been restored. The proof checks the same
+session, exactly one pending follow-up and new turn, unchanged conversation
+principal, a new run/sender key, and a reply posted from inside the new container.
+Both owned containers must be positively absent after cleanup.
+
+This test exposed a real negotiation failure: cleanReport stripped the host's
+native-history capability, causing prepareLaunch to refuse fully provisioned
+houses. The capability now survives the authenticated sanitizer, with a
+regression that failed before the fix. A completed physical-stop collection is
+also durable evidence after the last heartbeat expires; it forces the old body
+ended even if a prior report called it working. The stale-heartbeat regression
+failed before that correction too. These proofs cover real process/container
+lifecycle and storage, not a provider model's semantic memory after a crash.

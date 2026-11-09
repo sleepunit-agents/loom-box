@@ -356,7 +356,7 @@ function cleanReport(r) {
     else done[rid] = { ...attempt, error: String(d.error ?? 'its host couldn\'t start it').slice(0, 300), ...(r?.caps?.includes('native-admission') && d.nativeNotStarted === true ? { nativeNotStarted: true } : {}) };
   }
   // What this host can do beyond the first version's: `parts`, a brief that names the agent's files (briefs.mjs).
-  const caps = Array.isArray(r?.caps) ? r.caps.filter((c) => c === 'parts' || c === 'native-admission') : [];
+  const caps = Array.isArray(r?.caps) ? r.caps.filter((c) => c === 'parts' || c === 'native-admission' || c === 'native-history') : [];
   const startingUnknown = caps.includes('native-admission') && (!Array.isArray(r?.starting) || r.starting.some(id => !RID.test(id)));
   const starting = caps.includes('native-admission') && Array.isArray(r?.starting) ? [...new Set(r.starting.filter(id => RID.test(id)))] : [];
   return { bodies, done, caps, starting, startingUnknown };
@@ -977,7 +977,9 @@ export class HouseRunner {
     const x = houseRec(this.host(body.agent, this.seatFor(body)), body.house);
     let collecting = false;
     try { collecting = !!load(this.env).houses?.[body.house]?.collection; } catch { /* fresh reports still carry their own facts */ }
-    return x && (collecting || freshRec(x, body.house, this.now().getTime())) ? x : null;
+    // The box's completed physical-stop transaction is durable evidence; it
+    // does not expire with the dead host's final heartbeat.
+    return x && (collecting || x.offlineCollection?.complete === true || freshRec(x, body.house, this.now().getTime())) ? x : null;
   }
 
   entry(body) {
@@ -985,6 +987,7 @@ export class HouseRunner {
     const x = raw ? this.rec(body) : null;
     if (!x) return null;
     const entry = x.report?.bodies?.[raw] ?? { status: 'ended' };
+    if (x.offlineCollection?.complete === true) return { ...entry, status: 'ended', feedable: false };
     try { if (load(this.env).houses?.[body.house]?.collection) return { ...entry, status: 'ended' }; } catch { /* keep the observed report */ }
     return entry;
   }
