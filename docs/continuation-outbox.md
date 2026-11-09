@@ -71,7 +71,9 @@ CONTINUATION_CORE=/path/to/loom CONTINUATION_CLOCK=/path/to/loom-clock \
   node --test test/continuation-clock.integration.test.mjs
 ```
 
-It proves core replay avoids a second child, non-clock credentials and a supplied
+It kills the real clock process after core accepts but before the receipt returns.
+The fresh clock recovers its persisted firing, posts identical JSON, and core replay
+avoids a second child. It also proves non-clock credentials and a supplied
 source field are refused before forwarding, and forged handles, borrowed holder
 keys/sessions, rebinding and source reset cannot produce another stored reply.
 A forged handle can launch an ordinary wake; it cannot authorize a report.
@@ -81,7 +83,7 @@ Timer creation is stubbed so this bench never installs host systemd units.
 
 All three PRs remain draft (runtime148, core675, clock24). Before merge/install:
 prove the complete authenticated clock→core→runtime route and its negatives,
-including the clock's durable firing journal; complete exact-head CI and resolve
+with the native harness and executable instead of the test bridge; complete exact-head CI and resolve
 core's Node22 history failure with its owner; review collection/expiry; then
 coordinate installation and live delivery proof. Preserve PR145 native admission
 ownership. No installed or historical-thread delivery is claimed here.

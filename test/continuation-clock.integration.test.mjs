@@ -55,9 +55,26 @@ test('clock fire process reaches authenticated core delivery and binds only its 
   const clockDir=join(w.env.HOME,'clock','art');mkdirSync(clockDir,{recursive:true});
   const entry={id:'w-abcdef',kind:'wake',created:'2026-11-09 00:00:00',at:'2026-11-09 00:00:00',prompt:'complete route',for:'owner',continuation:{handle:grant.handle,wake:'w-abcdef'}};
   writeFileSync(join(clockDir,'spool.jsonl'),JSON.stringify(entry)+'\n');
-  const firing=spawn('python3',[join(process.env.CONTINUATION_CLOCK,'bin/wake'),'fire',entry.id],{env:{...process.env,HOME:w.env.HOME,PATH:`${bin}:${process.env.PATH}`,WAKE_DATA:join(w.env.HOME,'clock'),WAKE_LOCAL_AGENT:'art',WAKE_AGENT:'art',WAKE_FIRE:'house',WAKE_DELIVERY:'deliver',WAKE_LOOM_URL:`http://127.0.0.1:${setup.port}`,WAKE_DELIVER_TOKEN_FILE:tokenFile,WAKE_PRINCIPAL:JSON.stringify([process.execPath,principal]),HOUSE_ID:''},stdio:['ignore','pipe','pipe']});
-  t.after(()=>firing.kill('SIGKILL'));let err='';firing.stderr.on('data',b=>err+=b);
-  assert.equal((await once(firing,'exit'))[0],0,err);
+  let holdReceipt=true, accepted;const acceptance=new Promise(r=>accepted=r);const clockBodies=[];
+  const proxy=createServer(async(req,res)=>{
+    let body='';for await(const c of req)body+=c;clockBodies.push(JSON.parse(body));
+    const answer=await fetch(`http://127.0.0.1:${setup.port}${req.url}`,{method:req.method,headers:{authorization:req.headers.authorization,'content-type':'application/json'},body});
+    const text=await answer.text();
+    if(holdReceipt){assert.equal(answer.status,200,text);accepted();return;}
+    res.writeHead(answer.status,{'content-type':'application/json'});res.end(text);
+  });
+  proxy.listen(0,'127.0.0.1');await once(proxy,'listening');
+  t.after(()=>{proxy.closeAllConnections();proxy.close();});
+  const fire=()=>spawn('python3',[join(process.env.CONTINUATION_CLOCK,'bin/wake'),'fire',entry.id],{env:{...process.env,HOME:w.env.HOME,PATH:`${bin}:${process.env.PATH}`,WAKE_DATA:join(w.env.HOME,'clock'),WAKE_LOCAL_AGENT:'art',WAKE_AGENT:'art',WAKE_FIRE:'house',WAKE_DELIVERY:'deliver',WAKE_LOOM_URL:`http://127.0.0.1:${proxy.address().port}`,WAKE_DELIVER_TOKEN_FILE:tokenFile,WAKE_PRINCIPAL:JSON.stringify([process.execPath,principal]),HOUSE_ID:''},stdio:['ignore','pipe','pipe']});
+  const firing=fire();t.after(()=>firing.kill('SIGKILL'));
+  await Promise.race([acceptance,once(firing,'exit').then(([c])=>{throw Error(`clock exited before acceptance: ${c}`);})]);
+  const ended=once(firing,'exit');firing.kill('SIGKILL');assert.equal((await ended)[1],'SIGKILL');
+  const pending=readFileSync(join(clockDir,'spool.jsonl'),'utf8').split('\n').filter(Boolean).map(JSON.parse).find(e=>e.id===entry.id);
+  assert.deepEqual(pending.delivery,clockBodies[0],'wire body persisted before forwarding');
+  holdReceipt=false;const restarted=fire();t.after(()=>restarted.kill('SIGKILL'));
+  let err='';restarted.stderr.on('data',b=>err+=b);
+  assert.equal((await once(restarted,'exit'))[0],0,err);
+  assert.deepEqual(clockBodies[1],clockBodies[0],'fresh clock uses identical sealed firing');
   assert.equal(deliveries.length,1,readFileSync(join(clockDir,'wake.log'),'utf8'));
   assert.equal(deliveries[0].source,'clock');assert.deepEqual(deliveries[0].continuation,entry.continuation);
   const child=children[0];assert.equal(child.body,'started');
