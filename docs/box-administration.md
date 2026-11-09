@@ -150,3 +150,18 @@ capability reporting and physical command admission/receipts, result retrieval,
 the shared CLI/MCP surface, and isolated native-harness/app verification. The
 foundation tests use fake approvals and OS identities; no real host command,
 sudo policy or production lease is enabled by them.
+
+The production check/use adapter now uses the existing bounded approvals
+subprocess helper and mints a fresh principal statement immediately before
+consumption, after rechecking the saved conversation and box identity. It never
+substitutes an owner principal for unknown or several people. Approval checks
+use the approvals protocol's question mark for an unknown principal. This
+adapter depends on approvals PR 16 for authenticated decision-maker reads and
+piece-only administration consumption; neither draft is deployed.
+
+An isolated integration run against that actual approvals CLI exercised a
+fixture UI Allow, a ten-minute approval wait, preservation of an unknown
+principal's named people, and a deliberately lost successful consumption reply.
+Retry recovered the same lease with one consumption. This verifies the adapter
+boundary; automatic filing/tick activation, production UI and host execution
+remain unimplemented.

@@ -6,7 +6,8 @@ import { dirname, join, isAbsolute } from 'node:path';
 import { homedir } from 'node:os';
 import { StateError, load, withLock } from './state.mjs';
 import { deliveryDir, holdsRun, loadConv } from './delivery.mjs';
-import { principalOf } from './principal.mjs';
+import { mint, principalOf } from './principal.mjs';
+import { approvalsRunAsync, approvalsWhy } from './approvals-call.mjs';
 import { boxOwner, membersOf, ownsBox } from './owners.mjs';
 import { mayHost } from './control.mjs';
 import { ageSealer } from './sealed.mjs';
@@ -179,16 +180,52 @@ function refresh(env, j, s, at) {
   if (!eligible) stop(j, s, 'revoked', at);
   else if (s.activation && at >= s.activation.until) stop(j, s, 'expired', at);
 }
-const approvalFor = s => s.authority.principal.owner ? 'owner' : s.authority.principal.for ?? '-';
+const approvalFor = s => s.authority.principal.owner ? 'owner' : s.authority.principal.for ?? '?';
 function cardMatches(card, s) {
   return card?.id === s.approval && card.agent === s.agent && card.kind === ADMINISTRATION_KIND && card.target === s.target && card.for === approvalFor(s)
     && (!['allowed', 'used'].includes(card.state) || card.decidedBy === s.execution.owner);
+}
+
+/** Internal production approval client. It never accepts a body-supplied
+ * statement or principal. Each consumption gets a fresh signed statement
+ * after checking the saved scope against current conversation authority. */
+export function administrationApprovals(env, o = {}) {
+  const run = o.approvalsRun ?? ((argv) => approvalsRunAsync(env, argv));
+  const as = s => JSON.stringify({ kind: 'agent', agent: s.agent, house: "loom's runtime" });
+  const call = async argv => {
+    const r = await run(argv);
+    if (r.error || r.status !== 0) fail('administration approvals: ' + approvalsWhy(r), 503);
+    return r.stdout;
+  };
+  return {
+    async check(id, scope) {
+      let card;
+      const text = await call(['check', id, '--json', '--as', as(scope)]);
+      try { card = JSON.parse(text); } catch { fail('administration approval response cannot be decoded', 503); }
+      if (!card || typeof card !== 'object' || Array.isArray(card)) fail('administration approval response cannot be decoded', 503);
+      return card;
+    },
+    async use(id, scope) {
+      const proof = transaction(env, o, (j, at) => {
+        const live = scopeOf(j, scope.id);
+        refresh(env, j, live, at);
+        if (live.approval !== id || live.scopeHash !== scope.scopeHash || live.state !== 'activating') fail('administration approval is no longer eligible for consumption');
+        // refresh checked current principal/reset and exact box/OS identity.
+        return { as: as(live), target: live.target, statement: mint(deliveryDir(env), {
+          agent: live.agent, conversation: live.conversation, principal: principalOf(env, loadConv(env, live.conversation)),
+        }, at) };
+      });
+      await call(['use', id, '--kind', ADMINISTRATION_KIND, '--target', proof.target,
+        '--as', proof.as, '--principal', proof.statement]);
+    },
+  };
 }
 
 /** No external call runs under the journal lock. The allowed expiry and fixed
  * lease cutoff are committed BEFORE consumption. A used card without that
  * intent can never create or lengthen a lease. */
 export async function advanceAdministration(env, id, approvals, o = {}) {
+  approvals ??= administrationApprovals(env, o);
   let s = transaction(env, o, (j, at) => {
     const s = scopeOf(j, id);
     refresh(env, j, s, at);
