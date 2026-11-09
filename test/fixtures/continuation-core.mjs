@@ -21,7 +21,7 @@ writeFileSync(join(home, 'pieces', 'runtime', 'piece.json'), JSON.stringify({ v:
 // its declared offer; the bridge substitutes only the harness-backed runtime world.
 if (process.env.CONTINUATION_BRIDGE) {
   const bin = join(home, 'pieces', 'bin'); mkdirSync(bin, { recursive: true });
-  writeFileSync(join(bin, 'loom-runtime'), `#!${process.execPath}\nlet b=''; for await (const c of process.stdin) b+=c; const r=await fetch(${JSON.stringify(process.env.CONTINUATION_BRIDGE)}, {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({mode:process.argv[2],input:JSON.parse(b)})}); process.stdout.write(await r.text());\n`, {mode:0o755});
+  writeFileSync(join(bin, 'loom-runtime'), `#!${process.execPath}\nimport { spawnSync } from 'node:child_process';\nif (process.argv[2] === 'api' && process.env.CONTINUATION_RUNTIME_CLI) {\n  const r = spawnSync(process.execPath, [process.env.CONTINUATION_RUNTIME_CLI, ...process.argv.slice(2)], {stdio:'inherit', env:process.env});\n  process.exit(r.status ?? 1);\n}\nlet b=''; for await (const c of process.stdin) b+=c; const r=await fetch(${JSON.stringify(process.env.CONTINUATION_BRIDGE)}, {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({mode:process.argv[2],input:JSON.parse(b)})}); process.stdout.write(await r.text());\n`, {mode:0o755});
   const file = join(home, 'pieces', 'runtime', 'piece.json');
   const {readFileSync} = await import('node:fs');
   const record = JSON.parse(readFileSync(file)); record.loom.delivery=['loom-runtime','deliver','--json'];

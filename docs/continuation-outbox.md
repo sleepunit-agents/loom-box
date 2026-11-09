@@ -39,7 +39,8 @@ loss and 5xx retry. Explicit permanent adapter refusals also stop.
 Every outbox mutation seals its record, fsyncs a private temporary file, renames
 it and fsyncs its directory. The next retry time is persisted before network I/O.
 A SIGKILL after acceptance leaves pending state and retries the identical ref.
-There is no collection/expiry policy yet.
+There is no automatic collection or expiry yet; the retention review below is
+a shipping gate, not an implemented collector.
 
 ## Evidence and remaining gates
 
@@ -77,7 +78,10 @@ avoids a second child. It also proves non-clock credentials and a supplied
 source field are refused before forwarding, and forged handles, borrowed holder
 keys/sessions, rebinding and source reset cannot produce another stored reply.
 A forged handle can launch an ordinary wake; it cannot authorize a report.
-The fake harness and managed executable bridge remain explicit test seams;
+Holder issue/enqueue/status now execute the production `src/cli.mjs api --json`
+in a fresh process launched through core's managed bin. The HTTP bridge rejects
+API calls, so the bench cannot silently substitute its in-process handler.
+The fake harness and delivery/principal bridge remain explicit test seams;
 no installed runner, native harness or installed end-to-end proof is claimed.
 Timer creation is stubbed so this bench never installs host systemd units.
 
@@ -87,3 +91,29 @@ with the native harness and executable instead of the test bridge; complete exac
 core's Node22 history failure with its owner; review collection/expiry; then
 coordinate installation and live delivery proof. Preserve PR145 native admission
 ownership. No installed or historical-thread delivery is claimed here.
+
+## Retention review
+
+The runtime currently keeps sealed grants and every pending/delivered/failed report
+indefinitely. A grant has an issuance time but no deadline, and a still-bound child
+may enqueue multiple distinct report ids. Reset/principal/target/child-run checks
+remain the revocation boundary. Slot expiry is not capability expiry. This keeps
+long scheduled continuations valid, but storage and authority lifetime are unbounded;
+do not describe the current implementation as having retention limits.
+
+Core keeps the stable ref and payload hash with the encrypted reply rather than
+in its ordinary short-lived turn idempotency cache. Archival keeps that receipt.
+Explicit thread deletion removes the reply/hash too, but retains a deleted-thread
+tombstone and rejects future posts to that target. It is not a receipt GC scheme.
+
+Before introducing collection, agree the maximum admission/enqueue/retry lifetime
+together across clock, runtime and core. Never prune pending reports by age alone:
+a lost receipt may already represent an accepted post. Removing a terminal report
+while its grant can still enqueue the same id also destroys local payload-conflict
+detection. Removing a core ref while retries can reach a live target permits a
+duplicate reply. A bounded design needs durable terminal/expired tombstones and a
+common retry cutoff, plus deletion/reset tests and a delayed-retry crash proof.
+
+This review makes no destructive change. Keep expiry/collection open for the
+coordinated shipping review; native admission and history owners still own their
+respective gates.

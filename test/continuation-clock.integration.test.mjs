@@ -5,12 +5,12 @@ import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { api } from '../src/control.mjs';
 import { ageSealer } from '../src/sealed.mjs';
 import { world } from './delivery-world.mjs';
 import { deliver, deliveryDir, handOverWake, loadConv, tick } from '../src/delivery.mjs';
 
-// This retains only the deterministic harness and managed-bin bridge seams. It adds the
+// This retains deterministic harness and delivery/principal bridge seams. Holder APIs
+// run through the actual managed production executable in separate processes. It adds the
 // real clock fire process and core's authenticated managed delivery offer, rather
 // than pretending a direct deliver() call proves those boundaries.
 test('clock fire process reaches authenticated core delivery and binds only its admitted child', {
@@ -25,7 +25,7 @@ test('clock fire process reaches authenticated core delivery and binds only its 
         handOverWake(w.env, {agent:'art', place:input[ input.indexOf('--place')+1 ], id:input[input.indexOf('--id')+1], for:'owner'});
         res.end('{}'); return;
       }
-      if(mode==='api') { res.end(JSON.stringify(await api(w.env,{},input))); return; }
+      assert.notEqual(mode,'api','holder calls must use the production executable');
       assert.equal(mode,'deliver'); deliveries.push(input);
       const answer=await deliver(w.env,input,w.o); children.push(answer);
       res.end(JSON.stringify(answer));
@@ -35,7 +35,7 @@ test('clock fire process reaches authenticated core delivery and binds only its 
   t.after(()=>{bridge.closeAllConnections();bridge.close();});
   const bridgeUrl=`http://127.0.0.1:${bridge.address().port}`;
   const coreHome=join(w.env.HOME,'core'); mkdirSync(coreHome);
-  const core=fork(new URL('./fixtures/continuation-core.mjs',import.meta.url),[],{env:{...process.env,LOOM_HOME:coreHome,CONTINUATION_BRIDGE:bridgeUrl},stdio:['ignore','ignore','pipe','ipc']});
+  const core=fork(new URL('./fixtures/continuation-core.mjs',import.meta.url),[],{env:{...process.env,...w.env,LOOM_HOME:coreHome,CONTINUATION_BRIDGE:bridgeUrl,CONTINUATION_RUNTIME_CLI:join(import.meta.dirname,'../src/cli.mjs')},stdio:['ignore','ignore','pipe','ipc']});
   t.after(()=>core.kill('SIGKILL'));
   let errors='';core.stderr.on('data',b=>errors+=b);
   const setup=await Promise.race([once(core,'message').then(([v])=>v),once(core,'exit').then(([c])=>{throw Error(`core ${c}: ${errors}`);})]);
