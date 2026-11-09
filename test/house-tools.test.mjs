@@ -195,3 +195,29 @@ test('piece-call posts the argv to /api/<piece>/run as the token, and reads back
     assert.deepEqual(b.seen[1].argv, ['comment', 't-1', 'the text']);
   } finally { b.server.close(); }
 });
+
+test('the installed approvals wrapper carries conversation provenance even for an unknown principal', async () => {
+  const h = house();
+  assert.equal(install(h).status, 0);
+  const token = join(h.home, 'token'), runtime = join(h.home, 'fake-runtime');
+  writeFileSync(token, 'diagnostic-token\n');
+  writeFileSync(runtime, '#!/bin/sh\necho \'{"ok":true,"owner":false,"for":"?","statement":"ACTUAL.sig"}\'\n', { mode: 0o755 });
+  const server = await fakeLoom({ exit: 0, stdout: 'pending\n', stderr: '' });
+  const request = ['request', '--kind', 'codex-diagnostic', '--target', 'receipt'];
+  const invoke = (args, cv = 'cv-0123456789ab') => new Promise(resolve => {
+    const child = execFile(join(h.home, '.local/bin/approvals'), args, {
+      env: { HOME: h.home, PATH: h.path, LOOM_URL: server.url, LOOM_TOKEN_FILE: token, LOOM_BODY_CONVERSATION: cv, PIECE_CALL_RUNTIME: runtime },
+    }, (error, stdout, stderr) => resolve({ code: error?.code ?? 0, stdout, stderr }));
+    child.stdin.end();
+  });
+  try {
+    assert.equal((await invoke(request)).code, 0);
+    assert.deepEqual(server.seen.at(-1).argv, [...request, '--conversation', 'cv-0123456789ab', '--principal', 'ACTUAL.sig']);
+    await invoke([...request, '--conversation=cv-111111111111', '--principal', 'FORGED']);
+    assert.deepEqual(server.seen.at(-1).argv, [...request, '--conversation=cv-111111111111', '--principal', 'ACTUAL.sig']);
+    await invoke(request, 'not-a-conversation');
+    assert.deepEqual(server.seen.at(-1).argv, request);
+    await invoke(['check', 'a-12345678']);
+    assert.deepEqual(server.seen.at(-1).argv, ['check', 'a-12345678', '--principal', 'ACTUAL.sig']);
+  } finally { server.server.close(); }
+});

@@ -95,6 +95,13 @@ def with_principal(piece, argv):
             continue
         clean.append(argv[i])
         i += 1
+    # The house executes this bridge, not the approvals piece's standalone main.
+    # Keep its conversation link here too; it is display provenance, never trust.
+    if piece == "approvals" and clean[:1] == ["request"] and not any(
+            a == "--conversation" or a.startswith("--conversation=") for a in clean):
+        cv = os.environ.get("LOOM_BODY_CONVERSATION", "")
+        if re.fullmatch(r"cv-[0-9a-f]{12}", cv):
+            clean += ["--conversation", cv]
     st = principal_statement()
     return clean + ["--principal", st] if st else clean
 
