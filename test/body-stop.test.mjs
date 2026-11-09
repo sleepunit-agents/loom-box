@@ -5,14 +5,14 @@ import { join } from 'node:path';
 import { runBodyHost } from '../src/bodyhost.mjs';
 import { scratch } from './scratch.mjs';
 
-test('a requested stop waits for process exit before packing the final session', async () => {
+for (const failFirstStop of [false, true]) test(`a requested stop waits for process exit before packing the final session${failFirstStop ? ', retrying a failed request' : ''}`, async () => {
   const home = scratch('rt-stop-');
   const file = join(home, 'session');
   writeFileSync(file, 'before stop');
   let beat = 0, ends = 0, packed;
   const native = {
     start: () => ({ id: 'b1' }), status: () => beat < 2 ? 'working' : 'idle',
-    stopped: () => beat >= 4, end: () => { ends++; },
+    stopped: () => beat >= 4, end: () => { ends++; if (failFirstStop && ends === 1) throw new Error('temporary stop failure'); },
     slotOf: () => ({ harness: 'codex', session: 's1' }),
     roots: { sessions: home }, sessionFiles: () => ({ keep: [{ root: 'sessions', rel: 'session' }], drop: [] }),
   };
@@ -28,7 +28,7 @@ test('a requested stop waits for process exit before packing the final session',
       return { req: beat === 0 ? { r1: { harness: 'codex', brief: 'work' } } : {}, ...(beat ? { stop: { b1: { at: 1, pack: true } } } : {}) };
     },
   });
-  assert.equal(ends, 1, 'the same stop is requested once');
+  assert.equal(ends, failFirstStop ? 2 : 1, 'only a failed stop request is retried');
   assert.equal(existsSync(file), false);
   const files = JSON.parse(Buffer.from(packed.data, 'base64').toString());
   assert.equal(Buffer.from(files[0].data, 'base64').toString(), 'final flush');
