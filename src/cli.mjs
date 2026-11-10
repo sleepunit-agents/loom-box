@@ -151,7 +151,7 @@ import { answerLoop, deliver, listConvs, post, staleRuns, send, sendOutcome, sen
 import { coreFrom } from './core.mjs';
 import { watchBridges } from './nowboard.mjs';
 import { reviewStatus, reviewTick, runReview } from './review.mjs';
-import { bodyKeyFor, runBodyHost } from './bodyhost.mjs';
+import { bodyConversation, bodyKeyFor, bodySession, runBodyHost } from './bodyhost.mjs';
 import { runnerFor, usageDirOf } from './runners.mjs';
 import { capture as captureStatusline, keptReading, lineOf as statuslineText } from './statusline.mjs';
 import { applyUpgrade, carrySettings, loadCarried, recoverUpgrade } from './version.mjs';
@@ -497,14 +497,14 @@ async function main(argv, env) {
       // sets CLAUDE_CODE_SESSION_ID per session (under a shared daemon too); Codex gives each command it runs
       // CODEX_THREAD_ID, the thread its `thread.started` named, which is a Codex body's slot (runners.mjs). Without
       // it every send from a Codex body was refused as naming no session (t-1898, Mark's Comms reply of 2026-11-06).
-      const session = env.CLAUDE_CODE_SESSION_ID || env.CODEX_THREAD_ID || undefined;
+      const session = bodySession(env);
       // --person <slug> --via <venue>: one DM to that person instead, through that venue's adapter (delivery.mjs).
       const person = flag(rest, '--person');
       const via = flag(rest, '--via');
       const msg = { conversation, text: await textOf(rest, '--text'), key: bodyKeyFor(env, conversation), ...(session ? { session } : {}), ...(person !== undefined ? { person } : {}), ...(via !== undefined ? { via } : {}) };
       const remote = env.LOOM_URL && env.LOOM_TOKEN_FILE;
       const call = remote ? pieceCall(env, flag(rest, '--piece')) : null;
-      const r = remote ? await call('send', msg) : await send(env, msg, { detach: true });
+      const r = await untilSessionKnown(() => (remote ? call('send', msg) : send(env, msg, { detach: true })));
       // Accepted isn't posted (t-1920): wait for what the venue said, so a body never reports a message it didn't send.
       const answer = r.accepted ? await sendOutcome({
         status: (q) => (remote ? call('send-status', q) : sendStatus(env, q)),
@@ -585,11 +585,12 @@ async function main(argv, env) {
         return;
       }
       // A body asking: in a house through the piece API (its house's token), else here; with its run's key and session.
-      const conversation = flag(rest, '--conversation') || env.LOOM_BODY_CONVERSATION;
-      const session = env.CLAUDE_CODE_SESSION_ID || env.CODEX_THREAD_ID || undefined;
+      const conversation = flag(rest, '--conversation') || ownConversation(env);
+      if (!conversation) throw new Fail('principal: this body can\'t tell its own conversation yet (name it with --conversation)');
+      const session = bodySession(env);
       const q = { conversation, key: bodyKeyFor(env, conversation), ...(session ? { session } : {}) };
       const remote = env.LOOM_URL && env.LOOM_TOKEN_FILE;
-      const r = remote ? await pieceCall(env, flag(rest, '--piece'))('principal', q) : bodyPrincipal(env, q);
+      const r = await untilSessionKnown(async () => (remote ? pieceCall(env, flag(rest, '--piece'))('principal', q) : bodyPrincipal(env, q)));
       out(r);
       if (!r.ok) process.exitCode = 1;
       return;
@@ -648,7 +649,7 @@ async function main(argv, env) {
       // Where this body is (gates-api.mjs, placeOf): its own conversation, proved as a relay or `send` proves it. In a
       // house, through the piece API; on loom's machine (a local body), here.
       const mine = ownConversation(env);
-      if (!mine) throw new Fail('loom runtime place: this isn\'t a body holding a conversation (no LOOM_BODY_CONVERSATION)', 2);
+      if (!mine) throw new Fail('loom runtime place: can\'t tell this body\'s own conversation (none mapped for its session, or none in its environment)', 2);
       if (env.LOOM_URL && env.LOOM_TOKEN_FILE) return runAnswer(await pieceCall(env, flag(rest, '--piece'))('run', { argv: ['place', '--conversation', mine], ...bodyProof(env, mine) }));
       const { placeOf } = await import('./gates-api.mjs');
       const r = await placeOf(env, mine, bodyProof(env, mine));
@@ -1026,16 +1027,39 @@ if (isMain) {
 
 export { main };
 
-/** This body's own conversation (LOOM_BODY_CONVERSATION), or undefined. */
+/**
+ * This body's own conversation, or undefined: the one its house says its harness session holds (bodyhost.mjs,
+ * bodyConversation), its LOOM_BODY_CONVERSATION only when nothing says otherwise. A reused `claude --bg` session keeps
+ * the environment of the body it was first started for (t-2053), so the environment alone never names it.
+ */
 function ownConversation(env) {
-  return /^cv-[0-9a-f]{12}$/.test(env.LOOM_BODY_CONVERSATION ?? '') ? env.LOOM_BODY_CONVERSATION : undefined;
+  // Told once per command (it may wait on its house): a property, as main runs before this module's own lets do.
+  const m = ownConversation.memo;
+  if (m?.env === env) return m.cv;
+  const cv = bodyConversation(env);
+  ownConversation.memo = { env, cv };
+  return cv;
 }
 
 /** A body's proof that it holds `cv` in its current run (as `send` takes it): its run's key and harness session. */
 function bodyProof(env, cv) {
   const key = bodyKeyFor(env, cv);
-  const session = env.CLAUDE_CODE_SESSION_ID || env.CODEX_THREAD_ID || undefined;
+  const session = bodySession(env);
   return { ...(key ? { key } : {}), ...(key && session ? { session } : {}) };
+}
+
+/**
+ * A proof the runtime refused only because it can't name this body's session yet (a house body's host reports it
+ * within a beat of the start, t-2053): asked again a few times, never with anything else changed.
+ */
+async function untilSessionKnown(ask, { tries = 6, ms = 2000 } = {}) {
+  let r;
+  for (let i = 0; i < tries; i++) {
+    r = await ask();
+    if (r?.ok !== false || !/session can't be told yet/.test(String(r.reason ?? r.error ?? ''))) return r;
+    if (i < tries - 1) await sleep(ms);
+  }
+  return r;
 }
 
 /** A piece API `run` answer, as this command's own output and exit. */

@@ -40,7 +40,7 @@ export async function spawnCall(env, caller, q = {}, o = {}) {
     const c = loadConv(env, q.handle);
     if (!c?.spawn || c.agent !== agent) no('no such spawn');
     if (caller.kind !== 'owner' && c.spawn.origin !== parent?.conversation && c.conversation !== parent?.conversation) no('only the asking conversation can use this handle');
-    if (c.resetPending || c.actsFor?.reset !== undefined || JSON.stringify(principalOf(env, c)) !== JSON.stringify(c.spawn.principal)) no('the spawned principal has changed');
+    if (c.resetPending || c.actsFor?.reset !== undefined || JSON.stringify(principalOf(env, c)) !== JSON.stringify(c.spawn.principal)) no('the spawned principal has changed: something not the asker\'s joined it after it started (a relay\'s answer from another agent, a wake loom couldn\'t say was yours, or a reset), so its report isn\'t returned as the asker\'s; read it in its own conversation');
     if (parent && (parent.actsFor?.reset !== c.spawn.parentReset || JSON.stringify(principalOf(env, parent)) !== JSON.stringify(c.spawn.principal))) no('the asking principal has changed');
     if (action === 'result') return { handle: c.conversation, state: c.spawn.report ? 'done' : c.spawn.failed ? 'failed' : c.paused ? 'paused' : 'pending', ...(c.spawn.assignment ? { assignment: { model: c.spawn.assignment.model, harness: c.spawn.assignment.harness, ...(c.spawn.assignment.role ? { role: c.spawn.assignment.role } : {}) } } : {}), ...(c.spawn.report ? { report: d.sealer.open(Buffer.from(c.spawn.report, 'base64')).toString('utf-8') } : {}), ...(c.spawn.failed ? { reason: c.spawn.failed } : {}) };
     if (action !== 'say') no('action is start, result, say or roles');
