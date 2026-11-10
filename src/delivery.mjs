@@ -3666,7 +3666,7 @@ export function resetPrincipal(env, conversation, { agent, approval } = {}) {
     rmSync(homeFile(env, conversation), { force: true });
     delete c.slot; delete c.home; delete c.fallback;
     // The run that heard what came before speaks no more: its key is gone now, not when its body is ended.
-    if (c.body) { c.resetPending = true; delete c.sendKey; }
+    if (c.body) { c.resetPending = true; forgetRunKey(env, c); }
     // A reset is activity: the record (and the reset it holds) outlives any continuation issued before it (t-2004).
     c.last = new Date().toISOString();
     saveConv(env, c);

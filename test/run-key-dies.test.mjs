@@ -4,10 +4,10 @@
 // conversation's record, and on loom's machine its key file (bodyhost.mjs, keyFile) goes too.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { bodyPrincipal, continuationCall, deliver, deliveryDir, heldConv, holdsRun, loadConv, releaseBody, send, tick } from '../src/delivery.mjs';
 import { putWakeFor } from '../src/principal.mjs';
-import { bodyKeyFor, keyFile } from '../src/bodyhost.mjs';
+import { bodyKeyFor, keepKey, keyFile } from '../src/bodyhost.mjs';
 import { fileOf } from '../src/files.mjs';
 import { cvOf, fakeRunner, world } from './delivery-world.mjs';
 import { scratch } from './scratch.mjs';
@@ -134,4 +134,24 @@ test('on loom\'s machine, an ended run\'s key file goes with it, and a newer run
   assert.notEqual(key2, key);
   assert.equal(bodyKeyFor(w.env, cv), key2, 'the new run\'s file is its own');
   assert.equal(holdsRun(w.env, cv, { key, session: local.slotOf({ id: idOf(c2.body) }).session }, w.o), false);
+});
+
+test('on loom\'s machine, a key file that already holds another key is not the ended run\'s to remove', async () => {
+  const LOCAL = JSON.stringify({ agents: ['art'], cwd: '/home/art/Art', claude: '/home/art/.local/bin/claude', args: [], path: '/usr/bin' });
+  const w = world({ LOOM_RUNTIME_LOCAL_BODIES: LOCAL });
+  const local = fakeRunner([], scratch('rt-local-'));
+  w.o.runner = (_h, isLocal) => (isLocal ? local : w.runner);
+  const m = w.msg('alert:y', 'disk at 90%', { venue: 'wake', from: { kind: 'schedule' }, kind: 'wake', source: 'clock', local: true });
+  putWakeFor(deliveryDir(w.env), { agent: m.agent, place: m.place, id: m.id, for: 'owner' });
+  await deliver(w.env, m, w.o);
+  const cv = cvOf('art', 'wake', 'alert:y');
+  const c = loadConv(w.env, cv);
+  // Another key written over it before the run's end (a newer launch's): kept, while the ended run's hash still goes.
+  keepKey(w.env, cv, 'n'.repeat(32));
+  local.dead.add(idOf(c.body));
+  await tick(w.env, w.o);
+  const after = loadConv(w.env, cv);
+  assert.equal(after.body, undefined);
+  assert.equal(after.sendKey, undefined);
+  assert.equal(readFileSync(keyFile(w.env, cv), 'utf-8').trim(), 'n'.repeat(32));
 });
