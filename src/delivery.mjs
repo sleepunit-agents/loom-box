@@ -86,7 +86,7 @@ import { AccountsError, accountsFrom, accountsOfRecord, stateAccounts } from './
 import { commitPreparedBody, endBody, readBody, resumeBody, startBody } from './bodies.mjs';
 import { CoreError, coreFrom } from './core.mjs';
 import { stoppingHosts, HouseRunner, releaseEmptySeatHouses, seatRoom, sweepSeats, sweepTransfers } from './houserunner.mjs';
-import { venueKind as kindOf, resolveFor, readModelChoice, setModelChoice } from './models.mjs';
+import { venueKind as kindOf, resolveFor, readModelChoice, readModels, setModelChoice } from './models.mjs';
 import { pieceName, setting } from './piece.mjs';
 import { dropSession, packSession, restoreFiles, SessionSizeError, SessionHistoryMissing } from './sessions.mjs';
 import { ageSealer } from './sealed.mjs';
@@ -1218,9 +1218,12 @@ function plan(env, cv, d, mem) {
     const left = [];
     // A body whose house is no longer its conversation's (t-1952) is fed nothing there, not even the runtime's own note.
     const moved = seatMoved(env, c);
+    // A pinned job whose account is kept for conversations (t-2037): nothing more mid-turn; its next turn is gated.
+    const held = !moved && c.queue.some((x) => !isNote(x)) ? heldForConversations(env, c, d) : null;
     for (const x of c.queue) {
       if (x.untilIdle) { left.push({ x, reason: 'relay replies wait for the requesting turn to finish' }); continue; }
       if (moved) { left.push({ x, reason: 'its conversation moves house when this turn is over' }); continue; }
+      if (held && !isNote(x)) { left.push({ x, reason: 'its model\'s account is kept for conversations until its reset, so its next turn waits for room' }); continue; }
       if (x.tierUnread && !c.bodyRules?.guest) { left.push({ x, reason: 'its sender\'s tier couldn\'t be read' }); continue; }
       const text = open(d, x, mem);
       const r = text === null ? { fed: false, reason: 'its text is gone' } : runner.feed(bodyOf(c.body, rec), { id: x.key, text: render([{ ...x, text }]) });
@@ -1723,6 +1726,29 @@ function workerGate(env, c, d) {
   const on = workerBodiesByAccount(env, c.conversation);
   const unknown = on.unknown ?? 0;
   return capacityGate({ kind, jobsOn: (name) => (on[name] ?? 0) + unknown, burnOf: (name) => forecastBurn(readReadings(dir, name)), now: d.now().getTime() });
+}
+
+/**
+ * Whether a pinned job's warm body, mid-turn, should be fed nothing more for now (t-2037, the limit slice 4 left): with
+ * the owner's allocator on, any account its body runs on is kept for conversations until its reset. Read without
+ * waiting (plan runs under the lock): the readings the tick keeps, never a fresh fetch. What it holds waits for the
+ * turn to end; the next resume is the gated one (routeOf), so the job then waits, its session kept, or fails over as
+ * its spawn allows. An account with no reading, a body whose account can't be told: not held, as a start isn't.
+ */
+function heldForConversations(env, c, d) {
+  if (!c.spawn?.assignment?.model) return null;
+  const gate = workerGate(env, c, d);
+  if (!gate) return null;
+  let window;
+  try { window = readModels(env).find((m) => m.id === c.spawn.assignment.model)?.window; } catch { window = undefined; }
+  let rec;
+  try { rec = readBody(env, c.body); } catch { return null; }
+  for (const a of accountsOfBody(d, rec)) {
+    let v;
+    try { v = gate(a, window); } catch { continue; }
+    if (v && v.allow === false) return v;
+  }
+  return null;
 }
 
 /** The one conversation commit for a native start or its recovered receipt.
