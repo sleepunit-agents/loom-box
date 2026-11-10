@@ -151,7 +151,7 @@ import { answerLoop, deliver, listConvs, post, staleRuns, send, sendOutcome, sen
 import { coreFrom } from './core.mjs';
 import { watchBridges } from './nowboard.mjs';
 import { reviewStatus, reviewTick, runReview } from './review.mjs';
-import { bodyKeyFor, runBodyHost } from './bodyhost.mjs';
+import { bodyConversation, bodyKeyFor, bodySession, runBodyHost } from './bodyhost.mjs';
 import { runnerFor, usageDirOf } from './runners.mjs';
 import { capture as captureStatusline, keptReading, lineOf as statuslineText } from './statusline.mjs';
 import { applyUpgrade, carrySettings, loadCarried, recoverUpgrade } from './version.mjs';
@@ -497,7 +497,7 @@ async function main(argv, env) {
       // sets CLAUDE_CODE_SESSION_ID per session (under a shared daemon too); Codex gives each command it runs
       // CODEX_THREAD_ID, the thread its `thread.started` named, which is a Codex body's slot (runners.mjs). Without
       // it every send from a Codex body was refused as naming no session (t-1898, Mark's Comms reply of 2026-11-06).
-      const session = env.CLAUDE_CODE_SESSION_ID || env.CODEX_THREAD_ID || undefined;
+      const session = bodySession(env);
       // --person <slug> --via <venue>: one DM to that person instead, through that venue's adapter (delivery.mjs).
       const person = flag(rest, '--person');
       const via = flag(rest, '--via');
@@ -585,8 +585,9 @@ async function main(argv, env) {
         return;
       }
       // A body asking: in a house through the piece API (its house's token), else here; with its run's key and session.
-      const conversation = flag(rest, '--conversation') || env.LOOM_BODY_CONVERSATION;
-      const session = env.CLAUDE_CODE_SESSION_ID || env.CODEX_THREAD_ID || undefined;
+      const conversation = flag(rest, '--conversation') || ownConversation(env);
+      if (!conversation) throw new Fail('principal: this body can\'t tell its own conversation yet (name it with --conversation)');
+      const session = bodySession(env);
       const q = { conversation, key: bodyKeyFor(env, conversation), ...(session ? { session } : {}) };
       const remote = env.LOOM_URL && env.LOOM_TOKEN_FILE;
       const r = remote ? await pieceCall(env, flag(rest, '--piece'))('principal', q) : bodyPrincipal(env, q);
@@ -1026,15 +1027,24 @@ if (isMain) {
 
 export { main };
 
-/** This body's own conversation (LOOM_BODY_CONVERSATION), or undefined. */
+/**
+ * This body's own conversation, or undefined: the one its house says its harness session holds (bodyhost.mjs,
+ * bodyConversation), its LOOM_BODY_CONVERSATION only when nothing says otherwise. A reused `claude --bg` session keeps
+ * the environment of the body it was first started for (t-2053), so the environment alone never names it.
+ */
 function ownConversation(env) {
-  return /^cv-[0-9a-f]{12}$/.test(env.LOOM_BODY_CONVERSATION ?? '') ? env.LOOM_BODY_CONVERSATION : undefined;
+  // Told once per command (it may wait on its house): a property, as main runs before this module's own lets do.
+  const m = ownConversation.memo;
+  if (m?.env === env) return m.cv;
+  const cv = bodyConversation(env);
+  ownConversation.memo = { env, cv };
+  return cv;
 }
 
 /** A body's proof that it holds `cv` in its current run (as `send` takes it): its run's key and harness session. */
 function bodyProof(env, cv) {
   const key = bodyKeyFor(env, cv);
-  const session = env.CLAUDE_CODE_SESSION_ID || env.CODEX_THREAD_ID || undefined;
+  const session = bodySession(env);
   return { ...(key ? { key } : {}), ...(key && session ? { session } : {}) };
 }
 

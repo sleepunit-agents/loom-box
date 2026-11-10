@@ -520,7 +520,10 @@ test('in houses: each seat gets its own house, and a house\'s host is handed onl
   assert.deepEqual(houses['h-2'].started.map((x) => x.key), ['key-of-p-loren']);
   // Each conversation's key file is in its own house's home (bodyhost.mjs, keyFile), never the other's.
   const keys = (h) => { try { return readdirSync(join(houses[h].home, '.local', 'state', 'loom-runtime', 'keys')); } catch { return []; } };
-  assert.deepEqual([keys('h-1'), keys('h-2')], [['cv-00000000000a.key'], ['cv-00000000000b.key']]);
+  assert.deepEqual([keys('h-1'), keys('h-2')].map((k) => k.filter((n) => n.endsWith('.key'))), [['cv-00000000000a.key'], ['cv-00000000000b.key']]);
+  // And which conversation each body's session holds (t-2053), in its own house only.
+  const held = (h) => { const d = join(houses[h].home, '.local', 'state', 'loom-runtime', 'keys', 'sessions'); try { return readdirSync(d).map((f) => readFileSync(join(d, f), 'utf-8')); } catch { return []; } };
+  assert.deepEqual([held('h-1'), held('h-2')], [['cv-00000000000a'], ['cv-00000000000b']]);
   // Status and feeding go through the body's own seat's record.
   const ref = (x) => ({ id: x.body.split(':')[1], agent: 'art', house: x.house, seat: x.seat, harness: 'claude' });
   await until(() => hr.status(ref(a)) === 'working' && hr.status(ref(b)) === 'working');

@@ -101,7 +101,7 @@ import { cancelReservedLaunch, launchAttempt, launchWorkerAlive, launchWorkerIde
 import { launchInjectedNative, observeNativeLaunch, superviseNativeLaunch } from './native-launch.mjs';
 import { raiseAlert } from './alerthook.mjs';
 import { changed as changedCards } from './activity.mjs';
-import { keepKey } from './bodyhost.mjs';
+import { keepKey, keepSession } from './bodyhost.mjs';
 import { spawnCap } from './spawn.mjs';
 import { readRelays } from './relay.mjs';
 import { householdOwners, membersOf, ownersOf } from './owners.mjs';
@@ -1651,7 +1651,12 @@ export function commitStartedConversation(env, op, { run, senderHash, bodyRules,
     if (houseLaunch) c.launchAcks = [...(c.launchAcks ?? []).filter(h => h.id !== houseLaunch.id), houseLaunch];
     // A local body speaks with its run's key as a house's body does: from the keys dir (bodyhost.mjs, keyFile), as
     // `claude --bg` gives every session its daemon's environment, not this launch's (t-1830).
-    if (localKey !== undefined) keepKey(env, op.cv, localKey);
+    if (localKey !== undefined) {
+      keepKey(env, op.cv, localKey);
+      // And which conversation its session holds (t-2053): its own CLI reads that, never only the daemon's environment.
+      const session = r.slot?.session ?? (() => { try { return readBody(env, r.body).slot?.session; } catch { return undefined; } })();
+      if (session) keepSession(env, session, op.cv);
+    }
     c.bodyRules = bodyRules;
     // A worker job's assignment (t-2038): the model it first ran on, kept for every later run. An older job (spawned
     // before assignments) gets one here, from the body it runs now. A failover re-pins it, the move kept as lineage.
@@ -3016,7 +3021,7 @@ export function heldConv(env, cv, { key, session } = {}, o = {}) {
   if (houseProblem(env, c, o.caller)) return null;
   // Nor from a body whose conversation has moved to another principal's house (t-1952).
   if (seatMoved(env, c)) return null;
-  // Fail closed (unlike send's, kept as it was): a body whose session the runner can't name proves nothing yet.
+  // Fail closed, as send's does (t-2053): a body whose session the runner can't name proves nothing yet.
   const own = sessionOf({ ...depsOf(env, o), env }, c.body);
   return own && session === own ? c : null;
 }
@@ -3104,9 +3109,8 @@ function houseProblem(env, c, caller) {
 
 /**
  * Why the caller isn't the body holding conversation `c` in its current run, or null when it is: its run's key
- * (LOOM_BODY_KEY) matches, and so does its harness session, where the runner knows the body's (a sibling body holding
- * this conversation's key, its house's file, is another session; one that names no session is refused once the
- * body's is known). What `send` takes, and what a principal statement takes (bodyPrincipal).
+ * (LOOM_BODY_KEY) matches, and so does its harness session (a sibling body holding this conversation's key, its
+ * house's file, is another session; one whose session the runner can't name yet is refused, t-2053). What `send` takes, and what a principal statement takes (bodyPrincipal).
  */
 function holderProblem(env, d, c, { key, session }, does = 'speaks in it', caller = undefined) {
   const want = typeof c.sendKey === 'string' && /^[0-9a-f]{64}$/.test(c.sendKey) ? Buffer.from(c.sendKey, 'hex') : null;
@@ -3122,7 +3126,11 @@ function holderProblem(env, d, c, { key, session }, does = 'speaks in it', calle
     return `only the body holding ${c.conversation} ${does} (its conversation has moved to another principal's house)`;
   }
   const own = sessionOf({ ...d, env }, c.body);
-  if (own && session !== own) {
+  // Fail closed (t-2053): a key alone proves nothing. Every conversation's key is a file its house keeps, and a reused
+  // `claude --bg` session's environment names another conversation, so a body whose session its runner can't name yet
+  // is refused until it can (its host reports it within a beat of the start).
+  if (!own) return `only the body holding ${c.conversation} ${does} (its session can't be told yet: try again in a moment)`;
+  if (session !== own) {
     return `only the body holding ${c.conversation} ${does} (${session ? 'another session is' : 'no session is named'}: ${c.conversation} is a session of its own)`;
   }
   return null;

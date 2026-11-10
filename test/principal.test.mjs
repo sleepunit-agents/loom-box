@@ -315,7 +315,8 @@ test('piece-call sends approvals and the clock the runtime\'s statement and neve
       ['ready'],
       ['check', 'a-12345678'],
     ]);
-    assert.equal(readFileSync(join(D, 'asked'), 'utf-8'), 'principal --conversation cv-0123456789ab\nprincipal --conversation cv-0123456789ab\n');
+    // The runtime's CLI tells the body's conversation itself (its house's session map, t-2053), never piece-call from env.
+    assert.equal(readFileSync(join(D, 'asked'), 'utf-8'), 'principal\nprincipal\n');
   } finally { server.close(); }
 });
 

@@ -9,7 +9,7 @@
 // for its idle time (the next delivery asks for a house again), or when the runtime says its bodies are another house's.
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { composeBrief } from './briefs.mjs';
 import { packSession, dropSession, restoreFiles, SessionSizeError } from './sessions.mjs';
 import { PART_CHARS } from './houserunner.mjs';
@@ -43,7 +43,8 @@ export const keyFile = (env, conversation) => (CV.test(conversation ?? '') ? joi
 export function bodyKeyFor(env, conversation) {
   const f = keyFile(env, conversation);
   if (f) { try { const k = readFileSync(f, 'utf-8').trim(); if (k) return k; } catch { /* none kept here */ } }
-  return env.LOOM_BODY_KEY;
+  // The environment's key is its LOOM_BODY_CONVERSATION's run's: never another conversation's proof (t-2053).
+  return !env.LOOM_BODY_CONVERSATION || env.LOOM_BODY_CONVERSATION === conversation ? env.LOOM_BODY_KEY : undefined;
 }
 
 export function keepKey(env, conversation, key) {
@@ -53,6 +54,75 @@ export function keepKey(env, conversation, key) {
   const tmp = `${f}.${process.pid}.tmp`;
   writeFileSync(tmp, key, { mode: 0o600 });
   renameSync(tmp, f);
+}
+
+/**
+ * A harness session id, as a body's environment names it (CLAUDE_CODE_SESSION_ID, CODEX_THREAD_ID): the one thing a
+ * `claude --bg` body's environment says that is its own. A spare session the daemon started ahead of time keeps the
+ * environment of whatever it was started under, so its LOOM_BODY_CONVERSATION (and LOOM_BODY_KEY) can be another
+ * conversation's; its session id is its own (t-2053).
+ */
+const SESSION = /^[A-Za-z0-9][A-Za-z0-9._-]{3,127}$/;
+export const bodySession = (env) => {
+  const s = env.CLAUDE_CODE_SESSION_ID || env.CODEX_THREAD_ID || undefined;
+  return SESSION.test(s ?? '') ? s : undefined;
+};
+/** Where a house says which conversation each of its bodies' sessions holds: <keys>/sessions/<session>, and back. */
+const bySession = (env, session) => (SESSION.test(session ?? '') ? join(keysDir(env), 'sessions', session) : null);
+const byConversation = (env, cv) => (CV.test(cv ?? '') ? join(keysDir(env), 'held', cv) : null);
+
+function writeAtomic(f, text) {
+  mkdirSync(dirname(f), { recursive: true, mode: 0o700 });
+  const tmp = `${f}.${process.pid}.tmp`;
+  writeFileSync(tmp, text, { mode: 0o600 });
+  renameSync(tmp, f);
+}
+const readTrim = (f) => { try { return readFileSync(f, 'utf-8').trim(); } catch { return ''; } };
+
+/**
+ * Says that harness session `session` holds conversation `cv` (t-2053): written by whoever started the body (its house's
+ * host, or the runtime on loom's machine) once the session is known, and read by the body's own CLI. Never the body's
+ * environment alone, which a reused session keeps from its first start.
+ */
+export function keepSession(env, session, cv) {
+  const f = bySession(env, session), g = byConversation(env, cv);
+  if (!f || !g) return false;
+  writeAtomic(f, cv);
+  writeAtomic(g, session);
+  return true;
+}
+
+/** Forgets that `session` holds `cv` (its body ended), leaving whatever a later start wrote. */
+export function forgetSession(env, session, cv) {
+  const f = bySession(env, session);
+  if (f && readTrim(f) === cv) rmSync(f, { force: true });
+}
+
+const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+export const SESSION_WAIT_MS = 15_000;
+
+/**
+ * This body's own conversation (t-2053), or undefined: the one its house's host says its harness session holds. Its
+ * environment's LOOM_BODY_CONVERSATION only when nothing says otherwise. When the house says that conversation is
+ * another session's (a reused spare kept the first body's environment), it waits a little for its own (the host
+ * writes it as soon as the start is claimed) and never answers with the other's.
+ */
+export function bodyConversation(env, { waitMs = SESSION_WAIT_MS, sleep = sleepSync } = {}) {
+  const fromEnv = CV.test(env.LOOM_BODY_CONVERSATION ?? '') ? env.LOOM_BODY_CONVERSATION : undefined;
+  const session = bodySession(env);
+  if (!session) return fromEnv;
+  const mine = () => { const cv = readTrim(bySession(env, session)); return CV.test(cv) ? cv : undefined; };
+  let cv = mine();
+  if (cv) return cv;
+  if (!fromEnv) return undefined;
+  const holder = readTrim(byConversation(env, fromEnv));
+  // No word on that conversation, or it's this session's: the environment stands (a house that writes no map yet).
+  if (!holder || holder === session) return fromEnv;
+  for (let waited = 0; waited < waitMs; waited += 250) {
+    sleep(250);
+    if ((cv = mine())) return cv;
+  }
+  return undefined;
 }
 
 function dropKey(env, conversation, key) {
@@ -77,6 +147,10 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
   // A body's environment is the house's, less what's the host's alone: its task (which carried the boot key).
   const bodyEnv = Object.fromEntries(Object.entries(env).filter(([k]) => k !== 'HOUSE_TASK' && k !== 'LOOM_HOST_KEY'));
   const mine = new Map();   // id -> {harness}
+  const mapSession = (b, session) => {
+    if (!b?.cv || !session || b.mapped === session) return;
+    try { if (keepSession(env, session, b.cv)) b.mapped = session; } catch (e) { log(`couldn't keep ${b.cv}'s session: ${e.message}`); }
+  };
   const durableRequests = new Set();
   const launching = new Map(); // durable rid -> in-flight promise
   const uncertain = new Map(); // durable rid -> original request to reconcile
@@ -116,7 +190,7 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
       if (['working', 'started'].includes(b.seen) && (status === 'idle' || status === 'ended')) turnsOver.push({ id, harness: b.harness, body: { id, ...(b.slot ? { slot: b.slot } : {}) } });
       if (status !== 'unknown') b.seen = status;
       const slot = (() => { try { return r.slotOf({ id, ...(b.slot ? { slot: b.slot } : {}) }) ?? b.slot; } catch { return b.slot; } })();
-      if (slot?.session) b.slot = slot;
+      if (slot?.session) { b.slot = slot; if (!b.ended) mapSession(b, slot.session); }
       // What its inbox still holds (ids only): fed, never taken by its hook. The runtime keeps their text.
       const pending = (() => { try { return (r.inbox?.pending?.(id) ?? []).map((p) => p?.id).filter((k) => typeof k === 'string').slice(0, 64); } catch { return []; } })();
       // Its turn over: how it went (runners.mjs, turn), for the runtime's loop check (t-1763).
@@ -203,6 +277,8 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
             }
           } catch (e) { if (!q.attempt || !enteredNative || e.nativeNotStarted) for (const w of written) rmSync(w, { recursive: true, force: true }); throw e; }
           mine.set(b.id, { harness: q.harness, seen: 'started', ...(b.slot ? { slot: b.slot } : {}), ...(cv ? { cv, key: q.key } : {}), ...(q.activity === true ? { activity: true } : {}) });
+          // Which conversation its session holds, for its own CLI (t-2053): as soon as the session is known.
+          mapSession(mine.get(b.id), b.slot?.session ?? (() => { try { return r.slotOf(b)?.session; } catch { return undefined; } })());
           done[rid] = { id: b.id, ...(q.attempt ? { attempt: q.attempt, inputConfirmed: b.inputUncertain !== true } : {}) };
           uncertain.delete(rid);
           log(`started ${b.id} for ${rid}`);
@@ -261,6 +337,7 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
       }
       delete b.stopPending;
       if (b.cv) dropKey(env, b.cv, b.key);
+      if (b.cv && b.mapped) forgetSession(env, b.mapped, b.cv);
       heard.delete(id);
       b.ended = true;
     }
