@@ -1299,7 +1299,8 @@ export function serviceRestart(env, effects, caller, body) {
   });
 }
 
-const UNNAMED = /the house file has no service [a-z0-9-]+/;
+/** The box's words when it couldn't start a house (box.mjs), before its own reason. */
+const BOX_REFUSED = 'the box couldn\'t start it: ';
 
 /** When a service's house ends: move it, restart it (backing off), or leave it down. */
 function serviceHouseEnded(s, h, effects) {
@@ -1307,8 +1308,9 @@ function serviceHouseEnded(s, h, effects) {
   if (!svc || svc.house !== h.id) return;
   if (svc.want !== 'up') return;
   // The box said the agent's house file names no such service (house.mjs specFor): it stays down, never a crash loop,
-  // and only the owner brings it back (t-2132).
-  if (h.state === 'failed' && UNNAMED.test(String(h.log ?? ''))) {
+  // and only the owner brings it back (t-2132). Only the box's own first line, for a house that never ran: a service's
+  // output follows that line, and one that ran could print anything.
+  if (h.state === 'failed' && !h.started && String(h.log ?? '').split('\n')[0] === `${BOX_REFUSED}the house file has no service ${h.service}`) {
     svc.want = 'down'; svc.unnamed = true; delete svc.moveTo;
     return;
   }

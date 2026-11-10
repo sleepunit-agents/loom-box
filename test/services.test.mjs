@@ -280,7 +280,7 @@ test('a service its house file doesn\'t name stays down, and only the owner brin
   const p = ok(call(box('one'), 'poll'));
   const h = p.start.find((x) => x.service === 'ghost');
   ok(call(box('one'), 'claim', { id: h.id }));
-  ok(call(box('one'), 'report', { id: h.id, state: 'failed', log: 'the box couldn\'t start it: the house file has no service ghost' }));
+  ok(call(box('one'), 'report', { id: h.id, state: 'failed', log: 'the box couldn\'t start it: the house file has no service ghost\nbuild output' }));
   const v = ok(call(owner, 'list')).services.find((x) => x.name === 'ghost' || x.service === 'art/ghost');
   assert.equal(v.want, 'down', 'no crash loop');
   assert.equal(live().filter((x) => x.service === 'ghost').length, 0);
@@ -289,4 +289,13 @@ test('a service its house file doesn\'t name stays down, and only the owner brin
   assert.match(r.body.error, /isn't in its house file/);
   ok(call(owner, 'service-up', { agent: 'art', name: 'ghost' }));
   assert.equal(live().filter((x) => x.service === 'ghost').length, 1);
+});
+
+test('a running service that prints the box\'s words is a crash, never taken down as unnamed (t-2132)', () => {
+  ok(call(owner, 'service-up', { agent: 'art', name: 'discord' }));
+  const { h } = run('one');
+  ok(call(box('one'), 'report', { id: h.id, state: 'failed', log: 'the box couldn\'t start it: the house file has no service discord' }));
+  assert.equal(svc().want, 'up');
+  const v = ok(call(owner, 'list')).services[0];
+  assert.equal(v.unnamed, undefined);
 });
