@@ -22,7 +22,7 @@ export function mayRunBody(s, id, agent, harness, members) {
 export function bodyBox(s, agent, harness, env, nowMs = Date.now()) {
   const members = membersOf(env);
   const fits = (id) => mayRunBody(s, id, agent, harness, members);
-  const up = (id) => boxUp(s.boxes?.[id], nowMs);
+  const up = (id) => boxUp(s.boxes?.[id], nowMs, agent);
   const pref = preferenceOf(s, agent, env);
   const all = Object.keys(s.boxes ?? {}).sort();
   const box = pref.find((id) => fits(id) && up(id)) ?? all.find((id) => fits(id) && up(id)) ?? pref.find(fits) ?? all.find(fits);

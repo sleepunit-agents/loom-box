@@ -8,7 +8,7 @@
 // Silence is the box's and its houses': a house whose own body host still reports (the box's process died, its
 // containers didn't) is running, and is never on a card.
 import { approvalsFake, approvalsRunAsync, approvalsWhy } from './approvals-call.mjs';
-import { LIVE, WRITE_OFF_AFTER_MS, boxNameOf, householdOwner, writeOffBox } from './control.mjs';
+import { LIVE, WRITE_OFF_AFTER_MS, boxNameOf, drillOf, heardAt, householdOwner, writeOffBox } from './control.mjs';
 import { houseHeard } from './houserunner.mjs';
 import { load, update } from './state.mjs';
 
@@ -24,8 +24,16 @@ export const DENIED_FOR = 12 * 3_600_000;
 
 const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 const runtimeAs = (agent) => JSON.stringify({ kind: 'agent', agent, house: 'loom\'s runtime' });
-const dark = (b, nowMs) => !!b && !b.local && !b.revoked && !b.reportOnly && !!b.lastSeen && nowMs - Date.parse(b.lastSeen) >= WRITE_OFF_AFTER_MS;
+const dark = (b, nowMs, agent) => !!b && !b.local && !b.revoked && !b.reportOnly && !!heardAt(b, nowMs, agent) && nowMs - Date.parse(heardAt(b, nowMs, agent)) >= WRITE_OFF_AFTER_MS;
 const targetOf = (agent, box, lastSeen) => `${agent}:${box}@${Math.floor(Date.parse(lastSeen) / 1000)}`;
+/**
+ * Whether a house is heard from, as a write-off decides it: on a drilled box (control.mjs drillOf), the drill's houses
+ * count as unheard and every other house of that agent there as heard, so only what the owner put in the drill is asked about.
+ */
+const heard = (env, s, agent, house, nowMs) => {
+  const d = drillOf(s.boxes?.[s.houses?.[house]?.box], nowMs, agent);
+  return d ? !d.houses.includes(house) : houseHeard(env, agent, house, nowMs);
+};
 
 /**
  * Each dark box's agents with conversations held in its silent houses:
@@ -36,10 +44,10 @@ export function heldOnDarkBoxes(env, s, convs, nowMs) {
   for (const c of convs) {
     const m = /^(?:claude|codex):(h-[0-9]+)-/.exec(c.body ?? '');
     const h = m && s.houses?.[m[1]];
-    if (!h || h.service || !LIVE.has(h.state) || h.agent !== c.agent || !dark(s.boxes?.[h.box], nowMs)) continue;
-    if (houseHeard(env, h.agent, h.id, nowMs)) continue;
+    if (!h || h.service || !LIVE.has(h.state) || h.agent !== c.agent || !dark(s.boxes?.[h.box], nowMs, h.agent)) continue;
+    if (heard(env, s, h.agent, h.id, nowMs)) continue;
     const key = `${h.agent}:${h.box}`;
-    const x = (out[key] ??= { agent: h.agent, box: h.box, target: targetOf(h.agent, h.box, s.boxes[h.box].lastSeen), houses: [], conversations: [] });
+    const x = (out[key] ??= { agent: h.agent, box: h.box, target: targetOf(h.agent, h.box, heardAt(s.boxes[h.box], nowMs, h.agent)), drill: !!drillOf(s.boxes[h.box], nowMs, h.agent), houses: [], conversations: [] });
     if (!x.houses.includes(h.id)) x.houses.push(h.id);
     x.conversations.push(c.conversation);
     ((x.byHouse ??= {})[h.id] ??= []).push(c.conversation);
@@ -104,13 +112,17 @@ export async function askDarkBoxes(env, { convs, nowMs = Date.now(), warn = (m) 
     if (!mine) continue;
     if (mine !== x.houses) x = { ...x, houses: mine, conversations: mine.flatMap((h) => x.byHouse?.[h] ?? []) };
     const name = String(boxNameOf(s, x.box)).normalize('NFKC').replace(/[\p{C}\p{Zl}\p{Zp}]/gu, ' ').replace(/[;:"“”]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 40);
-    const n = x.conversations.length, mins = Math.floor((nowMs - Date.parse(s.boxes[x.box].lastSeen)) / 60_000);
+    const seen = heardAt(s.boxes[x.box], nowMs, x.agent);
+    const n = x.conversations.length, mins = Math.floor((nowMs - Date.parse(seen)) / 60_000);
     const work = n === 0 ? 'work' : n === 1 ? 'conversation' : `${n} conversations`;
-    const ask = `The box “${name}” has been silent for ${mins} minutes. Carry on ${cap(x.agent)}'s ${work} from there on another box?`.slice(0, 140);
-    const why = `${cap(x.agent)}'s ${work} can't go on until that box answers, or you say it's gone.`;
+    // A drill's card says so: the box is in fact up, and his Allow is for a rehearsal.
+    const ask = (x.drill ? `Drill: pretend the box “${name}” went dark. Carry on ${cap(x.agent)}'s ${work} from there on another box?`
+      : `The box “${name}” has been silent for ${mins} minutes. Carry on ${cap(x.agent)}'s ${work} from there on another box?`).slice(0, 140);
+    const why = x.drill ? `A failover test you started: if you say yes, ${cap(x.agent)}'s ${work} there is stopped and goes on on another box.`
+      : `${cap(x.agent)}'s ${work} can't go on until that box answers, or you say it's gone.`;
     const ifYes = `It goes on, on the next box ${cap(x.agent)} may use; it checks what it already did. If the box comes back, it's stopped there.`.slice(0, 140);
     const ifNo = 'It waits for that box to come back.';
-    const details = `Box ${x.box}, last heard ${s.boxes[x.box].lastSeen}. Its houses there: ${x.houses.join(', ')}; their conversations: ${x.conversations.join(', ')}. Their history stays on that box, so each goes on without its last session and is told its work may already have had effects.`;
+    const details = `Box ${x.box}, ${x.drill ? `in a drill, taken as last heard ${seen}` : `last heard ${seen}`}. Its houses there: ${x.houses.join(', ')}; their conversations: ${x.conversations.join(', ')}. Their history stays on that box, so each goes on without its last session and is told its work may already have had effects.`;
     const argv = ['request', '--kind', WRITE_OFF_KIND, '--target', x.target, '--ask', ask, '--why', why, '--if-yes', ifYes, '--if-no', ifNo,
       '--details', details, '--as', runtimeAs(x.agent), '--on-behalf', 'owner'];
     const release = () => update(env, (st) => { if (st.writeOffAsks?.[key]?.at === at && !st.writeOffAsks[key].approval) delete st.writeOffAsks[key]; });
@@ -155,10 +167,10 @@ export function writeOffAsk(env, { agent, box, target, approval }, nowMs = Date.
   if (b.local) return { why: 'that is loom\'s own machine' };
   const a = s.writeOffAsks?.[`${agent}:${box}`];
   if (!a || a.approval !== approval || a.target !== target || a.applied) return { why: 'this card is out of date (it was asked again, or answered)' };
-  if (!dark(b, nowMs) || targetOf(agent, box, b.lastSeen) !== target) return { why: `${boxNameOf(s, box)} has been heard from since you were asked` };
-  const heard = (a.houses ?? []).filter((h) => houseHeard(env, agent, h, nowMs));
-  if (heard.length) return { why: `${heard.join(', ')} ${heard.length === 1 ? 'has' : 'have'} been heard from since you were asked, so ${heard.length === 1 ? 'it is' : 'they are'} still running` };
-  return { ask: a, lastSeen: b.lastSeen };
+  if (!dark(b, nowMs, agent) || targetOf(agent, box, heardAt(b, nowMs, agent)) !== target) return { why: `${boxNameOf(s, box)} has been heard from since you were asked` };
+  const live = (a.houses ?? []).filter((h) => heard(env, s, agent, h, nowMs));
+  if (live.length) return { why: `${live.join(', ')} ${live.length === 1 ? 'has' : 'have'} been heard from since you were asked, so ${live.length === 1 ? 'it is' : 'they are'} still running` };
+  return { ask: a, lastSeen: heardAt(b, nowMs, agent) };
 }
 
 /**
@@ -178,7 +190,7 @@ export function writeOffApproved(env, effects, caller, fields, spend) {
   const spent = spend(env, id, WRITE_OFF_KIND, target, asker, { onBehalf: 'owner' });
   if (spent) return { ok: false, message: `Nothing changed: the approval couldn't be spent (${String(spent).slice(0, 200)}).`, page: '' };
   let r;
-  try { r = writeOffBox(env, effects, { name: m[2], agent: m[1], houses: ask.houses, lastSeen, heard: (h) => houseHeard(env, m[1], h, +(effects.now?.() ?? new Date())) }); } catch (e) {
+  try { r = writeOffBox(env, effects, { name: m[2], agent: m[1], houses: ask.houses, lastSeen, heard: (h, st) => heard(env, st, m[1], h, +(effects.now?.() ?? new Date())) }); } catch (e) {
     // Spent and not applied: the next pass sees it used and asks again while the work is still held.
     return { ok: false, message: `The approval was spent, but nothing was written off: ${String(e.message || e).slice(0, 200)}. You'll be asked again if it's still waiting.`, page: '' };
   }

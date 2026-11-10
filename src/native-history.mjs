@@ -1,6 +1,7 @@
 // Per-house native history. Logins and generated Codex homes stay outside this
 // directory; only the harnesses' history and admission witnesses survive it.
-import { lstatSync, mkdirSync, readdirSync, readlinkSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { constants, copyFileSync, linkSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmdirSync, symlinkSync, unlinkSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 
@@ -24,16 +25,68 @@ export function nativeHistoryRoot(env) {
   return root;
 }
 
-function linkHistory(source, target) {
-  const current = stat(source);
-  if (current?.isSymbolicLink()) {
-    if (resolve(dirname(source), readlinkSync(source)) === resolve(target)) return;
-    throw Error('native history refuses to replace an existing directory link');
+const unique = () => `${Date.now()}-${process.pid}-${randomBytes(4).toString('hex')}`;
+const rmdirIfEmpty = dir => { try { rmdirSync(dir); } catch (e) { if (e.code !== 'ENOTEMPTY' && e.code !== 'EEXIST') throw e; } };
+
+// One file into native history without ever replacing one there: the same bytes already there drop the house's copy;
+// different bytes keep native history's where it is and put the house's beside it as `<name>.adopted-<stamp>`.
+// A hard link moves the file itself, so a writer still holding it open keeps writing to the adopted copy.
+function place(from, to) {
+  for (let name = to; ; name = `${to}.adopted-${unique()}`) {
+    try { linkSync(from, name); return unlinkSync(from); } catch (e) {
+      if (e.code === 'EEXIST') { if (name === to && readFileSync(name).equals(readFileSync(from))) return unlinkSync(from); continue; }
+      if (e.code !== 'EXDEV' && e.code !== 'EPERM') throw e;
+    }
+    try { copyFileSync(from, name, constants.COPYFILE_EXCL); } catch (e) { if (e.code === 'EEXIST') { if (name === to && readFileSync(name).equals(readFileSync(from))) return unlinkSync(from); continue; } throw e; }
+    // Across filesystems a copy: the house's file goes only once the copy holds every byte it does.
+    if (readFileSync(name).equals(readFileSync(from))) unlinkSync(from);
+    return;
   }
-  if (current && (!current.isDirectory() || readdirSync(source).length)) throw Error('native history refuses to replace existing native files');
-  mkdirSync(dirname(source), { recursive: true, mode: 0o700 });
-  if (current) rmSync(source, { recursive: true });
-  symlinkSync(target, source, 'dir');
+}
+
+// Merges a set-aside folder into native history. Anything that isn't a file or folder (a link, a socket) stays where
+// it is, and so does the folder holding it: nothing is ever deleted that wasn't first placed in native history.
+function adopt(staged, target) {
+  mkdirSync(target, { recursive: true, mode: 0o700 });
+  for (const name of readdirSync(staged)) {
+    const from = join(staged, name), kind = lstatSync(from);
+    if (kind.isDirectory()) {
+      const there = stat(join(target, name));
+      adopt(from, there && !(there.isDirectory() && !there.isSymbolicLink()) ? join(target, `${name}.adopted-${unique()}`) : join(target, name));
+    } else if (kind.isFile()) place(from, join(target, name));
+  }
+  rmdirIfEmpty(staged);
+}
+
+function linkHistory(source, target) {
+  for (let tries = 0; ; tries++) {
+    const current = stat(source);
+    if (current?.isSymbolicLink()) {
+      if (resolve(dirname(source), readlinkSync(source)) === resolve(target)) return;
+      throw Error('native history refuses to replace an existing directory link');
+    }
+    if (current && !current.isDirectory()) throw Error('native history refuses to replace existing native files');
+    if (tries > 8) throw Error('native history could not link a folder that keeps changing');
+    if (current && readdirSync(source).length) {
+      // A CLI wrote here before its history was linked (t-2073). Set it aside under a name only this start holds:
+      // rename is atomic, so of two starts racing only one adopts it, and the other links once it's gone.
+      const staged = `${source}.adopting-${unique()}`;
+      try { renameSync(source, staged); } catch (e) { if (e.code === 'ENOENT') continue; throw e; }
+      // Another start may have linked it between the look and the rename: that link holds no files, and following it
+      // would merge native history into itself, so it goes and the next pass links again.
+      const moved = lstatSync(staged);
+      if (moved.isSymbolicLink()) { unlinkSync(staged); continue; }
+      if (!moved.isDirectory()) throw Error(`native history refuses to replace existing native files (set aside at ${staged})`);
+      adopt(staged, target);
+      continue;
+    }
+    mkdirSync(dirname(source), { recursive: true, mode: 0o700 });
+    try {
+      if (current) rmdirSync(source);
+      symlinkSync(target, source, 'dir');
+      return;
+    } catch (e) { if (!['ENOENT', 'EEXIST', 'ENOTEMPTY'].includes(e.code)) throw e; }
+  }
 }
 
 /** Called before the existing adapter is constructed, never a new launcher. */
