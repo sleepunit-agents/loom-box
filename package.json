@@ -142,6 +142,23 @@
         "label": "Days finished follow-up reports are kept after their deadline",
         "default": "7",
         "hint": "1-90"
+      },
+      {
+        "name": "LOOM_RUNTIME_HOST_RULES",
+        "label": "Ask the owner's standing rules for steps on loom's machine",
+        "kind": "choice",
+        "default": "0",
+        "options": [
+          {
+            "value": "0",
+            "label": "No: each step runs at its own tier"
+          },
+          {
+            "value": "1",
+            "label": "Yes: the owner's rule on the Approvals page decides"
+          }
+        ],
+        "hint": "needs the approvals piece with host rules (t-2104); an unreadable answer is the step's own tier"
       }
     ],
     "services": [
