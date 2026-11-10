@@ -479,13 +479,13 @@ describe('a house reads its effective grants from the runtime', () => {
     assert.deepEqual(ask(memStore(), q({ basis: true })), { allow: true });
     const st = Object.assign(memStore(), { piece: 'runtime' });
     assert.deepEqual(ask(st, q()), { allow: true });
-    assert.deepEqual(ask(st, q({ basis: true })), { allow: true, basis: { piece: 'runtime', key: KEY, sha256: null } });
+    assert.deepEqual(ask(st, q({ basis: true })), { allow: true, basis: { piece: 'runtime', collection: GRANTS, key: KEY, sha256: null } });
     const doc = { v: 1, pieces: { tasks: { mark: ['*'] } } };
     st.put(GRANTS, KEY, doc);
     const a = ask(st, q({ basis: true }));
     assert.equal(a.allow, false);
     // The text loom's store holds is JSON.stringify of the document: core hashes that same text.
-    assert.deepEqual(a.basis, { piece: 'runtime', key: KEY, sha256: createHash('sha256').update(JSON.stringify(doc)).digest('hex') });
+    assert.deepEqual(a.basis, { piece: 'runtime', collection: GRANTS, key: KEY, sha256: createHash('sha256').update(JSON.stringify(doc)).digest('hex') });
     assert.equal(ask(st, q()).basis, undefined);
   });
 });
