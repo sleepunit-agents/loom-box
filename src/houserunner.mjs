@@ -337,10 +337,15 @@ export function cleanCards(cards) {
     // A house's word is data: its label passes the same gate as one made here (redacted, a private path named
     // "a private file", one printable line of 120 at most), its id and tool must be nothing secret-shaped, and its
     // time is an ISO time or now.
-    if (redact(c.id) !== c.id || redact(c.tool) !== c.tool) return [];
+    if (redact(c.tool) !== c.tool) return [];
+    // An id is only a handle, never shown. A real one often looks random (a Claude tool_use id, a Codex item under its
+    // 24-hex body id), and redact() would take it for a secret: so one it would change is renamed to a short stable
+    // hash, the same step every time, never the id itself (t-2109: dropping them dropped every house body's steps).
+    const id = redact(c.id) === c.id ? c.id : `h:${createHash('sha256').update(c.id).digest('hex').slice(0, 16)}`;
+    if (redact(id) !== id) return [];
     const summary = part('text', c.summary, 120);
     if (summary === GONE || summary.length > 120 || UNPRINTABLE_ONE.test(summary)) return [];
-    return [{ id: c.id, at: cardTime(c.at), tool: c.tool, summary, state: c.state }];
+    return [{ id, at: cardTime(c.at), tool: c.tool, summary, state: c.state }];
   });
 }
 

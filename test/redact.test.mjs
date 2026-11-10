@@ -484,9 +484,10 @@ test('read 2: heredocs with $\'EOF\', "$D" or ~ delimiters; the house boundary; 
   assert.equal(commandLabel('cat <<"$D" > f\ngit log 482913\n$D'), 'Ran cat');
   assert.equal(commandLabel('cat <<~EOF\n  gh pr view 1\n  EOF\nls'), 'Ran cat, ls');
   assert.ok(!commandLabel('cat <<~EOF\n  gh pr view 482913\n  EOF').includes('482913'));
-  // cleanCards: a private path named; a token-shaped id or tool dropped; a time that isn't one replaced.
+  // cleanCards: a private path named; a token-shaped id renamed to a hash (never itself, t-2109) and a token-shaped tool
+  // dropped; a time that isn't one replaced.
   assert.equal(cleanCards([{ id: 'c', at: 'x', tool: 'B', summary: 'Read /home/art/.config/gh/hosts.yml', state: 'done' }])[0].summary, 'Read a private file');
-  assert.deepEqual(cleanCards([{ id: j('gh', 'p_abcdefghijklmnopqrstuvwxyz0123'), at: 'x', tool: 'B', summary: 's', state: 'done' }]), []);
+  assert.ok(!JSON.stringify(cleanCards([{ id: j('gh', 'p_abcdefghijklmnopqrstuvwxyz0123'), at: 'x', tool: 'B', summary: 's', state: 'done' }])).includes('abcdefghijklmnop'));
   assert.deepEqual(cleanCards([{ id: 'c', at: 'x', tool: j('sk-', 'ant-api03-abcdefghijklmnopqrstuvwxyz'), summary: 's', state: 'done' }]), []);
   assert.notEqual(cleanCards([{ id: 'c', at: '12345678901234567890', tool: 'B', summary: 's', state: 'done' }])[0].at, '12345678901234567890');
   const cards = claudeCards([{ type: 'assistant', timestamp: j('gh', 'p_abcdefghijklmnopqrstuvwxyz0123'), message: { content: [{ type: 'tool_use', id: 'u', name: j('mcp__x__gh', 'p_abcdefghijklmnopqrstuvwxyz0123'), input: {} }] } }]);
@@ -521,4 +522,22 @@ test('a supplementary variation selector (U+E0100–E01EF) inside a key doesn\'t
       assert.ok(!UNPRINTABLE_ONE.test(out), JSON.stringify(out));
     }
   }
+});
+
+test('cleanCards keeps a house body\'s real steps: Claude tool ids and Codex body-prefixed ids look random, so they are renamed, never dropped (t-2109)', () => {
+  // The two shapes a house host reports (activity.mjs): a Claude tool_use id, and a Codex item under its 24-hex body id.
+  const claude = { id: j('toolu_', '01RkDcxWJbXrN5EuYQ8sWmTe'), at: 'x', tool: 'Bash', summary: 'Ran git', state: 'running' };
+  const codex = { id: j('b0da06aceb4487327941', '5999:item_12'), at: 'x', tool: 'command', summary: 'Ran npm', state: 'done' };
+  const out = cleanCards([claude, codex]);
+  assert.equal(out.length, 2, 'both steps reach core');
+  for (const c of out) {
+    assert.match(c.id, /^[A-Za-z0-9_.:\-]{1,80}$/, 'an id core takes');
+    assert.equal(redact(c.id), c.id, 'and nothing secret-shaped');
+  }
+  // Stable: the same step reported again is the same card, so its later state moves it rather than adding another.
+  assert.deepEqual(cleanCards([claude, codex]).map((c) => c.id), out.map((c) => c.id));
+  assert.notEqual(out[0].id, out[1].id);
+  // A secret sent as an id never reaches core as itself.
+  const [s] = cleanCards([{ ...claude, id: SECRETS.github }]);
+  assert.ok(s && !s.id.includes(SECRETS.github.slice(4, 14)));
 });
