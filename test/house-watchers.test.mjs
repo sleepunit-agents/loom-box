@@ -4,7 +4,7 @@ import { once } from 'node:events';
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, symlinkSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { observeHouse, observationReplaced, reapHouseWaits } from '../src/house-watchers.mjs';
+import { observeHouse, observationReplaced, reapHouseWaits, waitForHouseWaits } from '../src/house-watchers.mjs';
 
 const options = { stdio: 'ignore' };
 // Node ignores argv after -e's script, so it stands in for a long-lived wait.
@@ -58,6 +58,7 @@ test('orphan sweep requires exact executable, argv, parent and assigned house', 
   add(12,98,['podman','wait','ours']); add(13,1,['podman','wait','theirs']);
   add(14,1,['podman','stop','ours']); add(15,1,['podman','wait','ours','theirs']);
   add(16,1,['podman','wait','ours'],process.execPath);
+  add(28,1,['unrelated-name','wait','ours']);
   add(24,1,['podman','wait','','ours']);
   add(17,1,['podman','wait','ours-extra']);
   mkdirSync(join(proc,'97')); writeFileSync(join(proc,'97','comm'),'tini\n');
@@ -89,4 +90,24 @@ test('orphan sweep requires exact executable, argv, parent and assigned house', 
   reapHouseWaits(command,new Set(['ours']),proc,(pid,sig)=>killed.push([pid,sig]),dir,new Set([12,13,14,15,16,17,21,23,24,26]));
   assert.deepEqual(killed,[...expected.slice(0,2),[12,'SIGKILL'],...expected.slice(2)],'explicit legacy PID still requires executable/name/argv and preserves marked live owners');
   rmSync(proc,{recursive:true});
+});
+
+test('startup waits for confirmed death and refuses adoption while SIGKILL is pending', async () => {
+  const proc=join(dir,'pending-proc');mkdirSync(join(proc,'100'),{recursive:true});
+  const status=join(proc,'100','status');writeFileSync(status,'State: D\n');
+  try {
+    await assert.rejects(waitForHouseWaits([100],proc,20),/still running/);
+    let released=false;
+    const timer=setTimeout(()=>{released=true;writeFileSync(status,'State: Z\n');},30);
+    try { await waitForHouseWaits([100],proc,200); assert.equal(released,true,'death was acknowledged before startup continues'); }
+    finally { clearTimeout(timer); }
+  } finally { rmSync(proc,{recursive:true}); }
+});
+
+for (const [output,exit] of [['9',0],['0',7]]) test(`guardian forwards actual wait output ${output} and exit ${exit}`, async () => {
+  const command=join(dir,'result-'+exit);writeFileSync(command,`#!/bin/sh\nprintf '${output}\\n'\nexit ${exit}\n`,{mode:0o755});
+  const child=await observeHouse(command,'result-'+exit,{stdio:['ignore','pipe','ignore']});
+  let result='';child.stdout.on('data',d=>result+=d);
+  const [code]=await once(child,'close');
+  assert.equal(code,exit);assert.equal(result,output+'\n');
 });

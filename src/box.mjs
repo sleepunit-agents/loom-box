@@ -10,7 +10,7 @@
 // gave it), its own state and nested-container dirs, and the repo mirror
 // read-only. No agent code runs on the box itself. When it ends, its secrets,
 // clone and dirs go.
-import { observeHouse, observationReplaced, reapHouseWaits } from './house-watchers.mjs';
+import { observeHouse, observationReplaced, reapHouseWaits, waitForHouseWaits } from './house-watchers.mjs';
 import { lastUpgrade, maybeUpgrade, ownCommit, ownPiece } from './version.mjs';
 import { createHash, randomBytes } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
@@ -473,7 +473,7 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
   machineLogin = false, machineStatus = () => machineClaudeStatus(env), status = (agents, force) => harnessStatus(env, { agents, force }), login = (h, o) => startLogin(env, h, o), codexUsage = () => null, clock = () => Date.now(), secureChannel = true,
   sweep = () => sweepCliContainers(env), runtime = () => ({ commit: ownCommit(), piece: ownPiece() }),
   buildOf = (c) => buildNow(env, c), houseImage = (id) => imageOf(env, id), sampleUnits: unitsImpl = undefined, bootInfo: bootImpl = undefined, sampleHealth: healthImpl = undefined, reportOnly = undefined, collectionGiveUpMs = collectionGiveUpOf(env),
-  reapWaits = names => reapHouseWaits(podman(env), names, '/proc', process.kill, env.PATH) }) {
+  reapWaits = async names => { await waitForHouseWaits(reapHouseWaits(podman(env), names, '/proc', process.kill, env.PATH)); } }) {
   const houses = new Map(); // id -> { child, dir, stopAt? }
   // This runner, as the control plane tells it from one before it: a login handed to another run is one a restart
   // dropped (control.mjs, settleLogins).
@@ -975,7 +975,7 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
     // Historical receipts are ownership evidence even after a house is terminal.
     const receipts = !collectionsScanned && existsSync(root) ? readdirSync(root).filter(n => /^h-[0-9]+$/.test(n)) : [];
     if (!waitsReaped) {
-      reapWaits(new Set([...active, ...receipts].map(containerName)));
+      await reapWaits(new Set([...active, ...receipts].map(containerName)));
       waitsReaped = true;
     }
     // A completion can land while this poll is in flight. Keep its tombstone until a later poll observes the terminal state.

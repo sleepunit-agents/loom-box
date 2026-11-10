@@ -9,7 +9,9 @@ New waits inherit `LOOM_WAIT_OWNER=<runtime-pid>:<Linux-start-time>`. On startup
 the runtime reaps waits whose owner is gone, a zombie, or a reused PID, even under
 custom subreapers. It requires the resolved Podman executable, exactly three argv
 entries (`podman wait <assigned-container>`), and an assigned container name or locally owned historical house receipt.
-It preserves waits whose recorded runtime is still alive.
+It preserves waits whose recorded runtime is still alive. Startup waits for
+signalled observers to terminate before adoption; a wait stuck after SIGKILL
+fails that reconciliation and is retried on a later poll.
 
 Before this marker existed, ownership cannot be proven under an arbitrary
 supervisor. Unmarked legacy waits are only automatically reaped under PID 1,

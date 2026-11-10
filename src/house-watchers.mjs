@@ -1,4 +1,4 @@
-import { delimiter, join } from 'node:path';
+import { basename, delimiter, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { accessSync, constants, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
@@ -75,10 +75,27 @@ export function reapHouseWaits(command, names, proc = '/proc', kill = process.ki
       if (realpathSync(`${base}/exe`) !== executable) continue;
       const args = readFileSync(`${base}/cmdline`, 'utf8').split('\0');
       if (args.at(-1) === '') args.pop();
-      if (args.length !== 3 || args[1] !== 'wait' || !names.has(args[2])) continue;
+      if (![command, executable, basename(command), basename(executable)].includes(args[0]) || args.length !== 3 || args[1] !== 'wait' || !names.has(args[2])) continue;
       kill(Number(pid), 'SIGKILL');
       reaped.push(Number(pid));
     } catch { /* disappeared or inaccessible */ }
   }
   return reaped;
+}
+
+// Startup must not adopt a successor until every signalled observer is dead.
+// A D-state process may defer SIGKILL: fail reconciliation and retry later.
+export async function waitForHouseWaits(pids, proc = '/proc', timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const live = pids.filter(pid => {
+      try {
+        const status = readFileSync(`${proc}/${pid}/status`, 'utf8');
+        return !/^State:\s+[ZX]/m.test(status);
+      } catch (e) { if (e.code === 'ENOENT') return false; throw e; }
+    });
+    if (!live.length) return;
+    if (Date.now() >= deadline) throw Error(`house waits still running after SIGKILL: ${live.join(', ')}`);
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
 }
