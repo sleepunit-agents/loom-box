@@ -102,7 +102,7 @@ import { cancelReservedLaunch, launchAttempt, launchWorkerAlive, launchWorkerIde
 import { launchInjectedNative, observeNativeLaunch, superviseNativeLaunch } from './native-launch.mjs';
 import { raiseAlert } from './alerthook.mjs';
 import { changed as changedCards } from './activity.mjs';
-import { keepKey, keepSession } from './bodyhost.mjs';
+import { keepKey, keepSession, keyFile } from './bodyhost.mjs';
 import { spawnCap } from './spawn.mjs';
 import { continuationOutbox } from './continuation-outbox.mjs';
 import { admit, allocatorOf, capacityGate, forecastBurn, logShadow, readReadings, recordReadings, startKind } from './allocator.mjs';
@@ -911,6 +911,18 @@ export function houseLetGo(env, houses, ref) {
 }
 
 /**
+ * A run's key dies with its run (t-2103): once no body holds the conversation, its hash goes off the record (so no
+ * proof can match it, whatever later sets a body), and on loom's machine its key file (bodyhost.mjs, keyFile) goes too,
+ * only while it is still that run's key (a newer run's file, written before its commit, is that run's to keep).
+ */
+function forgetRunKey(env, c) {
+  const want = typeof c.sendKey === 'string' && /^[0-9a-f]{64}$/.test(c.sendKey) ? Buffer.from(c.sendKey, 'hex') : null;
+  const f = want ? keyFile(env, c.conversation) : null;
+  if (f) { try { const k = readFileSync(f, 'utf-8').trim(); if (k && timingSafeEqual(keyHash(k), want)) rmSync(f, { force: true }); } catch { /* none kept here */ } }
+  delete c.sendKey;
+}
+
+/**
  * `loom runtime body end` (t-2079): the owner ended this body, so no conversation keeps it as its body, nor a retirement
  * waiting on it (a retirement whose house will never send its history held its spawn slot for hours). The conversation
  * resumes from its digests, or its saved slot, on its next message.
@@ -920,7 +932,7 @@ export function releaseBody(env, ref) {
     const released = [];
     for (const c of listConvs(env)) {
       if (c.body !== ref && c.retiring?.body !== ref) continue;
-      if (c.body === ref) { delete c.body; delete c.idleSince; delete c.nativeRetirement; }
+      if (c.body === ref) { delete c.body; delete c.idleSince; delete c.nativeRetirement; forgetRunKey(env, c); }
       if (c.retiring?.body === ref) delete c.retiring;
       saveConv(env, c);
       released.push(c.conversation);
@@ -2052,7 +2064,7 @@ async function executeOne(env, op, d, mem) {
     locked(env, () => {
       const c = loadConv(env, op.cv);
       if (!c) return;
-      if (c.body === op.body) { c.body = undefined; c.idleSince = undefined; closeEnded(env, c, op.body, d, d.now().getTime()); }
+      if (c.body === op.body) { c.body = undefined; c.idleSince = undefined; forgetRunKey(env, c); closeEnded(env, c, op.body, d, d.now().getTime()); }
       if (saved.slot) c.slot = { ...saved.slot, rules: c.bodyRules ?? { guest: false } }; else delete c.slot;
       requeue(c, [...saved.pending, ...op.msgs]);
       if (ours(c, op)) delete c.starting;
@@ -2069,7 +2081,7 @@ async function executeOne(env, op, d, mem) {
       rmSync(slotFile(env, op.cv), { force: true });
       const c = loadConv(env, op.cv);
       if (!c) return;
-      if (c.body === op.body) { c.body = undefined; c.idleSince = undefined; delete c.bodyRules; delete c.resetPending; closeEnded(env, c, op.body, d, d.now().getTime()); }
+      if (c.body === op.body) { c.body = undefined; c.idleSince = undefined; delete c.bodyRules; delete c.resetPending; forgetRunKey(env, c); closeEnded(env, c, op.body, d, d.now().getTime()); }
       delete c.slot;
       if (ours(c, op)) delete c.starting;
       requeue(c, saved.pending);
@@ -2083,7 +2095,7 @@ async function executeOne(env, op, d, mem) {
     locked(env, () => {
       const c = loadConv(env, op.cv);
       if (!c) return;
-      if (c.body === op.body) { c.body = undefined; c.idleSince = undefined; closeEnded(env, c, op.body, d, d.now().getTime()); }
+      if (c.body === op.body) { c.body = undefined; c.idleSince = undefined; forgetRunKey(env, c); closeEnded(env, c, op.body, d, d.now().getTime()); }
       if (ours(c, op)) delete c.starting;
       if (saved.slot) c.slot = { ...saved.slot, rules: c.bodyRules ?? { guest: false } }; else if (c.body === undefined) delete c.slot;
       // What its inbox still held goes to its next body (shuttle's drop: pending becomes a fresh batch).
@@ -2509,6 +2521,7 @@ async function interruptOp(env, op, d) {
       if (run && !Number.isFinite(run.end)) { run.end = d.now().getTime(); run.interrupted = true; }
       c.body = undefined;
       delete c.idleSince;
+      forgetRunKey(env, c);
       if (saved.slot) c.slot = { ...saved.slot, rules: c.bodyRules ?? { guest: false } };
       else if (op.body) delete c.slot;
       requeue(c, saved.pending);
@@ -2686,6 +2699,7 @@ async function quotaOp(env, op, d) {
     if (c.body === op.body) {
       c.body = undefined;
       c.idleSince = undefined;
+      forgetRunKey(env, c);
       if (saved.slot) c.slot = { ...saved.slot, rules: c.bodyRules ?? { guest: false } }; else delete c.slot;
     }
     const retried = !!r?.retryOf;
@@ -2990,6 +3004,7 @@ async function stopStuck(env, op, d) {
     if (c.body === op.body) {
       c.body = undefined;
       c.idleSince = undefined;
+      forgetRunKey(env, c);
       if (saved.slot) c.slot = { ...saved.slot, rules: c.bodyRules ?? { guest: false } }; else delete c.slot;
       // Its run failed, on the record the loop check reads (loops.mjs, judge).
       const r = (c.runLog ?? []).findLast((x) => x.run === c.run);
@@ -3651,7 +3666,7 @@ export function resetPrincipal(env, conversation, { agent, approval } = {}) {
     rmSync(homeFile(env, conversation), { force: true });
     delete c.slot; delete c.home; delete c.fallback;
     // The run that heard what came before speaks no more: its key is gone now, not when its body is ended.
-    if (c.body) { c.resetPending = true; delete c.sendKey; }
+    if (c.body) { c.resetPending = true; forgetRunKey(env, c); }
     // A reset is activity: the record (and the reset it holds) outlives any continuation issued before it (t-2004).
     c.last = new Date().toISOString();
     saveConv(env, c);
