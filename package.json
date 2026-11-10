@@ -290,6 +290,7 @@
       "grants",
       "ask"
     ],
+    "grants_store": "grants",
     "store": {
       "grants": {
         "writers": "owner"
