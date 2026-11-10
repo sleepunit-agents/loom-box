@@ -1581,30 +1581,37 @@ async function activityPass(env, c, d) {
   // in the conversation, whose words its own might carry. Read from its principal now (principalOf: a former owner
   // counts as a person), as localForeign reads it, never from the stored field alone.
   const ownersAlone = (() => { try { return wordsShown(principalOf(env, c), c); } catch { return false; } })();
-  // Every card through the one gate (activity.mjs stepParts), made here or reported by a house.
-  const cards = (r.activity(body) ?? []).filter((x) => x && (x.tool !== 'text' || ownersAlone)).map((x) => ({ ...baseCard(x), ...stepParts(x) }));
+  // Every card through the one gate (activity.mjs stepParts), made here or reported by a house. Where someone else is
+  // in the conversation, a step's words (its command, output, diff, plan items) don't go either: theirs could be in
+  // them. Its label, tool, state, result line and times do (Jonathan, 2026-11-10: other people summarized).
+  const cards = (r.activity(body) ?? []).filter((x) => x && (x.tool !== 'text' || ownersAlone)).map((x) => {
+    const parts = stepParts(x);
+    if (!ownersAlone) { delete parts.detail; delete parts.body; delete parts.items; }
+    return { ...baseCard(x), ...parts };
+  });
+  const nowMs = (() => { try { return d.now().getTime(); } catch { return Date.now(); } })();
   const { out, next } = changedCards(cards, c.cardsSent ?? {});
-  if (noThread.has(c.conversation) && !out.length) return;
+  // A thread core said is gone (409) is told nothing, for a while (it may be unarchived): its cards are marked told.
+  if (held(noThread, c.conversation, nowMs)) { if (out.length) saveSent(env, c, next, null); return; }
   let alive = null;
   try { alive = cleanAlive(r.signOfLife?.(body)); } catch { /* it can't say */ }
-  const old = oldCore.has(c.conversation);
-  const nowMs = (() => { try { return d.now().getTime(); } catch { return Date.now(); } })();
+  const old = held(oldCore, c.conversation, nowMs);
   // Its last sign of life goes when it moved, at most every ALIVE_MS when alone (core's working line); never to a core
-  // that refused it, nor to a thread core said is gone.
-  const sendAlive = !!alive && !old && !noThread.has(c.conversation) && alive.at !== c.aliveSent?.at && (out.length > 0 || nowMs - (c.aliveSent?.told ?? 0) >= ALIVE_MS);
+  // that refused it.
+  const sendAlive = !!alive && !old && alive.at !== c.aliveSent?.at && (out.length > 0 || nowMs - (c.aliveSent?.told ?? 0) >= ALIVE_MS);
   // A core from before t-2109 is told plain cards only, without words between steps.
   const told = old ? out.filter((x) => x.tool !== 'text').map(baseCard) : out;
   if (!told.length && !sendAlive) { if (out.length) saveSent(env, c, next, null); return; }
   const post = (cs, a) => d.core.activity({ conversation: c.conversation, run: c.run, cards: cs, ...(a ? { alive: a } : {}) });
   // Refused for good (no live thread, or a card core won't take): they're marked told, so they aren't sent again. A 409
-  // (no live thread) stops its sign of life too. A 400 that says core doesn't know the further parts (an older core:
-  // unknown keys, or no cards with a sign of life) is told the plain cards, and remembered until restart.
+  // (no live thread) holds the conversation for HOLD_MS. A 400 that says core doesn't know the further parts (an older
+  // core: unknown keys, or no cards beside a sign of life) is told the plain cards, and held to plain ones for HOLD_MS.
   try { await post(told, sendAlive ? alive : null); } catch (e) {
     if (e?.status !== 409 && e?.status !== 400) throw e;
-    if (e.status === 409) noThread.add(c.conversation);
+    if (e.status === 409) noThread.set(c.conversation, nowMs);
     let retold = false;
     if (e.status === 400 && !old && OLD_CORE.test(String(e.message ?? ''))) {
-      oldCore.add(c.conversation);
+      oldCore.set(c.conversation, nowMs);
       const plain = out.filter((x) => x.tool !== 'text').map(baseCard);
       try { if (plain.length) { await post(plain, null); retold = true; } } catch (e2) { if (e2?.status !== 409 && e2?.status !== 400) throw e2; }
     }
@@ -1613,6 +1620,15 @@ async function activityPass(env, c, d) {
     return;
   }
   saveSent(env, c, next, sendAlive ? alive : null, nowMs);
+}
+
+/** Whether a conversation is still held (oldCore, noThread): for HOLD_MS after it was, then tried again. */
+function held(m, conversation, nowMs) {
+  const at = m.get(conversation);
+  if (at === undefined) return false;
+  if (nowMs - at < HOLD_MS) return true;
+  m.delete(conversation);
+  return false;
 }
 
 /** What was told of a conversation's cards and its sign of life, on its record (only while its body is the same). */
@@ -1624,7 +1640,8 @@ function saveSent(env, c, next, alive, nowMs = Date.now()) {
 }
 /** At most how often a body's sign of life alone is told (t-2109), and the conversations whose core refused it. */
 const ALIVE_MS = 20_000;
-const oldCore = new Set(), noThread = new Set();
+const oldCore = new Map(), noThread = new Map();
+const HOLD_MS = 10 * 60_000;
 /** How an older core refuses the further parts: a card's unknown keys, or no cards beside a sign of life. */
 const OLD_CORE = /unknown keys|cards is a list of 1-/;
 

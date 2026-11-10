@@ -69,6 +69,7 @@ const stableLaunchToken = value => {
 /** At most how much of a session's transcript a sign of life reads a time, and of a helper's transcript (t-2109). */
 const SIGN_READ_MAX = 4 * 1024 * 1024;
 const HELPER_READ_MAX = 2 * 1024 * 1024;
+const SIGN_MEMO = new Map();
 /** `max` bytes of `p` from `offset` (as text), and the offset after them. */
 function readFrom(p, offset, max) {
   let fd;
@@ -366,7 +367,8 @@ export class ClaudeRunner {
     if (!f) return null;
     let st;
     try { st = statSync(f); } catch { return null; }
-    const memos = (this.signMemo ??= new Map());
+    // Kept for the process, by file: a body host makes a runner each beat, so a memo of its own would start over.
+    const memos = SIGN_MEMO;
     let m = memos.get(f);
     if (!m || st.size < m.offset) m = { offset: 0, seen: new Map(), rest: '' };
     if (st.size > m.offset) {

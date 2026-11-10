@@ -119,6 +119,9 @@ test('a sign of life: when its transcript last moved, and its tokens, each messa
   assert.equal(r.signOfLife(body).tokens, 45);
   appendFileSync(f, `${next.slice(20)}\n${a('m2', 9)}\n`);
   assert.equal(r.signOfLife(body).tokens, 56, '40 + 9 + 7');
+  // A body host makes a runner each beat: a new one carries on from where the last read stopped.
+  appendFileSync(f, `${a('m4', 4)}\n`);
+  assert.equal(new ClaudeRunner({ projectsDir: join(root, 'projects'), jobsDir: join(root, 'jobs') }).signOfLife(body).tokens, 60);
   assert.equal(claudeTokens([]), null);
 });
 

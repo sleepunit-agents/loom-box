@@ -7,7 +7,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { changed, claudeCards, claudeSummary, codexCards, shownPath } from '../src/activity.mjs';
 import { ClaudeRunner, CodexRunner } from '../src/runners.mjs';
-import { deliver, loadConv, tick } from '../src/delivery.mjs';
+import { deliver, loadConv, saveConv, tick } from '../src/delivery.mjs';
 import { here, world, cvOf } from './delivery-world.mjs';
 import { scratch } from './scratch.mjs';
 
@@ -210,7 +210,7 @@ test('whose words show: only a conversation for the owner alone, read from its p
   assert.equal(wordsShown(p, { actsFor: { owners: ['someone-gone'] } }), false);
 });
 
-test('an older core: after its first refusal, plain cards go straight to it; a 409 stops the sign of life; another 400 is only a warning (t-2109)', async () => {
+test('an older core: after its first refusal, plain cards go straight to it; a 409 holds the thread; another 400 is only a warning (t-2109)', async () => {
   const { spawnCall } = await import('../src/spawn.mjs');
   const rich = (n) => ({ id: `t${n}`, at: 'x', tool: 'Bash', summary: `Step ${n}`, state: 'done', detail: 'npm test', body: 'ok' });
   const run = async (answer) => {
@@ -226,16 +226,58 @@ test('an older core: after its first refusal, plain cards go straight to it; a 4
     cards.push(rich(2)); at += 30;
     await tick(o.env, o.o);
     at += 30;
-    o.clock?.advance?.(60_000);
+    o.clock.advance(60_000);
     await tick(o.env, o.o);
     return o.core.activityCalls.filter((a) => a.conversation === r.handle);
   };
   const extra = (x) => !!x.alive || x.cards.some((c) => Object.keys(c).some((k) => !['id', 'at', 'tool', 'summary', 'state'].includes(k)));
   const old = await run((x) => (extra(x) ? Object.assign(new Error('bad-input: card 0 has unknown keys: body'), { status: 400 }) : null));
-  // First batch: refused rich, then told plain. Second batch: plain at once, no second refusal.
+  // First batch: refused rich, then told plain. Second batch: plain at once, no second refusal; no sign of life.
   assert.deepEqual(old.map((x) => [x.cards.map((c) => c.id), extra(x)]), [[['t1'], true], [['t1'], false], [['t2'], false]]);
   const gone = await run(() => Object.assign(new Error('conflict: that conversation has no live thread'), { status: 409 }));
-  assert.deepEqual(gone.map((x) => x.cards.map((c) => c.id)), [['t1'], ['t2']], 'after a 409, only new cards are tried, never a sign of life alone');
+  assert.deepEqual(gone.map((x) => x.cards.map((c) => c.id)), [['t1']], 'after a 409 nothing more is tried, cards or a sign of life');
   const other = await run((x) => (x.cards.some((c) => c.id === 't1') ? Object.assign(new Error('bad-input: run is the body run'), { status: 400 }) : null));
-  assert.ok(other.some((x) => x.alive), 'a 400 for another reason doesn\'t take it for an older core');
+  const t2 = other.find((x) => x.cards.some((c) => c.id === 't2'));
+  assert.ok(t2 && t2.cards[0].body === 'ok', 'a 400 for another reason isn\'t taken for an older core: later cards go whole');
+});
+
+test('a sign of life alone goes at most every 20 seconds, and only when it moved (t-2109)', async () => {
+  const { spawnCall } = await import('../src/spawn.mjs');
+  const o = world();
+  o.core.commsAnswer = (x) => (x.op === 'spawn' ? { ok: true, id: 'th:abcdefghij' } : { ok: true });
+  let at = 0;
+  o.runner.activity = () => [{ id: 't1', at: 'x', tool: 'Bash', summary: 'Step', state: 'running' }];
+  o.runner.signOfLife = () => ({ at: new Date(Date.UTC(2026, 10, 10, 10, 0, at)).toISOString() });
+  const r = await spawnCall(o.env, { kind: 'owner' }, { agent: 'art', brief: 'x' }, o.o);
+  await tick(o.env, o.o); await tick(o.env, o.o);
+  const alone = () => o.core.activityCalls.filter((a) => a.conversation === r.handle && !a.cards.length).length;
+  assert.equal(alone(), 0, 'it went with the card');
+  at += 5; o.clock.advance(5_000); await tick(o.env, o.o);
+  assert.equal(alone(), 0, 'moved, but within 20 s');
+  o.clock.advance(20_000); await tick(o.env, o.o);
+  assert.equal(alone(), 1, 'moved, past 20 s');
+  o.clock.advance(30_000); await tick(o.env, o.o);
+  assert.equal(alone(), 1, 'past 20 s, but it didn\'t move');
+});
+
+test('where someone else is, or a former owner spoke, no words and no command, output or diff go: label, state and result only (t-2109)', async () => {
+  const { spawnCall } = await import('../src/spawn.mjs');
+  const o = world();
+  o.core.commsAnswer = (x) => (x.op === 'spawn' ? { ok: true, id: 'th:abcdefghij' } : { ok: true });
+  o.runner.activity = () => [{ id: 'w', at: 'x', tool: 'text', summary: 'Loren said hi', state: 'done', body: 'Loren said hi' },
+    { id: 't1', at: 'x', tool: 'Bash', summary: 'Saved the note', state: 'done', detail: 'npm test', body: 'what Loren said', result: '1 line of output' }];
+  const r = await spawnCall(o.env, { kind: 'owner' }, { agent: 'art', brief: 'x' }, o.o);
+  // Its stored actsFor still says the owner; its principal now holds a former owner, a person.
+  const c = loadConv(o.env, r.handle);
+  c.actsFor = { ...c.actsFor, owner: true, people: [], unknown: false, owners: ['someone-gone'] };
+  saveConv(o.env, c);
+  await tick(o.env, o.o); await tick(o.env, o.o);
+  const sent = o.core.activityCalls.filter((a) => a.conversation === r.handle).flatMap((a) => a.cards);
+  assert.deepEqual(sent.map((x) => [x.tool, x.detail, x.body, x.result]), [['Bash', undefined, undefined, '1 line of output']]);
+  // A bridge chat with a person: the same.
+  const b = world();
+  b.runner.activity = o.runner.activity;
+  await deliver(b.env, b.msg('dm:U1', 'hi'), b.o);
+  await tick(b.env, b.o);
+  for (const x of b.core.activityCalls.flatMap((a) => a.cards)) assert.deepEqual([x.tool, x.detail, x.body], ['Bash', undefined, undefined]);
 });
