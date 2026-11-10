@@ -64,7 +64,8 @@ export function loomStore(env = process.env, { run = spawnSync, piece = pieceNam
  * (it touches `-shm`'s mtime with its read marks, so that's left out). '' when they can't be read, which keeps nothing.
  */
 export function storeSignature(env, piece = pieceName(env)) {
-  const home = resolve(env.LOOM_HOME || join(env.HOME || homedir(), '.config', 'loom'));
+  // As core finds it (householdHome): LOOM_HOME, else the user's own home, never $HOME.
+  const home = resolve(env.LOOM_HOME || join(homedir(), '.config', 'loom'));
   const db = join(home, 'commons', 'stores', `${piece}.db`);
   const stat = (p) => { try { const s = statSync(p, { bigint: true }); return `${s.ino}:${s.mtimeNs}:${s.size}`; } catch (e) { return e.code === 'ENOENT' ? '-' : null; } };
   const head = (p, n) => {

@@ -7,13 +7,14 @@
 // the piece hands it), in a 0700 directory, the socket itself 0600: only this user reaches it. That user can run
 // `loom-runtime ui --json` anyway, which reads the same files, so the socket gives nobody anything new.
 //
-// What: one request per line, {"id": n, "op": "manifest"}; one answer per line, in order,
-// {"id": n, "ok": true, "version": "<the cli.mjs this service runs>", "at": <ms>, "stdout": "<what ui --json prints>"}.
-// Core compares `version` with what the piece's bin resolves to now, so an install never reads the old version's
-// answer. Nothing else is served: no page, no action, no API, and no grant ever travels here. The manifest is one
+// What: one request per line, {"id": n, "op": "manifest", "version": "<file>@<mtime>", "since": <ms>}; one answer per
+// line, in order, {"id": n, "ok": true, "version": "<the cli.mjs this service runs>@<mtime>", "at": <ms>, "stdout":
+// "<what ui --json prints>"}. Core compares `version` with what the piece's bin resolves to now, so an install never
+// reads the old version's answer; only an ask for this version counts as loom reading the socket. `since`: computed
+// again if the kept answer is older (core heard the piece moved, or an action ran). Nothing else is served: no page, no action, no API, and no grant ever travels here. The manifest is one
 // answer for every viewer (it reads no scope); core narrows it per viewer as it does an answer from `ui --json`.
 import { createServer, createConnection } from 'node:net';
-import { chmodSync, lstatSync, mkdirSync, unlinkSync } from 'node:fs';
+import { chmodSync, lstatSync, mkdirSync, statSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -30,7 +31,11 @@ export const IDLE_MS = 10 * 60_000;
 /** sun_path is 108 bytes on Linux; past this, no socket (loom keeps running `ui --json`). */
 const MAX_PATH = 100;
 
-export const VERSION = fileURLToPath(new URL('./cli.mjs', import.meta.url));
+/** What this service runs: the file and when it last changed, as core reads the piece's bin (piece-socket.ts, versionOf). */
+const FILE = fileURLToPath(new URL('./cli.mjs', import.meta.url));
+export const VERSION = `${FILE}@${statSync(FILE).mtimeMs}`;
+/** A connection whose unread answers pass this goes: a client that asks and never reads can't fill the service's memory. */
+export const MAX_UNREAD = 2 * 1024 * 1024;
 
 /** Where the socket is: in the piece's own home, as core names it. null outside loom (no LOOM_PIECE_HOME). */
 export function socketPath(env) {
@@ -96,10 +101,12 @@ export async function serveManifest(env, { compute, changed, now = Date.now, log
     kept = next;
     return moved;
   };
-  const answer = (id) => {
-    asked = now();
+  const answer = (id, version, since) => {
+    // An ask for another version: core will run `ui --json` instead, so it isn't loom reading this socket (the
+    // heartbeat stays on).
+    if (version === VERSION) asked = now();
     try {
-      if (!kept || now() - kept.at >= STALE_MS) fresh();
+      if (!kept || now() - kept.at >= STALE_MS || (Number.isSafeInteger(since) && since > kept.at)) fresh();
       return { id, ok: true, version: VERSION, at: kept.at, stdout: kept.stdout };
     } catch (e) {
       log(`manifest: ${e.message}`);
@@ -126,18 +133,24 @@ export async function serveManifest(env, { compute, changed, now = Date.now, log
         try { m = JSON.parse(line); } catch { m = null; }
         // Anything but a manifest request: the connection goes, unanswered.
         if (!m || typeof m !== 'object' || m.op !== 'manifest' || !Number.isSafeInteger(m.id) || m.id < 0) { c.destroy(); return; }
-        c.write(JSON.stringify(answer(m.id)) + '\n');
+        // Asking faster than it reads: the connection goes.
+        if (c.writableLength > MAX_UNREAD) { c.destroy(); return; }
+        c.write(JSON.stringify(answer(m.id, m.version, m.since)) + '\n');
       }
       if (Buffer.byteLength(buf) > MAX_LINE) c.destroy();
     });
   });
-  const old = process.umask(0o177);
   try {
-    await new Promise((resolve, reject) => { server.once('error', reject); server.listen(path, () => { server.off('error', reject); resolve(); }); });
+    await new Promise((resolve, reject) => {
+      server.once('error', reject);
+      // The socket is made 0600 as it's bound (the umask only for that call: it binds before listen returns).
+      const old = process.umask(0o177);
+      try { server.listen(path, () => { server.off('error', reject); resolve(); }); } finally { process.umask(old); }
+    });
   } catch (e) {
     log(`no manifest socket: ${e.message}`);
     return null;
-  } finally { process.umask(old); }
+  }
   try { chmodSync(path, 0o600); } catch { /* the dir is 0700 either way */ }
   server.on('error', (e) => log(`manifest socket: ${e.message}`));
 

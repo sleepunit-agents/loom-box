@@ -5,7 +5,7 @@ import { createConnection } from 'node:net';
 import { mkdtempSync, statSync, mkdirSync, writeFileSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { serveManifest, socketPath, stablePrint, VERSION, STALE_MS, ACTIVE_MS } from '../src/ui-socket.mjs';
+import { serveManifest, socketPath, stablePrint, VERSION, STALE_MS, ACTIVE_MS, MAX_UNREAD } from '../src/ui-socket.mjs';
 import { keptReads, memStore, storeSignature } from '../src/store.mjs';
 
 const home = () => mkdtempSync(join(tmpdir(), 'uisock-'));
@@ -40,10 +40,10 @@ test('answers the manifest from memory, 0600 in a 0700 dir, with the version it 
   assert.equal(statSync(s.path).mode & 0o777, 0o600);
   const c = client(s.path);
   await c.ready;
-  const a = await c.ask(JSON.stringify({ id: 1, op: 'manifest' }));
+  const a = await c.ask(JSON.stringify({ id: 1, op: 'manifest', version: VERSION }));
   assert.deepEqual({ ...a, at: 0 }, { id: 1, ok: true, version: VERSION, at: 0, stdout: '{"v":2,"n":1}\n' });
   // Asked again at once: the same answer, not computed again.
-  const b = await c.ask(JSON.stringify({ id: 2, op: 'manifest' }));
+  const b = await c.ask(JSON.stringify({ id: 2, op: 'manifest', version: VERSION }));
   assert.equal(b.id, 2);
   assert.equal(b.stdout, '{"v":2,"n":1}\n');
   assert.equal(n, 1);
@@ -82,10 +82,10 @@ test('an answer past STALE_MS is computed again; a tick computes while loom asks
   assert.equal(n, 0);
   const c = client(s.path);
   await c.ready;
-  await c.ask(JSON.stringify({ id: 1, op: 'manifest' }));
+  await c.ask(JSON.stringify({ id: 1, op: 'manifest', version: VERSION }));
   assert.equal(n, 1);
   t += STALE_MS;
-  await c.ask(JSON.stringify({ id: 2, op: 'manifest' }));
+  await c.ask(JSON.stringify({ id: 2, op: 'manifest', version: VERSION }));
   assert.equal(n, 2);
   // Only the idle clock moved: computed, not "moved".
   body = { v: 2, agents: { art: { readings: [], idle: { observedAt: 'b' } } } };
@@ -194,4 +194,43 @@ test('keptReads keeps nothing read while a write landed (the signature moved dur
   k.list('gate-proposals');
   k.list('gate-proposals');
   assert.equal(reads, 2);
+});
+
+test('since: an answer older than core\'s last move is computed again; an ask for another version keeps the heartbeat', async () => {
+  const h = home();
+  let t = 1_000_000;
+  let n = 0;
+  const s = await serveManifest({ LOOM_PIECE_HOME: h }, { compute: () => `{"n":${++n}}\n`, changed: async () => {}, now: () => t, log: quiet });
+  const c = client(s.path);
+  await c.ready;
+  // Another version's ask: answered (core will refuse it) but not loom reading this socket.
+  await c.ask(JSON.stringify({ id: 1, op: 'manifest', version: '/old/cli.mjs@1' }));
+  assert.equal(await s.tick(), false);
+  t += 10;
+  const a = await c.ask(JSON.stringify({ id: 2, op: 'manifest', version: VERSION, since: t - 5 }));
+  assert.equal(a.stdout, '{"n":2}\n');
+  assert.equal((await c.ask(JSON.stringify({ id: 3, op: 'manifest', version: VERSION, since: t - 5 }))).stdout, '{"n":2}\n');
+  assert.equal(await s.tick(), true);
+  c.end();
+  await s.close();
+});
+
+test('a client that asks and never reads is cut off before the service holds MAX_UNREAD of answers', async () => {
+  const h = home();
+  const big = `{"x":"${'y'.repeat(256 * 1024)}"}\n`;
+  const s = await serveManifest({ LOOM_PIECE_HOME: h }, { compute: () => big, changed: async () => {}, log: quiet });
+  const c = createConnection(s.path);
+  await new Promise((r) => c.once('connect', r));
+  c.on('error', () => {});
+  const closed = new Promise((r) => c.once('close', r));
+  c.write(`${JSON.stringify({ id: 1, op: 'manifest', version: VERSION })}\n`.repeat(Math.ceil(4 * MAX_UNREAD / big.length) + 64));
+  // Unread, a socket hears no end: once it's had time to fill, read (and drop) what came, then the server's close shows.
+  await new Promise((r) => setTimeout(r, 300));
+  let got = 0;
+  c.on('data', (d) => { got += d.length; });
+  let timer;
+  await Promise.race([closed, new Promise((_, no) => { timer = setTimeout(() => no(new Error('not cut off')), 5000); })]);
+  clearTimeout(timer);
+  assert.ok(got < 4 * MAX_UNREAD);
+  await s.close();
 });
