@@ -3833,7 +3833,7 @@ export async function spawnComms(env, d = depsOf(env)) {
         const parent = loadConv(env, c.spawn.origin);
         if (parent?.agent === c.agent) {
           const t = await d.core.turn({ key: `runtime:spawn-link-${c.conversation}`, agent: c.agent, venue: parent.venue, place: parent.place,
-            at: c.spawn.created, from: { kind: 'agent', id: c.agent }, kind: 'note', run: c.spawn.origin_run });
+            at: c.spawn.created, from: { kind: 'agent', id: c.agent }, kind: 'note', outcome: 'none', run: c.spawn.origin_run });
           try { await d.core.audit({ conversation: parent.conversation, seq: t.seq, text: `Spawned [${c.label ?? 'job'}](/comms/${c.spawn.thread.slice(3)}) (${c.conversation}), from run ${c.spawn.origin_run}.` }); } catch (e) { if (e.status !== 409) throw e; }
           locked(env, () => { const fresh = loadConv(env, c.conversation); fresh.spawn.linked = true; saveConv(env, fresh); });
         }
