@@ -6,7 +6,8 @@ import { api, setAgent } from '../src/control.mjs';
 import { HouseRunner } from '../src/houserunner.mjs';
 import { runBodyHost } from '../src/bodyhost.mjs';
 import { ageSealer } from '../src/sealed.mjs';
-import { bodyPrincipal, deliver, deliveryDir, loadConv, tick } from '../src/delivery.mjs';
+import { bodyPrincipal, deliver, deliveryDir, jobSeated, loadConv, saveConv, seatMoved, tick } from '../src/delivery.mjs';
+import { principalOf } from '../src/principal.mjs';
 import { readBody } from '../src/bodies.mjs';
 import { load, update } from '../src/state.mjs';
 import { setModels } from '../src/models.mjs';
@@ -138,4 +139,29 @@ test('the allocating parent can cancel its task but another principal house cann
   assert.equal(c.spawn.job.origin, 'cv-aaaaaaaaaaaa');
   assert.equal(c.spawn.ruleSource.place, 'guest-room');
   assert.equal(JSON.stringify(load(w.env).houses['h-7']).includes('private model portion'), false, 'the derived brief is not copied into house metadata');
+});
+
+test('a job whose conversation someone else joins leaves its own house, and that house is let go (t-2081)', async () => {
+  const w = world();
+  const cv = 'cv-0000000a2081';
+  const owner = { owner: true, people: [], unknown: false };
+  update(w.env, s => { s.houses['h-7'] = { id: 'h-7', agent: 'art', state: 'running', kind: 'body-host', seat: 'j-h-7', job: { house: 'h-7', conversation: cv }, taskActsFor: owner }; });
+  const c = { conversation: cv, agent: 'art', venue: 'spawn', place: 'job-h-7', body: 'claude:h-7-abc', bodyRules: { seat: 'j-h-7' }, queue: [], actsFor: { ...owner },
+    spawn: { job: { house: 'h-7' }, principal: principalOf(w.env, { agent: 'art', actsFor: owner }) } };
+  saveConv(w.env, c);
+  const caller = { kind: 'agent', agent: 'art', house: 'h-7' };
+  assert.equal(jobSeated(w.env, loadConv(w.env, cv)), true);
+  assert.equal(seatMoved(w.env, loadConv(w.env, cv)), false, 'the job\'s own principal keeps it in its house');
+  assert.deepEqual(await taskStatus(w.env, caller, w.o), { done: false });
+  // A relay's answer from another agent: a sender no one can name.
+  saveConv(w.env, { ...c, actsFor: { ...owner, unknown: true } });
+  assert.equal(jobSeated(w.env, loadConv(w.env, cv)), false);
+  assert.equal(seatMoved(w.env, loadConv(w.env, cv)), true, 'its body is no longer fed in the job\'s house');
+  const st = await taskStatus(w.env, caller, w.o);
+  assert.equal(st.done, true, 'the task host exits, so the house and what it was issued go');
+  assert.equal(st.ok, false);
+  // A person who isn't the owner, likewise.
+  saveConv(w.env, { ...c, actsFor: { owner: true, people: ['loren'], unknown: false } });
+  assert.equal(seatMoved(w.env, loadConv(w.env, cv)), true);
+  assert.equal((await taskStatus(w.env, caller, w.o)).done, true);
 });

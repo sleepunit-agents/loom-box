@@ -1298,7 +1298,14 @@ export async function drain(env, cv, d = depsOf(env), mem = new Map()) {
  * (loom's machine, t-1830) has no house and is the owner's work only: one whose conversation a person other than the
  * owner has written into has moved too (and its next start is refused: execute, localForeign).
  */
-const conversationSeat = (env, c) => c.spawn?.job ? `j-${c.spawn.job.house}` : seatOf(principalOf(env, c), c.conversation);
+const conversationSeat = (env, c) => jobSeated(env, c) ? `j-${c.spawn.job.house}` : seatOf(principalOf(env, c), c.conversation);
+
+/**
+ * Whether a job's conversation still belongs in its own house (t-2081): only while its principal is the one it started
+ * with, the one that house's secrets were issued for. One that someone else joined (a relay's answer, a wake loom
+ * couldn't say was the owner's) is seated by its principal instead, so its next body runs in that principal's house.
+ */
+export const jobSeated = (env, c) => !!c?.spawn?.job && JSON.stringify(principalOf(env, c)) === JSON.stringify(c.spawn.principal);
 
 export function seatMoved(env, c) {
   if (!c?.body) return false;
