@@ -4,11 +4,11 @@
 // say is taken.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { deliver, loadConv, tick } from '../src/delivery.mjs';
 import { load, update } from '../src/state.mjs';
-import { WRITE_OFF_AFTER_MS, api } from '../src/control.mjs';
+import { WRITE_OFF_AFTER_MS, api, writeOffBox } from '../src/control.mjs';
 import { bodySync } from '../src/houserunner.mjs';
 import { cvOf, hasAge, houseWorld, world } from './delivery-world.mjs';
 
@@ -25,14 +25,13 @@ test('only the household owner writes off a box, only one silent long enough, ne
     s.houses['h-7'] = { id: 'h-7', agent: 'art', box: far, state: 'running', tokenLabel: 'house-h-7', nativeHistory: { v: 1, complete: false } };
     s.houses['h-8'] = { id: 'h-8', agent: 'art', box: far, state: 'running', service: 'bridge' };
   });
-  assert.equal(api(h.env, fx, { caller: { kind: 'agent', agent: 'art' }, path: 'box-write-off', body: { name: 'far' } }).status, 403);
-  assert.equal(api(h.env, fx, { caller: { kind: 'owner', agents: ['art'] }, path: 'box-write-off', body: { name: 'far' } }).status, 403, 'a scoped owner token');
-  assert.equal(api(h.env, fx, { caller: owner, path: 'box-write-off', body: { name: 'far' } }).status, 409, 'heard from a minute ago');
-  assert.equal(api(h.env, fx, { caller: owner, path: 'box-write-off', body: { name: 'one' } }).status, 409, 'loom\'s own box');
+  // No API path does it: only the owner's Allow on a card (dark-box.mjs).
+  assert.equal(api(h.env, fx, { caller: owner, path: 'box-write-off', body: { name: 'far' } }).status, 404);
+  assert.throws(() => writeOffBox(h.env, fx, { name: 'far' }), /heard from in the last/);
+  assert.throws(() => writeOffBox(h.env, fx, { name: 'one' }), /loom's own machine/);
   update(h.env, (s) => { s.boxes[far].lastSeen = new Date(Date.now() - WRITE_OFF_AFTER_MS - 1000).toISOString(); });
-  const r = api(h.env, fx, { caller: owner, path: 'box-write-off', body: { name: 'far' } });
-  assert.equal(r.status, 200, JSON.stringify(r.body));
-  assert.deepEqual(r.body.writtenOff, ['h-7']);
+  assert.throws(() => writeOffBox(h.env, fx, { name: 'far', lastSeen: '2026-01-01T00:00:00.000Z' }), /heard from since/);
+  const r = { body: writeOffBox(h.env, fx, { name: 'far' }) };
   const s = load(h.env);
   assert.equal(s.houses['h-7'].state, 'lost');
   assert.deepEqual(s.houses['h-7'].nativeHistory, { v: 1, complete: true, writtenOff: true });
@@ -75,8 +74,7 @@ for (const harness of ['claude', 'codex']) test(`${harness}: a conversation mid-
     w.clock.advance(1001); await tick(h.env, o);
     assert.equal(loadConv(h.env, cv).body, before.body);
     // The owner writes it off.
-    const r = api(h.env, fx, { caller: owner, path: 'box-write-off', body: { name: 'far' } });
-    assert.equal(r.status, 200, JSON.stringify(r.body));
+    const r = { body: writeOffBox(h.env, fx, { name: 'far', houses: ['h-1'] }) };
     assert.deepEqual(r.body.writtenOff, ['h-1']);
     w.clock.advance(1001); await tick(h.env, o); await tick(h.env, o);
     const after = loadConv(h.env, cv);
@@ -95,50 +93,95 @@ for (const harness of ['claude', 'codex']) test(`${harness}: a conversation mid-
   } finally { if (host) { const p = join(h.env.LOOM_BOX_DATA, 'delivery/hosts', 'art@p-loren.json'); const rec = readFileSync(p, 'utf8'); writeFileSync(p, JSON.stringify({ ...JSON.parse(rec), house: 'h-999' })); await host; } await first; }
 });
 
-test('the owner is asked once per agent and dark box; his Allow writes off exactly that, and a box that\'s back withdraws it', async () => {
-  const { askDarkBoxes, writeOffApproved, writeOffProblem } = await import('../src/dark-box.mjs');
+test('the owner is asked once per agent and stretch of silence; his Allow writes off exactly the houses on the card', async () => {
+  const { askDarkBoxes, writeOffApproved, writeOffAsk } = await import('../src/dark-box.mjs');
   const h = houseWorld();
-  const asked = [], spent = [], withdrawn = [];
-  h.env.LOOM_RUNTIME_TEST_APPROVALS = { request: (target, x) => { asked.push([target, x]); return `a-0000000${asked.length}`; }, withdraw: (id) => withdrawn.push(id) };
-  const spend = (env, id, kind, target, agent, o) => { spent.push([id, kind, target, agent, o?.onBehalf]); return ''; };
+  const asked = [], spent = [], withdrawn = [], states = {};
+  h.env.LOOM_RUNTIME_TEST_APPROVALS = { request: (target, x) => { asked.push([target, x]); const id = `a-0000000${asked.length}`; states[id] = 'pending'; return id; },
+    withdraw: (id) => { withdrawn.push(id); states[id] = 'withdrawn'; }, state: (id) => states[id] ?? 'gone' };
+  const spend = (env, id, kind, target, agent, o) => { spent.push([id, kind, target, agent, o?.onBehalf]); states[id] = 'used'; return ''; };
   const fx = { now: () => new Date(), mint: () => 'loom_' + 't'.repeat(31), revoke: () => {} };
   assert.equal(api(h.env, fx, { caller: owner, path: 'add-box', body: { name: 'far', mayHost: '*' } }).status, 200);
   const far = Object.entries(load(h.env).boxes).find(([, b]) => b.name === 'far')[0];
+  const last = new Date(Date.now() - WRITE_OFF_AFTER_MS - 60_000).toISOString();
+  const T = (agent) => `${agent}:${far}@${Math.floor(Date.parse(last) / 1000)}`;
   update(h.env, (s) => {
-    s.boxes[far].lastSeen = new Date(Date.now() - WRITE_OFF_AFTER_MS - 60_000).toISOString();
-    s.houses['h-7'] = { id: 'h-7', agent: 'art', box: far, state: 'running' };
-    s.houses['h-9'] = { id: 'h-9', agent: 'mark', box: far, state: 'running' };
+    s.boxes[far].lastSeen = last;
+    for (const [id, agent] of [['h-7', 'art'], ['h-9', 'mark'], ['h-11', 'art']]) s.houses[id] = { id, agent, box: far, state: 'running' };
   });
+  // h-11's own body host still reports (the box's process died, its container didn't): it's running, never on a card.
+  const hosts = join(h.env.LOOM_BOX_DATA, 'delivery', 'hosts');
+  mkdirSync(hosts, { recursive: true });
+  writeFileSync(join(hosts, 'art@p-dana.json'), JSON.stringify({ house: 'h-11', report: { at: Date.now(), house: 'h-11', bodies: {} } }));
   const convs = [{ conversation: 'cv-00000000000a', agent: 'art', body: 'claude:h-7-b0000001' }, { conversation: 'cv-00000000000b', agent: 'art', body: 'codex:h-7-b0000002' },
-    { conversation: 'cv-00000000000c', agent: 'mark', body: 'claude:h-9-b0000003' }, { conversation: 'cv-00000000000d', agent: 'art', body: 'claude:h-9-b0000004' }];
-  const runtimeAs = (agent) => JSON.stringify({ kind: 'agent', agent, house: 'loom\'s runtime' });
-  await askDarkBoxes(h.env, { convs, runtimeAs });
-  await askDarkBoxes(h.env, { convs, runtimeAs });
-  assert.deepEqual(asked.map((x) => x[0]).sort(), [`art:${far}`, `mark:${far}`], 'one card each, once; a body in another agent\'s house isn\'t counted');
-  const art = asked.find((x) => x[0] === `art:${far}`)[1];
+    { conversation: 'cv-00000000000c', agent: 'mark', body: 'claude:h-9-b0000003' }, { conversation: 'cv-00000000000d', agent: 'art', body: 'claude:h-9-b0000004' },
+    { conversation: 'cv-00000000000e', agent: 'art', body: 'claude:h-11-b0000005' }];
+  await askDarkBoxes(h.env, { convs });
+  await askDarkBoxes(h.env, { convs });
+  assert.deepEqual(asked.map((x) => x[0]).sort(), [T('art'), T('mark')], 'one card each, once; another agent\'s house and a house still reporting aren\'t counted');
+  const art = asked.find((x) => x[0] === T('art'))[1];
   assert.equal(art.kind, 'box-write-off');
   assert.match(art.ask, /far.*silent for 11 minutes.*Art's 2 conversations/);
   assert.ok(art.ask.length <= 140);
+  assert.match(art.details, /houses there: h-7;/);
   const aid = load(h.env).writeOffAsks[`art:${far}`].approval;
-  const fields = { id: aid, agent: 'art', target: `art:${far}` };
-  // Never anyone else's Allow, never a body's, never for another agent's card or a stale one.
+  const fields = { id: aid, agent: 'art', target: T('art') };
+  // Never anyone else's Allow, never a body's, never for another agent's card, another stretch of silence or a stale one.
   assert.equal(writeOffApproved(h.env, fx, { kind: 'owner', agents: ['art'] }, fields, spend).ok, false);
   assert.equal(writeOffApproved({ ...h.env, HOUSE_ID: 'h-3' }, fx, owner, fields, spend).ok, false);
   assert.equal(writeOffApproved(h.env, fx, owner, { ...fields, agent: 'mark' }, spend).ok, false);
   assert.equal(writeOffApproved(h.env, fx, owner, { ...fields, id: 'a-0000ffff' }, spend).ok, false);
+  assert.equal(writeOffApproved(h.env, fx, owner, { ...fields, target: `art:${far}@12345` }, spend).ok, false);
   assert.equal(spent.length, 0, 'nothing is spent for a refused one');
+  states[aid] = 'allowed';
+  // A house created after the card isn't on it: only the card's houses go.
+  update(h.env, (s) => { s.houses['h-13'] = { id: 'h-13', agent: 'art', box: far, state: 'wanted' }; });
   const r = writeOffApproved(h.env, fx, owner, fields, spend);
   assert.equal(r.ok, true, r.message);
-  assert.deepEqual(spent, [[aid, 'box-write-off', `art:${far}`, 'art', 'owner']]);
-  assert.equal(load(h.env).houses['h-7'].state, 'lost');
-  assert.equal(load(h.env).houses['h-9'].state, 'running', 'mark\'s house waits for his own card');
-  // Applied: its ask goes, with no withdraw. Mark's box comes back: his card is withdrawn.
-  await askDarkBoxes(h.env, { convs, runtimeAs });
+  assert.deepEqual(spent, [[aid, 'box-write-off', T('art'), 'art', 'owner']]);
+  const st = load(h.env);
+  assert.equal(st.houses['h-7'].state, 'lost');
+  assert.equal(st.houses['h-11'].state, 'running', 'still reporting: not written off');
+  assert.equal(st.houses['h-13'].state, 'wanted', 'not on the card');
+  assert.equal(st.houses['h-9'].state, 'running', 'mark\'s house waits for his own card');
+  // Applied: its ask goes, with no withdraw.
+  await askDarkBoxes(h.env, { convs });
   assert.equal(load(h.env).writeOffAsks[`art:${far}`], undefined);
   assert.deepEqual(withdrawn, []);
+  // Mark's card expires allowed and unapplied: asked again, as a new card.
+  const markAid = load(h.env).writeOffAsks[`mark:${far}`].approval;
+  states[markAid] = 'expired';
+  await askDarkBoxes(h.env, { convs });
+  const again = load(h.env).writeOffAsks[`mark:${far}`].approval;
+  assert.notEqual(again, markAid);
+  // The box comes back: its card is withdrawn, and that Allow no longer applies.
   update(h.env, (s) => { s.boxes[far].lastSeen = new Date().toISOString(); });
-  assert.match(writeOffProblem(h.env, { agent: 'mark', box: far, approval: load(h.env).writeOffAsks[`mark:${far}`].approval }), /heard from/);
-  await askDarkBoxes(h.env, { convs, runtimeAs });
-  assert.deepEqual(withdrawn, ['a-00000002']);
+  assert.match(writeOffAsk(h.env, { agent: 'mark', box: far, target: T('mark'), approval: again }).why, /heard from/);
+  await askDarkBoxes(h.env, { convs });
+  assert.ok(withdrawn.includes(again));
   assert.equal(load(h.env).writeOffAsks[`mark:${far}`], undefined);
+});
+
+test('a house written off in the middle of its offline collection retires as a loss, not held for a receipt', async () => {
+  const { HouseRunner } = await import('../src/houserunner.mjs');
+  const { SessionHistoryMissing } = await import('../src/sessions.mjs');
+  const h = houseWorld();
+  const fx = { now: () => new Date(), mint: () => 'loom_' + 't'.repeat(31), revoke: () => {} };
+  assert.equal(api(h.env, fx, { caller: owner, path: 'add-box', body: { name: 'far', mayHost: '*' } }).status, 200);
+  const far = Object.entries(load(h.env).boxes).find(([, b]) => b.name === 'far')[0];
+  update(h.env, (s) => {
+    s.boxes[far].lastSeen = new Date(Date.now() - WRITE_OFF_AFTER_MS - 1000).toISOString();
+    s.houses['h-5'] = { id: 'h-5', agent: 'art', box: far, state: 'running', nativeHistory: { v: 1, complete: false, plan: 'p1' }, collection: { phase: 'native' } };
+  });
+  const hosts = join(h.env.LOOM_BOX_DATA, 'delivery', 'hosts');
+  mkdirSync(hosts, { recursive: true });
+  writeFileSync(join(hosts, 'art.json'), JSON.stringify({ house: 'h-5', offlineCollection: { plan: 'p1', complete: false, done: {} }, report: { at: 0, house: 'h-5', bodies: {} } }));
+  const hr = new HouseRunner(h.env, 'claude', { sealer: h.sealer, poll: 10 });
+  const body = { id: 'h-5-b0000009', agent: 'art', house: 'h-5' };
+  assert.deepEqual(hr.finalInbox(body), { ready: false }, 'before: waiting on a receipt the dark box will never send');
+  writeOffBox(h.env, fx, { name: 'far', houses: ['h-5'] });
+  assert.equal(hr.finalInbox(body), undefined);
+  assert.equal(hr.pending(body), false);
+  assert.equal(hr.unheard(body), null);
+  await assert.rejects(hr.pack(body, { deferAck: true }), SessionHistoryMissing);
 });

@@ -226,6 +226,14 @@ function recordOfHouse(env, agent, house) {
   return null;
 }
 
+/** Whether a house's own body host has reported lately (t-2057): its box's silence is no proof its bodies stopped. */
+export function houseHeard(env, agent, house, nowMs = Date.now()) {
+  try {
+    const found = recordOfHouse(env, agent, house);
+    return !!found && freshRec(houseRec(found.h, house), house, nowMs);
+  } catch { return true; } // Unreadable: never take it for silence.
+}
+
 /**
  * Seat records that are over: no house that's live, nothing draining, nothing asked. The owner's is kept (it's the
  * agent's own); an unknown conversation's or a person's goes, and comes back with its next body.
@@ -1180,6 +1188,8 @@ export class HouseRunner {
     const raw = rawOf(body), x = raw ? houseRec(this.host(body.agent, this.seatFor(body)), body.house) : null;
     if (!x?.offlineCollection) return undefined;
     const receipt = collectionReceipt(x, raw);
+    // Written off mid-collection (t-2057): no receipt is coming from the dark box; it retires as a loss (pack()).
+    if (!receipt && this.writtenOff(body)) return undefined;
     if (!receipt) return { ready: false };
     return { ready: true, lost: receipt.lost === true, pending: Array.isArray(receipt.pending)
       ? [...new Set([...(x.inbox?.[raw] ?? []).map(y => y.key), ...receipt.pending])] : null };

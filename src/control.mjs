@@ -999,12 +999,14 @@ export const WRITE_OFF_AFTER_MS = 10 * 60_000;
  * list. If the box comes back it's told to stop each of them, and nothing they say is taken. Only a box silent for
  * WRITE_OFF_AFTER_MS, never loom's own; `agent`, when given, only its houses; `houses`, when given, are exactly the ones the owner was asked about.
  */
-export function writeOffBox(env, effects, { name, agent, houses: asked }) {
+export function writeOffBox(env, effects, { name, agent, houses: asked, lastSeen }) {
   return update(env, (s) => {
     const id = resolveBox(s, name);
     const b = s.boxes[id];
     if (b.local) fail(`${boxNameOf(s, id)} is loom's own machine; its houses can't be written off`, 409);
     const at = Date.parse(now(effects));
+    // The card was for one stretch of silence: a box heard from since then isn't written off on it.
+    if (lastSeen !== undefined && b.lastSeen !== lastSeen) fail(`${boxNameOf(s, id)} has been heard from since you were asked`, 409);
     if (b.lastSeen && at - Date.parse(b.lastSeen) < WRITE_OFF_AFTER_MS) fail(`${boxNameOf(s, id)} was heard from in the last ${WRITE_OFF_AFTER_MS / 60_000} minutes; its houses aren't written off`, 409);
     const want = Array.isArray(asked) ? new Set(asked.filter((x) => typeof x === 'string')) : null;
     const done = [];
@@ -1567,7 +1569,7 @@ const OWNER_ONLY = {
   'add-box': addBox, 'revoke-box': revokeBox, 'may-host': setMayHost, 'set-primary': setPrimary, 'set-agent': setAgent,
   'seed-state': seedState, 'saved-state': (env, _fx, b) => savedState(env, b),
   'remote-up': remoteUp, 'remote-down': remoteDown,
-  'box-lend': lendBox, 'box-owner': setBoxOwner, 'box-watch': setBoxWatch, 'box-write-off': writeOffBox,
+  'box-lend': lendBox, 'box-owner': setBoxOwner, 'box-watch': setBoxWatch,
 };
 /** The box's own owner's (assertBoxOwner): its logins and Update now. */
 export const BOX_OWNER_ONLY = { 'login-start': loginStart, 'login-code': loginCode, 'login-cancel': loginCancel, 'box-update-now': boxUpdateNow };
