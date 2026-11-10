@@ -220,6 +220,8 @@ export function houseWorld({ sealer, claimMs = 5000, warmMs = 5000, harness = 'c
   update(env, (s) => { const k = Object.keys(s.boxes).find((x) => s.boxes[x].local); s.boxes[k].harnesses = { [harness]: { loggedIn: true } }; });
   const model = harness === 'claude' ? 'opus' : 'gpt';
   setModels(env, { list: [{ id: model, harness, family: harness === 'claude' ? 'anthropic' : 'openai' }], agent: 'art', prefer: [model] });
+  // This fixture's selected native runner is an explicit owner harness choice.
+  setModelChoice(env, { agent: 'art', harness });
   const fed = [];
   const ended = [];
   const started = [];
