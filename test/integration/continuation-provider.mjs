@@ -4,22 +4,27 @@ import { fork, spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { mkdirSync, writeFileSync, readFileSync, copyFileSync, existsSync, chmodSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { world, houseWorld } from '../delivery-world.mjs';
 import { api } from '../../src/control.mjs';
 import { load } from '../../src/state.mjs';
 import { setModels } from '../../src/models.mjs';
-import { continuationCall, deliver, handOverWake, loadConv, tick } from '../../src/delivery.mjs';
+import { continuationCall, deliver, deliveryDir, handOverWake, loadConv } from '../../src/delivery.mjs';
 
-// DRAFT, NOT YET HOST-EXECUTED. Codex only; source holder is synthetic.
-// Clock SIGKILL/replay -> authenticated companion core -> HouseRunner -> real
-// container body-host -> actual Codex shell -> continuation enqueue -> core receipt.
+// Codex only; source holder is synthetic. Stage 1 (host-run green 2026-11-09 on the pre-merge draft; the
+// extension stages 2-4 are authored, NOT YET HOST-EXECUTED):
+// 1. Clock SIGKILL/replay -> authenticated companion core -> HouseRunner -> real container body-host ->
+//    actual Codex shell -> continuation enqueue.
+// 2. The runtime controller's continuation drain, in its own process, is SIGKILLed after core accepted the
+//    provider's report and before the receipt reached it; a fresh process retries the same ref: one core row.
+// 3. Cutoff: the provider's own later report is refused past the sealed deadline; a drain past it posts nothing.
+// 4. Source reset: the provider's next report is refused as no longer the bound run.
 // Principal handoff and the house-token API transport use isolated test bridges.
 // No installed service is a target. See docs/continuation-provider-bench.md.
-test('OPT-IN actual Codex: SIGKILL clock receipt replay admits one native child and its provider submits one report', {
-  skip: process.env.CONTINUATION_PROVIDER_OPT_IN !== 'actual-codex', timeout: 240000,
+test('OPT-IN actual Codex: clock replay, controller crash, cutoff and reset around one provider report', {
+  skip: process.env.CONTINUATION_PROVIDER_OPT_IN !== 'actual-codex', timeout: 280000,
 }, async t => {
-  for (const [key,sha] of [['CONTINUATION_CORE','cd0713deefe2d819b7325cf7c75b8148e69f0c27'],['CONTINUATION_CLOCK','3ec64bace24c2f03bd58b86ac2c6acee16c4b1ef']]) {
+  for (const [key,sha] of [['CONTINUATION_CORE','5214140963140b0e535f1ecc179b7c5ecbddb88a'],['CONTINUATION_CLOCK','d3ca90b2f96ee0354c0144ffebfe1b6b6ce2bb6d']]) {
     assert.ok(process.env[key],key+' is required');
     const r=spawnSync('git',['-C',process.env[key],'rev-parse','HEAD'],{encoding:'utf8'});
     assert.equal(r.status,0);assert.equal(r.stdout.trim(),sha,'exact companion revision');
@@ -46,7 +51,7 @@ test('OPT-IN actual Codex: SIGKILL clock receipt replay admits one native child 
   mkdirSync(join(dir,'native'),{mode:0o700}); // production mounts a pre-created per-house native history dir (src/house.mjs)
   mkdirSync(join(dir,'codex'));copyFileSync(process.env.CONTINUATION_PROVIDER_AUTH,join(dir,'codex','auth.json'));chmodSync(join(dir,'codex','auth.json'),0o600);
   writeFileSync(join(dir,'token'),'isolated-house-token',{mode:0o600});
-  let bridgeUrl, hostExit=null;
+  let bridgeUrl, hostExit=null, bridgeClock=null;
   const hostTask=(async()=>{
     await wait(()=>load(h.env).houses['h-1'],'house allocation');
     const box={kind:'piece',subject:Object.keys(load(h.env).boxes).find(k=>load(h.env).boxes[k].local)};
@@ -72,7 +77,14 @@ test('OPT-IN actual Codex: SIGKILL clock receipt replay admits one native child 
       let raw=''; for await (const c of req) raw+=c;
       if(req.url.startsWith('/api/runtime/')) {
         assert.equal(req.headers.authorization,'Bearer isolated-house-token');
-        const r=await api(h.env,{now:()=>new Date()},{caller:{kind:'agent',agent:'art',house:'h-1'},path:req.url.split('/').at(-1),body:JSON.parse(raw)});
+        const path=req.url.split('/').at(-1), b=JSON.parse(raw), caller={kind:'agent',agent:'art',house:'h-1'};
+        let r;
+        // Cutoff stage only: control.mjs's continuation route, field for field, with this test's clock past the
+        // sealed deadline (the route takes no clock). Every other call goes through the production api() unchanged.
+        if(bridgeClock!==null&&path.startsWith('continuation-')) {
+          try { r={status:200,body:continuationCall(h.env,{action:path.slice('continuation-'.length),conversation:b.conversation,key:b.key,session:typeof b.session==='string'?b.session:undefined,handle:b.handle,id:b.id,text:b.text},{caller,now:()=>new Date(bridgeClock)})}; }
+          catch(e) { assert.ok(e.status>=400&&e.status<500,e.stack); r={status:e.status,body:{error:e.message}}; }
+        } else r=await api(h.env,{now:()=>new Date()},{caller,path,body:b});
         res.writeHead(r.status,{'content-type':'application/json'});res.end(JSON.stringify(r.body));return;
       }
       const { mode, input } = JSON.parse(raw);
@@ -90,6 +102,8 @@ test('OPT-IN actual Codex: SIGKILL clock receipt replay admits one native child 
   t.after(()=>{bridge.closeAllConnections();bridge.close();});
   bridgeUrl=`http://127.0.0.1:${bridge.address().port}`;
   const coreHome=join(w.env.HOME,'core'); mkdirSync(coreHome);
+  // An out-of-range lifetime fails closed in the production executable (its default is 7 days, t-2004).
+  w.env.LOOM_RUNTIME_CONTINUATION_DAYS='0';
   const core=fork(new URL('../fixtures/continuation-core.mjs',import.meta.url),[],{env:{...process.env,...w.env,LOOM_HOME:coreHome,CONTINUATION_TEST_TIME:'',CONTINUATION_BRIDGE:bridgeUrl,CONTINUATION_RUNTIME_CLI:join(import.meta.dirname,'../../src/cli.mjs')},stdio:['ignore','ignore','pipe','ipc']});
   t.after(()=>core.kill('SIGKILL'));
   let errors='';core.stderr.on('data',b=>errors+=b);
@@ -102,8 +116,8 @@ test('OPT-IN actual Codex: SIGKILL clock receipt replay admits one native child 
   const source=await deliver(w.env,w.msg(setup.place,'owner',{source:'loom',venue:'loom',place:setup.place,from:{kind:'person',slug:'jonathan'}}),w.o);
   const proof=cv=>{const c=loadConv(w.env,cv);return {conversation:cv,key:w.runner.envs[c.body.split(':')[1]].LOOM_BODY_KEY,session:w.runner.slotOf({id:c.body.split(':')[1]}).session};};
   const holder=async(action,b)=>{const r=await fetch(`http://127.0.0.1:${setup.port}/api/runtime/continuation-${action}`,{method:'POST',headers:{authorization:`Bearer ${setup.agentToken}`,'content-type':'application/json'},body:JSON.stringify(b)});return {status:r.status,body:await r.json()};};
-  // Production executable must retain its policy hold. Only this trusted test
-  // parent supplies a lifetime; enqueue/status still use the unchanged executable.
+  // A misconfigured production executable refuses to issue. Only this trusted test
+  // parent supplies its 24-hour lifetime; enqueue/status still use the unchanged executable.
   const issued=await holder('issue',proof(source.conversation));
   assert.notEqual(issued.status,200,JSON.stringify(issued));
   assert.match(JSON.stringify(issued.body), /deadline policy is not configured/);
@@ -115,7 +129,7 @@ test('OPT-IN actual Codex: SIGKILL clock receipt replay admits one native child 
   writeFileSync(principal,`const r=await fetch(${JSON.stringify(bridgeUrl)},{method:'POST',body:JSON.stringify({mode:'principal',input:process.argv.slice(2)})});if(!r.ok)process.exit(1);`);
   const tokenFile=join(w.env.HOME,'clock-token');writeFileSync(tokenFile,setup.clockToken);
   const clockDir=join(w.env.HOME,'clock','art');mkdirSync(clockDir,{recursive:true});
-  const entry={id:'w-abcdef',kind:'wake',created:'2026-11-09 00:00:00',at:'2026-11-09 00:00:00',prompt:`This is an isolated integration bench. Use your shell tool to run exactly: ${imageNode} /runtime/test/fixtures/continuation-provider-report.mjs ${grant.handle} . Wait for it to finish, then stop. Do not inspect credentials or do any other work.`,for:'owner',continuation:{handle:grant.handle,expiresAt:grant.expiresAt,wake:'w-abcdef'}};
+  const entry={id:'w-abcdef',kind:'wake',created:'2026-11-09 00:00:00',at:'2026-11-09 00:00:00',prompt:`This is an isolated integration bench. Use your shell tool to run exactly: ${imageNode} /runtime/test/fixtures/continuation-provider-report.mjs ${grant.handle} . It waits for this bench between steps and can take up to four minutes: give the command a timeout of at least 240000 ms and wait for it to finish, then stop. Do not inspect credentials or do any other work.`,for:'owner',continuation:{handle:grant.handle,expiresAt:grant.expiresAt,wake:'w-abcdef'}};
   writeFileSync(join(clockDir,'spool.jsonl'),JSON.stringify(entry)+'\n');
   let holdReceipt=true, accepted;const acceptance=new Promise(r=>accepted=r);const clockBodies=[];
   const proxy=createServer(async(req,res)=>{
@@ -159,8 +173,64 @@ test('OPT-IN actual Codex: SIGKILL clock receipt replay admits one native child 
   writeFileSync(join(dir,'release'),'go');
   await wait(()=>existsSync(join(dir,'enqueued.json')),'actual provider enqueue');
   const queued=JSON.parse(readFileSync(join(dir,'enqueued.json'),'utf8'));assert.equal(queued.state,'pending');assert.ok(queued.ref);
-  await tick(h.env,{...childOptions,core:undefined});
   const {default:Sqlite}=await import(`${process.env.CONTINUATION_CORE}/node_modules/better-sqlite3/lib/index.js`);
-  const db=new Sqlite(join(coreHome,'comms.db'),{readonly:true});
-  try { assert.equal(db.prepare("SELECT COUNT(*) AS n FROM comms_messages WHERE id LIKE 'continuation-%'").get().n,1); console.log(JSON.stringify({bench:'actual-codex-clock-replay',session:provider.session,clockRequests:clockBodies.length,runtimeAdmissions:deliveries.length,reportRows:1,image,codex,model:process.env.CONTINUATION_PROVIDER_MODEL,version:check.stdout.trim()})); } finally {db.close();}
+  const rows=()=>{const db=new Sqlite(join(coreHome,'comms.db'),{readonly:true});try{return db.prepare("SELECT COUNT(*) AS n FROM comms_messages WHERE id LIKE 'continuation-%'").get().n;}finally{db.close();}};
+  const stage=async(name,file)=>{writeFileSync(join(dir,'release-'+name),'go');await wait(()=>existsSync(join(dir,file)),'provider '+name);return JSON.parse(readFileSync(join(dir,file),'utf8'));};
+
+  // Stage 2: the controller's continuation drain in its own process. A proxy in front of core lets the post
+  // through and withholds core's answer; that process is SIGKILLed with acceptance unknown to it.
+  let holdPost=true, posted;const postAccepted=new Promise(r=>posted=r);const payloads=[], answers=[];
+  const coreProxy=createServer(async(req,res)=>{
+    let body='';for await(const c of req)body+=c;
+    let op=null;try{op=JSON.parse(body).op;}catch{/* not a comms call */}
+    if(op==='post'||op==='reconcile')payloads.push(JSON.parse(body));
+    const answer=await fetch(`http://127.0.0.1:${setup.port}${req.url}`,{method:req.method,headers:{authorization:req.headers.authorization??'','content-type':'application/json'},...(req.method==='GET'||req.method==='HEAD'?{}:{body})});
+    const text=await answer.text();
+    if(op==='post'){answers.push({status:answer.status,text});if(holdPost){posted();return;}}
+    res.writeHead(answer.status,{'content-type':answer.headers.get('content-type')??'application/json'});res.end(text);
+  });
+  coreProxy.listen(0,'127.0.0.1');await once(coreProxy,'listening');
+  t.after(()=>{coreProxy.closeAllConnections();coreProxy.close();});
+  const drainer=(at=null)=>spawn(process.execPath,['--input-type=module','-e',`
+    import { drainContinuations } from './src/delivery.mjs';
+    const at = ${JSON.stringify(at)};
+    await drainContinuations(JSON.parse(process.env.BENCH_ENV), at ? { now: () => new Date(at) } : {});
+  `],{cwd:resolve(import.meta.dirname,'../..'),env:{...process.env,BENCH_ENV:JSON.stringify({...h.env,LOOM_RUNTIME_LOOM_URL:`http://127.0.0.1:${coreProxy.address().port}/mcp`})},stdio:['ignore','ignore','pipe']});
+  const drained=async(p,label)=>{let e='';p.stderr.on('data',x=>e+=x);const [code]=await once(p,'exit');assert.equal(code,0,label+': '+e);};
+  const first=drainer();t.after(()=>first.kill('SIGKILL'));
+  await Promise.race([postAccepted,once(first,'exit').then(([c])=>{throw Error(`drain exited before posting: ${c}`);})]);
+  assert.equal(answers[0].status,200,answers[0].text);
+  const killed=once(first,'exit');first.kill('SIGKILL');assert.equal((await killed)[1],'SIGKILL');
+  assert.equal(rows(),1,'core accepted the report before the controller died');
+  assert.equal(payloads.length,1);assert.equal(payloads[0].ref,queued.ref);
+  holdPost=false;
+  await new Promise(r=>setTimeout(r,2500)); // the first attempt's retry backoff (2 s)
+  await drained(drainer(),'fresh drain after controller SIGKILL');
+  assert.equal(payloads.length,2,'the fresh controller retried exactly once');
+  assert.deepEqual(payloads[1],payloads[0],'identical sealed payload and stable ref');
+  assert.equal(answers[1].status,200,answers[1].text);
+  assert.equal(rows(),1,'core deduplicated the retry: still one visible report');
+  const status=await stage('status','status.json');
+  assert.equal(status.state,'delivered','the provider reads its own report as delivered');
+  await drained(drainer(),'drain after delivery');
+  assert.equal(payloads.length,2,'a delivered report is never posted again');
+
+  // Stage 3: cutoff. The provider's own next report, past the sealed deadline, is refused; so is any post.
+  const cutoffAt=grant.expiresAt+60000;bridgeClock=cutoffAt;
+  const cut=await stage('cutoff','cutoff.json');bridgeClock=null;
+  assert.deepEqual(cut,{refused:true,reason:'continuation expired'},JSON.stringify(cut));
+  await drained(drainer(new Date(cutoffAt).toISOString()),'drain past the deadline');
+  assert.equal(payloads.length,2,'nothing posted or reconciled past the deadline for a delivered report');
+  assert.equal(rows(),1);
+
+  // Stage 4: source reset. The source conversation's reset changes; the provider's next report is refused at
+  // the binding recheck, before any clock or deadline check, through the production api() route again.
+  const sourceFile=join(deliveryDir(h.env),'conversations',`${source.conversation}.json`);
+  const reset=JSON.parse(readFileSync(sourceFile,'utf8'));reset.actsFor={...(reset.actsFor??{}),reset:'bench-source-reset'};
+  writeFileSync(sourceFile,JSON.stringify(reset));
+  const after=await stage('reset','reset.json');
+  assert.deepEqual(after,{refused:true,reason:'continuation source was reset or changed'},JSON.stringify(after));
+  await drained(drainer(new Date(cutoffAt).toISOString()),'drain after reset');
+  assert.equal(payloads.length,2);assert.equal(rows(),1,'exactly one report across replay, crash, cutoff and reset');
+  console.log(JSON.stringify({bench:'actual-codex-continuation',session:provider.session,clockRequests:clockBodies.length,runtimeAdmissions:deliveries.length,controllerPosts:2,reportRows:1,cutoff:cut.reason,reset:after.reason,image,codex,model:process.env.CONTINUATION_PROVIDER_MODEL,version:check.stdout.trim()}));
 });
