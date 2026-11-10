@@ -315,3 +315,41 @@ test('runners read at most their limits a pass: a transcript\'s tail, a helper\'
   assert.equal(firsts[0], undefined, 'not caught up after one slice');
   assert.equal(firsts.at(-1), 12);
 });
+
+test('every card carries a fixed label made where it\'s made: fixed words, a plain base name, counts, a plain name; never a quote', async () => {
+  const { claudeFixed, FIXED } = await import('../src/activity.mjs');
+  const quoting = [
+    ['Bash', { command: 'echo hi', description: 'Tell Loren "the rent is late"' }, 'Ran a command'],
+    ['Grep', { pattern: 'Loren: "rent"', path: '/x' }, 'Searched files'],
+    ['Glob', { pattern: '**/loren-notes*.md' }, 'Looked for files'],
+    ['WebSearch', { query: 'what Loren asked' }, 'Searched the web'],
+    ['WebFetch', { url: 'https://example.com/loren' }, 'Read a web page'],
+    ['Agent', { description: 'Answer Loren about rent' }, 'Started a helper'],
+    ['Task', { description: 'Answer Loren' }, 'Started a helper'],
+    ['SendMessage', { to: 'x', message: 'Loren says hi' }, 'Messaged a helper'],
+    ['TodoWrite', { todos: [{ content: 'Reply to Loren', status: 'in_progress' }, { content: 'x', status: 'completed' }] }, 'Plan (1/2)'],
+    ['mcp__loom__relay', { to: 'mark', say: 'Loren wants the rent' }, 'Messaged mark'],
+    ['mcp__loom__relay', { to: 'mark: "x', say: 'hi' }, 'Messaged someone'],
+    ['mcp__loom__relay', { to: 'Mark ": evil', say: 'hi' }, 'Messaged someone'],
+    ['mcp__loom__recall', { query: 'Loren' }, 'Searched memory'],
+    ['Read', { file_path: '/home/art/notes/loren: "rent".md' }, 'Read a file'],
+    ['Read', { file_path: '/home/art/Code/x/a.ts' }, 'Read a.ts'],
+    ['Edit', { file_path: '/home/art/.env' }, 'Edited a file'],
+    ['Skill', { skill: 'brainstorming' }, 'Used a skill'],
+    ['SomethingNew', { any: 'Loren' }, 'Used a tool'],
+  ];
+  for (const [name, input, want] of quoting) {
+    assert.equal(claudeFixed(name, input), want, name);
+    assert.ok(FIXED.test(want), want);
+    const [c] = claudeCards([use(`u-${name}`, name, input)]);
+    assert.equal(c.fixed, want);
+  }
+  // A failure adds its exit code and fixed phrase only.
+  const [f] = claudeCards([use('ff', 'Bash', { command: 'npm test', description: 'Loren\'s tests' }), res('ff', 'Exit code 1\nℹ fail 3', undefined, true)]);
+  assert.equal(f.fixed, 'Ran a command — exit 1: 3 tests failed');
+  // A house's fixed label is kept only in a shape made here.
+  for (const bad of ['Messaged mark: "Loren wants rent"', 'Searched for "x"', 'Read notes/loren.md', 'Ran a command — Loren', 'Plan (1/2): Reply to Loren']) assert.equal(stepParts({ fixed: bad }).fixed, undefined, bad);
+  for (const ok of ['Messaged mark', 'Read a.ts', 'Plan (1/2)', 'Ran a command — exit 2: no such file', 'Searched memory']) assert.equal(stepParts({ fixed: ok }).fixed, ok);
+  const [x] = codexCards([{ type: 'item.completed', item: { id: 'i', type: 'mcp_tool_call', tool: 'relay', arguments: { to: 'loren', say: 'rent?' }, status: 'completed' } }], 'b:');
+  assert.equal(x.fixed, 'Messaged loren');
+});

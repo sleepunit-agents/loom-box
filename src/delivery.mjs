@@ -1587,14 +1587,12 @@ async function activityPass(env, c, d) {
   // in the conversation, a step's words (its command, output, diff, plan items) don't go either: theirs could be in
   // them. Its label, tool, state, result line and times do (Jonathan, 2026-11-10: other people summarized).
   const cards = (r.activity(body) ?? []).filter((x) => x && (x.tool !== 'text' || ownersAlone)).map((x) => {
-    const parts = stepParts(x);
-    const base = baseCard(x);
-    if (!ownersAlone) {
-      delete parts.detail; delete parts.body; delete parts.items;
-      // A label that quotes words (a plan's item, a message's first line) keeps only its fixed part.
-      base.summary = String(base.summary).replace(/^(Plan \(\d+\/\d+\)):.*$/s, '$1').replace(/^(Messaged [^:"]{1,60}): ".*$/s, '$1');
-    }
-    return { ...base, ...parts };
+    const { fixed, ...parts } = stepParts(x);
+    if (ownersAlone) return { ...baseCard(x), ...parts };
+    // Where someone else is: its fixed label (set where the card was made, never derived from its words), else "Did a
+    // step"; no words of any kind (its label, command, diff, plan items); its state, result phrase, times and nesting.
+    const { detail: _d, body: _b, items: _i, ...plain } = parts;
+    return { ...baseCard(x), summary: fixed ?? 'Did a step', ...plain };
   });
   const nowMs = (() => { try { return d.now().getTime(); } catch { return Date.now(); } })();
   const { out, next } = changedCards(cards, c.cardsSent ?? {});
@@ -1613,14 +1611,15 @@ async function activityPass(env, c, d) {
   // Refused for good (no live thread, or a card core won't take): they're marked told, so they aren't sent again. A 409
   // (no live thread) holds the conversation for HOLD_MS. A 400 that says core doesn't know the further parts (an older
   // core: unknown keys, or no cards beside a sign of life) is told the plain cards, and held to plain ones for HOLD_MS.
-  try { await post(told, sendAlive ? alive : null); } catch (e) {
-    if (e?.status !== 409 && e?.status !== 400) throw e;
+  // In batches of at most POST_MAX of JSON (core takes 1 MB a post; an older core 64 KB, which refuses with 413).
+  try { for (const [k, batch] of batches(told).entries()) await post(batch, sendAlive && k === 0 ? alive : null); } catch (e) {
+    if (e?.status !== 409 && e?.status !== 400 && e?.status !== 413) throw e;
     const hold = e.status === 409 ? { noThread: nowMs } : {};
     let retold = false;
-    if (e.status === 400 && !old && OLD_CORE.test(String(e.message ?? ''))) {
+    if ((e.status === 413 || (e.status === 400 && OLD_CORE.test(String(e.message ?? '')))) && !old) {
       hold.oldCore = nowMs;
       const plain = out.filter((x) => x.tool !== 'text').map(baseCard);
-      try { if (plain.length) { await post(plain, null); retold = true; } } catch (e2) { if (e2?.status !== 409 && e2?.status !== 400) throw e2; }
+      try { if (plain.length) { for (const b of batches(plain)) await post(b, null); retold = true; } } catch (e2) { if (![400, 409, 413].includes(e2?.status)) throw e2; }
     }
     if (!retold) d.warn(`${c.conversation}: core took none of ${out.length} activity cards${sendAlive ? ' and its sign of life' : ''} (${e.message}); they're not sent again`);
     // A refused sign of life counts as told: it isn't posted again until it moves, past the throttle.
@@ -1628,6 +1627,21 @@ async function activityPass(env, c, d) {
     return;
   }
   saveSent(env, c, next, sendAlive ? alive : null, nowMs);
+}
+
+/** At most how much JSON one activity post carries (t-2109): half core's cap, so a full card always fits. */
+const POST_MAX = 512 * 1024;
+/** Cards in posts of at most POST_MAX of JSON each (one card a post at least); none for none. */
+function batches(cards) {
+  const out = [];
+  let cur = [], size = 0;
+  for (const c of cards) {
+    const n = JSON.stringify(c).length + 1;
+    if (cur.length && size + n > POST_MAX) { out.push(cur); cur = []; size = 0; }
+    cur.push(c); size += n;
+  }
+  if (cur.length || !out.length) out.push(cur);
+  return out;
 }
 
 /** Whether a conversation's activity is still held (`noThread`, `oldCore` on its record): for HOLD_MS after it was. */

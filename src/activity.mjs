@@ -186,6 +186,78 @@ export function claudeSummary(name, input = {}) {
   }
 }
 
+// ─── A card's fixed label (t-2109): fixed words and safe parts only, set where the card is made ──────────────────────
+
+/** A file's base name as a fixed label may hold it: plain characters only, never a quote, a colon or a folder. */
+const safeName = (p) => { const n = fileName(p); return n !== GONE && n !== PRIVATE_FILE && /^[A-Za-z0-9._+-]{1,60}$/.test(n) ? n : null; };
+/** A person's or agent's name as a fixed label may hold it: a plain handle (`mark`, `loren-b`), else nothing. */
+const safeWho = (w) => (typeof w === 'string' && /^[a-z][a-z0-9]{0,30}(?:-[a-z0-9]{1,30}){0,3}$/.test(w) && redact(w) === w ? w : null);
+const planFixed = (items) => (Array.isArray(items) && items.length ? `Plan (${items.filter((x) => x.done).length}/${items.length})` : 'Updated its plan');
+
+/**
+ * A Claude tool call's fixed label: what the owner's view shows where someone else is in the conversation, and the
+ * only label sent there (delivery's activityPass). Built from fixed words and safe parts (a file's plain base name, a
+ * plan's counts, a plain name, a work id) — never a pattern, a query, a description or a message's words.
+ */
+export function claudeFixed(name, input = {}) {
+  const i = input && typeof input === 'object' ? input : {};
+  const file = (verb, p) => { const n = safeName(p); return n ? `${verb} ${n}` : `${verb} a file`; };
+  switch (name) {
+    case 'Bash': case 'BashOutput': return 'Ran a command';
+    case 'KillShell': case 'KillBash': return 'Stopped a background command';
+    case 'Read': return file('Read', i.file_path);
+    case 'Edit': case 'MultiEdit': return file('Edited', i.file_path);
+    case 'Write': return file('Wrote', i.file_path);
+    case 'NotebookEdit': return file('Edited', i.notebook_path);
+    case 'Grep': return 'Searched files';
+    case 'Glob': return 'Looked for files';
+    case 'WebSearch': return 'Searched the web';
+    case 'WebFetch': return 'Read a web page';
+    case 'Task': case 'Agent': return 'Started a helper';
+    case 'SendMessage': return 'Messaged a helper';
+    case 'TodoWrite': return planFixed((Array.isArray(i.todos) ? i.todos : []).map((t) => ({ done: t?.status === 'completed' })));
+    case 'Skill': return 'Used a skill';
+    case 'ToolSearch': return 'Loaded more tools';
+    default: return name.startsWith('mcp__') ? mcpFixed(mcpName(name), i) : 'Used a tool';
+  }
+}
+
+/** An MCP tool's fixed label: loom's tools in their fixed words, a relay as who it went to, a public tool's id. */
+function mcpFixed(tool, input) {
+  const i = input && typeof input === 'object' ? input : {};
+  if (tool === 'relay') { const w = safeWho(i.to); return w ? `Messaged ${w}` : 'Messaged someone'; }
+  if (Object.hasOwn(LOOM_TOOLS, tool)) return LOOM_TOOLS[tool];
+  const priv = PRIVATE.find(([re]) => re.test(tool));
+  if (priv) return priv[1];
+  const pub = PUBLIC_ARGS.find(([re]) => re.test(tool));
+  if (!pub) return 'Used a tool';
+  const arg = publicArg(tool, i);
+  return `${pub[4]}${arg ? ` ${arg}` : ''}`;
+}
+
+/** A Codex item's fixed label. */
+function codexFixed(item) {
+  switch (item.type) {
+    case 'command_execution': return 'Ran a command';
+    case 'file_change': { const c = Array.isArray(item.changes) ? item.changes : []; const n = c.length === 1 ? safeName(c[0]?.path) : null; return n ? `Changed ${n}` : c.length ? `Changed ${c.length} file${c.length === 1 ? '' : 's'}` : 'Changed files'; }
+    case 'mcp_tool_call': return mcpFixed(String(item.tool ?? ''), item.arguments);
+    case 'web_search': return 'Searched the web';
+    case 'todo_list': return planFixed((Array.isArray(item.items) ? item.items : []).map((t) => ({ done: t?.completed === true })));
+    default: return 'Used a tool';
+  }
+}
+
+/** A failure's fixed phrase after a fixed label: its exit code and failWhy's fixed words only. */
+const fixedWhy = (label, why) => (why ? `${label} — ${why}` : label);
+
+/** The shapes a fixed label may take (a house's is checked against them): fixed words, a plain name, a count, an id. */
+const NAME = '[A-Za-z0-9._+-]{1,60}';
+const FIXED_WORDS = [...new Set(['Ran a command', 'Stopped a background command', 'Searched files', 'Looked for files', 'Searched the web', 'Read a web page',
+  'Started a helper', 'Messaged a helper', 'Messaged someone', 'Used a skill', 'Loaded more tools', 'Used a tool', 'Updated its plan', 'Changed files',
+  'Read a file', 'Edited a file', 'Wrote a file', 'Did a step', 'Wrote its words', 'Used a task tool', 'Used a GitHub tool', ...Object.values(LOOM_TOOLS), ...PRIVATE.map(([, w]) => w)])];
+const esc = (w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+export const FIXED = new RegExp(`^(?:${FIXED_WORDS.map(esc).join('|')}|(?:Read|Edited|Wrote|Changed) ${NAME}|Changed \\d{1,6} files?|Plan \\(\\d{1,4}/\\d{1,4}\\)|Messaged [a-z][a-z0-9]{0,30}(?:-[a-z0-9]{1,30}){0,3}|Used a task tool t-\\d{1,9}|Used a GitHub tool #\\d{1,9})(?: — (?:exit -?\\d{1,6}(?:: [a-z0-9 ()]{1,40})?|[a-z0-9 ()]{1,40}))?$`);
+
 /** A glob's last part, through the gate; checked whole first, so a secret with a / in it never shows its tail. */
 function lastPart(g) {
   const s = String(g ?? '').slice(0, 2000);
@@ -406,14 +478,14 @@ export function claudeCards(lines, prefix = '', parent = null) {
         const body = shownText(c.text.replace(SGR, ''), MAX_TEXT);
         const label = part('text', firstLine(c.text), MAX_SUMMARY);
         if (!body || label === GONE) return;
-        cards.set(id, { id, at: cardTime(l.timestamp), tool: 'text', summary: clean(label), state: 'done', body, ...(parent ? { parent } : {}) });
+        cards.set(id, { id, at: cardTime(l.timestamp), tool: 'text', summary: clean(label), fixed: 'Wrote its words', state: 'done', body, ...(parent ? { parent } : {}) });
       });
       for (const c of content) {
         if (c?.type !== 'tool_use' || typeof c.id !== 'string') continue;
         const id = `${prefix}${c.id}`.slice(0, 80);
         if (cards.has(id)) continue;
         const name = String(c.name ?? ''), input = c.input && typeof c.input === 'object' ? c.input : {};
-        const card = { id, at: cardTime(l.timestamp), tool: toolName(c.name), summary: claudeSummary(name, input) || 'Used a tool', state: 'running', ...(parent ? { parent } : {}) };
+        const card = { id, at: cardTime(l.timestamp), tool: toolName(c.name), summary: claudeSummary(name, input) || 'Used a tool', fixed: claudeFixed(name, input), state: 'running', ...(parent ? { parent } : {}) };
         const detail = claudeDetail(name, input), limit = claudeLimit(name, input);
         if (detail) card.detail = detail;
         if (limit) card.limit = limit;
@@ -432,7 +504,7 @@ export function claudeCards(lines, prefix = '', parent = null) {
         // Claude Code's Bash result starts "Exit code N" on a failure.
         const code = /^Exit code (\d+)/.exec(text)?.[1];
         const exit = code ? Number(code) : undefined;
-        if (card.state === 'failed') card.summary = withWhy(card.summary, failWhy({ exit, output: text }));
+        if (card.state === 'failed') { const why = failWhy({ exit, output: text }); card.summary = withWhy(card.summary, why); card.fixed = fixedWhy(card.fixed, why); }
         if (Number.isInteger(exit)) card.exit = exit;
         // A line's toolUseResult is its one result's: with several results in one line, whose it is can't be told, so
         // none of them is read from it (no diff on the wrong card).
@@ -484,6 +556,7 @@ export function codexCards(events, prefix = '') {
     if (!card) continue;
     const label = codexSummary(item); // once per event: a plan moves on item.updated, a step's label on completion
     if (!card.summary) card.summary = label;
+    if (!card.fixed || item.type === 'todo_list') card.fixed = codexFixed(item);
     if (!card.detail) {
       const detail = item.type === 'command_execution' ? commandLine(unwrapShell(item.command))
         : item.type === 'file_change' && Array.isArray(item.changes) && item.changes.length && fileName(item.changes[0]?.path) !== GONE ? fileName(item.changes[0]?.path) : '';
@@ -494,6 +567,7 @@ export function codexCards(events, prefix = '') {
     if (e.type === 'item.completed') {
       card.state = item.status === 'failed' || (item.type === 'command_execution' && Number.isInteger(item.exit_code) && item.exit_code !== 0) ? 'failed' : 'done';
       card.summary = card.state === 'failed' ? withWhy(label, codexWhy(item)) : label;
+      card.fixed = card.state === 'failed' ? fixedWhy(codexFixed(item), codexWhy(item)) : codexFixed(item);
       if (item.type === 'command_execution') {
         if (Number.isInteger(item.exit_code) && Math.abs(item.exit_code) < 1e6) card.exit = item.exit_code;
         card.result = clean(redact(shellResult({ exit: item.exit_code, output: item.aggregated_output, failed: card.state === 'failed' })));
@@ -534,6 +608,8 @@ export function cleanAlive(a) {
  */
 export function stepParts(c, idOf = (x) => x) {
   const o = {};
+  // Its fixed label, only in a shape made here (FIXED); else none (delivery then says "Did a step").
+  if (typeof c?.fixed === 'string' && c.fixed.length <= MAX_SUMMARY && FIXED.test(c.fixed)) o.fixed = c.fixed;
   const int = (v, lo, hi) => (Number.isInteger(v) && v >= lo && v <= hi ? v : null);
   const tool = String(c?.tool ?? '');
   // A target only of the shape made here for its tool (detailOk): a command; a file's base name; a search's pattern.
@@ -579,7 +655,7 @@ function bodyAllowed(tool, detail) {
 export const baseCard = (c) => ({ id: c.id, at: c.at, tool: c.tool, summary: c.summary, state: c.state });
 
 /** What the record keeps of a card: its state and a short hash of its label (never the label itself). */
-const mark = (c) => `${c.state}:${createHash('sha256').update(JSON.stringify([c.summary, c.detail, c.result, c.body, c.exit, c.end, c.items, c.parent])).digest('hex').slice(0, 8)}`;
+const mark = (c) => `${c.state}:${createHash('sha256').update(JSON.stringify([c.summary, c.fixed, c.detail, c.result, c.body, c.exit, c.end, c.items, c.parent])).digest('hex').slice(0, 8)}`;
 
 /**
  * What to post of `cards` given what was posted (`sent`: id → its mark): the new ones and those whose state or label

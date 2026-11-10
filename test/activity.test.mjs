@@ -155,7 +155,7 @@ test('a wake enables remote activity capture and posts live steps without a Comm
   const options = [];
   const start = w.runner.start.bind(w.runner);
   w.runner.start = (o) => { options.push(o); return start(o); };
-  w.runner.activity = () => [{ id: 'wake1', at: 'x', tool: 'Read', summary: 'Read a file', state: 'done' }];
+  w.runner.activity = () => [{ id: 'wake1', at: 'x', tool: 'Read', summary: 'Read a file', fixed: 'Read a file', state: 'done' }];
   const r = await deliver(w.env, w.msg('lane:watch', 'check the work', { venue: 'wake', kind: 'wake', from: { kind: 'schedule' } }), w.o);
   await tick(w.env, w.o);
   assert.equal(options[0].activity, true, 'the remote bodyhost must collect cards too');
@@ -270,9 +270,12 @@ test('where someone else is, or a former owner spoke, no words and no command, o
   const o = world();
   o.core.commsAnswer = (x) => (x.op === 'spawn' ? { ok: true, id: 'th:abcdefghij' } : { ok: true });
   o.runner.activity = () => [{ id: 'w', at: 'x', tool: 'text', summary: 'Loren said hi', state: 'done', body: 'Loren said hi' },
-    { id: 't1', at: 'x', tool: 'Bash', summary: 'Saved the note', state: 'done', detail: 'npm test', body: 'what Loren said', result: '1 line of output' },
-    { id: 'p', at: 'x', tool: 'TodoWrite', summary: 'Plan (1/2): Reply to Loren about the rent', state: 'done', items: [{ text: 'Reply to Loren about the rent', state: 'now' }, { text: 'x', state: 'todo' }] },
-    { id: 'm', at: 'x', tool: 'mcp__loom__relay', summary: 'Messaged mark: "Loren wants the rent by Friday"', state: 'done' }];
+    { id: 't1', at: 'x', tool: 'Bash', summary: 'Saved the note', fixed: 'Ran a command', state: 'done', detail: 'npm test', body: 'what Loren said', result: '1 line of output' },
+    { id: 'p', at: 'x', tool: 'TodoWrite', summary: 'Plan (1/2): Reply to Loren about the rent', fixed: 'Plan (0/2)', state: 'done', items: [{ text: 'Reply to Loren about the rent', state: 'now' }, { text: 'x', state: 'todo' }] },
+    { id: 'm', at: 'x', tool: 'mcp__loom__relay', summary: 'Messaged mark: "Loren wants the rent by Friday"', fixed: 'Messaged mark', state: 'done' },
+    // A label the house made up, or none at all: never its words.
+    { id: 'f', at: 'x', tool: 'Grep', summary: 'Searched for "Loren rent"', fixed: 'Searched for "Loren rent"', state: 'done' },
+    { id: 'n', at: 'x', tool: 'WebSearch', summary: 'Searched the web for "Loren rent"', state: 'done' }];
   const r = await spawnCall(o.env, { kind: 'owner' }, { agent: 'art', brief: 'x' }, o.o);
   // Its stored actsFor still says the owner; its principal now holds a former owner, a person.
   const c = loadConv(o.env, r.handle);
@@ -281,9 +284,12 @@ test('where someone else is, or a former owner spoke, no words and no command, o
   await tick(o.env, o.o); await tick(o.env, o.o);
   const sent = o.core.activityCalls.filter((a) => a.conversation === r.handle).flatMap((a) => a.cards);
   assert.deepEqual(sent.map((x) => [x.tool, x.summary, x.detail, x.body, x.items, x.result]), [
-    ['Bash', 'Saved the note', undefined, undefined, undefined, '1 line of output'],
-    ['TodoWrite', 'Plan (1/2)', undefined, undefined, undefined, undefined],
-    ['mcp__loom__relay', 'Messaged mark', undefined, undefined, undefined, undefined]]);
+    ['Bash', 'Ran a command', undefined, undefined, undefined, '1 line of output'],
+    ['TodoWrite', 'Plan (0/2)', undefined, undefined, undefined, undefined],
+    ['mcp__loom__relay', 'Messaged mark', undefined, undefined, undefined, undefined],
+    ['Grep', 'Did a step', undefined, undefined, undefined, undefined],
+    ['WebSearch', 'Did a step', undefined, undefined, undefined, undefined]]);
+  assert.ok(sent.every((x) => !('fixed' in x)), 'core never gets a field it doesn\'t know');
   assert.ok(!JSON.stringify(sent).includes('Loren'));
   // A bridge chat with a person: the same.
   const b = world();
@@ -356,4 +362,26 @@ test('a sign of life a core refuses isn\'t posted again until it moves; an older
   await tick(c.o.env, c.o.o); await tick(c.o.env, c.o.o);
   const cs = c.calls().flatMap((x) => x.cards);
   assert.deepEqual(cs.map((x) => [x.tool, x.detail]), [['Bash', undefined]]);
+});
+
+test('large cards go in posts of at most 512 KB; a 413 is an older core\'s cap: plain cards then (t-2109)', async () => {
+  const { spawnCall } = await import('../src/spawn.mjs');
+  const o = world();
+  o.core.commsAnswer = (x) => (x.op === 'spawn' ? { ok: true, id: 'th:abcdefghij' } : { ok: true });
+  const big = (n) => ({ id: `e${n}`, at: 'x', tool: 'Edit', summary: `Edited f${n}.ts`, fixed: `Edited f${n}.ts`, state: 'done', detail: `f${n}.ts`, body: `+${'x'.repeat(1900)}\n`.repeat(15) });
+  o.runner.activity = () => Array.from({ length: 30 }, (_, i) => big(i));
+  const r = await spawnCall(o.env, { kind: 'owner' }, { agent: 'art', brief: 'x' }, o.o);
+  await tick(o.env, o.o); await tick(o.env, o.o);
+  const calls = o.core.activityCalls.filter((a) => a.conversation === r.handle);
+  assert.ok(calls.length >= 2, 'split');
+  assert.ok(calls.every((c) => JSON.stringify(c.cards).length <= 512 * 1024 + 100));
+  assert.equal(calls.flatMap((c) => c.cards).length, 30);
+  const q = world();
+  q.core.commsAnswer = o.core.commsAnswer;
+  q.runner.activity = () => [big(1)];
+  q.core.activity = async (x) => { q.core.activityCalls.push(x); if (JSON.stringify(x).length > 20_000) throw Object.assign(new Error('core refused comms/activity: too large'), { status: 413 }); return { ok: true }; };
+  const r2 = await spawnCall(q.env, { kind: 'owner' }, { agent: 'art', brief: 'x' }, q.o);
+  await tick(q.env, q.o); await tick(q.env, q.o);
+  const qc = q.core.activityCalls.filter((a) => a.conversation === r2.handle);
+  assert.deepEqual(qc.at(-1).cards, [{ id: 'e1', at: 'x', tool: 'Edit', summary: 'Edited f1.ts', state: 'done' }]);
 });
