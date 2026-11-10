@@ -154,6 +154,10 @@ box and add it again.
   `loom box service move <service> <name> --agent <agent>`. It hands off:
   the bridge stops on the old box, its state moves to the new one, and it
   starts there. Expect a short gap without the bridge.
+  From a house (t-2132), only a body doing the owner's own work moves, stops
+  or brings back up a service, and only one that's already there: a new
+  service is the owner's to bring up first, and a service's own house (a
+  bridge others steer) never starts, moves or stops one.
 
 ### On Windows: WSL2
 

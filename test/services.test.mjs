@@ -242,3 +242,31 @@ test('a service house reports its account\'s usage with its service\'s token (no
   assert.equal(call({ ...art, service: 'slack' }, 'usage', { harness: 'claude', reading }).status, 404);
   assert.equal(call(art, 'usage', { harness: 'claude', reading }).status, 403);
 });
+
+test('a house starts, moves or stops a service only as the owner\'s own body, and only one that\'s there (t-2132)', () => {
+  update(env, (s) => {
+    const base = { agent: 'art', box: Object.keys(s.boxes)[0], kind: 'body-host', task: '(body host)', needs: [], state: 'running', created: new Date(clock).toISOString(), updated: new Date(clock).toISOString() };
+    s.houses['h-901'] = { ...base, id: 'h-901', seat: 'owner.cv-0123456789ab' };
+    s.houses['h-902'] = { ...base, id: 'h-902', seat: 'p-loren' };
+    s.houses['h-903'] = { ...base, id: 'h-903', seat: 'owner.cv-0123456789ab', state: 'stopped' };
+  });
+  const mine = { ...art, house: 'h-901' };
+  const no = (caller, path, body, why) => { const r = call(caller, path, body); assert.equal(r.status, 403, JSON.stringify(r.body)); assert.match(r.body.error, why); };
+  // A new one is the owner's to bring up first, even from his own body's house.
+  no(mine, 'service-up', { name: 'discord' }, /owner brings a new one up/);
+  ok(call(owner, 'service-up', { agent: 'art', name: 'discord' }));
+  // A person's seat, a house that's ended, someone else's house id, a service's own token: never.
+  for (const c of [{ ...art, house: 'h-902' }, { ...art, house: 'h-903' }, { ...art, house: 'h-999' }, { ...art, service: 'slack' }, { ...art, service: 'slack', house: 'h-901' }]) {
+    for (const [path, body] of [['service-down', { name: 'discord' }], ['service-move', { name: 'discord', box: 'laptop' }], ['service-up', { name: 'discord' }]]) {
+      no(c, path, body, /owner's own work|doesn't start, move or stop services/);
+    }
+  }
+  assert.equal(svc().want, 'up');
+  // The owner's own body: one that's there.
+  const m = ok(call(mine, 'service-move', { name: 'discord', box: 'laptop' }));
+  assert.equal(m.service, 'art/discord');
+  ok(call(mine, 'service-down', { name: 'discord' }));
+  ok(call(mine, 'service-up', { name: 'discord' }));
+  // Loom's machine's own agent token (no house) is as before.
+  ok(call(art, 'service-up', { name: 'slack' }));
+});

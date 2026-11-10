@@ -1152,10 +1152,27 @@ function startService(s, svc, effects, delayMs = 0) {
   return id;
 }
 
+/**
+ * Whether an agent's caller may start, move or stop its services (t-2132). The owner's calls: as before. A service's
+ * own house (a chat bridge others steer): never. A house: only a body doing the owner's own work (its seat the owner's,
+ * as housePrincipal says), and only for a service that's already there: a new one is the owner's to bring up (the
+ * Boxes page), so a house can't start one its house file doesn't name or one he never set. An agent token in no house
+ * is loom's machine's own (the owner's trust boundary, t-2119), as before.
+ */
+function assertMayRunServices(env, s, caller, key, { create = false } = {}) {
+  if (caller.kind !== 'agent') return;
+  if (caller.service !== undefined && caller.service !== null) fail('a service doesn\'t start, move or stop services', 403);
+  if (caller.house === undefined || caller.house === null) return;
+  const h = s.houses?.[caller.house];
+  if (!h || h.agent !== caller.agent || !LIVE.has(h.state) || housePrincipal(s, h, env)?.owner !== true) fail('only a body doing the owner\'s own work starts, moves or stops a service', 403);
+  if (create && !s.services?.[key]) fail(`${key} isn't a service yet: the owner brings a new one up on the Boxes page`, 403);
+}
+
 /** Bring a service up (on its box, or the agent's primary), or say where it already is. */
 export function serviceUp(env, effects, caller, body) {
   return update(env, (s) => {
     const { a, key } = serviceOf(s, caller, body);
+    assertMayRunServices(env, s, caller, key, { create: true });
     if (!s.agents[a]) fail(`${a} has no house yet: the owner sets its repo on the Boxes page`, 409);
     s.services ??= {};
     const svc = s.services[key];
@@ -1173,6 +1190,7 @@ export function serviceUp(env, effects, caller, body) {
 export function serviceDown(env, effects, caller, body) {
   return update(env, (s) => {
     const { key } = serviceOf(s, caller, body);
+    assertMayRunServices(env, s, caller, key);
     const svc = s.services?.[key];
     if (!svc) fail(`no service ${key}`, 404);
     svc.want = 'down';
@@ -1234,6 +1252,7 @@ export function writeOffBox(env, effects, { name, agent, houses: asked, lastSeen
 export function serviceMove(env, effects, caller, body) {
   return update(env, (s) => {
     const { a, key } = serviceOf(s, caller, body);
+    assertMayRunServices(env, s, caller, key);
     const svc = s.services?.[key];
     if (!svc || svc.want !== 'up') fail(`${key} isn't up`, 404);
     const to = placeHouse(s, a, { box: body.box }, env);
@@ -1268,6 +1287,7 @@ export function serviceMove(env, effects, caller, body) {
 export function serviceRestart(env, effects, caller, body) {
   return update(env, (s) => {
     const { key } = serviceOf(s, caller, body);
+    assertMayRunServices(env, s, caller, key);
     const svc = s.services?.[key];
     if (!svc || svc.want !== 'up') fail(`${key} isn't up`, 404);
     const h = s.houses[svc.house];
