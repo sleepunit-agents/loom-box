@@ -107,7 +107,10 @@ export async function serveManifest(env, { compute, changed, now = Date.now, log
     // An ask for another version: core will run `ui --json` instead, so it isn't loom reading this socket (the
     // heartbeat stays on).
     try {
-      if (!kept || now() - kept.at >= STALE_MS || (Number.isSafeInteger(since) && since > kept.at)) fresh();
+      // Also when nobody was asking: the kept answer wasn't being kept current, and the heartbeat may have told core of a
+      // move since.
+      const lapsed = !asked || now() - asked >= ACTIVE_MS;
+      if (!kept || lapsed || now() - kept.at >= STALE_MS || (Number.isSafeInteger(since) && since > kept.at)) fresh();
       if (version === VERSION) asked = now();
       return { id, ok: true, version: VERSION, at: kept.at, stdout: kept.stdout };
     } catch (e) {
