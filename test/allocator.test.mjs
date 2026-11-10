@@ -160,3 +160,11 @@ test('enforced: every model with room kept for conversations is a wait, not out 
   assert.equal(e.reserved, undefined);
   assert.match(e.message, /no model is left/);
 });
+
+test('enforced: an account with no reading (an API key) is admitted but never chosen ahead of a measured login', () => {
+  const sub = login('sub', 'anthropic', { '7d': 0.2, reset_7d: S + 3 * 86400, checked: S });
+  const key = { ...login('key', 'anthropic', {}), kind: 'api-key' };
+  const gate = capacityGate({ kind: 'agent', now: NOW });
+  assert.equal(resolveModel({ agent: 'art', kind: 'spawn', models: [CLAUDE], accounts: { accounts: [key, sub] }, gate, now: NOW }).accountKey, 'sub');
+  assert.equal(resolveModel({ agent: 'art', kind: 'spawn', models: [CLAUDE], accounts: { accounts: [key] }, gate, now: NOW }).accountKey, 'key');
+});

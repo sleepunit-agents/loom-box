@@ -284,8 +284,9 @@ function resolveRoom({ agent, m, accounts, now, gate }) {
   // conversations has no room, so the next eligible one (a Codex model, say) is chosen as an ordinary pick.
   if (gate && roomy.length) {
     const seen = roomy.map((a) => ({ a, v: gate(a, m.window) }));
-    const tightest = (v) => Math.max(...v.windows.map((r) => r.after + r.reserve));
-    const ok = seen.filter((x) => x.v.allow).sort((x, y) => tightest(x.v) - tightest(y.v));
+    // An account with no reading (an API key, say) is admitted but ranked last: never ahead of a measured login.
+    const tightest = (v) => (v.windows.length ? Math.max(...v.windows.map((r) => r.after + r.reserve)) : Infinity);
+    const ok = seen.filter((x) => x.v.allow).sort((x, y) => { const a = tightest(x.v), b = tightest(y.v); return a < b ? -1 : a > b ? 1 : 0; });
     if (ok.length) {
       const pick = ok[0].a;
       return { ok: true, account: pick.label ?? pick.name, accountKey: pick.name, admission: ok[0].v.why };
