@@ -73,7 +73,7 @@ describe('local bodies', () => {
   });
 
   test('the setting: agents and an absolute cwd, or none', () => {
-    assert.deepEqual(localBodiesOf({ LOOM_RUNTIME_LOCAL_BODIES: LOCAL }), { agents: ['art'], cwd: '/home/art/Art', from: 'clock', claude: '/home/art/.local/bin/claude', args: ['--dangerously-skip-permissions'], path: '/home/art/Art/bin:/usr/bin' });
+    assert.deepEqual(localBodiesOf({ LOOM_RUNTIME_LOCAL_BODIES: LOCAL }), { agents: ['art'], cwd: '/home/art/Art', from: 'clock', claude: '/home/art/.local/bin/claude', args: ['--dangerously-skip-permissions'], path: '/home/art/Art/bin:/usr/bin', where: 'here' });
     for (const bad of [undefined, '', 'nope', '[]', '{"agents":["art"]}', '{"agents":[],"cwd":"/x"}', '{"agents":["art"],"cwd":"rel"}']) {
       assert.equal(localBodiesOf({ LOOM_RUNTIME_LOCAL_BODIES: bad }), null, String(bad));
     }
