@@ -1,7 +1,11 @@
 # Actual provider continuation bench (held, opt-in)
 
-Status (2026-11-10, t-2004): **stage 1 host-run green; stages 2-4 authored, not yet
-host-executed.**
+Status (2026-11-10, t-2004): **all four stages host-run green on the merged code** (two
+consecutive runs, loom `5214140`, clock `d3ca90b`; loom note
+`work/2026-11-10-provider-bench-host-run-merged`). One bench defect was fixed to get there: the
+cutoff bridge's test clock also reached the house runner, which then read the live house's
+reports as a day stale and refused at the holder check before the deadline check; only the
+outbox now sees the test clock.
 
 Stage 1 ran green on 2026-11-09 on this branch's earlier head `bedb109`, which carried the
 *pre-review draft* of the follow-up code, with Codex `gpt-5.6-terra`, codex-cli 0.162.1,
@@ -37,23 +41,23 @@ helper (`test/fixtures/continuation-provider-report.mjs`) with its own inherited
 and actual native UUID; the parent never borrows that key. The helper waits for the parent's
 release file before each step.
 
-1. **Clock crash/replay** (host-run green on the draft). A proxy withholds the first accepted
+1. **Clock crash/replay** (host-run green on the draft, and again on the merged code 2026-11-10). A proxy withholds the first accepted
    clock receipt. The test SIGKILLs the clock process, reads its persisted wire body, restarts
    it, and requires identical replay with one runtime admission and one native UUID; the
    native session HouseRunner saw must equal the one the provider's own shell records. Only
    then does the provider enqueue its report (`pending`).
-2. **Runtime-controller crash with lost report receipt** (authored). The controller's
+2. **Runtime-controller crash with lost report receipt** (host-run green 2026-11-10). The controller's
    continuation drain (`drainContinuations`, the step of the service tick that posts reports)
    runs in its own process behind a proxy that lets the post reach core and withholds core's
    answer. That process is SIGKILLed: core holds one row, and the runtime doesn't know it. A
    fresh process, after the 2 s retry backoff, posts the identical sealed payload with the
    same stable ref exactly once; core deduplicates; still one row. The provider's own
    `continuation status` then reads `delivered`, and a further drain posts nothing.
-3. **Cutoff** (authored). With the bridge's clock one minute past the sealed deadline, the
+3. **Cutoff** (host-run green 2026-11-10). With the bridge's clock one minute past the sealed deadline, the
    provider's own next report is refused with `continuation expired`, and a drain past the
    deadline posts and reconciles nothing. The test clock reaches only the continuation route,
    copied field for field from `control.mjs`, because the production route takes no clock.
-4. **Source reset** (authored). The source conversation's recorded reset changes, and the
+4. **Source reset** (host-run green 2026-11-10). The source conversation's recorded reset changes, and the
    provider's next report, through the unchanged production `api()` route, is refused with
    `continuation source was reset or changed` (the binding recheck, before any clock check).
    Exactly one core row across all four stages.
@@ -69,9 +73,10 @@ installation commands are no-op fixture binaries; no installed timer is changed.
 step is a separate process here); physical provider-host death or restoration; provider
 execution exactly once; a *child* run reset (only the source's); a lost receipt that crosses the
 cutoff with a real provider (the model-free `test/continuation-core.integration.test.mjs` covers
-that with real core, for live, archived, deleted and never-accepted targets); Claude. Until stages
-2-4 pass on loom's machine, the release claim for the actual-provider path stays the narrow one:
-**clock crash/replay only, on the draft code**.
+that with real core, for live, archived, deleted and never-accepted targets); Claude. With all four
+stages green on loom's machine (2026-11-10), the release claim for the actual-provider path is:
+**Codex, clock crash/replay, controller-drain crash with a lost receipt, cutoff and source reset,
+on the merged code**, within the limits just listed.
 
 ### Run risk for stages 2-4
 

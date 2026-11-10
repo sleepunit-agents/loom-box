@@ -81,8 +81,11 @@ test('OPT-IN actual Codex: clock replay, controller crash, cutoff and reset arou
         let r;
         // Cutoff stage only: control.mjs's continuation route, field for field, with this test's clock past the
         // sealed deadline (the route takes no clock). Every other call goes through the production api() unchanged.
+        // Only the outbox sees the test clock: the holder check reads the live house through the test's real-clock runner
+        // (h.hr), as the production route's fresh runner would at a real cutoff; a runner on the moved clock finds the
+        // house's reports a day stale and refuses before any deadline check (host run 2026-11-10, t-2004).
         if(bridgeClock!==null&&path.startsWith('continuation-')) {
-          try { r={status:200,body:continuationCall(h.env,{action:path.slice('continuation-'.length),conversation:b.conversation,key:b.key,session:typeof b.session==='string'?b.session:undefined,handle:b.handle,id:b.id,text:b.text},{caller,now:()=>new Date(bridgeClock)})}; }
+          try { r={status:200,body:continuationCall(h.env,{action:path.slice('continuation-'.length),conversation:b.conversation,key:b.key,session:typeof b.session==='string'?b.session:undefined,handle:b.handle,id:b.id,text:b.text},{caller,now:()=>new Date(bridgeClock),runner:()=>h.hr})}; }
           catch(e) { assert.ok(e.status>=400&&e.status<500,e.stack); r={status:e.status,body:{error:e.message}}; }
         } else r=await api(h.env,{now:()=>new Date()},{caller,path,body:b});
         res.writeHead(r.status,{'content-type':'application/json'});res.end(JSON.stringify(r.body));return;
