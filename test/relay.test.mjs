@@ -5,13 +5,13 @@
 // in an agent's MCP session only when the runtime offers it) is in loom's suite (src/offered-tools.integration.test.ts).
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { deliver, deliveryDir, holdsRun, loadConv, tick } from '../src/delivery.mjs';
 import { GRANTS, KEY, setRelay } from '../src/grants.mjs';
 import { approvalsInstalled, appendRelay, readRelays, relay, relayNotices, relayText, relayTool, relaysOf, RETURN_MS, TOOL } from '../src/relay.mjs';
-import { originOf } from '../src/relay.mjs';
+import { depsOf, originOf } from '../src/relay.mjs';
 import { runFor } from '../src/gates-api.mjs';
 import { memStore } from '../src/store.mjs';
 import { plain, world } from './delivery-world.mjs';
@@ -40,8 +40,8 @@ function relayWorld({ pairs = { art: ['mark'], mark: ['art'] }, approvals = true
     household: () => ({ v: 1, agents: ['art', 'mark', 'fez'], owner: 'jonathan' }),
     approvals: {
       installed: () => approvals,
-      spend: (aid, target, caller) => {
-        spent.push({ aid, target, caller });
+      spend: (aid, target, caller, onBehalf) => {
+        spent.push({ aid, target, caller, onBehalf });
         if (allowed[aid] !== target) return `${aid} allows nothing for ${target}`;
         delete allowed[aid];
         return '';
@@ -89,7 +89,7 @@ describe('test 6: relay', () => {
   test('an unpaired relay is refused without an approval, and goes once with an allowed one', async () => {
     const allowed = { 'a-0000000f': 'art->fez' };
     const { w, d, delivered, spent } = relayWorld({ allowed });
-    await assert.rejects(relay(w.env, art, { to: 'fez', say: 'hi' }, d), /doesn't pair art with fez .*approvals request --kind relay --target art->fez/);
+    await assert.rejects(relay(w.env, art, { to: 'fez', say: 'hi' }, d), /doesn't pair art with fez .*approvals request --kind relay --target art->fez .*--ask 'OK for Art to ask Fez about/);
     assert.equal(delivered.length, 0);
     await assert.rejects(relay(w.env, art, { to: 'fez', say: 'hi', approval: 'a-00000001' }, d), /approval a-00000001 isn't allowed for a relay from art to fez: a-00000001 allows nothing/);
     assert.equal(delivered.length, 0);
@@ -97,7 +97,8 @@ describe('test 6: relay', () => {
     assert.match(ok.text, /fez has it/);
     assert.equal(delivered.length, 1);
     // Spent as the calling body: its agent, house and service (the approvals piece matches who asked).
-    assert.deepEqual(spent.at(-1), { aid: 'a-0000000f', target: 'art->fez', caller: art });
+    // Nothing proved which conversation asked: spent for someone loom can't name (t-1953), never the owner by default.
+    assert.deepEqual(spent.at(-1), { aid: 'a-0000000f', target: 'art->fez', caller: art, onBehalf: '-' });
     // Spent: once.
     await assert.rejects(relay(w.env, art, { to: 'fez', say: 'hi again', approval: 'a-0000000f' }, d), /isn't allowed/);
     assert.equal(delivered.length, 1);
@@ -379,6 +380,34 @@ describe('the return address is the asker\'s, proved or unambiguous', () => {
     assert.equal(originOf(w.env, { agent: 'art' }, owner), null, 'no body is at work there to have asked');
   });
 
+  test('a body on loom\'s machine relays from its shell only with its proof (t-1953)', async () => {
+    const dir = scratch('relay-local-');
+    const env = { ...process.env, HOME: dir, LOOM_RUNTIME_PIECE: 'runtime', LOOM_BODY_CONVERSATION: 'cv-0123456789ab', LOOM_BODY_KEY: 'k-not-its-key', CLAUDE_CODE_SESSION_ID: 'sess-1' };
+    delete env.LOOM_URL; delete env.LOOM_TOKEN_FILE;
+    const out = await new Promise((resolve) => {
+      const child = spawn(process.execPath, [join(import.meta.dirname, '..', 'src', 'cli.mjs'), 'relay', '--to', 'mark', '--say', 'hi'], { env });
+      let stderr = ''; child.stderr.on('data', (x) => { stderr += x; });
+      child.on('close', (status) => resolve({ status, stderr }));
+    });
+    assert.equal(out.status, 1);
+    assert.match(out.stderr, /can't prove it holds cv-0123456789ab/);
+    assert.equal(readRelays({ ...env }, Date.now()).length, 0, 'nothing sent');
+    // A real conversation of a body here, with the wrong key: refused at the proof itself.
+    const { w } = relayWorld();
+    const cv = (await deliver(w.env, w.msg('th:local', 'ask mark', { venue: 'loom', source: 'loom' }), w.o)).conversation;
+    assert.ok(loadConv(w.env, cv).body, 'a body holds it');
+    const wrong = { ...process.env, ...w.env, LOOM_BODY_CONVERSATION: cv, LOOM_BODY_KEY: 'k-not-its-key', CLAUDE_CODE_SESSION_ID: 'sess-1' };
+    delete wrong.LOOM_URL; delete wrong.LOOM_TOKEN_FILE;
+    const r2 = await new Promise((resolve) => {
+      const child = spawn(process.execPath, [join(import.meta.dirname, '..', 'src', 'cli.mjs'), 'relay', '--to', 'mark', '--say', 'hi'], { env: wrong });
+      let stderr = ''; child.stderr.on('data', (x) => { stderr += x; });
+      child.on('close', (status) => resolve({ status, stderr }));
+    });
+    assert.equal(r2.status, 1);
+    assert.match(r2.stderr, new RegExp(`can't prove it holds ${cv}`));
+    assert.equal(readRelays(w.env, w.clock.now().getTime()).length, 0, 'nothing sent');
+  });
+
   test('the house CLI names its conversation and sends its proof in the call\'s body, never argv', async (t) => {
     const calls = [];
     const server = createServer(async (req, res) => {
@@ -405,6 +434,49 @@ describe('the return address is the asker\'s, proved or unambiguous', () => {
     const { w } = relayWorld();
     const r = await runFor(w.env, { kind: 'agent', agent: 'art' }, ['relay', '--to', 'mark', '--say', 'x', '--key', 'k'], memStore());
     assert.equal(r.exit, 2, '--key is not a flag: proof never rides in argv');
+  });
+});
+
+describe('a relay approval is spent only for whom it was asked (t-1953)', () => {
+  const proofOf = (w, cv) => ({ key: w.runner.envs[loadConv(w.env, cv).body.split(':')[1]].LOOM_BODY_KEY, session: w.sessionFor(cv) });
+  test('a proven conversation spends for whom it acts: the owner\'s for the owner, a person\'s for that person', async () => {
+    const { w, d, spent } = relayWorld({ allowed: { 'a-00000011': 'art->fez', 'a-00000012': 'art->fez', 'a-00000013': 'art->fez' } });
+    // Loren owns the household here: her Comms thread is the owner's.
+    const mine = (await deliver(w.env, w.msg('th:mine', 'ask fez', { venue: 'loom', source: 'loom' }), w.o)).conversation;
+    await relay(w.env, { agent: 'art' }, { to: 'fez', say: 'one', conversation: mine, approval: 'a-00000011' }, d, proofOf(w, mine));
+    assert.equal(spent.at(-1).onBehalf, 'owner');
+    // Dan isn't an owner: a conversation only he steered acts for him.
+    const dans = (await deliver(w.env, w.msg('dm:dan', 'ask fez for me', { from: { kind: 'person', slug: 'dan' } }), w.o)).conversation;
+    await relay(w.env, { agent: 'art' }, { to: 'fez', say: 'two', conversation: dans, approval: 'a-00000012' }, d, proofOf(w, dans));
+    assert.equal(spent.at(-1).onBehalf, 'dan');
+    // The same conversation named without proof (the MCP tool): someone loom can't name, and the refusal says how to prove it.
+    d.approvals.spend = (aid, target, caller, onBehalf) => { spent.push({ aid, target, caller, onBehalf }); return onBehalf === 'owner' ? '' : `${aid} was asked for the owner; this body acts for someone loom can't name`; };
+    await assert.rejects(relay(w.env, { agent: 'art' }, { to: 'fez', say: 'three', conversation: mine, approval: 'a-00000013' }, d), /someone loom can't name.*`loom runtime relay` proves it/);
+    assert.equal(spent.at(-1).onBehalf, '-');
+    // A proof for another conversation proves nothing about this one: spent (tried) for no one loom can name.
+    const before = spent.length;
+    await assert.rejects(relay(w.env, { agent: 'art' }, { to: 'fez', say: 'four', conversation: mine, approval: 'a-00000013' }, d, proofOf(w, dans)), /was asked for the owner/);
+    assert.equal(spent.length, before + 1, 'it reached the spend');
+    assert.equal(spent.at(-1).onBehalf, '-');
+    // Several people steered it: no one person, so no one loom can name (fails closed; approvals then refuses).
+    const both = (await deliver(w.env, w.msg('dm:group', 'ask fez', { from: { kind: 'person', slug: 'dan' } }), w.o)).conversation;
+    await deliver(w.env, w.msg('dm:group', 'me too', { from: { kind: 'person', slug: 'eve' } }), w.o);
+    assert.equal(holdsRun(w.env, both, proofOf(w, both)), true, 'proved: the - is whom it acts for, not a missing proof');
+    await assert.rejects(relay(w.env, { agent: 'art' }, { to: 'fez', say: 'five', conversation: both, approval: 'a-00000013' }, d, proofOf(w, both)));
+    assert.equal(spent.at(-1).onBehalf, '-');
+    assert.equal(spent.length, before + 2);
+  });
+
+  test('the real spend passes --on-behalf to approvals use', () => {
+    const dir = scratch('relay-spend-');
+    const log = join(dir, 'argv');
+    const bin = join(dir, 'loom');
+    writeFileSync(bin, `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(log)}, JSON.stringify(process.argv.slice(2)));\n`);
+    chmodSync(bin, 0o755);
+    assert.equal(depsOf({ LOOM_BIN: bin, PATH: process.env.PATH }).approvals.spend('a-00000021', 'art->fez', { kind: 'agent', agent: 'art' }, 'dan'), '');
+    const argv = JSON.parse(readFileSync(log, 'utf-8'));
+    assert.deepEqual(argv.slice(-2), ['--on-behalf', 'dan']);
+    assert.deepEqual(argv.slice(0, 6), ['approvals', 'use', 'a-00000021', '--kind', 'relay', '--target']);
   });
 });
 

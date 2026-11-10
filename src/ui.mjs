@@ -11,11 +11,11 @@ import { join } from 'node:path';
 import { BOX_NAME, StateError, load, localBoxName, stateDir } from './state.mjs';
 import { sessionsBusy } from './busy.mjs';
 import { allowJoin, blockAllJoins, blockJoin, pendingJoins } from './enroll.mjs';
-import { addBox, assertBoxOwner, resolveBox, isBoxOwner, boxLabelOf, boxOfCall, boxUpdateNow, loginOver, factsOf, lendBox, list, loginCancel, loginCode, loginStart, loginView, primaryOf, remoteDown, remoteUp, revokeBox, shownTask, serviceDown, serviceMove, serviceRestart, serviceUp, setAgent, isHostHouse, setBoxOwner, setMayHost, setBoxWatch, setPrimary, up, down, LIVE } from './control.mjs';
+import { preferenceOf, addBox, assertBoxOwner, resolveBox, isBoxOwner, boxLabelOf, boxOfCall, boxUpdateNow, loginOver, factsOf, lendBox, list, loginCancel, loginCode, loginStart, loginView, primaryOf, remoteDown, remoteUp, revokeBox, shownTask, serviceDown, serviceMove, serviceRestart, serviceUp, setAgent, isHostHouse, setBoxOwner, setMayHost, setBoxWatch, setPrimary, up, down, LIVE } from './control.mjs';
 import { LOGIN_HARNESSES } from './logins.mjs';
 import { ownCommit, swapCommand } from './version.mjs';
 import { stateAccounts } from './accounts.mjs';
-import { COMMS_VENUE, HARNESS_WORDS, conversationJobs, ownerModelChoice, answerLoop, deliveryNotices, listConvs, loadConv, loopAsks, readFallbacks, resetCardProblem, resetPrincipal, runtimeAs, whenWords, workingConversations } from './delivery.mjs';
+import { COMMS_VENUE, HARNESS_WORDS, conversationJobs, ownerModelChoice, answerLoop, deliveryNotices, listConvs, loadConv, loopAsks, readFallbacks, resetCardProblem, resetPrincipal, runtimeAs, whenWords, workingConversations, nonIdleAgents } from './delivery.mjs';
 import { loomStore } from './store.mjs';
 import { asks as gateAsks, answer as gateAnswer, gatesPage, mergePeople, status as gatesStatus, proposals as gateProposals, PROPOSALS as PROPOSALS_COLLECTION } from './gates.mjs';
 import { GRANTS, KEY as GRANTS_KEY, GrantsError, addGrant, grantPathsOk, grantsProblem, householdOf, setPiece, setRelay, usableBy } from './grants.mjs';
@@ -24,6 +24,15 @@ import { relayNotices } from './relay.mjs';
 import { adapterStatuses, nowAgentPage, nowManifest, nowPage } from './nowboard.mjs';
 import { boxPagePath, checkDark, watchAsks, watchNotices, watchOf, watchRows } from './watch.mjs';
 import { coreFrom } from './core.mjs';
+
+/** Where an agent runs, for its row (t-2048): the boxes its houses are up on, and its order when it has one. */
+function whereRuns(s, a, live, env, nowMs) {
+  const on = [...new Set(live.filter((h) => h.agent === a && h.state === 'running').map((h) => h.box))];
+  const pref = preferenceOf(s, a, env);
+  const order = pref.length > 1 ? ` · prefers ${pref.map((id) => boxLabelOf(s, id)).join(', then ')}` : '';
+  if (on.length) return `Running on ${on.map((id) => boxLabelOf(s, id)).join(', ')}${order}`;
+  return `Next on ${boxLabelOf(s, primaryOf(s, a, env, nowMs))}${order}`;
+}
 
 /**
  * The runtime's own store (the grants, the gates), when it runs as loom's piece: loom names it (LOOM_PIECE_NAME).
@@ -209,19 +218,42 @@ function sessionsSection(env, s, view, only) {
   return blocks.length > 1 ? { id: 'sessions', title: 'Sessions', blocks } : null;
 }
 
+/** No agent-wide Idle claim while a source cannot account for its current activity. */
+export function idleUncertain(agent, s, busy, adapters, board) {
+  if (!board || board.activityUnknown?.includes(agent)) return true;
+  for (const v of Object.values(s.services ?? {})) {
+    if (v.agent !== agent || v.want !== 'up') continue;
+    if (BRIDGE.test(v.name) && !(adapters[v.name]?.mode === 'live' && adapters[v.name].agents?.includes(agent))) return true;
+    if (v.name === 'remote' && (s.houses[v.house]?.state !== 'running' || busy[`house:${v.house}`] !== false)) return true;
+  }
+  const r = s.remotes?.[agent];
+  return !!(r?.want === 'up' && (r.state !== 'running' || busy[`box:${r.name}`] !== false));
+}
+
 export function manifest(env, nowMs = Date.now(), o = {}) {
   const s = load(env);
+  // One adapter snapshot serves both the legacy board and modern delivery ownership.
+  // Re-running both adapter CLIs could exceed core's three-second manifest deadline.
+  const adapters = adapterStatuses(env);
   try { checkLoginExpiry(env, nowMs, o.alert ? { alert: o.alert } : {}); } catch { /* next manifest */ }
   // The now board (nowboard.mjs): a bridge actually down is an alert (one restarting, by the runtime's own doing, is
   // not), one back from an outage an FYI, and what each agent's bodies are in is its doing.
-  let board = { asks: [], agents: {}, notices: [] };
-  try { board = nowManifest(env, nowMs / 1000, s, listConvs(env)); } catch { /* a board that can't be read leaves the rest of the manifest */ }
+  let board = { asks: [], agents: {}, notices: [], activityUnknown: Object.keys(s.agents ?? {}) };
+  try { board = nowManifest(env, nowMs / 1000, s, listConvs(env), adapters); } catch { /* a board that can't be read leaves the rest of the manifest */ }
   // An always-on box gone silent is dark (watch.mjs): loom reads this manifest each minute, so it's checked here too.
   try { checkDark(env, s, nowMs, o.alert ? { alert: o.alert } : {}); } catch { /* next time */ }
   let convs = [];
   try { convs = workingConversations(env); } catch { /* the delivery state unreadable this time: the cards say what else is known */ }
   const busy = { ...reportedBusy(s), ...sessionsBusy(join(stateDir(env), 'session-cpu.json')) };
-  const reports = agentReports(s, Date.now(), busy, convs, adapterStatuses(env));
+  const reports = agentReports(s, Date.now(), busy, convs, adapters);
+  try {
+    const busyAgents = nonIdleAgents(env);
+    for (const a of Object.keys(s.agents ?? {})) {
+      if (idleUncertain(a, s, busy, adapters, board) || busyAgents.has(a) || reports[a]?.doing?.length || board.agents[a]?.length || ['unavailable', 'broken'].includes(reports[a]?.state)) continue;
+      reports[a] ??= { readings: [] };
+      reports[a].idle = { observedAt: new Date(nowMs).toISOString(), expiresAt: new Date(nowMs + 30000).toISOString() };
+    }
+  } catch { /* unreadable delivery is not proof of idle */ }
   for (const [a, doing] of Object.entries(board.agents)) reports[a] = { readings: [], ...reports[a], doing: [...(reports[a]?.doing ?? []), ...doing].slice(0, 8) };
   for (const [agent, jobs] of Object.entries(board.jobs ?? {})) {
     reports[agent] ??= { readings: [] };
@@ -668,10 +700,10 @@ export function agentReports(s, nowMs = Date.now(), busy = {}, convs = [], adapt
  * who may see it (loom src/ui/handler.ts atWorkFor), as it does a Comms thread's title (comms.md, rule 4).
  */
 export function convDoing(c) {
-  const since = Number.isFinite(c.since) ? { since: new Date(c.since).toISOString() } : {};
+  const since = { ...(Number.isFinite(c.since) ? { since: new Date(c.since).toISOString() } : {}), ...(c.activity ? { activity: c.activity } : {}) };
   if (c.venue === COMMS_VENUE) return { text: 'In a Comms thread', kind: 'talk', where: 'Comms', conversation: c.conversation, ...since };
   if (c.kind === 'scheduled') return { text: 'On a wake', kind: 'lane', conversation: c.conversation, ...since };
-  return { text: `Working · ${cap(c.venue)}`, kind: 'talk', conversation: c.conversation, ...since };
+  return { text: `Working · ${cap(c.venue)}`, kind: 'talk', ...(['discord', 'slack', 'signal'].includes(c.venue) ? { where: cap(c.venue) } : {}), conversation: c.conversation, ...since };
 }
 
 /** "12 days", "5 hours", "40 minutes": how long, for a box's uptime. */
@@ -924,7 +956,7 @@ function boxesPage(env, nowMs) {
       const svc = view.services.filter((v) => v.agent === a && v.want === 'up');
       const down = svc.filter((v) => v.state === 'failed' || v.state === 'lost');
       return { label: who(a), agent: a, page: `agent:${a}`, value: `${plural(n, 'house')} up · ${plural(svc.length, 'service')}`,
-        detail: down.length ? `${andList(down.map((v) => v.name))} ${down.length === 1 ? 'is' : 'are'} down` : `Primary box: ${boxLabelOf(s, primaryOf(s, a, env))}`, tone: down.length ? 'bad' : n ? 'ok' : 'muted' };
+        detail: down.length ? `${andList(down.map((v) => v.name))} ${down.length === 1 ? 'is' : 'are'} down` : whereRuns(s, a, live, env, nowMs), tone: down.length ? 'bad' : n ? 'ok' : 'muted' };
     }) }] });
   }
 
@@ -1269,14 +1301,18 @@ function agentTabPage(env, agent, caller, nowMs) {
     ] } }] }] });
   if (!own) {
     const c = s.agents[agent];
-    const primary = primaryOf(s, agent, env);
+    const primary = primaryOf(s, agent, env, nowMs);
+    const pref = preferenceOf(s, agent, env);
     const boxOpts = live_boxes.map((b) => ({ value: b.id, label: b.label }));
     const secrets = Object.entries(c.secrets || {});
     const repo = String(c.repo ?? '').replace(/^https:\/\/github\.com\//, '').replace(/\.git$/, '');
     sections.push({ id: `agent-${agent}`, title: 'Its house', side: true, blocks: [{ type: 'panel', rows: [
-      { label: 'Primary box', value: nameOf(primary), ...(boxOpts.length >= 2 && boxOpts.length <= 5
-        ? { choice: { action: 'set-primary', name: 'box', value: primary, options: boxOpts, fields: { agent } } }
-        : boxOpts.length > 5 ? { edit: { title: 'Primary box', action: 'set-primary', submit: 'Set', hidden: { agent }, fields: [{ name: 'box', label: 'Primary', kind: 'choice', value: primary, options: boxOpts }] } } : {}) },
+      // Its boxes in order (t-2048): bodies and houses go to the first that's up and may host it.
+      { label: 'Boxes, in order', value: pref.map(nameOf).join(', then '),
+        detail: pref.length > 1 && primary !== pref[0] ? `${nameOf(pref[0])} is down: it runs on ${nameOf(primary)} for now` : `Runs on ${nameOf(primary)}; the next box takes over when it's down`,
+        ...(boxOpts.length >= 2 ? { edit: { title: `${who(agent)}'s boxes, in order`, action: 'set-primary', submit: 'Save', hidden: { agent },
+          fields: ['first', 'second', 'third'].map((name, i) => ({ name, label: i ? 'Then' : 'First', kind: 'choice', value: pref[i] ?? '',
+            options: [...(i ? [{ value: '', label: 'None' }] : []), ...boxOpts] })) } } : {}) },
       { label: 'Repo', value: repo || 'none', detail: `${c.houseFile || 'house/house.json'}${c.branch ? ` on ${c.branch}` : ''}`, sheet: { title: `${who(agent)}'s house`, blocks: [{ type: 'kv', items: houseFacts(c) }] } },
       { label: 'Nested containers', value: c.nested ? 'Allowed' : 'Not allowed', toggle: { action: 'agent-flag', on: !!c.nested, fields: { agent, flag: 'nested' } } },
       { label: 'GPU', value: c.gpu ? 'Allowed' : 'Not allowed', toggle: { action: 'agent-flag', on: !!c.gpu, fields: { agent, flag: 'gpu' } } },
@@ -1498,7 +1534,11 @@ export function act(env, effects, { action, fields: raw = {}, caller: c }, publi
         const choice = ownerModelChoice(env, OWNER, fields);
         return { ok: true, message: `Saved ${who(choice.agent)}'s model preference. New turns use ${choice.effective === 'auto' ? 'Auto' : HARNESS_WORDS[choice.effective]} when available.`, page: '' };
       }
-      case 'set-primary': { const r = setPrimary(env, effects, fields); return { ok: true, message: `${r.agent}'s primary is ${label(r.primary)}.`, page: '' }; }
+      case 'set-primary': {
+        const ordered = ['first', 'second', 'third'].some((k) => k in fields);
+        const r = setPrimary(env, effects, { agent: fields.agent, ...(ordered ? { boxes: [fields.first, fields.second, fields.third].filter(Boolean) } : { box: fields.box }) });
+        return { ok: true, message: `${r.agent} runs on ${r.boxes.map(label).join(', then ')}: the first that's up.`, page: '' };
+      }
       case 'set-agent': { const r = setAgent(env, effects, fields); return { ok: true, message: `Saved ${r.agent}'s house.`, page: '' }; }
       case 'up': {
         const r = up(env, effects, OWNER, { agent: fields.agent, box: fields.box, needs: fields.needs, task: fields.task });

@@ -5,7 +5,7 @@
 //
 // Boxes are pets: machines enrolled once and kept (wunder, the 5090 box, a
 // laptop). Houses are cattle: an agent's container on a box, built from the
-// agent's repo for a task and thrown away. Nothing picks a box by itself.
+// agent's repo for a task and thrown away. An agent's boxes are in the order its owner set: the first that's up.
 //
 // On loom's own machine (the control plane, and its first box):
 //   loom runtime add <name> [--may-host a,b] [--labels x,y]   enroll a box; prints its credential once
@@ -16,7 +16,7 @@
 //                  [--logins claude,codex|none|default]       which of a box's logins its houses may have
 //                                                         how its house is made (--port: one it may publish;
 //                                                         --tailnet: a box tailscaled.sock it may use, by name)
-//   loom runtime primary <agent> [<box>]                       an agent's primary (default: this machine)
+//   loom runtime primary <agent> [<box>...]                    its boxes in order: the first that's up (default: this machine)
 //   loom runtime rename-local                                  after renaming this machine: its box takes the new name
 //   loom runtime health [<box>] [--json]                       each box's last health sample and what's wrong now
 //   loom runtime always-on <box> on|off                        silent 10 minutes is an alert (loom's own and report-only boxes always are)
@@ -151,7 +151,7 @@ import { answerLoop, continuationCall, deliver, listConvs, post, staleRuns, send
 import { coreFrom } from './core.mjs';
 import { watchBridges } from './nowboard.mjs';
 import { reviewStatus, reviewTick, runReview } from './review.mjs';
-import { bodyKeyFor, runBodyHost } from './bodyhost.mjs';
+import { bodyConversation, bodyKeyFor, bodySession, runBodyHost } from './bodyhost.mjs';
 import { runnerFor, usageDirOf } from './runners.mjs';
 import { capture as captureStatusline, keptReading, lineOf as statuslineText } from './statusline.mjs';
 import { applyUpgrade, carrySettings, loadCarried, recoverUpgrade } from './version.mjs';
@@ -187,7 +187,8 @@ export async function tellAtWork(env, o = {}) {
   try {
     const s = loadState(env);
     const houses = Object.entries(s.houses ?? {}).filter(([, h]) => h.agent && !h.service && (h.state === 'running' || h.state === 'starting')).map(([k]) => k).sort().join(',');
-    print = `${workingPrint(o.deps ? workingConversations(env, o.deps) : workingConversations(env))}|${houses}`;
+    // Renew explicit idle observations too; a silent working set must not leave a 30-second observation cached for 45 seconds.
+    print = `${workingPrint(o.deps ? workingConversations(env, o.deps) : workingConversations(env))}|${houses}|${Math.floor((o.nowMs ?? Date.now()) / 10000)}`;
   } catch { return false; }
   if (print === atWork) return false;
   atWork = print;
@@ -332,7 +333,7 @@ async function main(argv, env) {
       }
       return;
     }
-    case 'primary': { const [agent, box] = positional(rest); out(setPrimary(env, realEffects(env), { agent, box })); return; }
+    case 'primary': { const [agent, ...boxes] = positional(rest); out(setPrimary(env, realEffects(env), { agent, boxes })); return; }
     case 'up': {
       let task = flag(rest, '--task');
       if (task === '-' || task === undefined) task = await readStdin();
@@ -511,14 +512,14 @@ async function main(argv, env) {
       // sets CLAUDE_CODE_SESSION_ID per session (under a shared daemon too); Codex gives each command it runs
       // CODEX_THREAD_ID, the thread its `thread.started` named, which is a Codex body's slot (runners.mjs). Without
       // it every send from a Codex body was refused as naming no session (t-1898, Mark's Comms reply of 2026-11-06).
-      const session = env.CLAUDE_CODE_SESSION_ID || env.CODEX_THREAD_ID || undefined;
+      const session = bodySession(env);
       // --person <slug> --via <venue>: one DM to that person instead, through that venue's adapter (delivery.mjs).
       const person = flag(rest, '--person');
       const via = flag(rest, '--via');
       const msg = { conversation, text: await textOf(rest, '--text'), key: bodyKeyFor(env, conversation), ...(session ? { session } : {}), ...(person !== undefined ? { person } : {}), ...(via !== undefined ? { via } : {}) };
       const remote = env.LOOM_URL && env.LOOM_TOKEN_FILE;
       const call = remote ? pieceCall(env, flag(rest, '--piece')) : null;
-      const r = remote ? await call('send', msg) : await send(env, msg, { detach: true });
+      const r = await untilSessionKnown(() => (remote ? call('send', msg) : send(env, msg, { detach: true })));
       // Accepted isn't posted (t-1920): wait for what the venue said, so a body never reports a message it didn't send.
       const answer = r.accepted ? await sendOutcome({
         status: (q) => (remote ? call('send-status', q) : sendStatus(env, q)),
@@ -535,7 +536,7 @@ async function main(argv, env) {
         const r = await spawnTool(env, rest.slice(1), await readStdin());
         out(r); if (r.isError) process.exitCode = 1; return;
       }
-      const action = ['wait', 'result', 'say'].includes(rest[0]) ? rest[0] : 'start';
+      const action = ['wait', 'result', 'say', 'roles'].includes(rest[0]) ? rest[0] : 'start';
       const cv = ownConversation(env);
       const body = !!(env.HOUSE_ID || env.LOOM_BODY_KEY || env.LOOM_BODY_CONVERSATION);
       const remote = !!(env.LOOM_URL && env.LOOM_TOKEN_FILE);
@@ -544,7 +545,7 @@ async function main(argv, env) {
       if (!agent || agent === 'self') agent = (body || remote) ? undefined : defaultAgent(env);
       const callerAgent = !remote && body ? (await import('./delivery.mjs')).loadConv(env, cv)?.agent : agent;
       const q = { action: action === 'wait' ? 'result' : action, agent, ...(cv ? { conversation: cv, ...bodyProof(env, cv) } : {}),
-        ...(action === 'start' ? { brief: await textOf(rest, '--brief'), prefer: flag(rest, '--prefer'), title: flag(rest, '--title') } : { handle: rest[1] }),
+        ...(action === 'start' ? { brief: await textOf(rest, '--brief'), prefer: flag(rest, '--prefer'), role: flag(rest, '--role'), ...(rest.includes('--failover') ? { failover: true } : {}), title: flag(rest, '--title') } : { handle: rest[1] }),
         ...(action === 'say' ? { text: await textOf(rest, '--text') } : {}) };
       const call = () => remote ? pieceCall(env)('spawn', q) : spawnCall(env, body ? { kind: 'agent', agent: callerAgent } : { kind: 'owner' }, q, { detach: true });
       const timeout = Number(flag(rest, '--timeout') ?? 600);
@@ -606,11 +607,12 @@ async function main(argv, env) {
         return;
       }
       // A body asking: in a house through the piece API (its house's token), else here; with its run's key and session.
-      const conversation = flag(rest, '--conversation') || env.LOOM_BODY_CONVERSATION;
-      const session = env.CLAUDE_CODE_SESSION_ID || env.CODEX_THREAD_ID || undefined;
+      const conversation = flag(rest, '--conversation') || ownConversation(env);
+      if (!conversation) throw new Fail('principal: this body can\'t tell its own conversation yet (name it with --conversation)');
+      const session = bodySession(env);
       const q = { conversation, key: bodyKeyFor(env, conversation), ...(session ? { session } : {}) };
       const remote = env.LOOM_URL && env.LOOM_TOKEN_FILE;
-      const r = remote ? await pieceCall(env, flag(rest, '--piece'))('principal', q) : bodyPrincipal(env, q);
+      const r = await untilSessionKnown(async () => (remote ? pieceCall(env, flag(rest, '--piece'))('principal', q) : bodyPrincipal(env, q)));
       out(r);
       if (!r.ok) process.exitCode = 1;
       return;
@@ -642,6 +644,7 @@ async function main(argv, env) {
       return;
     }
     case 'models': return models(rest, env, json);
+    case 'roles': return roles(rest, env, json);
     case 'grants': {
       if (env.LOOM_URL && env.LOOM_TOKEN_FILE) return runAnswer(await pieceCall(env)('run', { argv: ['grants', ...rest] }));
       if (env.HOUSE_ID) throw new Fail('grants in a house need LOOM_URL and LOOM_TOKEN_FILE; the grants live on loom', 2);
@@ -668,7 +671,7 @@ async function main(argv, env) {
       // Where this body is (gates-api.mjs, placeOf): its own conversation, proved as a relay or `send` proves it. In a
       // house, through the piece API; on loom's machine (a local body), here.
       const mine = ownConversation(env);
-      if (!mine) throw new Fail('loom runtime place: this isn\'t a body holding a conversation (no LOOM_BODY_CONVERSATION)', 2);
+      if (!mine) throw new Fail('loom runtime place: can\'t tell this body\'s own conversation (none mapped for its session, or none in its environment)', 2);
       if (env.LOOM_URL && env.LOOM_TOKEN_FILE) return runAnswer(await pieceCall(env, flag(rest, '--piece'))('run', { argv: ['place', '--conversation', mine], ...bodyProof(env, mine) }));
       const { placeOf } = await import('./gates-api.mjs');
       const r = await placeOf(env, mine, bodyProof(env, mine));
@@ -678,7 +681,23 @@ async function main(argv, env) {
     case 'relays':
     case 'relay': {
       if (cmd === 'relays' || rest[0] !== 'tool') {
-        if (!env.LOOM_URL || !env.LOOM_TOKEN_FILE) throw new Fail('loom runtime relay and relays are a body\'s, from its house (its token: LOOM_URL and LOOM_TOKEN_FILE): loom runtime relay --to <agent> --say <text>; the tool core runs is `relay tool`', 2);
+        if ((!env.LOOM_URL || !env.LOOM_TOKEN_FILE) && ownConversation(env)) {
+          // A body on loom's machine (a local wake, t-1953): no house token, so here, as `place` is. Only with its proof
+          // (its run's key and session): it relays as its conversation's agent, and spends an approval for whom that
+          // conversation acts. Without the proof nothing is sent: loom's machine is no shortcut past it.
+          const mine = ownConversation(env);
+          const { loadConv, holdsRun } = await import('./delivery.mjs');
+          const c = loadConv(env, mine);
+          const proof = bodyProof(env, mine);
+          const caller = { kind: 'agent', agent: c?.agent };
+          if (!c?.agent || !proof.key || !holdsRun(env, mine, proof, { caller })) throw new Fail(`loom runtime relay: this body can't prove it holds ${mine} (its run's key and session), so it can't relay from here`, 1);
+          const named = rest.includes('--conversation') ? rest[rest.indexOf('--conversation') + 1] : undefined;
+          if (named !== undefined && named !== mine) throw new Fail(`relay: --conversation is this body's own (${mine}); a relay's answer comes back only to the conversation that asked`, 2);
+          const argv = [cmd, ...rest, ...(cmd === 'relay' && named === undefined ? ['--conversation', mine] : [])];
+          const { runFor } = await import('./gates-api.mjs');
+          return runAnswer(await runFor(env, caller, argv, undefined, undefined, undefined, cmd === 'relay' ? proof : {}));
+        }
+        if (!env.LOOM_URL || !env.LOOM_TOKEN_FILE) throw new Fail('loom runtime relay and relays are a body\'s, from its house (its token: LOOM_URL and LOOM_TOKEN_FILE) or a body on loom\'s machine (LOOM_BODY_CONVERSATION): loom runtime relay --to <agent> --say <text>; the tool core runs is `relay tool`', 2);
         // A relay from a body names its own conversation (LOOM_BODY_CONVERSATION, unless it names one) and proves it
         // holds it, as `send` does: its run's key and harness session, in the body of the call, never in argv.
         let argv = [cmd, ...rest];
@@ -929,6 +948,36 @@ async function models(rest, env, json) {
   throw new Fail('usage: loom runtime models [set|resolve] …', 2);
 }
 
+/**
+ * The worker roles (models.mjs, t-2036): `loom runtime roles` lists them, for any body or the owner; `roles set`
+ * (a role as JSON on stdin) and `roles remove <id>` are the household owner's, each with `--why`. Here on loom's
+ * machine it reads the runtime's state; elsewhere (a house) it asks the piece.
+ */
+async function roles(rest, env, json) {
+  const [sub, id] = positional(rest);
+  const remote = !!(env.LOOM_URL && env.LOOM_TOKEN_FILE);
+  const why = flag(rest, '--why');
+  let q = {};
+  if (sub === 'set') q = { role: JSON.parse(await readStdin()), ...(why ? { why } : {}) };
+  else if (sub === 'remove') { if (!id) throw new Fail('usage: loom runtime roles remove <id> --why …', 2); q = { remove: id, ...(why ? { why } : {}) }; }
+  else if (sub !== undefined) throw new Fail('usage: loom runtime roles [set|remove <id>] [--why …]', 2);
+  let r;
+  if (remote) r = await pieceCall(env)('roles', q);
+  else if (env.HOUSE_ID) throw new Fail('roles in a house need LOOM_URL and LOOM_TOKEN_FILE', 2);
+  else {
+    const m = await import('./models.mjs');
+    r = sub === undefined ? m.readRoles(env) : m.setRole(env, { ...q, by: 'owner' });
+  }
+  if (r?.error) throw new Fail(r.error);
+  if (json || sub !== undefined) return out(r);
+  if (!r.roles.length) { process.stdout.write('no roles yet: the owner adds them (loom runtime roles set)\n'); return; }
+  process.stdout.write(`catalog v${r.version}\n`);
+  for (const x of r.roles) {
+    process.stdout.write(`${x.id}: ${x.description}\n  eligible: ${x.eligible.join(', ') || '(none: its models left the list)'}${x.failover ? '; may move to another eligible model when out of quota' : ''}\n`);
+    for (const k of ['needs', 'input', 'output', 'dossier']) if (x[k]) process.stdout.write(`  ${k}: ${x[k]}\n`);
+  }
+}
+
 /** A dir packed and handed over as a service's (or slot's) starting state, in parts inside loom's body cap. */
 async function seedFrom(call, who, from) {
   if (!from) throw new Fail('--from <dir>', 2);
@@ -1000,16 +1049,39 @@ if (isMain) {
 
 export { main };
 
-/** This body's own conversation (LOOM_BODY_CONVERSATION), or undefined. */
+/**
+ * This body's own conversation, or undefined: the one its house says its harness session holds (bodyhost.mjs,
+ * bodyConversation), its LOOM_BODY_CONVERSATION only when nothing says otherwise. A reused `claude --bg` session keeps
+ * the environment of the body it was first started for (t-2053), so the environment alone never names it.
+ */
 function ownConversation(env) {
-  return /^cv-[0-9a-f]{12}$/.test(env.LOOM_BODY_CONVERSATION ?? '') ? env.LOOM_BODY_CONVERSATION : undefined;
+  // Told once per command (it may wait on its house): a property, as main runs before this module's own lets do.
+  const m = ownConversation.memo;
+  if (m?.env === env) return m.cv;
+  const cv = bodyConversation(env);
+  ownConversation.memo = { env, cv };
+  return cv;
 }
 
 /** A body's proof that it holds `cv` in its current run (as `send` takes it): its run's key and harness session. */
 function bodyProof(env, cv) {
   const key = bodyKeyFor(env, cv);
-  const session = env.CLAUDE_CODE_SESSION_ID || env.CODEX_THREAD_ID || undefined;
+  const session = bodySession(env);
   return { ...(key ? { key } : {}), ...(key && session ? { session } : {}) };
+}
+
+/**
+ * A proof the runtime refused only because it can't name this body's session yet (a house body's host reports it
+ * within a beat of the start, t-2053): asked again a few times, never with anything else changed.
+ */
+async function untilSessionKnown(ask, { tries = 6, ms = 2000 } = {}) {
+  let r;
+  for (let i = 0; i < tries; i++) {
+    r = await ask();
+    if (r?.ok !== false || !/session can't be told yet/.test(String(r.reason ?? r.error ?? ''))) return r;
+    if (i < tries - 1) await sleep(ms);
+  }
+  return r;
 }
 
 /** A piece API `run` answer, as this command's own output and exit. */

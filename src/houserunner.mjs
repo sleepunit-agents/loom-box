@@ -1,3 +1,4 @@
+import { ACTIONS, observation } from './ticker.mjs';
 // Bodies in the agent's own warm house (loom docs/specs/bridges.md, "Bodies before the one service"; agent-runtime.md,
 // section 5), ported from shuttle's bodies.py: delivery says who to wake and for what; a body host in the agent's
 // house (bodyhost.mjs) wakes them, with that house's harness, its login, its repo, its secrets and its agent's token.
@@ -36,7 +37,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { listConvs } from './delivery.mjs';
-import { outdatedHouse, up } from './control.mjs';
+import { boxUp, outdatedHouse, preferenceOf, up } from './control.mjs';
 import { pieceName } from './piece.mjs';
 import { bodyBox } from './placement.mjs';
 import { isParts } from './briefs.mjs';
@@ -340,6 +341,7 @@ function cleanReport(r) {
       harness: ['claude', 'codex'].includes(b.harness) ? b.harness : 'unknown',
       status: ['working', 'idle', 'ended', 'unknown'].includes(b.status) ? b.status : 'unknown',
       ...(typeof b.session === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{3,127}$/.test(b.session) ? { session: b.session } : {}),
+      ...(ACTIONS.has(b.tickerAction) && Number.isFinite(Date.parse(b.tickerObservedAt)) ? { tickerAction: b.tickerAction, tickerObservedAt: b.tickerObservedAt } : {}),
       feedable: b.feedable === true,
       pending: Array.isArray(b.pending) ? b.pending.filter((k) => typeof k === 'string' && k.length <= 64).slice(0, 64) : [],
       // A Comms thread's body's tool steps (activity.mjs), checked here as core will check them.
@@ -773,7 +775,7 @@ export class HouseRunner {
       const h = this.host(agent, seat);
       let takes = !!h.house && houseTakes(this.env, h.house);
       // An older image than the agent's current build: drained, and the next body goes to a fresh house (t-1764).
-      if (takes && !/^j-h-[0-9]{1,9}$/.test(seat) && this.drain(agent, h.house, seat)) takes = false;
+      if (takes && !/^j-h-[0-9]{1,9}$/.test(seat) && (this.drain(agent, h.house, seat) || (!fresh(h, now) && this.leaveDownBox(agent, h.house, seat, now)))) takes = false;
       else if (fresh(h, now) && takes) {
         // Handed out (its launch writes the request next): marked, so the cap's release never stops it in between.
         hostLocked(this.env, () => { const x = loadHost(this.env, agent, seat); if (x.house === h.house) { x.handedAt = now; writeJson(hostFile(this.env, agent, seat), x); } });
@@ -790,7 +792,7 @@ export class HouseRunner {
         const full = seatRoom(this.env, agent, seat);
         if (full) { releaseEmptySeatHouses(this.env, agent, seat, now); throw seatFull(full); }
         const s = load(this.env);
-        const at = bodyBox(s, agent, this.harness, this.env);
+        const at = bodyBox(s, agent, this.harness, this.env, now);
         if (!at.box) throw new RunnerError(at.reason);
         const boot = randomBytes(24).toString('hex');
         // up() checks the cap again in the same state write that makes the house: two starts at once never pass it both.
@@ -818,10 +820,10 @@ export class HouseRunner {
    * draining houses (its host's key, its bodies, what's asked of them all go with it) and the record names no house:
    * the caller asks for a fresh one. Its state record says so (`draining`), for the page. True if it was drained.
    */
-  drain(agent, house, seat = OWNER_SEAT) {
+  drain(agent, house, seat = OWNER_SEAT, why = null) {
     let s;
     try { s = load(this.env); } catch { return false; }
-    if (!outdatedHouse(s, house)) return false;
+    if (!why && !outdatedHouse(s, house)) return false;
     const at = this.now().toISOString();
     const moved = hostLocked(this.env, () => {
       const x = loadHost(this.env, agent, seat);
@@ -835,10 +837,26 @@ export class HouseRunner {
     });
     if (moved) {
       try {
-        update(this.env, (st) => { const hh = st.houses[house]; if (hh && !hh.draining) hh.draining = { at, reason: 'outdated image', build: hh.build, current: st.builds?.[agent]?.id ?? null }; });
+        update(this.env, (st) => { const hh = st.houses[house]; if (hh && !hh.draining) hh.draining = why ? { at, reason: why } : { at, reason: 'outdated image', build: hh.build, current: st.builds?.[agent]?.id ?? null }; });
       } catch { /* the page shows it next time */ }
     }
     return moved;
+  }
+
+  /**
+   * The agent's house is on a box that's gone quiet (no host report, the box unheard for PLACE_UP_MS) while another box
+   * of its preference is up and may run its body (t-2048): that house drains, as an outdated one does, and the next
+   * body gets a fresh house there. Its own bodies stay its (held, never written off: the box may come back).
+   */
+  leaveDownBox(agent, house, seat, nowMs) {
+    let s;
+    try { s = load(this.env); } catch { return false; }
+    const where = s.houses?.[house]?.box;
+    if (!where || boxUp(s.boxes?.[where], nowMs)) return false;
+    const at = bodyBox(s, agent, this.harness, this.env, nowMs);
+    // Only to a box the owner listed for it: an agent with one primary keeps waiting for that box, as it always did.
+    if (!at.box || at.box === where || !boxUp(s.boxes?.[at.box], nowMs) || !preferenceOf(s, agent, this.env).includes(at.box)) return false;
+    return this.drain(agent, house, seat, `its box ${s.boxes?.[where]?.name ?? where} went quiet; new bodies go to ${s.boxes?.[at.box]?.name ?? at.box}`);
   }
 
   /** Reserve a stable request without handing any work to its host. The caller
@@ -1063,6 +1081,11 @@ export class HouseRunner {
   }
 
   status(body) { return this.entry(body)?.status ?? 'unknown'; }
+  tickerObservation(body) {
+    const rec = this.rec(body), entry = this.entry(body);
+    if (entry?.status !== 'working') return null;
+    return observation(entry.tickerAction, entry.tickerObservedAt, this.now().getTime());
+  }
   /** A stale host report is not proof that a running house's body ended. */
   pending(body) {
     try {

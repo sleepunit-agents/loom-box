@@ -65,7 +65,7 @@ export function importPart(env, part, { force = false } = {}) {
     if (!b.local || name === here) continue;
     delete s.boxes[name];
     s.boxes[here] = { ...b, local: true };
-    for (const [a, p] of Object.entries(s.primaries || {})) if (p === name) s.primaries[a] = here;
+    for (const [a, p] of Object.entries(s.primaries || {})) s.primaries[a] = Array.isArray(p) ? p.map((x) => (x === name ? here : x)) : p === name ? here : p;
     // A service placed on the old machine's own box is placed on this one's.
     for (const svc of Object.values(s.services || {})) if (svc.box === name) svc.box = here;
   }

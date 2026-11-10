@@ -67,6 +67,18 @@ test('a local conversation refused for being unknown asks the owner on the page,
   assert.equal(ap.filed.length, 1);
 });
 
+test('the card says whether the clock handed nothing over or said the wake was no one\'s (t-2009)', async () => {
+  const { w, ap, lwake } = setup();
+  await deliver(w.env, lwake('alert:n', 'none', null), w.o);
+  await deliver(w.env, lwake('alert:u', 'unknown', '-'), w.o);
+  const rows = (place) => loadConv(w.env, cvOf('art', 'wake', place)).queue;
+  assert.equal(rows('alert:n')[0].noWord, true);
+  assert.equal(rows('alert:n')[0].wakeFor, '-');
+  assert.equal(rows('alert:u')[0].noWord, undefined);
+  assert.match(ap.filed.find((f) => f.target.endsWith(cvOf('art', 'wake', 'alert:n'))).details, /a wake the clock said nothing about/);
+  assert.match(ap.filed.find((f) => f.target.endsWith(cvOf('art', 'wake', 'alert:u'))).details, /a wake set by work loom couldn't say was yours/);
+});
+
 test('a conversation a person other than the owner spoke in is theirs: no ask', async () => {
   const { w, ap, lwake } = setup();
   await deliver(w.env, lwake('alert:l', 'one', 'owner'), w.o);
@@ -159,6 +171,12 @@ test('only the rows shown on the card he allowed count as his: a relay not on it
   // What a card lists: the unplaced wake and the relay, in words; never Loren's wake.
   assert.deepEqual(shownRows(c.queue).map((r) => r.key), ['k1', 'k3']);
   assert.match(shownRows(c.queue)[1].words, /^a relay from Mark/);
+  // When each arrived, in the household's time zone and saying which (t-2008: a bare UTC time read as hours off).
+  assert.equal(shownRows(c.queue, { LOOM_RUNTIME_TZ: 'America/Chicago' })[0].words, 'a wake set by work loom couldn\'t say was yours (Sun, Nov 8, 4:00 AM CST)');
+  // The clock saying nothing (a failed hand-over) reads differently from its word that the wake is no one's (t-2009).
+  assert.match(shownRows([{ ...k1, noWord: true }])[0].words, /^a wake the clock said nothing about \(/);
+  assert.match(shownRows(c.queue)[1].words, /\(Sun, Nov 8, 10:01 AM UTC\)$/);
+  assert.match(shownRows([{ ...relay, at: undefined }])[0].words, /\(time unknown\)$/);
   // The card showed only k1: k1 is his, the relay (not shown) leaves it unknown, Loren's wake is hers.
   // (Loren's wake was noted as hers when it queued: then she's named, and no reset counts it as his.)
   writeFileSync(join(dir, `${cv}.json`), JSON.stringify({ ...c, actsFor: { ...c.actsFor, people: ['loren'] }, resetAsk: { at: 'x', queued: ['k1'], approval: 'a-00000001' } }));
@@ -429,7 +447,7 @@ test('a label can\'t fake the card\'s words; the withdraw goes as the card was f
   const details = filed[filed.indexOf('--details') + 1];
   assert.equal(details.includes('\u202e'), false);
   assert.equal(details.includes(':') && details.split('counted as yours if you allow:').length, 2, 'the card\'s clause appears once, from the runtime');
-  assert.match(details, /a wake with no word from the clock/);
+  assert.match(details, /a wake set by work loom couldn't say was yours/);
   assert.equal(resetPrincipal({ ...env, LOOM_BIN: bin }, cv).ok, true);
   const withdrew = readFileSync(log, 'utf-8').trim().split('\n').map((l) => JSON.parse(l)).find((a) => a[1] === 'withdraw');
   assert.deepEqual(withdrew, ['approvals', 'withdraw', 'a-0000abcf', '--as', runtimeAs('art')]);
