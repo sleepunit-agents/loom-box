@@ -70,6 +70,9 @@ const fenceWord = () => randomBytes(6).toString('hex');
 const fenced = (head, lines) => { const f = fenceWord(); return [head, DATA_NOTE, `<<<alert data ${f}`, ...lines, `alert data ${f}>>>`].join('\n'); };
 /** The most of one alert `show` hands back: well inside the host verbs' output bound, so its header is never cut. */
 const SHOW_MAX = 32 * 1024;
+/** The most lines a report lists (the newest), so it stays well inside the output bound and its fence's opening is kept. */
+const LINES_MAX = 100;
+const newest = (lines, what) => (lines.length > LINES_MAX ? [`… ${lines.length - LINES_MAX} older ${what} left out`, ...lines.slice(-LINES_MAX)] : lines);
 
 /** `show <al-id>`: the alert as raised, its facts and detail fenced as data. {exit, out}. */
 export function show(art, id) {
@@ -107,7 +110,7 @@ export function verdictsReport(art, source, days, nowMs = Date.now()) {
     if (es.length >= TUNE_AFTER) counts.push(`TUNE THIS ALERT: ${es.length} false alarms with the same cause; change the alert, or propose the change`);
   }
   // The counts are the runtime's own words, outside the fence; the causes and reasons are the triages', inside it.
-  return [fenced(`${vs.length} verdict(s) for ${source} in the last ${days} days:`, out), ...counts].join('\n');
+  return [fenced(`${vs.length} verdict(s) for ${source} in the last ${days} days:`, newest(out, 'lines')), ...counts.slice(0, 5)].join('\n');
 }
 
 /** `peek [--hours N]`: recent entries grouped by kind and source, so a flapping unit reads as one line. */
@@ -126,7 +129,7 @@ export function peek(art, hours, nowMs = Date.now()) {
     if (msg.length > 160) msg = `${msg.slice(0, 157)}...`;
     return `- [${g.kind.slice(0, 40)}] ${g.source.slice(0, 64)} — ${when} — ${msg}`;
   });
-  return lines.length ? fenced(`What the ledger holds from the last ${hours} hours, by kind and source:`, lines) : `nothing in the last ${hours} hours`;
+  return lines.length ? fenced(`What the ledger holds from the last ${hours} hours, by kind and source:`, newest(lines, 'groups')) : `nothing in the last ${hours} hours`;
 }
 
 /**
