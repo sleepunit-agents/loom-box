@@ -657,7 +657,7 @@ export function list(env, caller) {
   const primary = caller.kind === 'agent' ? primaryOf(s, caller.agent, env) : undefined;
   const services = Object.entries(s.services ?? {})
     .filter(([, v]) => sees(caller, v.agent))
-    .map(([key, v]) => ({ service: key, agent: v.agent, name: v.name, box: v.box, want: v.want, moveTo: v.moveTo ?? null, house: v.house, state: s.houses[v.house]?.state ?? null, restarts: v.restarts ?? 0, stateSaved: s.serviceState?.[key]?.at ?? null }));
+    .map(([key, v]) => ({ service: key, agent: v.agent, name: v.name, box: v.box, want: v.want, moveTo: v.moveTo ?? null, house: v.house, state: s.houses[v.house]?.state ?? null, restarts: v.restarts ?? 0, ...(v.unnamed ? { unnamed: true } : {}), stateSaved: s.serviceState?.[key]?.at ?? null }));
   const sessions = Object.entries(s.remotes ?? {}).filter(([a]) => sees(caller, a))
     .map(([a, r]) => remoteView(a, r));
   return { boxes, houses, services, remotes: sessions, ...(primary ? { primary } : {}) };
@@ -1055,7 +1055,11 @@ export function report(env, effects, caller, { id, state, exit, log, build }) {
     h.updated = now(effects);
     if (state === 'running') h.started ??= h.updated;
     if (Number.isInteger(exit)) h.exit = exit;
-    if (typeof log === 'string') h.log = log.slice(-MAX_LOG);
+    // The box's own refusal line (BOX_REFUSED…) is kept whole at the head, so a long tail never cuts it (t-2132).
+    if (typeof log === 'string') {
+      const first = log.split('\n')[0];
+      h.log = log.length > MAX_LOG && first.startsWith(BOX_REFUSED) && first.length < 300 ? `${first}\n${log.slice(-(MAX_LOG - first.length - 1))}` : log.slice(-MAX_LOG);
+    }
     if (TERMINAL.has(h.state)) delete h.collection;
     if (TERMINAL.has(h.state) && h.tokenLabel) revokeOrQueue(s, effects, h.tokenLabel);
     if (TERMINAL.has(h.state) && h.service) serviceHouseEnded(s, h, effects);
@@ -1152,16 +1156,34 @@ function startService(s, svc, effects, delayMs = 0) {
   return id;
 }
 
+/**
+ * Whether an agent's caller may start, move or stop its services (t-2132). The owner's calls: as before. A service's
+ * own house (a chat bridge others steer): never. A house: only a body doing the owner's own work (its seat the owner's,
+ * as housePrincipal says), and only for a service that's already there: a new one is the owner's to bring up (the
+ * Boxes page), so a house can't start one its house file doesn't name or one he never set. An agent token in no house
+ * is loom's machine's own (the owner's trust boundary, t-2119), as before.
+ */
+function assertMayRunServices(env, s, caller, key, { create = false } = {}) {
+  if (caller.kind !== 'agent') return;
+  if (caller.service !== undefined && caller.service !== null) fail('a service doesn\'t start, move or stop services', 403);
+  if (caller.house === undefined || caller.house === null) return;
+  const h = s.houses?.[caller.house];
+  if (!h || h.agent !== caller.agent || !['starting', 'running'].includes(h.state) || housePrincipal(s, h, env)?.owner !== true) fail('only a body doing the owner\'s own work starts, moves or stops a service', 403);
+  if (create && !s.services?.[key]) fail(`${key} isn't a service yet: the owner brings a new one up on the Boxes page`, 403);
+  if (create && s.services[key].unnamed) fail(`${key} isn't in its house file (a box said so): the owner brings it back up once it is`, 403);
+}
+
 /** Bring a service up (on its box, or the agent's primary), or say where it already is. */
 export function serviceUp(env, effects, caller, body) {
   return update(env, (s) => {
     const { a, key } = serviceOf(s, caller, body);
+    assertMayRunServices(env, s, caller, key, { create: true });
     if (!s.agents[a]) fail(`${a} has no house yet: the owner sets its repo on the Boxes page`, 409);
     s.services ??= {};
     const svc = s.services[key];
     if (svc?.want === 'up') return { service: key, box: svc.box, house: svc.house, state: s.houses[svc.house]?.state };
     const box = placeHouse(s, a, { box: body.box || svc?.box || undefined }, env, Date.parse(now(effects)));
-    // Its recent crashes stay: brought back up, a loop still shows as one.
+    // Its recent crashes stay: brought back up, a loop still shows as one. Not `unnamed`: only the owner gets here then.
     const next = { agent: a, name: body.name, box, want: 'up', restarts: 0, created: svc?.created ?? now(effects), ...(svc?.crashes?.length ? { crashes: svc.crashes } : {}) };
     s.services[key] = next;
     const id = startService(s, next, effects);
@@ -1173,6 +1195,7 @@ export function serviceUp(env, effects, caller, body) {
 export function serviceDown(env, effects, caller, body) {
   return update(env, (s) => {
     const { key } = serviceOf(s, caller, body);
+    assertMayRunServices(env, s, caller, key);
     const svc = s.services?.[key];
     if (!svc) fail(`no service ${key}`, 404);
     svc.want = 'down';
@@ -1234,6 +1257,7 @@ export function writeOffBox(env, effects, { name, agent, houses: asked, lastSeen
 export function serviceMove(env, effects, caller, body) {
   return update(env, (s) => {
     const { a, key } = serviceOf(s, caller, body);
+    assertMayRunServices(env, s, caller, key);
     const svc = s.services?.[key];
     if (!svc || svc.want !== 'up') fail(`${key} isn't up`, 404);
     const to = placeHouse(s, a, { box: body.box }, env);
@@ -1268,6 +1292,7 @@ export function serviceMove(env, effects, caller, body) {
 export function serviceRestart(env, effects, caller, body) {
   return update(env, (s) => {
     const { key } = serviceOf(s, caller, body);
+    assertMayRunServices(env, s, caller, key);
     const svc = s.services?.[key];
     if (!svc || svc.want !== 'up') fail(`${key} isn't up`, 404);
     const h = s.houses[svc.house];
@@ -1278,11 +1303,21 @@ export function serviceRestart(env, effects, caller, body) {
   });
 }
 
+/** The box's words when it couldn't start a house (box.mjs), before its own reason. */
+const BOX_REFUSED = 'the box couldn\'t start it: ';
+
 /** When a service's house ends: move it, restart it (backing off), or leave it down. */
 function serviceHouseEnded(s, h, effects) {
   const svc = s.services?.[serviceKey(h.agent, h.service)];
   if (!svc || svc.house !== h.id) return;
   if (svc.want !== 'up') return;
+  // The box said the agent's house file names no such service (house.mjs specFor): it stays down, never a crash loop,
+  // and only the owner brings it back (t-2132). Only the box's own first line, for a house that never ran: a service's
+  // output follows that line, and one that ran could print anything.
+  if (h.state === 'failed' && !h.started && String(h.log ?? '').split('\n')[0] === `${BOX_REFUSED}the house file has no service ${h.service}`) {
+    svc.want = 'down'; svc.unnamed = true; delete svc.moveTo;
+    return;
+  }
   if (svc.moveTo) {
     svc.box = svc.moveTo; delete svc.moveTo; svc.restarts = 0;
     startService(s, svc, effects);
