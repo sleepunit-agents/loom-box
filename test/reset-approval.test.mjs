@@ -567,3 +567,33 @@ for (const gate of ['control', 'retiring', 'paused']) test(`vouch cleanup respec
   await drain(w.env, cv, depsOf(w.env, w.o));
   assert.equal(loadConv(w.env, cv).queue.length, 1);
 });
+
+test('a denied conversation refuses later local wakes without asking or retrying them', async () => {
+  const { w, ap, lwake } = setup();
+  const cv = cvOf('art', 'wake', 'wake:w-denied');
+  await deliver(w.env, lwake('wake:w-denied', 'first', '-'), w.o);
+  ap.check = async () => 'denied';
+  await drain(w.env, cv, depsOf(w.env, w.o));
+  const r = await deliver(w.env, lwake('wake:w-denied', 'second', '-'), w.o);
+  assert.equal(r.status, 403);
+  assert.match(r.error, /vouch was denied/);
+  assert.equal(ap.filed.length, 1);
+  assert.equal(loadConv(w.env, cv).queue.length, 0);
+  assert.deepEqual(deliveryNotices(w.env, w.clock.now().getTime()), []);
+});
+
+test('pending and unreadable vouch checks are limited to once a minute across drains', async () => {
+  const { w, ap, lwake } = setup();
+  await deliver(w.env, lwake('wake:w-slow', 'bench', '-'), w.o);
+  const cv = cvOf('art', 'wake', 'wake:w-slow');
+  let checks = 0;
+  ap.check = async () => { checks++; throw new Error('offline'); };
+  const d = depsOf(w.env, w.o);
+  await drain(w.env, cv, d);
+  await drain(w.env, cv, d);
+  assert.equal(checks, 1);
+  w.clock.advance(60_000);
+  await drain(w.env, cv, d);
+  assert.equal(checks, 2);
+  assert.equal(loadConv(w.env, cv).queue.length, 1);
+});
