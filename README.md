@@ -732,20 +732,25 @@ A box never reads loom's stores, and loom never reaches into a box. The box poll
 
 A body never gets a shell on loom's machine. A body doing its owner's own work asks for a **host verb** instead: a
 named step from a fixed table, with typed arguments, run by a separate executor that has no model
-(`src/hostverbs.mjs`; design: loom note `runtime/2026-11-10-t2049-phase3-local-bodies-off-loom`, step 3).
+(`src/hostverbs.mjs`; design: loom note `runtime/2026-11-10-t2049-phase3-local-bodies-off-loom`, step 3). What a box,
+a checkout or the alert ledger says comes back fenced as data (`<<<data <word>` … `data <word>>>>`, the word new each
+call, so nothing inside can close it).
 
 ```
 loom runtime host unit-status <unit>                 do    /usr/bin/systemctl --user status (loom-*, art-*, wake-rearm)
 loom runtime host journal <unit> [--since 2h] [--lines 200]   do    journalctl --user -u <unit>
 loom runtime host read <path>                        do    a runtime log (allocator-shadow.jsonl, allocator-readings.jsonl,
                                                            host-exec/log.jsonl) or hosts/<your agent>.json
-loom runtime host box-health <box>                   do    loom runtime health <box>
-loom runtime host art-checkout                       do    git status --short --branch of loom's ~/Art (no fsmonitor, no pager)
+loom runtime host box-health <box>                   do    loom runtime health <box>, fenced as data
+loom runtime host art-checkout                       do    git status --short --branch of loom's ~/Art (no fsmonitor, pager,
+                                                           submodules, user or system config), fenced as data
 loom runtime host alert-show <al-id>                 do    Art's alert ledger (~/Art/.alerts), read in-process: the alert
 loom runtime host alert-verdicts <source> [--days 30]   do    its verdicts, and its false alarms by cause
 loom runtime host alert-peek [--hours 24]            do    what alerted lately, grouped by kind and source
-loom runtime host alert-verdict <source> real|fixed|false-alarm --cause C --why W [--alert al-…]
-                                                     do    one typed, bounded record appended (O_APPEND, no link)
+loom runtime host alert-verdict <source> real|fixed|false-alarm --cause C --why W --alert al-…
+                                                     do    one typed, bounded record appended (O_APPEND, no link): only
+                                                           from the conversation alert:<source>, for an alert that source
+                                                           raised, once per alert
 loom runtime host art-chain-check --approval a-…     ask   ~/Art/bin/art-chain-check (a script a push can change)
 loom runtime host deploy-loom <label> --approval a-… ask   flock /tmp/deploy-loom.lock ~/Art/bin/deploy-loom <label>
 loom runtime host pieces-update <piece> --approval a-…  ask   loom pieces update <piece>

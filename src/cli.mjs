@@ -765,12 +765,23 @@ async function main(argv, env) {
       // through the piece API; a body on loom's machine here. Only ever this body's own conversation.
       const mine = ownConversation(env);
       if (!mine) throw new Fail('loom runtime host: can\'t tell this body\'s own conversation (none mapped for its session, or none in its environment)', 2);
-      const named = flag(rest, '--conversation');
+      // Read left to right, a flag and its value as one pair: a value that looks like a flag (`--why --piece`) is the
+      // value, never a flag that names where the body's proof goes (t-2119 cold review).
+      const VALUED = new Set(['--approval', '--conversation', '--since', '--lines', '--cause', '--why', '--alert', '--days', '--hours', '--piece']);
+      const args = [];
+      let named, piece;
+      for (let i = 0; i < rest.length; i++) {
+        if (!VALUED.has(rest[i])) { args.push(rest[i]); continue; }
+        const [k, v] = [rest[i], rest[i + 1]];
+        i++;
+        if (k === '--conversation') named = v;
+        else if (k === '--piece') piece = v;
+        else args.push(k, ...(v === undefined ? [] : [v]));
+      }
       if (named !== undefined && named !== mine) throw new Fail(`host: --conversation is this body's own (${mine})`, 2);
-      const args = rest.filter((x, i) => !(x === '--piece' || rest[i - 1] === '--piece') && !(x === '--conversation' || rest[i - 1] === '--conversation'));
       const argv = ['host', ...args, '--conversation', mine];
       const proof = bodyProof(env, mine);
-      if (env.LOOM_URL && env.LOOM_TOKEN_FILE) return runAnswer(await untilSessionKnown(() => pieceCall(env, flag(rest, '--piece'))('run', { argv, ...proof })));
+      if (env.LOOM_URL && env.LOOM_TOKEN_FILE) return runAnswer(await untilSessionKnown(() => pieceCall(env, piece)('run', { argv, ...proof })));
       const { loadConv } = await import('./delivery.mjs');
       const { runFor } = await import('./gates-api.mjs');
       return runAnswer(await runFor(env, { kind: 'agent', agent: loadConv(env, mine)?.agent }, argv, undefined, undefined, undefined, proof));
