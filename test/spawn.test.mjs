@@ -227,3 +227,42 @@ test('a spawn with a Comms thread links itself in its parent conversation with a
   assert.ok(link, 'a link note lands in the parent conversation');
   assert.ok(w.core.audits.some((a) => a.conversation === parent.conversation && a.seq === link.seq && a.text.startsWith('Spawned [')));
 });
+
+test('result keeps the report made while it was the asker\'s after another agent\'s answer joins (t-2051)', async () => {
+  const w = world();
+  w.runner.final = () => 'mine';
+  const r = await start(w);
+  const c = loadConv(w.env, r.handle);
+  w.runner.finish(c.body, { failed: false, worked: true });
+  await tick(w.env, w.o);
+  // Another agent's answer (a relay's) joins: the conversation's principal is no longer the asker's.
+  await deliver(w.env, { source: 'relay', id: 'r-0123abcd', agent: 'art', venue: c.venue, place: c.place, from: { kind: 'agent', id: 'mark' }, kind: 'message', at: new Date().toISOString(), text: 'here is my answer' }, w.o);
+  assert.equal(principalOf(w.env, loadConv(w.env, r.handle)).unknown, true);
+  const got = await spawnCall(w.env, owner, { agent: 'art', handle: r.handle, action: 'result' }, w.o);
+  assert.equal(got.state, 'done');
+  assert.equal(got.report, 'mine');
+  assert.match(got.later, /read it in its own conversation/);
+  // The run the answer started reports too: never returned as the asker's.
+  w.runner.final = () => 'theirs';
+  w.runner.finish(loadConv(w.env, r.handle).body, { failed: false, worked: true });
+  await tick(w.env, w.o);
+  assert.equal((await spawnCall(w.env, owner, { agent: 'art', handle: r.handle, action: 'result' }, w.o)).report, 'mine');
+  await assert.rejects(spawnCall(w.env, owner, { agent: 'art', handle: r.handle, action: 'say', text: 'more' }, w.o), /spawned principal has changed/);
+  // A reset is a new generation: the kept report goes with it.
+  const reset = loadConv(w.env, r.handle);
+  reset.actsFor.reset = 'new generation';
+  saveConv(w.env, reset);
+  await assert.rejects(spawnCall(w.env, owner, { agent: 'art', handle: r.handle, action: 'result' }, w.o), /spawned principal has changed/);
+});
+
+test('a report collected after another agent\'s answer joined is never kept as the asker\'s (t-2051)', async () => {
+  const w = world();
+  w.runner.final = () => 'mixed';
+  const r = await start(w);
+  const c = loadConv(w.env, r.handle);
+  await deliver(w.env, { source: 'relay', id: 'r-4567cdef', agent: 'art', venue: c.venue, place: c.place, from: { kind: 'agent', id: 'mark' }, kind: 'message', at: new Date().toISOString(), text: 'joined mid-run' }, w.o);
+  w.runner.finish(c.body, { failed: false, worked: true });
+  await tick(w.env, w.o);
+  assert.equal(loadConv(w.env, r.handle).spawn.kept, undefined);
+  await assert.rejects(spawnCall(w.env, owner, { agent: 'art', handle: r.handle, action: 'result' }, w.o), /spawned principal has changed/);
+});

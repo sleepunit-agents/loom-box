@@ -1611,6 +1611,10 @@ function closeRun(env, c, d, now) {
       if (typeof text === 'string' && text.trim()) {
         c.spawn.report = d.sealer.seal(Buffer.from(text.slice(0, MAX_TEXT))).toString('base64');
         c.spawn.reportRun = r.run;
+        // The asker's own report (t-2051), kept past later runs: collected while every voice it heard was still the
+        // asker's. Something not the asker's joining later (a relay's answer from another agent) ends what the handle
+        // returns as theirs, but not this report, made before it.
+        if (!c.resetPending && c.actsFor?.reset === undefined && JSON.stringify(principalOf(env, c)) === JSON.stringify(c.spawn.principal)) c.spawn.kept = { report: c.spawn.report, run: r.run };
         r.sent = (r.sent ?? 0) + 1;
         (r.posts ??= []).push({ h: textHash(text), ok: true });
       }
