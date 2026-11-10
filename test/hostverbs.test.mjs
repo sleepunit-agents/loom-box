@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { execPass, hostExecDir, hostRequest, hostResult, parseVerb, readAllowed, runOne } from '../src/hostverbs.mjs';
+import { execPass, householdAgent, hostExecDir, hostRequest, hostResult, parseVerb, readAllowed, runCommand, runOne } from '../src/hostverbs.mjs';
 import { checkArgs } from '../src/cli-args.mjs';
 
 const CV = 'cv-0123456789ab';
@@ -21,11 +21,12 @@ function world({ approvals = {}, held = conv, principal = { owner: true }, house
     use: async (aid, t, who) => { calls.push(['use', aid, t, who]); return approvals.use ? approvals.use(aid, t) : { status: 0, stdout: '' }; },
     tell: async (t, what) => { calls.push(['tell', t, what]); return approvals.tell ? approvals.tell(t) : { status: 0, stdout: '' }; },
   };
-  const env = { HOME: dir, LOOM_BOX_DATA: join(dir, 'data'), LOOM_RUNTIME_TEST_APPROVALS: fx };
+  const env = { HOME: dir, LOOM_BOX_DATA: join(dir, 'data'), LOOM_RUNTIME_TEST_APPROVALS: fx, ...(approvals.rule ? { LOOM_RUNTIME_HOST_RULES: '1' } : {}) };
   const d = {
     heldConv: (_e, cv, p, o) => (cv === held?.conversation && p.key === proof.key && p.session === proof.session && o.caller === caller ? held : null),
     principalOf: () => principal,
     housePrincipal: (id) => (id === caller.house ? house : null),
+    householdAgent: () => true,
     waitMs: 0,
   };
   const queued = () => { try { return readdirSync(join(hostExecDir(env), 'queue')); } catch { return []; } };
@@ -41,6 +42,7 @@ test('only the owner\'s own body, proved, may ask; anyone else learns nothing, n
     ['an unknown house', world(), { ...caller, house: 'h-99' }, proof],
     ['another agent\'s conversation', world({ held: { ...conv, agent: 'mark' } }), caller, proof],
     ['no house, not a local conversation', world(), { kind: 'agent', agent: 'art' }, proof],
+    ['a member\'s own agent, not the household owner\'s', (() => { const w = world(); w.d.householdAgent = () => false; return w; })(), caller, proof],
   ];
   for (const [what, w, who, p] of cases) {
     const r = await hostRequest(w.env, who, ['no-such-verb', '--conversation', CV], p, w.d);
@@ -66,7 +68,7 @@ test('verbs and their arguments are a fixed table: nothing free-form parses', ()
     ['sh', ['-c', 'id']], ['unit-status', ['sshd']], ['unit-status', ['loom-http', 'x']], ['unit-status', ['loom-http;id']],
     ['restart', ['art-boot']], ['restart', ['sshd.service']], ['deploy-loom', ['x; rm -rf /']], ['deploy-loom', []],
     ['pieces-update', ['../x']], ['journal', ['loom-http', '--since', '1y']], ['journal', ['loom-http', '--lines', '99999']],
-    ['journal', ['loom-http', '--grep', 'x']], ['art-chain-check', ['--fix']], ['read', ['a', 'b']], ['__proto__', []], ['constructor', []],
+    ['journal', ['loom-http', '--grep', 'x']], ['art-chain-check', ['--fix']], ['deploy-loom', ['-h']], ['deploy-loom', ['--prepare']], ['read', ['a', 'b']], ['__proto__', []], ['constructor', []],
   ]) assert.ok(parseVerb(v, args).error, `${v} ${args.join(' ')}`);
   assert.deepEqual(parseVerb('journal', ['art-boot.timer', '--since', '2h', '--lines', '50']).p, { unit: 'art-boot.timer', since: '2h', lines: 50 });
   assert.equal(parseVerb('restart', ['loom-piece-runtime']).target, 'restart:loom-piece-runtime.service');
@@ -137,12 +139,12 @@ test('the executor runs the fixed argv with no shell, redacts and bounds output,
   const w = world();
   const r = await hostRequest(w.env, caller, ['journal', 'loom-http', '--since', '30m', '--conversation', CV], proof, w.d);
   const seen = [];
-  const exec = (cmd, argv, opts, cb) => { seen.push({ cmd, argv, opts }); cb(null, `line\nAuthorization: Bearer abcdefghijklmnop1234\n${'x'.repeat(70_000)}`, ''); };
+  const exec = async (cmd, argv, opts) => { seen.push({ cmd, argv, opts }); return { exit: 0, out: `line\nAuthorization: Bearer abcdefghijklmnop1234\n${'x'.repeat(70_000)}` }; };
   await execPass(w.env, { exec });
   assert.equal(seen.length, 1);
-  assert.equal(seen[0].cmd, 'journalctl');
+  assert.equal(seen[0].cmd, '/usr/bin/journalctl');
   assert.deepEqual(seen[0].argv, ['--user', '--no-pager', '--output=short-iso', '--since=-30min', '--lines=200', '--unit', 'loom-http.service']);
-  assert.equal(seen[0].opts.shell, false);
+  assert.doesNotMatch(seen[0].opts.env.PATH, /\/Art\/|\.local\/bin/, 'no checkout\'s bin on the child\'s PATH');
   assert.equal(seen[0].opts.env.LOOM_RUNTIME_TEST_APPROVALS, undefined, 'the child gets a small environment, not the runtime\'s');
   const got = hostResult(w.env, caller, [r.id, '--conversation', CV], proof, w.d);
   assert.equal(got.state, 'done');
@@ -170,8 +172,8 @@ test('the executor parses a spooled request again, drops one that isn\'t a priva
   mkdirSync(join(dir, 'running'), { recursive: true });
   writeFileSync(join(dir, 'running', 'hx-00000000000000cc.json'), JSON.stringify({ id: 'hx-00000000000000cc', verb: 'restart', args: ['loom-http'] }), { mode: 0o600 });
   const ran = [];
-  await execPass(w.env, { exec: (cmd, argv, _o, cb) => { ran.push([cmd, ...argv]); cb(null, 'ok', ''); } });
-  assert.deepEqual(ran, [['systemctl', '--user', 'status', '--no-pager', '--lines=0', '--', 'loom-http.service']]);
+  await execPass(w.env, { exec: async (cmd, argv) => { ran.push([cmd, ...argv]); return { exit: 0, out: 'ok' }; } });
+  assert.deepEqual(ran, [['/usr/bin/systemctl', '--user', 'status', '--no-pager', '--lines=0', '--', 'loom-http.service']]);
   const done = (id) => JSON.parse(readFileSync(join(dir, 'done', `${id}.json`), 'utf-8'));
   assert.equal(done('hx-00000000000000aa').state, 'refused');
   assert.equal(existsSync(join(dir, 'done', 'hx-00000000000000bb.json')), false);
@@ -182,7 +184,7 @@ test('changes run one at a time, across passes', async () => {
   const w = world();
   for (const p of ['runtime', 'clock']) await hostRequest(w.env, caller, ['pieces-update', p, '--approval', 'a-1234abcd', '--conversation', CV], proof, w.d);
   let live = 0, most = 0;
-  const exec = (_c, _a, _o, cb) => { live++; most = Math.max(most, live); setTimeout(() => { live--; cb(null, '', ''); }, 30); };
+  const exec = (_c, _a, _o) => new Promise((res) => { live++; most = Math.max(most, live); setTimeout(() => { live--; res({ exit: 0, out: '' }); }, 30); });
   const state = { busy: new Set(), chain: Promise.resolve() };
   await Promise.all([execPass(w.env, { exec, state }), execPass(w.env, { exec, state })]);
   assert.equal(most, 1);
@@ -194,12 +196,15 @@ test('read: only the runtime\'s named logs and hosts/ files, never a link or a p
   mkdirSync(join(del, 'hosts'), { recursive: true });
   writeFileSync(join(del, 'allocator-shadow.jsonl'), '{"a":1}\n');
   writeFileSync(join(del, 'hosts', 'art.json'), '{}');
+  writeFileSync(join(del, 'hosts', 'mark.json'), '{}');
   writeFileSync(join(w.env.HOME, 'secret'), 'x');
   symlinkSync(join(w.env.HOME, 'secret'), join(del, 'allocator-readings.jsonl'));
-  assert.ok(readAllowed(w.env, 'allocator-shadow.jsonl').path);
-  assert.ok(readAllowed(w.env, 'hosts/art.json').path);
+  assert.ok(readAllowed(w.env, 'allocator-shadow.jsonl', 'art').path);
+  assert.ok(readAllowed(w.env, 'hosts/art.json', 'art').path);
+  assert.ok(readAllowed(w.env, 'hosts/mark.json', 'art').error, 'another agent\'s record');
+  assert.ok(readAllowed(w.env, 'hosts/art.p-loren.json', 'art').error, 'a person\'s seat');
   for (const p of ['allocator-readings.jsonl', '../secret', '/etc/passwd', 'conversations/cv-0123456789ab.json', 'hosts/../../secret', 'keys/x.key']) assert.ok(readAllowed(w.env, p).error, p);
-  const r = await runOne(w.env, { id: 'hx-00000000000000dd', verb: 'read', args: ['allocator-shadow.jsonl'] });
+  const r = await runOne(w.env, { id: 'hx-00000000000000dd', verb: 'read', agent: 'art', args: ['allocator-shadow.jsonl'] });
   assert.equal(r.state, 'done');
   assert.equal(r.output, '{"a":1}\n');
 });
@@ -226,4 +231,41 @@ test('through the body API, a caller that proves nothing is refused before anyth
   assert.match(r.stderr, /owner's own work/);
   assert.equal(w.queued().length, 0);
   assert.equal(w.calls.length, 0);
+});
+
+test('a long line is redacted in pieces, never emptied', async () => {
+  const { boundOutput } = await import('../src/hostverbs.mjs');
+  const line = JSON.stringify({ a: 'x'.repeat(2900), token: 'ghp_abcdefghijklmnopqrstuvwxyz0123456789' });
+  const r = boundOutput(line);
+  assert.ok(r.output.length > 2500);
+  assert.doesNotMatch(r.output, /ghp_abcdefghij/);
+});
+
+test('art-chain-check runs a script a push can change, so it asks', async () => {
+  const w = world();
+  assert.equal((await hostRequest(w.env, caller, ['art-chain-check', '--conversation', CV], proof, w.d)).needsApproval, true);
+});
+
+test('without the household saying host rules exist, no rule is asked for (it would only cost the call\'s time)', async () => {
+  const w = world();
+  await hostRequest(w.env, caller, ['unit-status', 'loom-http', '--conversation', CV], proof, w.d);
+  assert.ok(!w.calls.some((c) => c[0] === 'rule'));
+});
+
+test('householdAgent: only an agent whose every owner is a household owner', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'hh-'));
+  writeFileSync(join(dir, 'household.json'), JSON.stringify({ members: [{ person: 'jonathan', agents: '*' }, { person: 'gabe', agents: ['gabe-bot'] }] }));
+  const env = { LOOM_HOME: dir };
+  assert.equal(householdAgent(env, 'art'), true);
+  assert.equal(householdAgent(env, 'gabe-bot'), false);
+});
+
+test('a command past its time is ended with everything it started', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'grp-'));
+  const pidf = join(dir, 'pid');
+  const r = await runCommand('/bin/sh', ['-c', `sleep 30 & echo $! > ${pidf}; wait`], { env: { PATH: '/usr/bin:/bin' }, timeoutMs: 300 });
+  assert.equal(r.timedOut, true);
+  const pid = Number(readFileSync(pidf, 'utf-8'));
+  await new Promise((res) => setTimeout(res, 200));
+  assert.throws(() => process.kill(pid, 0), 'the background child is gone too');
 });

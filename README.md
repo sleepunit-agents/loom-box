@@ -694,11 +694,11 @@ named step from a fixed table, with typed arguments, run by a separate executor 
 (`src/hostverbs.mjs`; design: loom note `runtime/2026-11-10-t2049-phase3-local-bodies-off-loom`, step 3).
 
 ```
-loom runtime host unit-status <unit>                 do    systemctl --user status (loom-*, art-*, wake-rearm)
+loom runtime host unit-status <unit>                 do    /usr/bin/systemctl --user status (loom-*, art-*, wake-rearm)
 loom runtime host journal <unit> [--since 2h] [--lines 200]   do    journalctl --user -u <unit>
 loom runtime host read <path>                        do    a runtime log (allocator-shadow.jsonl, allocator-readings.jsonl,
-                                                           relays.jsonl, host-exec/log.jsonl) or hosts/<agent>….json
-loom runtime host art-chain-check                    do    ~/Art/bin/art-chain-check
+                                                           relays.jsonl, host-exec/log.jsonl) or hosts/<your agent>.json
+loom runtime host art-chain-check --approval a-…     ask   ~/Art/bin/art-chain-check (a script a push can change)
 loom runtime host deploy-loom <label> --approval a-… ask   flock /tmp/deploy-loom.lock ~/Art/bin/deploy-loom <label>
 loom runtime host pieces-update <piece> --approval a-…  ask   loom pieces update <piece>
 loom runtime host restart <unit> --approval a-…      ask   loom-http, loom-http-local, loom-http-lan, loom-piece-*
@@ -706,22 +706,29 @@ loom runtime host result hx-…                        a long verb's result
 loom runtime host-exec                               loom's machine: the executor (contrib/host-exec)
 ```
 
-- **Who.** The caller proves it holds its conversation in its current run (its run's key and harness session, as
+- **Who.** Only a household owner's agent (every owner it has is a household owner: a member's own agent is that
+  member's, and never touches loom's machine). The caller proves it holds its conversation in its current run (its run's key and harness session, as
   `send` does), from the house holding that body. The conversation's principal is the owner, and so is the caller's
   house (the owner's seat, or a job house doing the owner's work); a body on loom's machine only for a local
   conversation. Anyone else is refused before anything else is read, the verb included.
-- **The tier.** The owner's standing rule for kind `host` and target `<verb>:<arg>` (`approvals rule host …`), when
-  the approvals piece has one; until it does (it has merge rules only), each verb's own: reads `do`, changes `ask`. An
+- **The tier.** Each verb's own: the fixed reads `do`; changes, and any script from a checkout that syncs by itself
+  (`art-chain-check`, `deploy-loom`), `ask`. With `LOOM_RUNTIME_HOST_RULES=1` (once the approvals piece has standing
+  rules for kind `host`, t-2104), the owner's rule for `<verb>:<arg>` (`approvals rule host …`) decides instead. An
   unreadable answer is the verb's own tier. `ask`: an approval of kind `host` for exactly that target, which the
   runtime spends once, for the owner (`approvals use … --as <the body> --on-behalf owner`); without one, the answer is
   the `approvals request` line to file, and the body parks on it. `tell`: the FYI is filed first, and a tell that can't
   be filed stops the verb. An approval offered for a verb that doesn't need one is refused, not spent.
 - **The spool.** Only after that is the request written to `delivery/host-exec/queue` (0600 in a 0700 dir). The
   executor claims each by renaming it into `running/`, parses it again against the same table, runs the fixed argv
-  with `execFile` (no shell) and a small environment, within the verb's time limit, and keeps the output's last 64 KB,
-  every line through `redact.mjs`, in `done/` (7 days, 200 results). Changes run one at a time; reads alongside. A
-  request the executor was running when it stopped is recorded as `lost` and never run again. A request file that
-  isn't a private file of the executor's user is dropped. Every step is a line in `host-exec/log.jsonl`, without output.
+  with no shell, system tools by absolute path, in its own process group (ended whole past its time limit), with a
+  PATH of node's dir and the system's only, and keeps the output's last 64 KB, every line through `redact.mjs`, in
+  `done/` (7 days, 200 results). Changes run one at a time; reads alongside. One executor at a time
+  (`executor.pid`). A stop finishes what's running and begins nothing more. A request the executor was running when
+  it stopped is recorded as `lost` and never run again. A request file that isn't a private file of the executor's
+  user is dropped. The executor trusts the spool as the runtime trusts its own state: anything running as loom's user
+  on loom's machine could write it (a local body already has that machine's shell), so the owner's yes is checked by
+  the runtime before spooling, not again by the executor. After `pieces-update runtime`, restart the executor's unit
+  to run the new code. Every step is a line in `host-exec/log.jsonl`, without output.
 - **Answers.** A body's call waits about 2 s; a longer verb answers with its id, and `host result` gives the result
   to the same conversation's holder only (any other is told there's no such request).
 - **Why a separate executor.** A deploy or a `pieces-update runtime` restarts the process that asked; the executor is

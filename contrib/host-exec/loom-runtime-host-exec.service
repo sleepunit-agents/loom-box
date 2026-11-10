@@ -11,7 +11,8 @@ After=default.target
 [Service]
 Type=simple
 ExecStart=%h/.local/bin/loom runtime host-exec
-Environment=PATH=%h/.local/share/mise/installs/node/24.18.1/bin:%h/.local/bin:%h/Art/bin:/usr/bin:/bin
+# No checkout's bin on PATH: what a verb runs is fixed in code (system tools by absolute path).
+Environment=PATH=%h/.local/share/mise/installs/node/24.18.1/bin:/usr/bin:/bin
 Restart=on-failure
 RestartSec=5
 # A stop waits for a running change (a deploy) to finish, up to this.
