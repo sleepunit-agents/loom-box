@@ -636,3 +636,40 @@ test('a Claude job\'s last words are read as its transcript grows, never whole e
   const wide = new ClaudeRunner(); wide.transcriptOf = () => file;
   assert.match(wide.final({}), /transcript line exceeded 16 MiB/);
 });
+
+ test('final memo refreshes recency, evicts beyond 64, and rejects a link replacing a cached file', async () => {
+  const {openSync, writeSync, closeSync, renameSync, symlinkSync} = await import('node:fs');
+  const h = harness(), runner = new ClaudeRunner();
+  const event = text => JSON.stringify({type: 'assistant', message: {content: [{type: 'text', text}]}}) + '\n';
+  const paths = Array.from({length: 65}, (_, i) => join(h.D, `recency-${i}.jsonl`));
+  const get = file => {runner.transcriptOf = () => file; return runner.final({});};
+  for (const file of paths) writeFileSync(file, event('kept'));
+  for (const file of paths.slice(0, 64)) assert.equal(get(file), 'kept');
+  assert.equal(get(paths[0]), 'kept');
+  assert.equal(get(paths[64]), 'kept');
+  for (const file of paths.slice(0, 2)) {const fd = openSync(file, 'r+'); writeSync(fd, 'X', 0); closeSync(fd);}
+  assert.equal(get(paths[0]), 'kept', 'recently accessed entry survives');
+  assert.equal(get(paths[1]), null, 'least recently used entry was evicted and now reads invalid JSON');
+  const file = paths[64], moved = file + '.moved';
+  renameSync(file, moved); symlinkSync(moved, file);
+  assert.equal(get(file), null, 'a cached path replaced with a symlink is refused before memo lookup');
+});
+
+ test('final skips an oversized unfinished line through a later newline and bounds every large-file allocation', async () => {
+  const fs = (await import('node:fs')).default;
+  const {syncBuiltinESMExports} = await import('node:module');
+  const h = harness(), file = join(h.D, 'unfinished.jsonl');
+  const event = text => JSON.stringify({type: 'assistant', message: {content: [{type: 'text', text}]}}) + '\n';
+  writeFileSync(file, event('old') + event('界'.repeat(6_000_000)).slice(0, -10));
+  const runner = new ClaudeRunner({readMax: {final: 1024 * 1024}}); runner.transcriptOf = () => file;
+  const read = fs.readSync, sizes = [];
+  fs.readSync = (fd, buffer, ...args) => {sizes.push(buffer.length); return read(fd, buffer, ...args);};
+  syncBuiltinESMExports();
+  try {assert.match(runner.final({}), /transcript line exceeded 16 MiB; last readable words follow\)\nold$/);}
+  finally {fs.readSync = read; syncBuiltinESMExports();}
+  assert.ok(sizes.length > 16 && sizes.every(n => n <= 1024 * 1024));
+  fs.appendFileSync(file, 'remainder without newline');
+  assert.match(runner.final({}), /transcript line exceeded 16 MiB/);
+  fs.appendFileSync(file, '\n' + event('recovered').trimEnd());
+  assert.equal(runner.final({}), 'recovered');
+});

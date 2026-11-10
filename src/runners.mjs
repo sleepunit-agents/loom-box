@@ -330,7 +330,7 @@ export class ClaudeRunner {
     const f = this.transcriptOf(body);
     if (!f) return null;
     let st;
-    try { st = statSync(f); } catch { return null; }
+    try { st = lstatSync(f); if (!st.isFile()) return null; } catch { return null; }
     let m = FINAL_MEMO.get(f);
     // Another file at that path, or one cut shorter, is read again from its start.
     if (!m || m.ino !== st.ino || st.size < m.offset) m = { ino: st.ino, offset: 0, rest: '', last: null };
