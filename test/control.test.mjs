@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { MAX_CLAIM_TRIES, api, meets } from '../src/control.mjs';
+import { MAX_CLAIM_TRIES, api, inProcessBoxClient, meets } from '../src/control.mjs';
 import { load } from '../src/state.mjs';
 import { scratch } from './scratch.mjs';
 
@@ -644,7 +644,7 @@ test('a box polling loom over plain HTTP outside the tailnet won\'t run a login'
     ['http://192.168.6.30:8787', false], ['http://100.200.1.1:8787', false], ['http://loom.example.com', false], ['ftp://x', false]]) assert.equal(secureLoomUrl(u), yes, u);
   const { runner } = await import('../src/box.mjs');
   const started = [];
-  const client = { async call(path, body) { const r = api(env, fx, { caller: box('one'), path, body }); if (r.status !== 200) throw new Error(r.body.error); return r.body; } };
+  const client = inProcessBoxClient(env, fx, box('one'));
   const r = runner({ ...env, LOOM_BOX_DATA: join(env.HOME, 'data') }, client, { loomUrl: 'http://192.168.6.30:8787/mcp', log: () => {}, secureChannel: false,
     status: () => ({ claude: { installed: true, loggedIn: false } }), login: (h) => { started.push(h); return { code() {}, cancel() {} }; }, upgrade: () => null });
   const l = ok(call(owner, 'login-start', { box: 'one', harness: 'claude' }));

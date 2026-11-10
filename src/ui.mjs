@@ -1,3 +1,4 @@
+import { endAdministration, administrationStatus, listAdministration } from './administration.mjs';
 import { checkLoginExpiry, loginExpiryAsks, loginExpiry } from './login-expiry.mjs';
 // The Boxes tab on loom's page (loom docs/extensions.md, "The page"): the
 // boxes, what each has and may host, the houses asked for, and the owner's
@@ -983,6 +984,28 @@ function boxesPage(env, nowMs) {
  * its state, machine, runtime and Update now, its sign-ins, its health and boot, its watch, its houses, and its settings.
  * A box's logins and Update now are its owner's (control.mjs, assertBoxOwner): another household owner sees, doesn't press.
  */
+function administrationSection(env, box, caller, nowMs) {
+  const scopes = listAdministration(env, caller, box, { now: () => new Date(nowMs) });
+  if (!scopes.length) return [];
+  return [{ id: 'administration', title: 'Scoped host access', blocks: [
+    { type: 'text', tone: 'muted', text: 'The work description is a human instruction. Box, OS identity, conversation and expiry limit access. Revoking blocks new commands; an offline box may still have outstanding work.' },
+    { type: 'panel', rows: scopes.map(s => {
+      const pending = s.operations.filter(r => ['admitted', 'stop-requested', 'unknown'].includes(r.state)).length;
+      const ended = ['revoked', 'finished', 'denied', 'expired', 'approval-unresolved'].includes(s.state);
+      const state = { requested: 'Requesting approval', pending: 'Awaiting approval', activating: 'Enabling access',
+        active: 'Active', 'approval-unresolved': 'Approval needs review', revoked: 'Revoked',
+        finished: 'Finished', denied: 'Denied', expired: 'Expired' }[s.state];
+      return { label: s.work, value: state,
+        detail: s.agent + ' · ' + s.identity + ' (UID ' + s.execution.uid + ') · ' + s.cwd +
+          (s.until ? ' · expires ' + new Date(s.until).toLocaleString('en-US', { timeZone: 'America/Chicago', timeZoneName: 'short' }) : '') +
+          (pending ? ' · ' + pending + ' command outcomes outstanding' : ''),
+        ...(!ended ? { act: { action: 'administration-revoke', label: 'Revoke access', tone: 'danger',
+          fields: { scope: s.id }, confirm: 'Block new commands and request that admitted work stops. An offline box cannot acknowledge the stop yet.' } } : {}),
+      };
+    }) },
+  ] }];
+}
+
 function boxPage(env, id, nowMs, caller = OWNER) {
   const s = load(env);
   const view = list(env, OWNER);
@@ -998,6 +1021,7 @@ function boxPage(env, id, nowMs, caller = OWNER) {
   const counts = `${st.short} · ${plural(running, 'house')} running${houseProgress(here) ? ` · ${houseProgress(here)}` : ''}`;
   return { title: b.label, intro: b.local ? boxRole(b) : cap(boxRole(b)), sections: [
     { id: 'status', blocks: [headline(bad, warn, counts, here.some(h => h.collection) ? 'Completed work is still being collected.' : 'Nothing needs you.', here.some(h => h.collection) && st.tone === 'ok' ? 'warn' : st.tone)] },
+    ...administrationSection(env, b.id, caller, nowMs),
     { id: `box-${b.id}`, blocks: [
       { type: 'panel', rows: [
         { label: 'State', value: st.value, ...(st.detail ? { detail: st.detail } : {}), tone: st.tone },
@@ -1511,6 +1535,18 @@ export function act(env, effects, { action, fields: raw = {}, caller: c }, publi
     // A box's logins and Update now: its owner's only.
     if (['login-start', 'login-code', 'login-cancel', 'box-update-now'].includes(action)) assertBoxOwner(env, OWNER, boxOfCall(env, action, fields));
     switch (action) {
+      case 'administration-revoke': {
+        // Unlike legacy page actions, require loom's named owner caller here.
+        if (c?.kind !== 'owner' || typeof c.who !== 'string') return { ok: false, message: 'The named box owner must revoke this access.' };
+        const q = { scope: String(fields.scope ?? '') };
+        const ended = endAdministration(env, c, q, { now: effects?.now ?? (() => new Date()) });
+        const status = administrationStatus(env, c, q, { now: effects?.now ?? (() => new Date()) });
+        const pending = status.operations.some(r => ['admitted', 'stop-requested', 'unknown'].includes(r.state));
+        return { ok: true, message: ended.state !== 'revoked' ? 'This access is ' + ended.state + '. No new commands can start under this scope.' : pending
+          ? 'Access revoked for new commands. Admitted work has a stop request; outstanding outcomes remain visible until the box acknowledges them.'
+          : 'Access revoked. No new commands can start under this scope.',
+          page: boxPagePath(ended.box) };
+      }
       case 'add-box': {
         const { name, token } = addBox(env, effects, fields);
         const url = publicUrl || '<this loom\'s URL>';

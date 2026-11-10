@@ -2829,6 +2829,9 @@ async function stopStuck(env, op, d) {
  */
 export async function tick(env, o = {}, only, mem = new Map()) {
   const d = depsOf(env, o);
+  // Owner approval enables scoped host work without a model continuation.
+  try { await (await import('./administration.mjs')).administrationTick(env, { ...o, now: d.now, warn: d.warn }, only); }
+  catch (e) { d.warn('administration tick: ' + e.message); }
   // A physical warm-house stop holds its conversations before any further delivery or replacement work.
   const housesStopping = stoppingHosts(env);
   if (housesStopping.length) locked(env, () => {

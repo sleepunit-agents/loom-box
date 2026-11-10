@@ -1,5 +1,6 @@
 import { hostStopLock, hasHostSession, nativeCollectionExchange } from './houserunner.mjs';
 import { checkLoginExpiry } from './login-expiry.mjs';
+import { administrationCapability } from './administration-capabilities.mjs';
 // The control plane's half of the runtime (loom docs/specs/runtime.md): what
 // each caller may ask of it. It runs on the machine loom runs on, reached
 // through loom's piece API (POST /api/<piece>/<path>: box, or runtime under its new name) by boxes and bodies, and
@@ -531,7 +532,12 @@ export function poll(env, effects, caller, body = {}) {
   return out;
 }
 
-function pollState(env, effects, caller, { facts, sessions, harnesses, usage, loginsRunning, runtime, reportOnly } = {}) {
+function pollState(env, effects, caller, { facts, sessions, harnesses, usage, loginsRunning, runtime, reportOnly, administration } = {}) {
+  let admin;
+  if (administration !== undefined) {
+    try { admin = administrationCapability(administration); }
+    catch (e) { update(env, s => { delete boxOf(s, caller).administration; }); throw e; }
+  }
   const f = facts === undefined ? null : listOf(facts, 'facts', FACT, 32);
   const running = runningReport(loginsRunning);
   const rt = runtimeReport(runtime);
@@ -547,6 +553,8 @@ function pollState(env, effects, caller, { facts, sessions, harnesses, usage, lo
     // Once: the box asks (joined with --report-only), and the owner's word after that stands, off included.
     if (reportOnly === true && !b.local && !b.reportOnlyAsked) { b.reportOnly = true; b.reportOnlyAsked = true; }
     const ro = !!b.reportOnly;
+    if (ro || admin === null || administration === undefined && runtime !== undefined) delete b.administration;
+    else if (admin) b.administration = admin;
     if (hs) b.harnesses = stamp(hs, now(effects));
     // The household's own salt for account keys (accounts.mjs): made once, never shown.
     s.accountSalt ??= randomBytes(16).toString('hex');
@@ -1578,6 +1586,15 @@ export const BOX_OWNER_ONLY = { 'login-start': loginStart, 'login-code': loginCo
 const BOX_ONLY = { hello, poll, claim, report, 'native-collection': nativeCollection, 'collection-status': collectionStatus, 'build-check': buildCheck, 'build-report': buildReport, 'save-state': saveState, 'state-part': statePart, 'remote-report': remoteReport, 'login-report': loginReport };
 
 /** One API call, as loom's piece API hands it over: {caller, path, body} → {status, body}. */
+export function inProcessBoxClient(env, effects, caller) {
+  if (caller?.kind !== 'piece' || !BOX_NAME.test(caller.subject ?? '')) fail('local box client needs its enrolled box caller', 403);
+  return { async call(path, body = {}) {
+    const answer = await api(env, effects, { caller, path, body });
+    if (answer.status !== 200) throw new StateError(`${path}: ${answer.status} ${answer.body?.error ?? 'refused'}`, answer.status);
+    return answer.body;
+  } };
+}
+
 export function api(env, effects, { caller, path, body }) {
   const b = body && typeof body === 'object' && !Array.isArray(body) ? body : {};
   try {
@@ -1587,6 +1604,18 @@ export function api(env, effects, { caller, path, body }) {
       if (path === 'join-request') return { status: 200, body: joinRequest(env, effects, caller, b) };
       if (path === 'join-poll') return { status: 200, body: joinPoll(env, effects, caller, b) };
       fail('a box with no credential can only ask to join', 403);
+    }
+    const administrationBox = {
+      'administration-work': 'administrationWork', 'administration-claim': 'claimAdministration',
+      'administration-admit': 'admitAdministration', 'administration-command': 'administrationCommandStatus',
+      'administration-cancel-claim': 'cancelAdministrationClaim',
+      'administration-complete': 'completeAdministrationCommand',
+    };
+    if (Object.hasOwn(administrationBox, path)) {
+      if (caller.kind !== 'piece' || !BOX_NAME.test(caller.subject ?? '')) fail(`${path} is for boxes`, 403);
+      return import('./administration.mjs').then(m => ({ status: 200,
+        body: path === 'administration-work' ? m.administrationWork(env, caller, effects) : m[administrationBox[path]](env, caller, b, effects),
+      })).catch(apiError);
     }
     if (BOX_ONLY[path]) {
       if (caller.kind !== 'piece' || !BOX_NAME.test(caller.subject ?? '')) fail(`${path} is for boxes`, 403);

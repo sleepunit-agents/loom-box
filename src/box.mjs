@@ -19,7 +19,7 @@ import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, re
 import { arch, cpus, homedir, platform, totalmem } from 'node:os';
 import { join as pathJoin } from 'node:path';
 import { newProof } from './enroll.mjs';
-import { BOX_NAME, stateDir } from './state.mjs';
+import { BOX_NAME, stateDir, localBoxName } from './state.mjs';
 import { containerName, missingSecrets, parseHouseFile, podmanSecret, runArgs, specFor } from './house.mjs';
 import { PART_RAW, joinParts, partsOf } from './blobs.mjs';
 import { boxSessions } from './remote.mjs';
@@ -28,6 +28,7 @@ import { bootInfo, SAMPLE_MS, unitSampler } from './watch.mjs';
 import { sampleHealth } from './health.mjs';
 import { harnessStatus, LOGIN_HARNESSES, loginDir, pruneLoginDir, startLogin, sweepCliContainers } from './logins.mjs';
 import { collectNativeHistory } from './native-collection-client.mjs';
+import { boxAdministration, administrationNamespace } from './administration-box.mjs';
 
 /** How often a box asks its harness CLIs whether they're logged in (and at once after a login). */
 export const STATUS_MS = 5 * 60_000;
@@ -112,11 +113,13 @@ export function detectFacts(env = process.env, labels = []) {
 export function remoteClient(url, credential, fetchImpl = fetch, piece = 'box') {
   const base = url.replace(/\/+$/, '');
   return {
-    async call(path, body = {}) {
+    async call(path, body = {}, { timeoutMs } = {}) {
+      if (timeoutMs !== undefined && (!Number.isInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 60_000)) throw new BoxError('invalid box request timeout');
       const r = await fetchImpl(`${base}/api/${piece}/${path}`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${credential}` },
         body: JSON.stringify(body),
+        ...(timeoutMs === undefined ? {} : { signal: AbortSignal.timeout(timeoutMs) }),
       });
       let out;
       try { out = await r.json(); } catch { out = {}; }
@@ -461,13 +464,16 @@ function rootless(env) {
 export function runner(env, client, { loomUrl, labels = [], log = (m) => process.stderr.write(`loom-box: ${m}\n`), hasSocket = (p) => existsSync(p), hasCdi = () => CDI_SPECS.some((p) => existsSync(p)), upgrade = maybeUpgrade,
   status = (agents, force) => harnessStatus(env, { agents, force }), login = (h, o) => startLogin(env, h, o), codexUsage = () => null, clock = () => Date.now(), secureChannel = true,
   sweep = () => sweepCliContainers(env), runtime = () => ({ commit: ownCommit(), piece: ownPiece() }),
-  buildOf = (c) => buildNow(env, c), houseImage = (id) => imageOf(env, id), sampleUnits: unitsImpl = undefined, bootInfo: bootImpl = undefined, sampleHealth: healthImpl = undefined, reportOnly = undefined }) {
+  buildOf = (c) => buildNow(env, c), houseImage = (id) => imageOf(env, id), sampleUnits: unitsImpl = undefined, bootInfo: bootImpl = undefined, sampleHealth: healthImpl = undefined, reportOnly = undefined, administration = undefined }) {
   const houses = new Map(); // id -> { child, dir, stopAt? }
   // This runner, as the control plane tells it from one before it: a login handed to another run is one a restart
   // dropped (control.mjs, settleLogins).
   const run = randomBytes(6).toString('hex');
   let swept = false;
   let work = null, closing = false;
+  let enrollment = localBoxName(env);
+  try { enrollment = loadConfig(env).id || loadConfig(env).name; } catch { /* local box */ }
+  const admin = administration === undefined ? boxAdministration(env, client, { namespace: administrationNamespace(loomUrl || '', enrollment), base: pathJoin(dataDir(env), 'administration'), secure: secureChannel, log }) : administration;
   const building = new AbortController();
   // The harness CLIs' own word on their logins, asked every STATUS_MS (and after a login), not every poll.
   let harnesses = null;
@@ -851,11 +857,13 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
 
   async function endStarts() {
     closing = true;
+    admin?.close();
     building.abort();
     if (work) await work;
   }
 
   async function shutdown() {
+    admin?.close();
     await endStarts();
     await endLogins();
     for (const id of houses.keys()) stop(id);
@@ -913,7 +921,9 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
     // Which runtime this box runs, and how its last upgrade went (version.mjs): the box's page shows both.
     let rt = null;
     try { const r = runtime(); rt = { ...(r.commit ? { commit: r.commit } : {}), ...(r.piece ? { piece: r.piece } : {}) }; const u = lastUpgrade(stateDir(env), clock()); if (u) rt.upgrade = u; } catch { rt = null; }
-    const want = await client.call('poll', { ...watchReport(), facts: detectFacts(env, labels), ...(busy ? { sessions: busy } : {}), ...(hs ? { harnesses: hs } : {}), ...(cx ? { usage: { codex: cx } } : {}),
+    let cap = null;
+    if (!reportOnlyHere) { try { cap = await admin?.capabilities() ?? null; } catch { /* No capability is safer than blocking ordinary houses. */ } }
+    const want = await client.call('poll', { ...watchReport(), facts: detectFacts(env, labels), ...(busy ? { sessions: busy } : {}), ...(hs ? { harnesses: hs } : {}), ...(cx ? { usage: { codex: cx } } : {}), administration: cap,
       // The logins this runner has going: one loom handed out that isn't here was lost (control.mjs, settleLogins).
       loginsRunning: { run, ids: [...logins.keys()] }, ...(rt ? { runtime: rt } : {}) });
     if (want.loginAgents) {
@@ -923,6 +933,7 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
       if (first) { const hs2 = harnessesNow(true); if (hs2) await client.call('poll', { harnesses: hs2 }).catch((e) => log(`poll: ${e.message}`)); }
     }
     onLogins(want.logins);
+    try { await admin?.tick({ reportOnly: reportOnlyHere }); } catch { log('administration: reconciliation unavailable; existing receipts retained'); }
     for (const id of want.stop || []) stop(id, true);
     // Polls carry real health, even while a build is held. Only one reconciliation
     // runs at a time: no duplicate claims, concurrent mirror writes or image builds.
