@@ -182,3 +182,32 @@ for (const harness of ['claude','codex']) test(`${harness}: owner interruption h
     assert.equal(h.local.startsEntered,1,'ordinary ticks cannot override the explicit owner hold');
   }finally{await stopHost(h,host,seat);await first;}
 });
+
+test('recovery binds a needs job\'s house receipt: its reservation is checked against its seat and its needs (t-2092)', {skip:!hasAge}, async()=>{
+  const { setRole } = await import('../src/models.mjs');
+  const { spawnCall } = await import('../src/spawn.mjs');
+  const { hostKeyOf } = await import('../src/principal.mjs');
+  const w=world(), h=houseWorld({harness:'claude'});
+  update(h.env,(s)=>{ const k=Object.keys(s.boxes).find((x)=>s.boxes[x].local); s.boxes[k].facts=['gpu:nvidia-geforce-rtx-5090']; });
+  setRole(h.env,{ role:{ id:'render', description:'Render frames', models:['opus'], needs:['gpu:5090'] } });
+  const key=hostKeyOf('owner',['gpu:5090']);
+  const originalWait=h.hr.waitPreparedLaunch.bind(h.hr);
+  h.hr.waitPreparedLaunch=async handle=>{ await originalWait(handle); throw Error('fixture registrar lost the ready native receipt'); };
+  const o={...w.o,runner:()=>h.hr,accounts:h.accounts,sealer:h.sealer};
+  let drained,host;
+  const first=spawnCall(h.env,{kind:'owner'},{agent:'art',brief:'Render it',role:'render'},{...o,onDrain:p=>{drained=p}});
+  try {
+    await wait(()=>load(h.env).houses['h-1']); host=h.host();
+    const out=await first; await drained;
+    const cv=out.handle;
+    const before=loadConv(h.env,cv), prepared=before.starting?.prepared;
+    assert.equal(prepared?.mode,'house');
+    assert.equal(readHouseLaunch(h.env,prepared.id).seat,key,'its reservation is the needs house\'s');
+    const fresh=new HouseRunner(h.env,'claude',{sealer:h.sealer,poll:10});
+    w.clock.advance(1001);
+    await tick(h.env,{...o,runner:()=>fresh});
+    const after=loadConv(h.env,cv);
+    assert.equal(after.body,'claude:h-1-b0000000','recovered, not held');
+    assert.equal(after.starting,undefined);
+  } finally { await stopHost(h,host,key); await first.catch(()=>{}); }
+});

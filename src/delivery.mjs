@@ -109,7 +109,7 @@ import { admit, allocatorOf, capacityGate, forecastBurn, logShadow, readReadings
 import { readRelays } from './relay.mjs';
 import { householdOwners, membersOf, ownersOf } from './owners.mjs';
 import { approvalsFake, approvalsRun, approvalsRunAsync, approvalsWhy } from './approvals-call.mjs';
-import { OWNER_SEAT, carriesSession, mint, noteSender, resetSigned, principalOf, putWakeFor, resetActsFor, seatOf, takeWakeContext, verify } from './principal.mjs';
+import { OWNER_SEAT, carriesSession, hostKeyOf, mint, noteSender, resetSigned, principalOf, putWakeFor, resetActsFor, seatOf, takeWakeContext, verify } from './principal.mjs';
 
 const DAY_MS = 86_400_000;
 export const MAX_TEXT = 40_000;
@@ -1861,7 +1861,7 @@ async function recoverPreparedStart(env, op, d) {
         locked(env, () => { const current = loadConv(env, op.cv); if (ours(current, op)) { abandon(current, d.now().getTime()); saveConv(env, current); } });
         return;
       }
-      if (!record || record.harness !== prepared.harness || record.agent !== c.agent || record.seat !== (prepared.snapshot.bodyRules.seat ?? 'owner')) throw Error('the original house reservation cannot be verified');
+      if (!record || record.harness !== prepared.harness || record.agent !== c.agent || record.seat !== hostKeyOf(prepared.snapshot.bodyRules.seat ?? 'owner', c.spawn?.role?.needs)) throw Error('the original house reservation cannot be verified');
       const runner = d.runner(prepared.harness, false), handle = prepared.handle ?? houseLaunchHandle(record);
       if (!prepared.handle && !['reserved', 'refused'].includes(record.state)) throw Error('the published house handle is missing from its prepared conversation');
       if (record.state === 'reserved') runner.cancelPreparedLaunch(handle);
@@ -2167,7 +2167,7 @@ async function executeOne(env, op, d, mem) {
       ...(c0.nativeRecovery ? { nativeRecovery: c0.nativeRecovery.id } : {}),
       way: { how: way.how, home: !!way.home, ...(way.file ? { file: way.file } : {}), ...(way.failover ? { failover: way.failover } : {}), ...(base.gate ? { gated: true } : {}) },
     } });
-    const base = { activity: c0.spawn?.interactive === true, agent: c0.agent, venue: c0.venue, venueKind: c0.kind, prefer: c0.spawn?.prefer ? [c0.spawn.prefer] : [], cwd: local ? lb.cwd : d.cwd, deny: rules.deny, guest: rules.guest, ...(local ? { local: true } : {}), ...(rules.seat ? { seat: rules.seat } : {}), ...jobModel(c0) };
+    const base = { activity: c0.spawn?.interactive === true, agent: c0.agent, venue: c0.venue, venueKind: c0.kind, prefer: c0.spawn?.prefer ? [c0.spawn.prefer] : [], cwd: local ? lb.cwd : d.cwd, deny: rules.deny, guest: rules.guest, ...(local ? { local: true } : {}), ...(rules.seat ? { seat: rules.seat } : {}), ...jobModel(c0), ...(Array.isArray(c0.spawn?.role?.needs) && c0.spawn.role.needs.length ? { needs: c0.spawn.role.needs } : {}) };
     // Out of quota (t-1907): which session this run continues, on which harness. Its home slot, when the harness it
     // switched away from has room again; its own slot, when that one's harness has room; else a fresh body elsewhere.
     // A deny list Codex can't keep (a tool within a server, a built-in: runners.mjs, codexDeny) keeps this body off
