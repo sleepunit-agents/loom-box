@@ -267,5 +267,8 @@ window and 0.5% of a daily or weekly one, the same for each job already running 
   for example) is chosen as an ordinary pick. When every model with room is kept, the job **waits**: its messages stay
   queued, it is not failed, and the owner gets no alert. It is checked again within 15 minutes, or at the reset if
   that comes sooner. The deferral is logged with `enforced: true`.
-- **Never gated:** live conversations (the final chat fallback), and a pinned job continuing on its assigned model.
-  Checking continuing jobs at each resume is the next slice.
+- **Never gated:** live conversations (the final chat fallback), including a terminal session.
+- **A job that has already run** (it has an assigned model) is checked again each time it continues. If its own
+  account is short of the reserve, it waits, keeping its session and messages, and is checked again within 15
+  minutes. It moves only if its spawn allowed a failover and another eligible model has headroom. Its lineage then
+  says it was "kept for conversations; failover allowed".

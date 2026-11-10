@@ -97,3 +97,40 @@ test('switch on: a job that ran before and fails over is never gated (its contin
   c = loadConv(w.env, r.handle);
   assert.match(c.body ?? '', /^codex:/, 'moved at once, though Codex is inside its reserve');
 });
+
+test('slice 4, switch on: a pinned job continuing waits when its account is kept for conversations, its session kept', async () => {
+  const w = setup({ enforce: false, claude: 0.5, codex: 0.3 });
+  const r = await w.spawn();
+  let c = loadConv(w.env, r.handle);
+  assert.equal(c.spawn.assignment.model, 'opus');
+  w.runner.finish(c.body);
+  update(w.env, (s) => setAllocatorMode(s, { mode: 'enforce' }));
+  w.max.usage = { '7d': 0.93, reset_7d: w.S + 3 * 86400, checked: w.S };
+  const before = w.log.filter((l) => l[0] === 'start' || l[0] === 'resume').length;
+  await spawnCall(w.env, { kind: 'owner' }, { agent: 'art', action: 'say', handle: r.handle, text: 'continue' }, w.o);
+  c = loadConv(w.env, r.handle);
+  assert.equal(w.log.filter((l) => l[0] === 'start' || l[0] === 'resume').length, before, 'no body: not moved, not resumed');
+  assert.match(c.waiting, /waiting for capacity/);
+  assert.ok(c.slot, 'its session stays');
+  assert.equal(c.spawn.assignment.model, 'opus', 'never moved without a failover');
+  // Room comes back (the reading falls after a reset): it resumes its own session.
+  w.max.usage = { '7d': 0.1, reset_7d: w.S + 7 * 86400, checked: w.S + 60 };
+  w.clock.advance(16 * 60_000);
+  await tick(w.env, w.o);
+  assert.equal(w.log.filter((l) => l[0] === 'start' || l[0] === 'resume').at(-1)[0], 'resume');
+});
+
+test('slice 4, switch on: with a failover allowed, a pinned job kept from its account moves once to a model with headroom', async () => {
+  const { setRole } = await import('../src/models.mjs');
+  const w = setup({ enforce: false, claude: 0.5, codex: 0.3 });
+  setRole(w.env, { role: { id: 'coding', description: 'Write code', models: ['opus', 'sol'] } });
+  const r = await spawnCall(w.env, { kind: 'owner' }, { agent: 'art', brief: 'Do the job', role: 'coding', failover: true }, w.o);
+  let c = loadConv(w.env, r.handle);
+  w.runner.finish(c.body);
+  update(w.env, (s) => setAllocatorMode(s, { mode: 'enforce' }));
+  w.max.usage = { '7d': 0.93, reset_7d: w.S + 3 * 86400, checked: w.S };
+  await spawnCall(w.env, { kind: 'owner' }, { agent: 'art', action: 'say', handle: r.handle, text: 'continue' }, w.o);
+  c = loadConv(w.env, r.handle);
+  assert.match(c.body ?? '', /^codex:/);
+  assert.equal(c.spawn.lineage.at(-1).why, 'kept for conversations; failover allowed');
+});
