@@ -101,7 +101,7 @@ import { CODEX_WONT, codexDeny, nativeRecoveryConfiguration, nativeRunnerConfigu
 import { cancelReservedLaunch, launchAttempt, launchWorkerAlive, launchWorkerIdentity, readLaunch, recoverLaunchReceipt, reserveLaunch } from './launch-journal.mjs';
 import { launchInjectedNative, observeNativeLaunch, superviseNativeLaunch } from './native-launch.mjs';
 import { raiseAlert } from './alerthook.mjs';
-import { baseCard, changed as changedCards, cleanAlive } from './activity.mjs';
+import { baseCard, changed as changedCards, cleanAlive, stepParts } from './activity.mjs';
 import { keepKey, keepSession, keyFile } from './bodyhost.mjs';
 import { spawnCap } from './spawn.mjs';
 import { continuationOutbox } from './continuation-outbox.mjs';
@@ -1581,7 +1581,8 @@ async function activityPass(env, c, d) {
   // in the conversation, whose words its own might carry. Read from its principal now (principalOf: a former owner
   // counts as a person), as localForeign reads it, never from the stored field alone.
   const ownersAlone = (() => { try { return wordsShown(principalOf(env, c), c); } catch { return false; } })();
-  const cards = (r.activity(body) ?? []).filter((x) => x.tool !== 'text' || ownersAlone);
+  // Every card through the one gate (activity.mjs stepParts), made here or reported by a house.
+  const cards = (r.activity(body) ?? []).filter((x) => x && (x.tool !== 'text' || ownersAlone)).map((x) => ({ ...baseCard(x), ...stepParts(x) }));
   const { out, next } = changedCards(cards, c.cardsSent ?? {});
   if (noThread.has(c.conversation) && !out.length) return;
   let alive = null;

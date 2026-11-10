@@ -164,7 +164,7 @@ test('a wake enables remote activity capture and posts live steps without a Comm
 test('the body\'s own words go only where it works for the owner alone; its sign of life goes with them; an older core gets plain cards (t-2109)', async () => {
   const w = world();
   w.core.commsAnswer = (b) => (b.op === 'spawn' ? { ok: true, id: 'th:abcdefghij' } : { ok: true });
-  const cards = [{ id: 'w1', at: 'x', tool: 'text', summary: 'Found it.', state: 'done', body: 'Found it.' }, { id: 't1', at: 'x', tool: 'Bash', summary: 'Ran the tests', state: 'done', body: 'ok', result: '1 line of output' }];
+  const cards = [{ id: 'w1', at: 'x', tool: 'text', summary: 'Found it.', state: 'done', body: 'Found it.' }, { id: 't1', at: 'x', tool: 'Bash', summary: 'Ran the tests', state: 'done', detail: 'npm test', body: 'ok', result: '1 line of output' }];
   w.runner.activity = () => cards;
   w.runner.signOfLife = () => ({ at: '2026-11-10T10:00:00.000Z', tokens: 4100 });
   const { spawnCall } = await import('../src/spawn.mjs');
@@ -212,7 +212,7 @@ test('whose words show: only a conversation for the owner alone, read from its p
 
 test('an older core: after its first refusal, plain cards go straight to it; a 409 stops the sign of life; another 400 is only a warning (t-2109)', async () => {
   const { spawnCall } = await import('../src/spawn.mjs');
-  const rich = (n) => ({ id: `t${n}`, at: 'x', tool: 'Bash', summary: `Step ${n}`, state: 'done', body: 'ok' });
+  const rich = (n) => ({ id: `t${n}`, at: 'x', tool: 'Bash', summary: `Step ${n}`, state: 'done', detail: 'npm test', body: 'ok' });
   const run = async (answer) => {
     const o = world();
     o.core.commsAnswer = (x) => (x.op === 'spawn' ? { ok: true, id: 'th:abcdefghij' } : { ok: true });

@@ -21,7 +21,7 @@
 import { createHash } from 'node:crypto';
 import { commandLabel, cutInput, cutTo, failWhy, fileName, GONE, INPUT_MAX, part, PRIVATE_FILE, privateFile, privateWords, redact, UNPRINTABLE, UNPRINTABLE_ONE } from './redact.mjs';
 
-const INVISIBLE_CH = /[\p{Cf}\u034f\u115f\u1160\u17b4\u17b5\u180b-\u180f\u2800\u3164\ufe00-\ufe0f\uffa0\u{E0100}-\u{E01EF}]/gu;
+
 
 export { UNPRINTABLE, UNPRINTABLE_ONE };
 
@@ -229,15 +229,20 @@ const CONTROL = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g;
  * redacted text, without them. Nothing is taken out after redaction runs.
  */
 function shownTextLine(line) {
+  // Terminal codes but colour go whole; then, outside colour codes, every unprintable character but a tab (the one
+  // list, redact.mjs UNPRINTABLE: controls, format and invisible characters, line and paragraph separators, lone
+  // surrogates, private and unassigned code points).
   const norm = String(line)
     .replace(/\x1b\][^\x07\x1b]{0,2000}(?:\x07|\x1b\\)?/g, '')
     .replace(/\x1b\[[0-9;?]{0,30}[A-Za-ln-z]/g, '')
-    .replace(/\x1b\[[0-9;]{0,30}m|\x1b|[\x00-\x08\x0a-\x1f\x7f-\x9f]/g, (m) => (m.length > 1 ? m : ''))
-    .replace(INVISIBLE_CH, '');
+    .split(/(\x1b\[[0-9;]{0,30}m)/)
+    .map((seg, i) => (i % 2 ? seg : seg.replace(UNPRINTABLE, (m) => m.replace(/[^\t]/gu, ''))))
+    .join('');
   const plain = norm.replace(SGR, '');
+  // A line past INPUT_MAX is cut at a word, before redaction, and says so.
   const cut = plain.length > INPUT_MAX ? cutInput(plain) : plain;
   const r = privateWords(redact(cut));
-  return r === plain ? norm : r;
+  return r === plain ? norm : cut === plain ? r : `${r} … (line cut)`;
 }
 
 /**
@@ -277,7 +282,8 @@ function patchText(patch) {
     if (!h || typeof h !== 'object') continue;
     const n = (v) => (Number.isInteger(v) && v >= 0 ? v : 0);
     out.push(`@@ -${n(h.oldStart)},${n(h.oldLines)} +${n(h.newStart)},${n(h.newLines)} @@`);
-    for (const l of Array.isArray(h.lines) ? h.lines : []) if (typeof l === 'string') out.push(l);
+    // Each line's content is redacted apart from its mark (+, -, space), so `+NAME=value` is an assignment to redact.
+    for (const l of Array.isArray(h.lines) ? h.lines : []) if (typeof l === 'string') out.push(/^[-+ ]/.test(l) ? `${l[0]}${shownTextLine(l.slice(1).replace(/\n/g, ' '))}` : shownTextLine(l));
   }
   return shownText(out.join('\n'));
 }
@@ -329,6 +335,9 @@ function claudeDetail(name, i) {
   }
 }
 
+/** Whether a command names a private file anywhere in it (redact.mjs privateFile, on each of its words). */
+const namesPrivate = (command) => String(command ?? '').slice(0, 20_000).split(/[\s'"`=<>|;&()]+/).some((w) => /[/.\\]/.test(w) && privateFile(w));
+
 /** Whether a file's contents must never show: no path, a private one, or one whose shown name isn't plain. */
 function hidden(path) {
   if (typeof path !== 'string' || !path) return true;
@@ -351,13 +360,14 @@ function claudeResult(name, r, text, failed, exit, input = {}) {
   switch (name) {
     case 'Bash': {
       const output = typeof u.stdout === 'string' || typeof u.stderr === 'string' ? [u.stdout, u.stderr].filter(Boolean).join('\n') : text;
-      const body = shownText(output);
+      // A command that names a private file (cat a key, read loom's stores) shows its result line, never its output.
+      const body = namesPrivate(input.command) ? '' : shownText(output);
       return { result: shellResult({ exit, output, failed }), ...(body ? { body } : {}) };
     }
     case 'Read': { const n = count(u.file?.numLines); return n === null ? {} : { result: `Read ${plural(n, 'line')}` }; }
     case 'Edit': case 'MultiEdit': { const p = patchLine(u.structuredPatch), body = shows ? patchText(u.structuredPatch) : ''; return p ? { result: p, ...(body ? { body } : {}) } : {}; }
     case 'Write': {
-      if (u.type === 'create' && typeof u.content === 'string') { const body = shows ? shownText(u.content.split('\n').map((l) => `+${l}`).join('\n')) : ''; return { result: `Wrote ${plural(u.content.split('\n').length, 'line')}`, ...(body ? { body } : {}) }; }
+      if (u.type === 'create' && typeof u.content === 'string') { const body = shows ? shownText(u.content.split('\n').map((l) => `+${shownTextLine(l)}`).join('\n')) : ''; return { result: `Wrote ${plural(u.content.split('\n').length, 'line')}`, ...(body ? { body } : {}) }; }
       const p = patchLine(u.structuredPatch), body = shows ? patchText(u.structuredPatch) : ''; return p ? { result: p, ...(body ? { body } : {}) } : {};
     }
     case 'Grep': { const f = count(u.numFiles), n = count(u.numLines); return n !== null && u.mode === 'content' ? { result: `Found ${plural(n, 'line')}` } : f !== null ? { result: `Found ${plural(f, 'file')}` } : {}; }
@@ -414,7 +424,7 @@ export function claudeCards(lines, prefix = '', parent = null) {
         const { result, body } = claudeResult(names.get(card.id), l.toolUseResult, text, card.state === 'failed', exit, inputs.get(card.id));
         if (result) card.result = clean(redact(result));
         if (body) card.body = body;
-        if (typeof l.timestamp === 'string') card.end = cardTime(l.timestamp);
+        if (typeof l.timestamp === 'string' && cardTime(l.timestamp) === l.timestamp) card.end = l.timestamp;
       }
     }
   }
@@ -471,7 +481,7 @@ export function codexCards(events, prefix = '') {
       if (item.type === 'command_execution') {
         if (Number.isInteger(item.exit_code) && Math.abs(item.exit_code) < 1e6) card.exit = item.exit_code;
         card.result = clean(redact(shellResult({ exit: item.exit_code, output: item.aggregated_output, failed: card.state === 'failed' })));
-        const body = shownText(item.aggregated_output);
+        const body = namesPrivate(unwrapShell(item.command)) ? '' : shownText(item.aggregated_output);
         if (body) card.body = body;
       } else if (item.type === 'file_change' && Array.isArray(item.changes)) card.result = `${plural(item.changes.length, 'file')} changed`;
     }
@@ -502,8 +512,8 @@ export function cleanAlive(a) {
 }
 
 /**
- * A card's further parts (t-2109), as core takes them, each through the gate again: from a house's word (houserunner
- * cleanCards) as from our own. A part that isn't its shape is left out, never the card. `detail` shown text of at most
+ * A card's further parts (t-2109), as core takes them, each through the gate again: a house's (houserunner cleanCards)
+ * and our own alike (delivery's activityPass passes every card through it before it's told). A part that isn't its shape is left out, never the card. `detail` shown text of at most
  * MAX_DETAIL without colours, `body` shown text of at most MAX_BODY, `result` one printable line of at most
  * MAX_SUMMARY, `items` at most MAX_ITEMS of {text (100), state done|now|todo}, `end` an ISO time, `parent` an id (as
  * the caller makes it), `exit` and `limit` whole numbers in range.
@@ -511,8 +521,11 @@ export function cleanAlive(a) {
 export function stepParts(c, idOf = (x) => x) {
   const o = {};
   const int = (v, lo, hi) => (Number.isInteger(v) && v >= lo && v <= hi ? v : null);
+  const tool = String(c?.tool ?? '');
   if (typeof c?.detail === 'string' && c.detail) { const d = shownText(c.detail.replace(SGR, ''), MAX_DETAIL); if (d) o.detail = d; }
-  if (typeof c?.body === 'string' && c.body) { const t = shownText(c.body, MAX_BODY); if (t) o.body = t; }
+  // A body only where one is made here (bodyAllowed): a shell step's output (not for a command that names a private
+  // file), the body's words, a diff of a file whose shown name is plain and not private. A read's never.
+  if (typeof c?.body === 'string' && c.body && bodyAllowed(tool, o.detail)) { const t = shownText(c.body, tool === 'text' ? MAX_TEXT : MAX_BODY); if (t) o.body = t; }
   if (typeof c?.result === 'string' && c.result) { const r = part('text', c.result, MAX_SUMMARY); if (r !== GONE && !UNPRINTABLE_ONE.test(r)) o.result = r; }
   const exit = int(c?.exit, -999_999, 999_999); if (exit !== null) o.exit = exit;
   const limit = int(c?.limit, 1, 86_400); if (limit !== null) o.limit = limit;
@@ -522,6 +535,16 @@ export function stepParts(c, idOf = (x) => x) {
     o.items = c.items.slice(0, MAX_ITEMS).map((x) => { const t = typeof x?.text === 'string' ? part('text', x.text, 100) : GONE; return { text: t === GONE ? 'an item' : t, state: ['done', 'now', 'todo'].includes(x?.state) ? x.state : 'todo' }; });
   }
   return o;
+}
+
+const SHELL = new Set(['Bash', 'command_execution']);
+const DIFFS = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit']);
+/** Whether a card of this tool, with this (gated) target, may carry a body: the same rule the cards made here follow. */
+function bodyAllowed(tool, detail) {
+  if (tool === 'text') return true;
+  if (SHELL.has(tool)) return !!detail && !namesPrivate(detail) && !detail.includes(PRIVATE_FILE);
+  if (DIFFS.has(tool)) return !!detail && detail !== PRIVATE_FILE && detail !== GONE && !hidden(detail);
+  return false;
 }
 
 /** Only a card's base fields, as a core from before t-2109 takes them. */

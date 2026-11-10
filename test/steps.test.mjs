@@ -176,3 +176,43 @@ test('a token split by a backspace, a carriage return or a lone escape is still 
   assert.equal(shownText('\x1b[31merror\x1b[0m: bad'), '\x1b[31merror\x1b[0m: bad');
   assert.ok(!shownText(`\x1b[31m${GH}\x1b[0m`).includes('\x1b'));
 });
+
+test('a line or paragraph separator, a lone surrogate or a private-use character inside a token can\'t save it', () => {
+  for (const sep of ['\u2028', '\u2029', '\ud800', '\ue000', '\u{10ffff}']) {
+    const t = shownText(`x ${GH.slice(0, 12)}${sep}${GH.slice(12)} y`);
+    assert.ok(!leak(t), JSON.stringify([sep, t]));
+  }
+  // A long line is cut at a word before redaction and says so.
+  assert.match(shownText(`${'word '.repeat(600)}end`), /… \(line cut\)$/);
+});
+
+test('a file whose shown name isn\'t plain (a token in its path) shows no diff; a diff\'s +NAME=value is redacted', () => {
+  const patch = [{ oldStart: 1, oldLines: 1, newStart: 1, newLines: 1, lines: ['-A=1', `+API_KEY=${GH}`, '+SECRET_PASSWORD=hunter2hunter2'] }];
+  const [odd, plain] = claudeCards([
+    use('g1', 'Edit', { file_path: `/home/art/Code/${GH}/notes.md` }), res('g1', 'ok', { structuredPatch: patch }),
+    use('g2', 'Edit', { file_path: '/home/art/Code/x/config.ts' }), res('g2', 'ok', { structuredPatch: patch }),
+  ]);
+  assert.equal(odd.body, undefined);
+  assert.ok(plain.body && !leak(plain.body) && !plain.body.includes('hunter2hunter2'), plain.body);
+});
+
+test('a command that names a private file shows its result, never its output', () => {
+  const [c] = claudeCards([use('k', 'Bash', { command: 'cat /home/art/.config/loom/people/jonathan.md' }), res('k', 'PRIVATE PERSON CARD', { stdout: 'PRIVATE PERSON CARD', stderr: '' })]);
+  assert.equal(c.body, undefined);
+  assert.equal(c.result, '1 line of output');
+  const [x] = codexCards([{ type: 'item.completed', item: { id: 'i', type: 'command_execution', command: "/usr/bin/bash -lc 'cat deploy.key'", aggregated_output: 'PRIVATE KEY BODY', exit_code: 0, status: 'completed' } }], 'b:');
+  assert.equal(x.body, undefined);
+});
+
+test('a house\'s body passes only where one is made here: never on a read, a private file\'s edit, or an unplain target', () => {
+  const base = { id: 'c', at: 'x', summary: 's', state: 'done' };
+  const keep = (c) => cleanCards([{ ...base, ...c }])[0]?.body;
+  assert.equal(keep({ tool: 'Read', detail: 'a.ts', body: 'FILE CONTENTS' }), undefined);
+  assert.equal(keep({ tool: 'Edit', detail: 'a private file', body: '+A=PRIVATEVALUE2' }), undefined);
+  assert.equal(keep({ tool: 'Edit', body: '+x' }), undefined, 'no target');
+  assert.equal(keep({ tool: 'Edit', detail: '.env', body: '+x' }), undefined);
+  assert.equal(keep({ tool: 'Bash', detail: 'cat ~/.ssh/id_ed25519', body: 'KEY' }), undefined);
+  assert.equal(keep({ tool: 'mcp__loom__recall', detail: 'x', body: 'MEMORY' }), undefined);
+  assert.equal(keep({ tool: 'Edit', detail: 'a.ts', body: '+x' }), '+x');
+  assert.equal(keep({ tool: 'Bash', detail: 'npm test', body: 'ok' }), 'ok');
+});
