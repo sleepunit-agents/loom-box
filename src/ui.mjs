@@ -19,7 +19,7 @@ import { stateAccounts } from './accounts.mjs';
 import { allocatorOf, setAllocatorMode, RESERVE_FLOOR, RESERVE_MARGIN } from './allocator.mjs';
 import { modelsOf, rolesOf, setRole } from './models.mjs';
 import { COMMS_VENUE, HARNESS_WORDS, conversationJobs, ownerModelChoice, answerLoop, deliveryNotices, listConvs, loadConv, loopAsks, readFallbacks, resetCardProblem, resetPrincipal, runtimeAs, whenWords, workingConversations, nonIdleAgents } from './delivery.mjs';
-import { loomStore } from './store.mjs';
+import { keptReads, loomStore, storeSignature } from './store.mjs';
 import { asks as gateAsks, answer as gateAnswer, gatesPage, mergePeople, status as gatesStatus, proposals as gateProposals, PROPOSALS as PROPOSALS_COLLECTION } from './gates.mjs';
 import { GRANTS, KEY as GRANTS_KEY, GrantsError, addGrant, grantPathsOk, grantsProblem, householdOf, setPiece, setRelay, usableBy } from './grants.mjs';
 import { spawnSync } from 'node:child_process';
@@ -45,7 +45,18 @@ function whereRuns(s, a, live, env, nowMs) {
 export function permsStore(env) {
   // A test hands in a store object; a real environment's string never is one.
   if (env?.LOOM_RUNTIME_TEST_STORE && typeof env.LOOM_RUNTIME_TEST_STORE === 'object') return env.LOOM_RUNTIME_TEST_STORE;
-  return env?.LOOM_PIECE_NAME ? loomStore(env) : null;
+  if (!env?.LOOM_PIECE_NAME) return null;
+  if (kept && kept.env === env) return kept.store;
+  return loomStore(env);
+}
+
+/**
+ * The store reads a long-lived process keeps (the delivery service's manifest, ui-socket.mjs): while the store's files
+ * haven't moved, the manifest lists the gates' proposals without a `loom store` process. For that one env object only.
+ */
+let kept = null;
+export function keepStoreReads(env) {
+  kept = env?.LOOM_PIECE_NAME ? { env, store: keptReads(loomStore(env), { signature: () => storeSignature(env) }) } : null;
 }
 /**
  * Spend a `grant` approval for exactly this target, as the body of the agent that asked (`--as`): '' when spent, else

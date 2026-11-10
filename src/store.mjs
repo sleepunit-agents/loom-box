@@ -4,6 +4,9 @@
 // `gates`), and the piece's own processes write its piece collections (`gate-proposals`). Reads are anyone's on
 // loom's machine. The runtime reads and writes only its own store, never another piece's.
 import { spawnSync } from 'node:child_process';
+import { closeSync, openSync, readSync, statSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { pieceName } from './piece.mjs';
 
 export class StoreError extends Error {
@@ -52,6 +55,52 @@ export function loomStore(env = process.env, { run = spawnSync, piece = pieceNam
       if (r.status !== 0) throw new StoreError(`loom store: ${why(r)}`);
       return parsed(r.stdout || '[]').map((d) => ({ key: d.key, doc: d.doc, rev: d.rev }));
     },
+  };
+}
+
+/**
+ * What the store's files are now (core's per-piece sqlite, WAL: loom docs/specs/piece-storage.md): every commit moves
+ * the wal-index header at the start of `-shm` (and the WAL, or the db after a checkpoint). A read moves neither header
+ * (it touches `-shm`'s mtime with its read marks, so that's left out). '' when they can't be read, which keeps nothing.
+ */
+export function storeSignature(env, piece = pieceName(env)) {
+  // As core finds it (householdHome): LOOM_HOME, else the user's own home, never $HOME.
+  const home = resolve(env.LOOM_HOME || join(homedir(), '.config', 'loom'));
+  const db = join(home, 'commons', 'stores', `${piece}.db`);
+  const stat = (p) => { try { const s = statSync(p, { bigint: true }); return `${s.ino}:${s.mtimeNs}:${s.size}`; } catch (e) { return e.code === 'ENOENT' ? '-' : null; } };
+  const head = (p, n) => {
+    let fd;
+    try { fd = openSync(p, 'r'); const b = Buffer.alloc(n); const got = readSync(fd, b, 0, n, 0); return b.subarray(0, got).toString('hex'); } catch (e) { return e.code === 'ENOENT' ? '-' : null; } finally { if (fd !== undefined) closeSync(fd); }
+  };
+  const parts = [stat(db), stat(`${db}-wal`), head(`${db}-wal`, 32), head(`${db}-shm`, 48)];
+  return parts.includes(null) || parts[0] === '-' ? '' : parts.join('|');
+}
+
+/**
+ * A long-lived process's reads of `store` (the delivery service's manifest, ui-socket.mjs), kept while `signature()`
+ * says the store's files haven't moved and for at most `maxAgeMs`: each read was a `loom store` process. A read is kept
+ * only when the signature was the same before and after it (nothing wrote meanwhile). A write through it forgets them
+ * all. Only for a process that reads as itself: reads are anyone's on loom's machine (a grant is checked only to write).
+ */
+export function keptReads(store, { signature, maxAgeMs = 30_000, now = Date.now } = {}) {
+  let sig = '';
+  let at = 0;
+  const kept = new Map();
+  const read = (k, fn) => {
+    const before = signature();
+    if (!before || before !== sig || now() - at >= maxAgeMs) { kept.clear(); sig = before; at = now(); }
+    if (before && kept.has(k)) return structuredClone(kept.get(k));
+    const v = fn();
+    if (before && signature() === before) kept.set(k, structuredClone(v));
+    return v;
+  };
+  const write = (fn) => { try { return fn(); } finally { kept.clear(); sig = ''; } };
+  return {
+    piece: store.piece,
+    get: (c, key) => read(`g\0${c}\0${key}`, () => store.get(c, key)),
+    list: (c, prefix) => read(`l\0${c}\0${prefix ?? ''}`, () => store.list(c, prefix)),
+    put: (c, key, doc, ifRev) => write(() => store.put(c, key, doc, ifRev)),
+    del: (c, key) => write(() => store.del(c, key)),
   };
 }
 
