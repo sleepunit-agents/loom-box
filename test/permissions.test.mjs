@@ -469,19 +469,23 @@ describe('a house reads its effective grants from the runtime', () => {
     assert.throws(() => ask(loomStore({}, { run, piece: 'runtim' }), JSON.stringify({ agent: 'art', piece: 'tasks', path: 'run' })), /no managed piece/);
     const none = () => ({ status: 3, stdout: '', stderr: 'loom store: no grants/household\n' });
     assert.equal(loomStore({}, { run: none, piece: 'runtime' }).get(GRANTS, KEY), null);
+    // The store says whose it is: the piece loom store is given (LOOM_RUNTIME_PIECE first, as pieceName says).
+    assert.equal(loomStore({ LOOM_RUNTIME_PIECE: 'elsewhere', LOOM_PIECE_NAME: 'runtime' }, { run: none }).piece, 'elsewhere');
   });
 
   test('asked with basis: true, the answer names what it decided on: the document and its text\'s sha256 (t-2065)', () => {
     const q = (more = {}) => JSON.stringify({ agent: 'art', piece: 'tasks', path: 'run', ...more });
-    const st = memStore();
+    // A store that doesn't say whose it is gives no basis.
+    assert.deepEqual(ask(memStore(), q({ basis: true })), { allow: true });
+    const st = Object.assign(memStore(), { piece: 'runtime' });
     assert.deepEqual(ask(st, q()), { allow: true });
-    assert.deepEqual(ask(st, q({ basis: true })), { allow: true, basis: { key: KEY, sha256: null } });
+    assert.deepEqual(ask(st, q({ basis: true })), { allow: true, basis: { piece: 'runtime', key: KEY, sha256: null } });
     const doc = { v: 1, pieces: { tasks: { mark: ['*'] } } };
     st.put(GRANTS, KEY, doc);
     const a = ask(st, q({ basis: true }));
     assert.equal(a.allow, false);
     // The text loom's store holds is JSON.stringify of the document: core hashes that same text.
-    assert.deepEqual(a.basis, { key: KEY, sha256: createHash('sha256').update(JSON.stringify(doc)).digest('hex') });
+    assert.deepEqual(a.basis, { piece: 'runtime', key: KEY, sha256: createHash('sha256').update(JSON.stringify(doc)).digest('hex') });
     assert.equal(ask(st, q()).basis, undefined);
   });
 });
