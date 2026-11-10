@@ -536,11 +536,15 @@ function taskPrincipal(env, agent, p) {
   return { unknown: true };
 }
 
-/** Whether a house for `p` (housePrincipal) gets what's scoped to `scope` under agent config `a`. Unscoped: yes. */
+/**
+ * Whether a house for `p` (housePrincipal) gets what's scoped to `scope` under agent config `a`. Unscoped: yes. The
+ * owner's houses get anything scoped to him or a project, but not what's scoped to services alone (t-2118): a chat
+ * venue's raw token kept for its bridge (`discord-token=service:discord`) is a way to post in any of its conversations.
+ */
 export function inScope(a, p, scope) {
   if (scope === undefined) return true;
-  if (p.owner) return true;
   const words = String(scope).split('+');
+  if (p.owner) return words.some((w) => !w.startsWith('service:'));
   if (p.service) return words.includes(`service:${p.service}`);
   if (!p.person || !Object.hasOwn(a.steers ?? {}, p.person)) return false;
   const may = a.steers[p.person];
