@@ -289,3 +289,71 @@ Remote boxes cannot report or request this target, houses never get this
 private login, and it is never offered as a house account. A failed/cancelled
 renewal cannot count the old, still-working login as successful: the CLI must
 exit successfully and extend the reported hard deadline.
+
+## Short read-only calls (t-2145)
+
+`loom-runtime oneshot --cwd <frozen-directory> [--prefer <model>] [--timeout <seconds>]`
+reads its prompt from stdin and prints only the final answer. Cold reviews use this
+entry point. It runs in a runtime house, using that house's mounted box logins;
+calling it on a machine outside a house fails explicitly. A missing runtime is
+never permission to launch another harness directly. Host callers must run their
+review in a house until trusted native one-shots have an account binding.
+
+The control-plane `oneshot-choice` API accepts only the calling agent's running
+house. It derives accounts from that house's box and mounted harnesses, intersects
+them with the agent's model allow-list, and uses `resolveFor`: the same owner
+harness preference, per-agent model order, scorecards and 97% quota boundary as
+bodies. A one-shot uses the worker reserve when the owner enabled enforcement, with
+the same in-flight worker counts and forecast as ordinary worker admission.
+Without an explicit preference, a body host supplies its assigned model through
+`LOOM_BODY_MODEL`, so a Codex job reviews on Codex. A per-call `--prefer` is a
+preference, never an account or allow-list override. The owner’s saved harness
+choice still wins when it has room.
+The API returns a model, harness, account label and reasons; never an account key
+or credential. It does not accept another agent or box from the caller.
+
+The CLI runs Claude in safe mode or Codex with a read-only sandbox and a fresh
+Codex home linked to its existing auth file. Hooks and skill-driven MCP installs
+are disabled. System or project Codex configuration layers that the fresh home
+cannot replace cause refusal before launch, using the canonical runner’s
+`codexLayers` check, so an external MCP write tool cannot bypass the sandbox. A caller supplies a frozen tree
+outside any instruction-bearing checkout. Read-only Codex can read outside the
+working tree: this is a review isolation convention, not a filesystem secrecy
+boundary. Do not put secrets in the review tree. Prompts go on stdin, never argv;
+neither prompt nor answer is sent to the choice API. Usage comes from Claude's
+stream events or Codex's temporary session rollout and is reported through the
+existing house `usage` API before the temporary home is removed. The account-wide
+reading then appears in `loom runtime accounts usage`. It is measured account
+quota, not a fabricated token cost per review. No reading means an explicit warning
+and the previous measurement remains; execution failures are never retried as
+quota failures.
+
+A structured usage-limit refusal holds only the house's own account through
+`oneshot-refused` and retries once with that harness avoided. No prose classifier,
+no unbounded retries, and no retry on timeout or an ordinary process error. A
+second refusal fails. Codex’s provider rollout determines terminal state; an
+explicit non-quota failure in either stream fails closed when streams conflict.
+Completion bookkeeping never erases a failure, and answer extraction follows
+quota reporting so a missing or truncated answer cannot discard a reading.
+Near-cap choice happens before execution. Choice and launch
+are not an atomic capacity reservation: concurrent calls may consume headroom
+between readings; cold review retains its existing concurrency gate.
+
+Blind grading is a deliberate choice constraint: it grades across families, not
+according to the producing agent's favorite model. `graderPool` uses the same
+account derivation and `hasRoom`, plus the worker reserve when enabled; `pickGraders` retains
+its independence rules and least-producing-model rule. A family with no room is
+skipped, never quietly substituted with the producer's family. Grading uses the
+owner's pinned container image and egress proxy; the one-shot API does not replace
+that privacy boundary. Claude stream events and Codex rollout quota metadata are
+reported into the same local box account readings. Codex's rollout exists only
+inside the disposable container, until quota extraction, then goes with it.
+The grader image must be rebuilt after `grader/quota.mjs` is added.
+
+Native harness subagents are work inside a runtime-selected body: they share its
+account, and their use reaches that account's next quota reading. They must inherit
+the parent's model; independent work requiring its own model uses runtime spawn.
+Remote-control remains a Claude-only vendor interface, with no Codex substitute
+for that interface; its profile preflight uses `claude mcp list`, with no model
+call. Old shuttle runners remain compatibility paths pending bridge retirement;
+they are inventoried exceptions, not a new entry point to copy.

@@ -32,6 +32,7 @@ jobs:
           repository: sleepunit-agents/loom-approvals
           ref: main
           path: .loom-approvals
+      - run: python3 scripts/check-model-calls
       - run: npm test
         env:
           LOOM_DIST: ${{ github.workspace }}/.loom/dist

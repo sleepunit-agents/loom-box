@@ -33,6 +33,7 @@ import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import net from 'node:net';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { lastRateLimit, terminalOutcome } from './logins.mjs';
 import { CRED_FILE, LOGIN_MOUNT, loginDir, podmanBin } from './logins.mjs';
 
 export class GraderError extends Error {}
@@ -177,13 +178,13 @@ export function graderScript(harness, model, kind) {
   if (harness === 'claude') {
     return `command -v claude >/dev/null 2>&1 || exit 99; mkdir -p /tmp/cli/.claude /tmp/cli/w; ${FORWARD}cd /tmp/cli/w; `
       + `exec claude -p --model ${q(model)} --tools '' --strict-mcp-config --setting-sources '' --disable-slash-commands `
-      + `--no-session-persistence --exclude-dynamic-system-prompt-sections --output-format json --system-prompt ${q(graderPrompt(kind))}`;
+      + `--no-session-persistence --exclude-dynamic-system-prompt-sections --output-format stream-json --verbose --system-prompt ${q(graderPrompt(kind))}`;
   }
   if (harness === 'codex') {
-    const off = ['shell_tool', 'unified_exec', 'apps', 'plugins', 'browser_use', 'computer_use', 'sleep_tool', 'tool_suggest', 'skill_search', 'memories'];
+    const off = ['multi_agent', 'hooks', 'skill_mcp_dependency_install', 'shell_tool', 'unified_exec', 'apps', 'plugins', 'browser_use', 'computer_use', 'sleep_tool', 'tool_suggest', 'skill_search', 'memories'];
     return `command -v codex >/dev/null 2>&1 || exit 99; mkdir -p "$CODEX_HOME" /tmp/cli/w; ln -s ${AT('codex')}/${CRED_FILE.codex} "$CODEX_HOME/${CRED_FILE.codex}"; ${FORWARD}cd /tmp/cli/w; `
-      + `exec codex exec --json --skip-git-repo-check --ephemeral --sandbox read-only ${off.map((f) => `--disable ${f}`).join(' ')} `
-      + `-c 'web_search="disabled"' -m ${q(model)} -`;
+      + `codex exec --json --skip-git-repo-check --sandbox read-only ${off.map((f) => `--disable ${f}`).join(' ')} `
+      + `-c 'web_search="disabled"' -m ${q(model)} -; code=$?; node /opt/loom-grader/quota.mjs "$CODEX_HOME/sessions" || exit 98; exit $code`;
   }
   throw new GraderError(`no grader for harness ${JSON.stringify(harness)}`);
 }
@@ -208,22 +209,10 @@ export function graderRunArgs(env, { harness, model, kind, image, name, egress }
 
 /** The model's own words, from the CLI's output: Claude's `result`, or Codex's last agent message. */
 export function answerOf(harness, stdout) {
-  const s = String(stdout ?? '');
-  if (harness === 'claude') {
-    let d;
-    try { d = JSON.parse(s.trim().split('\n').pop()); } catch { throw new GraderError('claude answered something that isn\'t its JSON result'); }
-    if (d?.is_error || typeof d?.result !== 'string') throw new GraderError(`claude's run failed${typeof d?.terminal_reason === 'string' ? ` (${d.terminal_reason.slice(0, 40)})` : ''}`);
-    return d.result;
-  }
-  let last = null;
-  for (const l of s.split('\n')) {
-    let e;
-    try { e = JSON.parse(l); } catch { continue; }
-    if (e?.type === 'item.completed' && e.item?.type === 'agent_message' && typeof e.item.text === 'string') last = e.item.text;
-    if (e?.type === 'turn.failed' || e?.type === 'error') throw new GraderError('codex\'s turn failed');
-  }
-  if (last === null) throw new GraderError('codex said nothing');
-  return last;
+  const terminal = terminalOutcome(harness, stdout);
+  if (terminal?.kind !== 'answer') throw new GraderError('the model’s turn failed or did not complete');
+  if (typeof terminal.answer !== 'string') throw new GraderError(`${harness} said nothing`);
+  return terminal.answer;
 }
 
 /** A finding as core keeps it: one printable line of at most 200 characters, or none. Anything token-like is none. */
@@ -253,15 +242,44 @@ export function verdictOf(text) {
 }
 
 /** A process run to its end, its stdout kept (8 MB at most) and its stderr dropped unread: {status, stdout, signal, error}. */
-export function runAsync(bin, argv, { env, input, timeout }) {
+export function runAsync(bin, argv, { env, input, timeout, cwd, killGroup = false }) {
   return new Promise((resolve) => {
-    let out = '';
+    let out = '', lineBuffer = '', skippingLine = false, truncated = false;
+    const readings = {};
+    const capture = line => {
+      for (const h of ['claude', 'codex']) {
+        const r = lastRateLimit(h, line); if (!r) continue;
+        const { limited: _oldLimited, ...old } = readings[h] ?? {};
+        const resets = { ...old.resets, ...r.resets };
+        for (const w of Object.keys(r.windows ?? {})) if (r.resets?.[w] === undefined) delete resets[w];
+        readings[h] = { ...old, ...r, windows: { ...old.windows, ...r.windows }, resets };
+      }
+    };
     let done = false;
-    const child = spawn(bin, argv, { env, stdio: ['pipe', 'pipe', 'ignore'] });
-    const t = setTimeout(() => { child.kill('SIGKILL'); }, timeout);
+    const child = spawn(bin, argv, { env, cwd, detached: killGroup && process.platform !== 'win32', stdio: ['pipe', 'pipe', 'ignore'] });
+    const kill = () => {
+      try { if (killGroup && process.platform !== 'win32' && child.pid) process.kill(-child.pid, 'SIGKILL'); else child.kill('SIGKILL'); } catch { /* already over */ }
+    };
+    const t = setTimeout(kill, timeout);
+    // A caller's outer timeout must not orphan a detached short-call process.
+    if (killGroup) { process.once('SIGTERM', kill); process.once('SIGINT', kill); }
     child.stdout.setEncoding('utf-8');
-    child.stdout.on('data', (d) => { if (out.length < 8 * 1024 * 1024) out += d; });
-    const end = (r) => { if (done) return; done = true; clearTimeout(t); resolve(r); };
+    child.stdout.on('data', d => {
+      const room = 8 * 1024 * 1024 - out.length;
+      out += d.slice(0, Math.max(0, room));
+      truncated ||= d.length > room;
+      // Parse small quota events even after the output cap. Skip oversized
+      // answer/tool lines without keeping them, then resume at the next line.
+      lineBuffer += d;
+      let nl;
+      while ((nl = lineBuffer.indexOf('\n')) >= 0) {
+        const line = lineBuffer.slice(0, nl); lineBuffer = lineBuffer.slice(nl + 1);
+        if (!skippingLine && line.length <= 256 * 1024) capture(line);
+        skippingLine = false;
+      }
+      if (lineBuffer.length > 256 * 1024) { lineBuffer = ''; skippingLine = true; }
+    });
+    const end = (r) => { if (done) return; done = true; clearTimeout(t); if (killGroup) kill(); if (killGroup) { process.removeListener('SIGTERM', kill); process.removeListener('SIGINT', kill); } if (!skippingLine && lineBuffer) capture(lineBuffer); resolve({ ...r, readings, truncated }); };
     child.on('error', (error) => end({ status: null, stdout: out, error }));
     child.on('close', (status, signal) => end({ status, stdout: out, signal }));
     child.stdin.on('error', () => {});
@@ -276,20 +294,30 @@ const dataDir = (env) => env.LOOM_BOX_DATA || join(env.HOME || homedir(), '.loca
  * its own egress proxy. Answers {score, finding?}, or throws a GraderError that says what failed and never what was
  * in the sample or the answer.
  */
-export async function grade(env, grader, { venueKind, entry }, { run = runAsync, rm = spawnSync, timeoutMs = GRADE_MS, name = `loom-grade-${randomBytes(4).toString('hex')}`, proxy = egressProxy } = {}) {
+export async function grade(env, grader, { venueKind, entry }, { run = runAsync, rm = spawnSync, timeoutMs = GRADE_MS, name = `loom-grade-${randomBytes(4).toString('hex')}`, proxy = egressProxy, reportUsage } = {}) {
   const input = grader.harness === 'codex' ? `${graderPrompt(venueKind)}\n\n${graderInput(entry)}` : graderInput(entry);
   const px = await proxy(join(dataDir(env), 'review'), EGRESS[grader.harness] ?? []);
   const podEnv = { PATH: env.PATH, HOME: env.HOME, ...(env.XDG_RUNTIME_DIR ? { XDG_RUNTIME_DIR: env.XDG_RUNTIME_DIR } : {}) };
-  let r;
+  let r, timed = false, reading;
   try {
     const argv = graderRunArgs(env, { harness: grader.harness, model: grader.model, kind: venueKind, image: grader.image, name, egress: px.dir });
     r = await run(podmanBin(env), argv, { env: podEnv, input, timeout: timeoutMs });
-  } finally { await px.close(); }
-  const refused = px.denied.size ? ` (egress refused ${[...px.denied].slice(0, 3).join(', ')})` : '';
-  if (r.signal || r.error?.code === 'ETIMEDOUT') {
-    rm(podmanBin(env), ['rm', '-f', name], { env: podEnv, stdio: 'ignore', timeout: 30_000 });
-    throw new GraderError(`the grader took longer than ${Math.round(timeoutMs / 1000)}s${refused}`);
+    timed = !!(r.signal || r.error?.code === 'ETIMEDOUT');
+    reading = r.readings?.[grader.harness] ?? lastRateLimit(grader.harness, r.stdout);
+    // Capture a timed-out Codex run's numeric quota before removing its tmpfs.
+    if (timed && grader.harness === 'codex' && !reading) {
+      const snapshot = rm(podmanBin(env), ['exec', name, 'node', '/opt/loom-grader/quota.mjs', '/tmp/cli/.codex/sessions'], { env: podEnv, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 });
+      reading = lastRateLimit('codex', snapshot.stdout);
+    }
+    if (reading && reportUsage) await reportUsage(grader.harness, { ...reading, checked: Math.floor(Date.now() / 1000) });
+  } finally {
+    if (timed) rm(podmanBin(env), ['rm', '-f', name], { env: podEnv, stdio: 'ignore', timeout: 30_000 });
+    await px.close();
   }
+  const refused = px.denied.size ? ` (egress refused ${[...px.denied].slice(0, 3).join(', ')})` : '';
+  if (timed) throw new GraderError(`the grader took longer than ${Math.round(timeoutMs / 1000)}s${refused}`);
+  if (r.truncated) throw new GraderError('grader output limit exceeded');
+  if (!reading && reportUsage) throw new GraderError('grader returned no quota reading (check the pinned image)');
   if (r.error) throw new GraderError(`can't run a container: ${r.error.code ?? 'error'}`);
   if (r.status === 99) throw new GraderError(`the image has no ${grader.harness}`);
   if (r.status !== 0 && grader.harness === 'codex') throw new GraderError(`codex exited ${r.status}${refused}`);

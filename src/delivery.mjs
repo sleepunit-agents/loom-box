@@ -1804,6 +1804,15 @@ function workerBodiesByAccount(env, except) {
   return on;
 }
 
+/** Short calls and graders use the same owner switch, commitments and forecast as worker starts. */
+export function shortCallGate(env, kind, now = Date.now()) {
+  if (allocatorOf(load(env)).mode !== 'enforce') return null;
+  const on = workerBodiesByAccount(env);
+  const dir = deliveryDir(env);
+  return capacityGate({ kind, jobsOn: name => (on[name] ?? 0) + (on.unknown ?? 0),
+    burnOf: name => forecastBurn(readReadings(dir, name)), now });
+}
+
 /** The capacity gate for a new worker start, or null: a live conversation, or the owner's allocator in shadow. */
 function workerGate(env, c, d) {
   const kind = startKind(c);

@@ -72,6 +72,8 @@
 //   loom runtime task-host [--brief-stdin]                  allocated raw task, or a script’s model brief: common delivery
 //   loom runtime session-host                               in a session house: keep its common body host alive
 //   loom runtime body-host [--piece <name>] --host-key <boot key>   in an agent's house, as its task: the bodies delivery asks for
+//   loom runtime oneshot --cwd <frozen-dir> [--prefer model] [--timeout seconds] < prompt
+//                                                         a short read-only call in a house, with usage and fallback
 // Models and accounts (the owner's, on loom's machine):
 //   loom runtime models [--json]                                         the model list and each agent's settings
 //   loom runtime models set --json < {list?, agent?, allow?, prefer?}    change them
@@ -526,6 +528,13 @@ async function main(argv, env) {
         if (rest.includes('--once') || stopping) return;
         await sleep(every);
       }
+    }
+    case 'oneshot': {
+      const { runOneShot } = await import('./oneshot.mjs');
+      const seconds = Number(flag(rest, '--timeout') ?? 600);
+      if (!Number.isInteger(seconds) || seconds < 1 || seconds > 86400) throw new Fail('timeout is 1-86400 seconds', 2);
+      const answer = await runOneShot(env, { input: await readStdin(), cwd: flag(rest, '--cwd') ?? process.cwd(), prefer: flags(rest, '--prefer'), timeout: seconds * 1000 }, { call: env.LOOM_URL && env.LOOM_TOKEN_FILE ? pieceCall(env) : null });
+      process.stdout.write(answer + '\n'); return;
     }
     case 'body': return body(rest, env, json);
     case 'deliver': return delivery(rest, env, json);
