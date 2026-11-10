@@ -4,9 +4,9 @@
 // Built to the shapes Claude Code writes (`toolUseResult`, subagents/) and codex exec --json writes.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { claudeCards, codexCards, commandLine, shownText, testsLine, changed, stepParts, MAX_BODY } from '../src/activity.mjs';
+import { claudeCards, claudeTokens, codexCards, commandLine, shownText, testsLine, changed, stepParts, MAX_BODY } from '../src/activity.mjs';
 import { cleanCards } from '../src/houserunner.mjs';
 import { ClaudeRunner } from '../src/runners.mjs';
 import { scratch } from './scratch.mjs';
@@ -98,8 +98,28 @@ test('a helper\'s steps nest under the step that started it (Claude Code\'s suba
   const r = new ClaudeRunner({ projectsDir: join(root, 'projects'), jobsDir: join(root, 'jobs') });
   const cards = r.activity({ id: 'b', slot: { harness: 'claude', session } });
   assert.deepEqual(cards.map((c) => [c.id, c.tool, c.result, c.parent]), [['toolu_A', 'Agent', '1 tool use', undefined], ['abc123:toolu_B', 'Bash', '1 line of output', 'toolu_A']]);
-  const alive = r.alive({ id: 'b', slot: { harness: 'claude', session } });
-  assert.ok(Date.parse(alive.at) > 0);
+});
+
+test('a sign of life: when its transcript last moved, and its tokens, each message once at its largest, read as the file grows', () => {
+  const root = scratch('steps-sign');
+  const proj = join(root, 'projects', '-x');
+  const session = '11111111-2222-3333-4444-666666666666';
+  mkdirSync(proj, { recursive: true });
+  const f = join(proj, `${session}.jsonl`);
+  const a = (id, n) => JSON.stringify({ type: 'assistant', message: { id, usage: { output_tokens: n }, content: [] } });
+  writeFileSync(f, [a('m1', 10), a('m1', 40), a('m2', 5), JSON.stringify({ type: 'user', message: { content: [] } })].join('\n') + '\n');
+  const r = new ClaudeRunner({ projectsDir: join(root, 'projects'), jobsDir: join(root, 'jobs') });
+  const body = { id: 'b', slot: { harness: 'claude', session } };
+  const one = r.signOfLife(body);
+  assert.equal(one.tokens, 45, 'm1 streamed twice counts once, at 40');
+  assert.ok(Date.parse(one.at) > 0);
+  // It grows, with a line cut in two across writes: only the new bytes are read, and the cut line is read whole.
+  const next = a('m3', 7);
+  appendFileSync(f, next.slice(0, 20));
+  assert.equal(r.signOfLife(body).tokens, 45);
+  appendFileSync(f, `${next.slice(20)}\n${a('m2', 9)}\n`);
+  assert.equal(r.signOfLife(body).tokens, 56, '40 + 9 + 7');
+  assert.equal(claudeTokens([]), null);
 });
 
 test('a house\'s parts pass the same gate, and a parent id is renamed as its card\'s id is', () => {

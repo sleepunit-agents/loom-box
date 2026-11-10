@@ -17,11 +17,15 @@ test('a Claude transcript: tool_use makes a running card, its result done or fai
   const cards = claudeCards(read('claude-transcript.jsonl'));
   assert.deepEqual(cards.map((c) => [c.tool, c.summary, c.state]), [
     ['Bash', 'Run the test suite', 'failed'],
+    ['text', 'Thinking aloud: the secret plan is here.', 'done'],
     ['Read', 'Read delivery.ts', 'done'],
     ['Grep', 'Searched for "deliverAsOwner" in src', 'running'],
   ]);
+  // Its own words between steps are a text card (t-2109; delivery shows them only for the owner alone); thinking never.
+  assert.equal(cards[1].body, 'Thinking aloud: the secret plan is here.');
   const all = JSON.stringify(cards);
-  for (const never of ['s3cr3t', 'secret plan', 'private reasoning', '/home/art']) assert.ok(!all.includes(never), never);
+  for (const never of ['s3cr3t', 'private reasoning', '/home/art']) assert.ok(!all.includes(never), never);
+  cards.splice(1, 1);
   // A label is never a command line or output (t-1944); the owner's Watching view gets the whole command and a shell
   // step's output, redacted, in their own fields (t-2109). A read's contents never, anywhere.
   for (const c of cards) for (const never of ['npm test', 'OUTPUT-THAT-MUST-NOT-SHOW']) assert.ok(!c.summary.includes(never), never);
@@ -99,7 +103,7 @@ test('the runners read their own records: a Claude session\'s transcript, a Code
   mkdirSync(join(projects, '-home-art-Code-repo'), { recursive: true });
   writeFileSync(join(projects, '-home-art-Code-repo', 'sess-1234.jsonl'), readFileSync(join(here, 'fixtures', 'claude-transcript.jsonl')));
   const cr = new ClaudeRunner({ jobsDir: join(dir, 'jobs'), projectsDir: projects, usageDir: null });
-  assert.equal(cr.activity({ id: 'abcd1234', slot: { harness: 'claude', session: 'sess-1234' } }).length, 3);
+  assert.equal(cr.activity({ id: 'abcd1234', slot: { harness: 'claude', session: 'sess-1234' } }).length, 4);
   const runs = join(dir, 'runs');
   mkdirSync(join(runs, 'k1'), { recursive: true });
   writeFileSync(join(runs, 'k1', 'events.jsonl'), readFileSync(join(here, 'fixtures', 'codex-events.jsonl')));
@@ -162,7 +166,7 @@ test('the body\'s own words go only where it works for the owner alone; its sign
   w.core.commsAnswer = (b) => (b.op === 'spawn' ? { ok: true, id: 'th:abcdefghij' } : { ok: true });
   const cards = [{ id: 'w1', at: 'x', tool: 'text', summary: 'Found it.', state: 'done', body: 'Found it.' }, { id: 't1', at: 'x', tool: 'Bash', summary: 'Ran the tests', state: 'done', body: 'ok', result: '1 line of output' }];
   w.runner.activity = () => cards;
-  w.runner.alive = () => ({ at: '2026-11-10T10:00:00.000Z', tokens: 4100 });
+  w.runner.signOfLife = () => ({ at: '2026-11-10T10:00:00.000Z', tokens: 4100 });
   const { spawnCall } = await import('../src/spawn.mjs');
   const r = await spawnCall(w.env, { kind: 'owner' }, { agent: 'art', brief: 'Run the tests' }, w.o);
   await tick(w.env, w.o); await tick(w.env, w.o);
@@ -180,7 +184,7 @@ test('the body\'s own words go only where it works for the owner alone; its sign
   const o = world();
   o.core.commsAnswer = (x) => (x.op === 'spawn' ? { ok: true, id: 'th:abcdefghij' } : { ok: true });
   o.runner.activity = () => cards;
-  o.runner.alive = () => ({ at: '2026-11-10T10:00:00.000Z' });
+  o.runner.signOfLife = () => ({ at: '2026-11-10T10:00:00.000Z' });
   o.core.activity = async (x) => { o.core.activityCalls.push(x); if (x.alive || x.cards.some((c) => Object.keys(c).some((k) => !['id', 'at', 'tool', 'summary', 'state'].includes(k)))) throw Object.assign(new Error('bad-input: card 0 has unknown keys'), { status: 400 }); return { ok: true }; };
   const r2 = await spawnCall(o.env, { kind: 'owner' }, { agent: 'art', brief: 'x' }, o.o);
   await tick(o.env, o.o); await tick(o.env, o.o);
@@ -191,13 +195,47 @@ test('the body\'s own words go only where it works for the owner alone; its sign
 });
 
 test('whose words show: only a conversation for the owner alone, read from its principal now (t-2109)', async () => {
-  const { wordsShown } = await import('../src/delivery.mjs');
+  const { wordsShown, principalOf } = await import('../src/principal.mjs');
+  const owner = { for: 'jonathan', owner: true, people: [] };
+  assert.equal(wordsShown(owner, { actsFor: { owner: true, owners: ['jonathan'] } }), true);
+  assert.equal(wordsShown(owner, { actsFor: { owner: true } }), true, 'a wake the clock called the owner\'s');
+  assert.equal(wordsShown(owner, { actsFor: { owner: true, owners: ['jonathan', 'amelia'] } }), false, 'two owners spoke: each other\'s words');
+  assert.equal(wordsShown({ ...owner, unknown: true }, {}), false, 'unknown');
+  assert.equal(wordsShown({ for: 'loren', owner: false, people: ['loren'] }, {}), false, 'a person in it');
+  assert.equal(wordsShown({ for: null, owner: false, people: [] }, {}), false, 'not the owner');
+  assert.equal(wordsShown(null, {}), false, 'nothing read');
+  // principalOf counts a former owner as a person: such a conversation's words never show.
   const w = world();
-  const base = { agent: 'art', conversation: 'cv-000000000001' };
-  assert.equal(wordsShown(w.env, { ...base, actsFor: { owner: true, people: [], unknown: false } }), true);
-  assert.equal(wordsShown(w.env, { ...base, actsFor: { owner: true, people: [], unknown: true } }), false, 'unknown');
-  assert.equal(wordsShown(w.env, { ...base, actsFor: { owner: true, people: ['loren'], unknown: false } }), false, 'a person in it');
-  assert.equal(wordsShown(w.env, { ...base, actsFor: { owner: false, people: [], unknown: false } }), false, 'not the owner');
-  assert.equal(wordsShown(w.env, { ...base, actsFor: { owner: true, people: [], unknown: false, owners: ['someone-else-gone'] } }), false, 'a former owner is a person now');
-  assert.equal(wordsShown(w.env, { ...base }), false, 'no record');
+  const p = principalOf(w.env, { agent: 'art', actsFor: { owner: true, people: [], unknown: false, owners: ['someone-gone'] } });
+  assert.equal(wordsShown(p, { actsFor: { owners: ['someone-gone'] } }), false);
+});
+
+test('an older core: after its first refusal, plain cards go straight to it; a 409 stops the sign of life; another 400 is only a warning (t-2109)', async () => {
+  const { spawnCall } = await import('../src/spawn.mjs');
+  const rich = (n) => ({ id: `t${n}`, at: 'x', tool: 'Bash', summary: `Step ${n}`, state: 'done', body: 'ok' });
+  const run = async (answer) => {
+    const o = world();
+    o.core.commsAnswer = (x) => (x.op === 'spawn' ? { ok: true, id: 'th:abcdefghij' } : { ok: true });
+    const cards = [rich(1)];
+    let at = 0;
+    o.runner.activity = () => cards;
+    o.runner.signOfLife = () => ({ at: new Date(Date.UTC(2026, 10, 10, 10, 0, at)).toISOString() });
+    o.core.activity = async (x) => { o.core.activityCalls.push(x); const e = answer(x); if (e) throw e; return { ok: true }; };
+    const r = await spawnCall(o.env, { kind: 'owner' }, { agent: 'art', brief: 'x' }, o.o);
+    await tick(o.env, o.o); await tick(o.env, o.o);
+    cards.push(rich(2)); at += 30;
+    await tick(o.env, o.o);
+    at += 30;
+    o.clock?.advance?.(60_000);
+    await tick(o.env, o.o);
+    return o.core.activityCalls.filter((a) => a.conversation === r.handle);
+  };
+  const extra = (x) => !!x.alive || x.cards.some((c) => Object.keys(c).some((k) => !['id', 'at', 'tool', 'summary', 'state'].includes(k)));
+  const old = await run((x) => (extra(x) ? Object.assign(new Error('bad-input: card 0 has unknown keys: body'), { status: 400 }) : null));
+  // First batch: refused rich, then told plain. Second batch: plain at once, no second refusal.
+  assert.deepEqual(old.map((x) => [x.cards.map((c) => c.id), extra(x)]), [[['t1'], true], [['t1'], false], [['t2'], false]]);
+  const gone = await run(() => Object.assign(new Error('conflict: that conversation has no live thread'), { status: 409 }));
+  assert.deepEqual(gone.map((x) => x.cards.map((c) => c.id)), [['t1'], ['t2']], 'after a 409, only new cards are tried, never a sign of life alone');
+  const other = await run((x) => (x.cards.some((c) => c.id === 't1') ? Object.assign(new Error('bad-input: run is the body run'), { status: 400 }) : null));
+  assert.ok(other.some((x) => x.alive), 'a 400 for another reason doesn\'t take it for an older core');
 });

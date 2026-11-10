@@ -479,12 +479,15 @@ export function codexCards(events, prefix = '') {
   return [...cards.values()];
 }
 
-/** How many tokens a Claude session has written: each assistant message's output_tokens, once per message; null for none. */
-export function claudeTokens(lines) {
-  const seen = new Map();
+/**
+ * How many tokens a Claude session has written: each assistant message's output_tokens once (its largest: Claude
+ * Code writes a message's lines as it streams, each with the usage so far); null for none. `seen` (message id → its
+ * tokens) carries a count across reads of a growing transcript.
+ */
+export function claudeTokens(lines, seen = new Map()) {
   for (const l of lines) {
     const id = l?.message?.id, n = l?.message?.usage?.output_tokens;
-    if (l?.type === 'assistant' && typeof id === 'string' && Number.isInteger(n) && n >= 0) seen.set(id, Math.max(seen.get(id) ?? 0, n));
+    if (l?.type === 'assistant' && typeof id === 'string' && Number.isInteger(n) && n >= 0) seen.set(id, Math.max(seen.get(id) ?? 0, Math.min(n, 1e9)));
   }
   if (!seen.size) return null;
   let t = 0;

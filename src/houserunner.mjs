@@ -1245,7 +1245,7 @@ export class HouseRunner {
   /** Its activity cards, as its host last reported them (only a Comms thread's body has any). */
   activity(body) { return this.entry(body)?.cards ?? []; }
   /** Its last sign of life, as its host last reported it (t-2109). */
-  alive(body) { return this.entry(body)?.alive ?? null; }
+  signOfLife(body) { return this.entry(body)?.alive ?? null; }
 
   feed(body, message) {
     const e = this.entry(body);

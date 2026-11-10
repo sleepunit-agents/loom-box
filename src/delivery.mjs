@@ -109,7 +109,7 @@ import { admit, allocatorOf, capacityGate, forecastBurn, logShadow, readReadings
 import { readRelays } from './relay.mjs';
 import { householdOwners, membersOf, ownersOf } from './owners.mjs';
 import { approvalsFake, approvalsRun, approvalsRunAsync, approvalsWhy } from './approvals-call.mjs';
-import { OWNER_SEAT, carriesSession, hostKeyOf, mint, noteSender, resetSigned, principalOf, putWakeFor, resetActsFor, seatOf, takeWakeContext, verify } from './principal.mjs';
+import { OWNER_SEAT, carriesSession, hostKeyOf, mint, noteSender, resetSigned, principalOf, putWakeFor, resetActsFor, seatOf, takeWakeContext, verify, wordsShown } from './principal.mjs';
 
 const DAY_MS = 86_400_000;
 export const MAX_TEXT = 40_000;
@@ -1580,48 +1580,52 @@ async function activityPass(env, c, d) {
   // The body's own words between steps only where it works for the owner alone (t-2109): never where someone else is
   // in the conversation, whose words its own might carry. Read from its principal now (principalOf: a former owner
   // counts as a person), as localForeign reads it, never from the stored field alone.
-  const ownersAlone = wordsShown(env, c);
+  const ownersAlone = (() => { try { return wordsShown(principalOf(env, c), c); } catch { return false; } })();
   const cards = (r.activity(body) ?? []).filter((x) => x.tool !== 'text' || ownersAlone);
   const { out, next } = changedCards(cards, c.cardsSent ?? {});
+  if (noThread.has(c.conversation) && !out.length) return;
   let alive = null;
-  try { alive = cleanAlive(r.alive?.(body)); } catch { /* it can't say */ }
-  // Its last sign of life goes when it moved, at most every ALIVE_MS, with cards or alone (core's working line).
-  const sendAlive = alive && alive.at !== c.aliveSent?.at && (!out.length ? Date.now() - (c.aliveSent?.told ?? 0) >= ALIVE_MS : true) && !oldCore.has(c.conversation);
-  if (!out.length && !sendAlive) return;
+  try { alive = cleanAlive(r.signOfLife?.(body)); } catch { /* it can't say */ }
+  const old = oldCore.has(c.conversation);
+  const nowMs = (() => { try { return d.now().getTime(); } catch { return Date.now(); } })();
+  // Its last sign of life goes when it moved, at most every ALIVE_MS when alone (core's working line); never to a core
+  // that refused it, nor to a thread core said is gone.
+  const sendAlive = !!alive && !old && !noThread.has(c.conversation) && alive.at !== c.aliveSent?.at && (out.length > 0 || nowMs - (c.aliveSent?.told ?? 0) >= ALIVE_MS);
+  // A core from before t-2109 is told plain cards only, without words between steps.
+  const told = old ? out.filter((x) => x.tool !== 'text').map(baseCard) : out;
+  if (!told.length && !sendAlive) { if (out.length) saveSent(env, c, next, null); return; }
   const post = (cs, a) => d.core.activity({ conversation: c.conversation, run: c.run, cards: cs, ...(a ? { alive: a } : {}) });
-  // Refused for good (no live thread, or a card core won't take): they're marked told, so they aren't sent again. A core
-  // from before t-2109 refuses the further parts (400): it's told the plain cards, and no alive, until restart.
-  try { await post(out, sendAlive ? alive : null); } catch (e) {
+  // Refused for good (no live thread, or a card core won't take): they're marked told, so they aren't sent again. A 409
+  // (no live thread) stops its sign of life too. A 400 that says core doesn't know the further parts (an older core:
+  // unknown keys, or no cards with a sign of life) is told the plain cards, and remembered until restart.
+  try { await post(told, sendAlive ? alive : null); } catch (e) {
     if (e?.status !== 409 && e?.status !== 400) throw e;
-    let told = false;
-    if (e.status === 400) {
+    if (e.status === 409) noThread.add(c.conversation);
+    let retold = false;
+    if (e.status === 400 && !old && OLD_CORE.test(String(e.message ?? ''))) {
       oldCore.add(c.conversation);
       const plain = out.filter((x) => x.tool !== 'text').map(baseCard);
-      try { if (plain.length) { await post(plain, null); told = true; } } catch (e2) { if (e2?.status !== 409 && e2?.status !== 400) throw e2; }
+      try { if (plain.length) { await post(plain, null); retold = true; } } catch (e2) { if (e2?.status !== 409 && e2?.status !== 400) throw e2; }
     }
-    if (!told && out.length) d.warn(`${c.conversation}: core took none of ${out.length} activity cards (${e.message}); they're not sent again`);
+    if (!retold && out.length) d.warn(`${c.conversation}: core took none of ${out.length} activity cards (${e.message}); they're not sent again`);
+    saveSent(env, c, next, null);
+    return;
   }
-  locked(env, () => {
-    const x = loadConv(env, c.conversation);
-    if (x && x.body === c.body) { x.cardsSent = next; if (sendAlive) x.aliveSent = { at: alive.at, told: Date.now() }; saveConv(env, x); }
-  });
-}
-/**
- * Whether a conversation's body works for the owner alone (t-2109), so its own words may show in his view: its
- * principal now is the owner, known, with no person in it, and at most one owner spoke (several owners' words are
- * each other's). Fails closed: anything it can't read says no.
- */
-export function wordsShown(env, c) {
-  try {
-    const p = principalOf(env, c);
-    const spoke = Array.isArray(c?.actsFor?.owners) ? new Set(c.actsFor.owners) : new Set();
-    return p.owner === true && !p.unknown && Array.isArray(p.people) && p.people.length === 0 && spoke.size <= 1;
-  } catch { return false; }
+  saveSent(env, c, next, sendAlive ? alive : null, nowMs);
 }
 
+/** What was told of a conversation's cards and its sign of life, on its record (only while its body is the same). */
+function saveSent(env, c, next, alive, nowMs = Date.now()) {
+  locked(env, () => {
+    const x = loadConv(env, c.conversation);
+    if (x && x.body === c.body) { x.cardsSent = next; if (alive) x.aliveSent = { at: alive.at, told: nowMs }; saveConv(env, x); }
+  });
+}
 /** At most how often a body's sign of life alone is told (t-2109), and the conversations whose core refused it. */
 const ALIVE_MS = 20_000;
-const oldCore = new Set();
+const oldCore = new Set(), noThread = new Set();
+/** How an older core refuses the further parts: a card's unknown keys, or no cards beside a sign of life. */
+const OLD_CORE = /unknown keys|cards is a list of 1-/;
 
 const newRun = () => `run-${randomBytes(6).toString('hex')}`;
 

@@ -36,7 +36,7 @@
 import { spawn as nodeSpawn, spawnSync } from 'node:child_process';
 import { nativeHistoryEnv, validateNativeHistoryOptions } from './native-history.mjs';
 import { createHash, randomBytes } from 'node:crypto';
-import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -66,6 +66,19 @@ const stableLaunchToken = value => {
   return value;
 };
 
+/** At most how much of a session's transcript a sign of life reads a time, and of a helper's transcript (t-2109). */
+const SIGN_READ_MAX = 4 * 1024 * 1024;
+const HELPER_READ_MAX = 2 * 1024 * 1024;
+/** `max` bytes of `p` from `offset` (as text), and the offset after them. */
+function readFrom(p, offset, max) {
+  let fd;
+  try {
+    fd = openSync(p, 'r');
+    const buf = Buffer.alloc(max);
+    const n = readSync(fd, buf, 0, max, offset);
+    return { text: buf.subarray(0, n).toString('utf-8'), next: offset + n };
+  } catch { return { text: '', next: offset }; } finally { if (fd !== undefined) try { closeSync(fd); } catch { /* closed */ } }
+}
 const lines = (p) => { try { return readFileSync(p, 'utf-8').split('\n').flatMap((l) => { try { const v = JSON.parse(l); return v && typeof v === 'object' ? [v] : []; } catch { return []; } }); } catch { return []; } };
 
 /** A body's inbox, in the bridges piece's layout (shuttle/inbox.py), so its hook reads what's put here. */
@@ -324,9 +337,12 @@ export class ClaudeRunner {
       try { meta = JSON.parse(readFileSync(join(dir, n), 'utf-8')); } catch { continue; }
       const parent = typeof meta?.toolUseId === 'string' && cards.some((c) => c.id === meta.toolUseId) ? meta.toolUseId : null;
       if (!parent) continue;
-      cards.push(...claudeCards(lines(join(dir, `agent-${agent}.jsonl`)), `${agent}:`, parent));
+      // A helper's transcript is read from its end, at most HELPER_READ_MAX: its newest steps.
+      const tail = tailOf(join(dir, `agent-${agent}.jsonl`), HELPER_READ_MAX) ?? '';
+      cards.push(...claudeCards(tail.split('\n').flatMap((l) => { try { const v = JSON.parse(l); return v && typeof v === 'object' ? [v] : []; } catch { return []; } }), `${agent}:`, parent));
     }
-    return cards;
+    // In the order they happened, so a host's "newest 100" keeps the newest of the body's and its helpers' alike.
+    return cards.map((c, i) => [c, i]).sort((x, y) => (x[0].at < y[0].at ? -1 : x[0].at > y[0].at ? 1 : x[1] - y[1])).map(([c]) => c);
   }
 
   /** Its session's transcript, when it has one. */
@@ -342,19 +358,31 @@ export class ClaudeRunner {
 
   /**
    * Its last sign of life (t-2109): when its transcript was last written, and how many tokens it has written so far
-   * (each assistant message's output_tokens once), read again only when the file moved.
+   * (each assistant message's output_tokens once, its largest). Read as it grows: only the bytes written since the last
+   * read, at most SIGN_READ_MAX a time, so a long session is never read whole again.
    */
-  alive(body) {
+  signOfLife(body) {
     const f = this.transcriptOf(body);
     if (!f) return null;
     let st;
     try { st = statSync(f); } catch { return null; }
-    const memo = (this.aliveMemo ??= new Map()).get(f);
-    if (memo && memo.size === st.size && memo.mtimeMs === st.mtimeMs) return memo.alive;
-    const alive = { at: new Date(st.mtimeMs).toISOString(), ...(() => { const t = claudeTokens(lines(f)); return t === null ? {} : { tokens: t }; })() };
-    this.aliveMemo.set(f, { size: st.size, mtimeMs: st.mtimeMs, alive });
-    if (this.aliveMemo.size > 64) this.aliveMemo.delete(this.aliveMemo.keys().next().value);
-    return alive;
+    const memos = (this.signMemo ??= new Map());
+    let m = memos.get(f);
+    if (!m || st.size < m.offset) m = { offset: 0, seen: new Map(), rest: '' };
+    if (st.size > m.offset) {
+      const { text, next } = readFrom(f, m.offset, SIGN_READ_MAX);
+      const parts = (m.rest + text).split('\n');
+      // The last part is a line not yet ended: kept for the next read (dropped if it's grown past any real line).
+      const last = parts.pop() ?? '';
+      m.rest = last.length > SIGN_READ_MAX ? '' : last;
+      for (const l of parts) { try { claudeTokens([JSON.parse(l)], m.seen); } catch { /* not a line of JSON */ } }
+      m.offset = next;
+    }
+    memos.delete(f); memos.set(f, m);
+    if (memos.size > 64) memos.delete(memos.keys().next().value);
+    let tokens = 0;
+    for (const n of m.seen.values()) tokens += n;
+    return { at: new Date(st.mtimeMs).toISOString(), ...(m.seen.size ? { tokens } : {}) };
   }
 
   end(body, env) {
@@ -681,7 +709,7 @@ export class CodexRunner {
   activity(body) { return codexCards(this.events(body.id), `${body.id}:`); }
 
   /** Its last sign of life (t-2109): when its events were last written. Codex says its tokens only at a turn's end. */
-  alive(body) {
+  signOfLife(body) {
     try { return { at: new Date(statSync(join(this.runsDir, body.id, 'events.jsonl')).mtimeMs).toISOString() }; } catch { return null; }
   }
 

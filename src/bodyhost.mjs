@@ -218,7 +218,7 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
       // A Comms thread's body: its tool steps, the newest 100, read from its harness's own record (activity.mjs).
       const cards = b.activity ? (() => { try { return (r.activity?.({ id, ...(b.slot ? { slot: b.slot } : {}) }) ?? []).slice(-100); } catch { return []; } })() : null;
       // And its last sign of life (t-2109): when its record last moved, its tokens so far.
-      const alive = b.activity ? (() => { try { return r.alive?.({ id, ...(b.slot ? { slot: b.slot } : {}) }) ?? null; } catch { return null; } })() : null;
+      const alive = b.activity ? (() => { try { return r.signOfLife?.({ id, ...(b.slot ? { slot: b.slot } : {}) }) ?? null; } catch { return null; } })() : null;
       let final;
       if (status === 'idle' || status === 'ended') {
         try { final = r.final?.({ id, ...(b.slot ? { slot: b.slot } : {}) })?.slice(0, 40000); } catch { /* retry next sync */ }
