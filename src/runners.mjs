@@ -36,7 +36,7 @@
 import { spawn as nodeSpawn, spawnSync } from 'node:child_process';
 import { nativeHistoryEnv, validateNativeHistoryOptions } from './native-history.mjs';
 import { createHash, randomBytes } from 'node:crypto';
-import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -78,9 +78,11 @@ const jsonLines = (t) => t.split('\n').flatMap((l) => { try { const v = JSON.par
 function readFrom(p, offset, max) {
   let fd;
   try {
-    fd = openSync(p, 'r');
-    const buf = Buffer.alloc(max);
-    const n = readSync(fd, buf, 0, max, offset);
+    // Never through a link, as tailOf reads; a buffer only as large as what's there to read.
+    fd = openSync(p, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const size = Math.max(0, Math.min(max, fstatSync(fd).size - offset));
+    const buf = Buffer.alloc(size);
+    const n = size ? readSync(fd, buf, 0, size, offset) : 0;
     // Up to the last whole UTF-8 character: a character cut by the slice is read whole next time, never as U+FFFD.
     let end = n;
     if (n === max) { let k = n - 1, back = 0; while (k >= 0 && back < 4 && (buf[k] & 0xc0) === 0x80) { k--; back++; } if (k >= 0 && buf[k] >= 0xc0) end = k; }

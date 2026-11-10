@@ -26,6 +26,24 @@ import { nativePendingInbox } from './native-inbox.mjs';
  * session part (PART_CHARS) and its final beside them, and a card's diff may be ~96 KB.
  */
 export const CARDS_MAX = 256 * 1024;
+/** At most how many bytes a whole report carries (t-2109): core takes 1 MB a call, with room for the call around it. */
+export const REPORT_MAX = 900 * 1024;
+/**
+ * A report's cards trimmed so the whole report fits in `max` bytes (t-2109): one report carries every body's, beside
+ * packed session parts and finals, so several threads in one house share one budget. The newest cards, across its
+ * bodies, are kept; each body's keep their order. Anything else in the report is never trimmed.
+ */
+export function fitCards(report, max) {
+  const all = [];
+  for (const [id, b] of Object.entries(report.bodies ?? {})) if (Array.isArray(b.cards)) b.cards.forEach((c, i) => all.push({ id, i, at: String(c?.at ?? ''), n: Buffer.byteLength(JSON.stringify(c)) + 1 }));
+  const total = Buffer.byteLength(JSON.stringify(report));
+  if (total <= max) return report;
+  let room = max - (total - all.reduce((k, x) => k + x.n, 0));
+  const keep = new Set();
+  for (const x of all.sort((p, q) => (p.at < q.at ? 1 : p.at > q.at ? -1 : q.i - p.i))) { if (x.n > room) break; room -= x.n; keep.add(`${x.id}\0${x.i}`); }
+  for (const [id, b] of Object.entries(report.bodies)) if (Array.isArray(b.cards)) b.cards = b.cards.filter((_, i) => keep.has(`${id}\0${i}`));
+  return report;
+}
 /** The newest of `cards` whose JSON fits in `max` bytes, in their order (none dropped from the middle). */
 export function newestWithin(cards, max) {
   let size = 0, k = cards.length;
@@ -251,7 +269,9 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
     }
     let got;
     const sent = acks;
-    try { got = await client('body-sync', { hostKey: key, report: { bodies, done, packed, inboxAck: sent, caps: ['parts', 'native-admission', ...(history ? ['native-history'] : [])], starting: [...new Set([...launching.keys(), ...uncertain.keys(), ...Object.keys(done)])] } }); } catch (e) { log(`sync failed: ${e.message}`); await sleep(SYNC_MS); continue; }
+    const report = { bodies, done, packed, inboxAck: sent, caps: ['parts', 'native-admission', ...(history ? ['native-history'] : [])], starting: [...new Set([...launching.keys(), ...uncertain.keys(), ...Object.keys(done)])] };
+    fitCards(report, REPORT_MAX);
+    try { got = await client('body-sync', { hostKey: key, report }); } catch (e) { log(`sync failed: ${e.message}`); await sleep(SYNC_MS); continue; }
     if (typeof got.hostKey === 'string') key = got.hostKey;
     // Answered: what it acknowledged is the runtime's to forget now. (A lost answer: they go again next beat.)
     if (acks === sent) acks = {};

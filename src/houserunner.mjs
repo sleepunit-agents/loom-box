@@ -368,6 +368,9 @@ export const hostTask = (env, bootKey) => `loom-runtime body-host --piece ${piec
  * one only reuses an id in its own thread, which it already writes whole.
  */
 const RENAMED = 'h:';
+/** A body's cards' words as last sealed, and their mark (bodySync, t-2109); and blobs opened, by their hash. In memory. */
+const CARD_SEALS = new WeakMap();
+const CARD_OPENS = new Map();
 /** A card's id as it may leave the house boundary: itself, or RENAMED and 16 hex of its hash (cleanCards, below). */
 const cardId = (raw) => (redact(raw) === raw && !raw.startsWith(RENAMED) ? raw : `${RENAMED}${createHash('sha256').update(raw).digest('hex').slice(0, 16)}`);
 
@@ -483,16 +486,27 @@ export function bodySync(env, caller, body, o = {}) {
       }
     }
     // A card's words (t-2109: a command, a diff, the body's own words, plan items) are sealed before they reach disk,
-    // as a final is: the record keeps only each card's base, its numbers and a sealed blob of the rest.
-    for (const b of Object.values(bodies)) if (Array.isArray(b.cards)) {
-      b.cards = b.cards.map(({ detail, body: words, items, ...rest }) => {
+    // as a final is: the record keeps only each card's base, its numbers and one sealed blob of every card's words (by
+    // its id), sealed once a body and again only when they moved (CARD_SEALS: a seal is a process of its own).
+    for (const [bid, b] of Object.entries(bodies)) if (Array.isArray(b.cards)) {
+      const words = {};
+      b.cards = b.cards.map(({ detail, body: said, items, ...rest }) => {
         // A text card's label is the body's own first line: sealed too, its fixed label kept in the clear instead.
-        const said = rest.tool === 'text' ? { summary: rest.summary } : {};
-        const w = { ...(detail ? { detail } : {}), ...(words ? { body: words } : {}), ...(items ? { items } : {}), ...said };
+        const label = rest.tool === 'text' ? { summary: rest.summary } : {};
+        const w = { ...(detail ? { detail } : {}), ...(said ? { body: said } : {}), ...(items ? { items } : {}), ...label };
         if (rest.tool === 'text') rest.summary = rest.fixed ?? 'Wrote its words';
-        if (!Object.keys(w).length) return rest;
-        try { return { ...rest, sealed: sealer.seal(Buffer.from(JSON.stringify(w))).toString('base64') }; } catch { return rest; }
+        if (Object.keys(w).length) words[rest.id] = w;
+        return rest;
       });
+      if (!Object.keys(words).length) continue;
+      const json = JSON.stringify(words), key = `${caller.agent}\0${caller.house}\0${bid}`;
+      const mark = createHash('sha256').update(json).digest('hex');
+      if (!CARD_SEALS.has(sealer)) CARD_SEALS.set(sealer, new Map());
+      const seals = CARD_SEALS.get(sealer), was = seals.get(key);
+      if (was?.mark === mark) { b.cardWords = was.sealed; continue; }
+      try { b.cardWords = sealer.seal(Buffer.from(json)).toString('base64'); } catch { continue; }
+      seals.delete(key); seals.set(key, { mark, sealed: b.cardWords });
+      if (seals.size > 256) seals.delete(seals.keys().next().value);
     }
     for (const b of Object.values(bodies)) if (typeof b.final === 'string') {
       // A host reports over its authenticated channel; words are sealed before they reach disk.
@@ -1256,11 +1270,20 @@ export class HouseRunner {
   }
   /** Its activity cards, as its host last reported them (only a Comms thread's body has any). */
   activity(body) {
-    // Its words opened again (sealed on disk, t-2109); a blob that won't open leaves the card without them.
-    return (this.entry(body)?.cards ?? []).map(({ sealed, ...c }) => {
-      if (typeof sealed !== 'string') return c;
-      try { return { ...c, ...JSON.parse(this.sealer.open(Buffer.from(sealed, 'base64')).toString('utf-8')) }; } catch { return c; }
-    });
+    // Its words opened again (sealed on disk, t-2109), once a blob (CARD_OPENS); a blob that won't open leaves the
+    // cards without them.
+    const e = this.entry(body);
+    let words = {};
+    if (typeof e?.cardWords === 'string') {
+      const k = createHash('sha256').update(e.cardWords).digest('hex');
+      words = CARD_OPENS.get(k);
+      if (!words) {
+        try { words = JSON.parse(this.sealer.open(Buffer.from(e.cardWords, 'base64')).toString('utf-8')); } catch { words = {}; }
+        CARD_OPENS.set(k, words);
+        if (CARD_OPENS.size > 64) CARD_OPENS.delete(CARD_OPENS.keys().next().value);
+      }
+    }
+    return (e?.cards ?? []).map((c) => (Object.hasOwn(words, c.id) && words[c.id] && typeof words[c.id] === 'object' ? { ...c, ...words[c.id] } : c));
   }
   /** Its last sign of life, as its host last reported it (t-2109). */
   signOfLife(body) { return this.entry(body)?.alive ?? null; }

@@ -4,7 +4,7 @@ import { load, update, StateError } from './state.mjs';
 import { sees } from './control.mjs';
 import { registerTaskHost } from './houserunner.mjs';
 import { spawnCall } from './spawn.mjs';
-import { loadConv, depsOf, ownerConversationControl, ownerModelChoice, shownCards } from './delivery.mjs';
+import { CARDS_KEPT, loadConv, depsOf, ownerConversationControl, ownerModelChoice, shownCards } from './delivery.mjs';
 import { readBody } from './bodies.mjs';
 const fail = (message, status = 400) => { throw new StateError(message, status); };
 const LIVE = new Set(['starting', 'running']);
@@ -52,7 +52,7 @@ export async function sessionCommand(env, caller, q = {}, o = {}) {
     try {
       const rec = readBody(env, c.body);
       // Only as core is shown them (t-2109): their words only where the conversation is the owner's alone.
-      cards = shownCards(env, c, d.runner(rec.harness, rec.local).activity?.({ id: c.body.split(':')[1], ...rec }) ?? []);
+      cards = shownCards(env, c, (d.runner(rec.harness, rec.local).activity?.({ id: c.body.split(':')[1], ...rec }) ?? []).slice(-CARDS_KEPT));
       model = { harness: rec.harness, model: rec.model };
     } catch { /* unavailable reports never imply that the native body is finished */ }
   }

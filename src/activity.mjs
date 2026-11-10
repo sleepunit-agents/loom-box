@@ -340,13 +340,23 @@ function capLines(lines, max) {
   return [...head, `… ${lines.length - head.length - tail.length} lines not kept …`, ...tail].join('\n');
 }
 
+const KEY_BEGIN = /-----BEGIN [A-Z ]{0,40}PRIVATE KEY-----/;
+const KEY_END = /-----END [A-Z ]{0,40}PRIVATE KEY-----/;
+
 /**
  * A diff as shown: each line's content redacted apart from its mark (+, -, space), so `+NAME=value` is an assignment to
  * redact and `-print(…)` isn't read as a `-p` flag; a hunk header as itself; at most MAX_BODY.
  */
 export function diffText(text) {
-  // Its mark is read after the line is normalised, so nothing invisible before it can hide it.
-  return capLines(String(text ?? '').slice(0, 2_000_000).split('\n').map(normLine).map((l) => (/^[-+ ]/.test(l) ? `${l[0]}${shownTextLine(l.slice(1))}` : shownTextLine(l))), MAX_BODY);
+  // Its mark is read after the line is normalised, so nothing invisible before it can hide it. A key block's every line,
+  // from its BEGIN to its END whatever its mark, goes whole (redact can't see a key line by line).
+  let inKey = false;
+  return capLines(String(text ?? '').slice(0, 2_000_000).split('\n').map(normLine).map((l) => {
+    const words = /^[-+ ]/.test(l) ? l.slice(1) : l;
+    if (KEY_BEGIN.test(words)) inKey = true;
+    if (inKey) { if (KEY_END.test(words)) inKey = false; return GONE; }
+    return /^[-+ ]/.test(l) ? `${l[0]}${shownTextLine(words)}` : shownTextLine(l);
+  }), MAX_BODY);
 }
 
 /**
@@ -443,7 +453,7 @@ function claudeLimit(name, i) {
   return Math.min(86_400, Math.max(1, Math.ceil((Number.isFinite(ms) && ms > 0 ? ms : 120_000) / 1000)));
 }
 
-/** A finished Claude step's result line and its body (a shell step's output, an edit's diff): from its `toolUseResult`. */
+/** A finished Claude step's result line and its body (an edit's diff, made when read: lazyBody): from its `toolUseResult`. */
 function claudeResult(name, r, text, failed, exit, input = {}) {
   const u = r && typeof r === 'object' ? r : {};
   // A private file's contents never show, in a diff or as written (a .env, a key, loom's private stores): its counts only.
@@ -456,16 +466,29 @@ function claudeResult(name, r, text, failed, exit, input = {}) {
       return { result: shellResult({ exit, output, failed }) };
     }
     case 'Read': { const n = count(u.file?.numLines); return n === null ? {} : { result: `Read ${plural(n, 'line')}` }; }
-    case 'Edit': case 'MultiEdit': { const p = patchLine(u.structuredPatch), body = shows ? patchText(u.structuredPatch) : ''; return p ? { result: p, ...(body ? { body } : {}) } : {}; }
+    case 'Edit': case 'MultiEdit': { const p = patchLine(u.structuredPatch); return p ? { result: p, ...(shows ? { body: () => patchText(u.structuredPatch) } : {}) } : {}; }
     case 'Write': {
-      if (u.type === 'create' && typeof u.content === 'string') { const body = shows ? diffText(u.content.split('\n').map((l) => `+${l}`).join('\n')) : ''; return { result: `Wrote ${plural(u.content.split('\n').length, 'line')}`, ...(body ? { body } : {}) }; }
-      const p = patchLine(u.structuredPatch), body = shows ? patchText(u.structuredPatch) : ''; return p ? { result: p, ...(body ? { body } : {}) } : {};
+      if (u.type === 'create' && typeof u.content === 'string') return { result: `Wrote ${plural(u.content.split('\n').length, 'line')}`, ...(shows ? { body: () => diffText(u.content.split('\n').map((l) => `+${l}`).join('\n')) } : {}) };
+      const p = patchLine(u.structuredPatch); return p ? { result: p, ...(shows ? { body: () => patchText(u.structuredPatch) } : {}) } : {};
     }
     case 'Grep': { const f = count(u.numFiles), n = count(u.numLines); return n !== null && u.mode === 'content' ? { result: `Found ${plural(n, 'line')}` } : f !== null ? { result: `Found ${plural(f, 'file')}` } : {}; }
     case 'Glob': { const f = count(u.numFiles); return f === null ? {} : { result: `Found ${plural(f, 'file')}` }; }
     case 'Task': case 'Agent': { const n = count(u.totalToolUseCount); return n === null ? {} : { result: `${plural(n, 'tool use')}` }; }
     default: return {};
   }
+}
+
+/**
+ * A card's `body` made only when it's first read (t-2109): a transcript's window holds thousands of steps, and only the
+ * newest few are ever kept or sent, so their diffs and words are worked out, redacted line by line, for those only.
+ * An empty one reads as none.
+ */
+function lazyBody(card, make) {
+  let made = false, v;
+  Object.defineProperty(card, 'body', { enumerable: true, configurable: true,
+    get() { if (!made) { made = true; v = make() || undefined; } return v; },
+    set(x) { Object.defineProperty(card, 'body', { value: x, enumerable: true, configurable: true, writable: true }); } });
+  return card;
 }
 
 /** The cards in a Claude transcript's lines (parsed JSON objects), in order; `prefix` keeps ids unique per thread. */
@@ -482,10 +505,10 @@ export function claudeCards(lines, prefix = '', parent = null) {
       content.forEach((c, n) => {
         if (c?.type !== 'text' || typeof c.text !== 'string' || !c.text.trim() || !mid) return;
         const id = `${prefix}${mid}:${n}`.slice(0, 80);
-        const body = shownText(c.text.replace(SGR, ''), MAX_TEXT);
         const label = part('text', firstLine(c.text), MAX_SUMMARY);
-        if (!body || label === GONE) return;
-        cards.set(id, { id, at: cardTime(l.timestamp), tool: 'text', summary: clean(label), fixed: 'Wrote its words', state: 'done', body, ...(parent ? { parent } : {}) });
+        if (label === GONE) return;
+        const card = { id, at: cardTime(l.timestamp), tool: 'text', summary: clean(label), fixed: 'Wrote its words', state: 'done', ...(parent ? { parent } : {}) };
+        cards.set(id, lazyBody(card, () => shownText(c.text.replace(SGR, ''), MAX_TEXT)));
       });
       for (const c of content) {
         if (c?.type !== 'tool_use' || typeof c.id !== 'string') continue;
@@ -519,7 +542,7 @@ export function claudeCards(lines, prefix = '', parent = null) {
         const own = content.filter((x) => x?.type === 'tool_result').length === 1 ? l.toolUseResult : undefined;
         const { result, body } = claudeResult(names.get(card.id), own, text, card.state === 'failed', exit, inputs.get(card.id));
         if (result) card.result = clean(redact(result));
-        if (body) card.body = body;
+        if (body) lazyBody(card, body);
         if (typeof l.timestamp === 'string' && cardTime(l.timestamp) === l.timestamp) card.end = l.timestamp;
       }
     }

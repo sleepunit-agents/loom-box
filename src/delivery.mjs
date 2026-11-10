@@ -1577,7 +1577,8 @@ async function activityPass(env, c, d) {
   try { rec = readBody(env, c.body); r = d.runner(rec.harness, rec.local); } catch { return; }
   if (typeof r.activity !== 'function') return;
   const body = bodyOf(c.body, rec);
-  const cards = shownCards(env, c, r.activity(body) ?? []);
+  // Its newest CARDS_KEPT only: what's older was told already, and its words aren't worked out again each pass.
+  const cards = shownCards(env, c, (r.activity(body) ?? []).slice(-CARDS_KEPT));
   const nowMs = (() => { try { return d.now().getTime(); } catch { return Date.now(); } })();
   const { out, next } = changedCards(cards, c.cardsSent ?? {});
   // A thread core said is gone (409) is told nothing for a while (it may be unarchived): its cards wait, untold.
@@ -1640,6 +1641,9 @@ export function shownCards(env, c, cards) {
     return { ...baseCard(x), summary: fixed ?? 'Did a step', ...plain };
   });
 }
+
+/** How many of a body's newest cards each pass reads (t-2109): core's view shows its newest 100. */
+export const CARDS_KEPT = 200;
 
 /** At most how much JSON one activity post carries (t-2109): half core's cap, so a full card always fits. */
 const POST_MAX = 512 * 1024;

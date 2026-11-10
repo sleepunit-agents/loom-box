@@ -391,6 +391,17 @@ test('a house\'s card words are sealed on loom\'s disk, and opened again for the
   const got = hr.activity({ id: 'h-1-b0000001', house: 'h-1', agent: 'art' });
   assert.equal(got[0]?.body, '+THE-DIFF-WORDS');
   assert.deepEqual([got[1]?.summary, got[1]?.body], ['THE-OWN-WORDS first line', 'THE-OWN-WORDS first line'], 'opened again whole');
+  // Sealed once a body, and again only when its words move; opened once a blob.
+  let seals = 0, opens = 0;
+  const counting = { seal: (b) => { seals++; return testSealer.seal(b); }, open: (b) => { opens++; return testSealer.open(b); } };
+  const sync = (cards) => bodySync(env, { kind: 'agent', agent: 'art', house: 'h-1' }, { hostKey: 'the-host-key', report: { bodies: { b0000001: { harness: 'claude', status: 'working', cards } }, done: {} } }, { sealer: counting });
+  sync([card, said]); sync([card, said]);
+  assert.equal(seals, 1, 'unchanged words aren\'t sealed again');
+  sync([card, { ...said, body: 'THE-OWN-WORDS moved' }]);
+  assert.equal(seals, 2);
+  const hr2 = new HouseRunner(env, 'claude', { sealer: counting });
+  for (let k = 0; k < 3; k++) hr2.activity({ id: 'h-1-b0000001', house: 'h-1', agent: 'art' });
+  assert.equal(opens, 1, 'one blob opened once');
 });
 
 test('a sign of life read in slices never cuts a character in two', () => {
@@ -425,6 +436,31 @@ test('a house\'s report carries at most CARDS_MAX of cards, the newest, so large
   assert.deepEqual(kept.map((c) => c.id), all.slice(40 - kept.length).map((c) => c.id), 'none dropped from the middle');
   const report = cleanReport({ bodies: { b0000001: { harness: 'claude', status: 'working', cards: kept } } });
   assert.ok(Buffer.byteLength(JSON.stringify(report)) <= CARDS_MAX + 4096);
-  assert.ok(CARDS_MAX + 360 * 1024 + 40_000 * 3 < 1024 * 1024, 'with a packed part and a final beside it, under core\'s 1 MB');
   assert.deepEqual(newestWithin([], CARDS_MAX), []);
+});
+
+test('a whole report fits core\'s cap: several threads in one house share one budget, the newest cards kept (t-2109)', async () => {
+  const { CARDS_MAX, REPORT_MAX, fitCards, newestWithin } = await import('../src/bodyhost.mjs');
+  const big = (b, i) => ({ id: `${b}${i}`, at: new Date(Date.UTC(2026, 10, 10, 10, i, b === 'x' ? 0 : b === 'y' ? 20 : 40)).toISOString(), tool: 'Edit', summary: 'Edited f.ts', state: 'done', detail: 'f.ts', body: `+${'界'.repeat(10_000)}` });
+  const bodies = Object.fromEntries(['x', 'y', 'z'].map((b) => [`b000000${b}`, { status: 'working', cards: newestWithin(Array.from({ length: 12 }, (_, i) => big(b, i)), CARDS_MAX), final: 'w'.repeat(40_000) }]));
+  const report = { bodies, done: {}, packed: { b0000009: { part: 0, parts: 2, data: 'p'.repeat(360 * 1024) } } };
+  assert.ok(Buffer.byteLength(JSON.stringify(report)) > 1024 * 1024, 'over core\'s cap before');
+  fitCards(report, REPORT_MAX);
+  assert.ok(Buffer.byteLength(JSON.stringify(report)) <= REPORT_MAX, 'within it after');
+  assert.equal(report.packed.b0000009.data.length, 360 * 1024, 'a packed part is never trimmed');
+  const kept = Object.values(report.bodies).flatMap((b) => b.cards);
+  assert.ok(kept.length > 0);
+  const ids = new Set(kept.map((c) => c.id));
+  assert.ok(ids.has('z11') && !ids.has('x0'), 'the newest across bodies kept, the oldest dropped');
+  assert.ok(Object.values(report.bodies).every((b) => b.cards.every((c, i, a) => i === 0 || a[i - 1].at <= c.at)), 'each body\'s in order');
+  const small = { bodies: { b0000001: { cards: [big('x', 0)] } } };
+  assert.deepEqual(fitCards(small, REPORT_MAX).bodies.b0000001.cards.length, 1, 'a report that fits is left as it is');
+});
+
+test('a key block in a diff goes whole, every line from BEGIN to END, its last short line too (t-2109)', async () => {
+  const { diffText } = await import('../src/activity.mjs');
+  const key = ['-----BEGIN OPENSSH PRIVATE KEY-----', 'b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW', 'QyNTUxOQAAACBx', '-----END OPENSSH PRIVATE KEY-----'];
+  const out = diffText(['+echo hi', ...key.map((l) => `+${l}`), '+done'].join('\n'));
+  assert.ok(!out.includes('QyNTUxOQAAACBx') && !out.includes('b3BlbnNzaC1'));
+  assert.ok(out.startsWith('+echo hi') && out.endsWith('+done'));
 });
