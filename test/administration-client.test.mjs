@@ -11,6 +11,8 @@ import { deliver, loadConv } from '../src/delivery.mjs';
 import { api } from '../src/control.mjs';
 import { update } from '../src/state.mjs';
 import { remoteClient } from '../src/box.mjs';
+import { readExecution } from '../src/administration-execution-journal.mjs';
+import { administrationUnit } from '../src/administration-supervisor.mjs';
 import { administrativeHost } from '../src/administration-worker.mjs';
 import { reconcileAdministration, readAdministrationRequest } from '../src/administration-client.mjs';
 import { requestAdministration, administrationApproval, advanceAdministration, queueAdministration, administrationResult } from '../src/administration.mjs';
@@ -78,6 +80,7 @@ test('lost claim reply reconciles the same worker ticket before one physical eff
   assert.equal(existsSync(w.marker), false);
   const answer = await reconcileAdministration({ ...w.config, client: w.client });
   assert.equal(answer.state, 'uploaded'); assert.equal(readFileSync(w.marker, 'utf8'), 'one\n');
+  if (w.config.supervisor === 'systemd-fixture') assert.equal(readExecution(join(w.root, 'executions'), w.op.id).supervisor.unit, administrationUnit(join(w.root, 'executions'), w.op.id, true));
   assert.equal(w.calls['administration-claim'], 2); assert.equal(w.calls['administration-admit'], 1);
   assert.equal(administrationResult(w.env, w.caller, { ...w.proof, operation: w.op.id }, w.o).result.stdout, 'private-client-output');
   assert.deepEqual(await reconcileAdministration({ ...w.config, client: w.client }), answer);

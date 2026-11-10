@@ -11,7 +11,7 @@ import { scratch } from './scratch.mjs';
 import { administrativeHost, runAdministrationCommand, observeAdministrationExecution } from '../src/administration-worker.mjs';
 import { readExecution } from '../src/administration-execution-journal.mjs';
 import { launchWorkerAlive } from '../src/launch-journal.mjs';
-import { administrationSupervisorAvailable, administrationUnitState, signalAdministrationUnit } from '../src/administration-supervisor.mjs';
+import { administrationUnit, administrationSupervisorAvailable, administrationUnitState, signalAdministrationUnit } from '../src/administration-supervisor.mjs';
 import { world } from './delivery-world.mjs';
 import { deliver, loadConv } from '../src/delivery.mjs';
 import { update } from '../src/state.mjs';
@@ -42,6 +42,7 @@ test('a physical command runs once, receives stdin, and seals input and output w
   const result = await runAdministrationCommand(q);
   assert.equal(result.result.outcome, 'exited', result.result.stderr); assert.equal(result.result.exitCode, 0);
   assert.equal(result.result.stdout, 'private-command-stdin:undefined');
+  if (q.supervisor === 'systemd-fixture') assert.equal(readExecution(q.root, q.id).supervisor.unit, administrationUnit(q.root, q.id, true));
   const again = await runAdministrationCommand(q);
   assert.deepEqual(again, result); assert.equal(readFileSync(marker, 'utf8'), 'one\n');
   const journal = readFileSync(join(q.root, q.id + '.json'), 'utf8');

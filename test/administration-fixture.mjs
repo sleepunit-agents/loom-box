@@ -22,7 +22,7 @@ export function cleanupAdministrationFixture() {
     if (reset.error) throw reset.error;
     const state = spawnSync('systemctl', [...manager, 'show', unit, '--property=ActiveState', '--value'], options);
     if (state.error) throw state.error;
-    if (['active', 'activating', 'deactivating', 'failed'].includes(state.stdout.trim())) {
+    if (state.status !== 0 || state.stdout.trim() !== 'inactive') {
       throw Error('Fixture unit was not cleaned up: ' + unit);
     }
     } catch (error) { failures.push(error); }
