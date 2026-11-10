@@ -174,6 +174,28 @@ export function sharedSeatProblem(o) {
   return own === cv ? null : `a body holding ${cv} never runs in ${own}'s house`;
 }
 
+/**
+ * Tells core which conversation each live body's house holds (t-2061), once per house a process: for a house up before
+ * launches said so (the cut-over), whose body's seat is that conversation's own or its job's. A shared seat from before
+ * (`owner`, `p-<person>`) is never bound: it holds several conversations, so core takes no digest from it. `bodies`:
+ * [{agent, conversation, house, seat}]. A failure is said and tried again next time.
+ */
+const boundLive = new Set();
+export async function bindLiveHouses(bodies, bind, warn = () => {}) {
+  if (typeof bind !== 'function') return [];
+  const done = [];
+  for (const { agent, conversation, house, seat } of bodies) {
+    if (!AGENT_NAME.test(agent ?? '') || !HOUSE.test(house ?? '') || !/^cv-[0-9a-f]{12}$/.test(conversation ?? '')) continue;
+    const key = `${agent}\0${house}\0${conversation}`;
+    if (boundLive.has(key)) continue;
+    const s = seatOfKey(seat);
+    const own = seatConversation(s);
+    if (own ? own !== conversation : s !== `j-${house}`) continue;
+    try { await bind({ agent, house, conversation }); boundLive.add(key); done.push(house); } catch (e) { warn(`telling core ${house} holds ${conversation}: ${String(e?.message ?? e).split('\n')[0].slice(0, 200)}`); }
+  }
+  return done;
+}
+
 const rawOf = (body) => (body?.house && HOUSE.test(body.house) && String(body.id).startsWith(`${body.house}-`) ? String(body.id).slice(body.house.length + 1) : null);
 
 const readJson = (p) => { try { return JSON.parse(readFileSync(p, 'utf-8')); } catch { return null; } };

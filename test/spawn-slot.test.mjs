@@ -16,7 +16,8 @@ const house = (w, h) => update(w.env, (s) => { if (h) s.houses['h-7'] = { id: 'h
 /** One spawn at work in house h-7, a second queued behind it at a cap of one. */
 async function capped() {
   const w = world({ LOOM_RUNTIME_SPAWN_LIMIT: '1' });
-  w.runner.houses = { owner: 'h-7' };
+  // Each conversation's own owner seat (owner.cv-…, t-2061), reported in h-7 by the fake runner.
+  w.runner.houses = new Proxy({}, { get: (_, k) => (typeof k === 'string' && k.startsWith('owner.') ? 'h-7' : undefined) });
   house(w, { state: 'running' });
   const a = await start(w);
   const b = await start(w);

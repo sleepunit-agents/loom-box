@@ -254,16 +254,30 @@ export function houseWorld({ sealer, claimMs = 5000, warmMs = 5000, harness = 'c
     done.then(() => { left = true; });
     return done;
   };
-  // A host leaves at once when told its bodies are another house's: how a test ends one.
+  // A host leaves at once when told its bodies are another house's: how a test ends one. Its record is its seat's
+  // (one conversation's since t-2061: art@owner.cv-….json; a body holding none is the shared owner's, art.json).
   const kill = async () => {
-    const h = hostOf(env, 'art');
-    writeFileSync(join(env.LOOM_BOX_DATA, 'delivery', 'hosts', 'art.json'), JSON.stringify({ ...h, house: 'h-999' }));
+    const f = hostPath(env);
+    const h = JSON.parse(readFileSync(f, 'utf8'));
+    writeFileSync(f, JSON.stringify({ ...h, house: 'h-999' }));
     await sleep(80);
-    writeFileSync(join(env.LOOM_BOX_DATA, 'delivery', 'hosts', 'art.json'), JSON.stringify({ ...hostOf(env, 'art'), house: h.house }));
+    writeFileSync(f, JSON.stringify({ ...JSON.parse(readFileSync(f, 'utf8')), house: h.house }));
   };
   return { D, env, hr, local, fed, ended, host, kill, houseEnv, setDrop: (f) => { drop = f; }, setRequestDrop: f => { dropRequest = f; }, sealer, left: () => left,
     get dropped() { return started.filter((id) => !existsSync(transcript(id))); },
     accounts: staticAccounts({ accounts: [{ name: 'max', provider: harness === 'claude' ? 'anthropic' : 'openai', harness, kind: 'login', agents: ['art', 'mark', 'pip'], credentials: [{ kind: 'login', status: 'valid' }], usage: {} }] }) };
+}
+
+/**
+ * The host record of the seat whose house is `house` (h-1 by default): `art.json` (the shared owner seat, a body that
+ * holds no conversation) or `art@<seat>.json` (a conversation's own, t-2061). The owner's when none names it yet.
+ */
+export function hostPath(env, house = 'h-1', agent = 'art') {
+  const dir = join(env.LOOM_BOX_DATA, 'delivery', 'hosts');
+  let names = [];
+  try { names = readdirSync(dir).filter((n) => n === `${agent}.json` || (n.startsWith(`${agent}@`) && n.endsWith('.json'))); } catch { /* none yet */ }
+  for (const n of names) { try { if (JSON.parse(readFileSync(join(dir, n), 'utf8')).house === house) return join(dir, n); } catch { /* not a record */ } }
+  return join(dir, `${agent}.json`);
 }
 
 export async function bodyInHouse(w, o = {}) {

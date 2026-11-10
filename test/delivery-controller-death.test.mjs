@@ -28,13 +28,15 @@ function child(args,env,input='',cwd){
   processChild.stdin.end(input);return{process:processChild,done};
 }
 async function serverFor(env,holdReceipts=false){
-  const seqs=new Map();let held=false,release;const gate=new Promise(r=>{release=r;});
+  const seqs=new Map(),bound=[];let held=false,release;const gate=new Promise(r=>{release=r;});
   const server=createServer((request,response)=>{let raw='';request.on('data',x=>{raw+=x;});request.on('end',async()=>{
     const send=(status,body)=>{response.statusCode=status;response.setHeader('content-type','application/json');response.end(JSON.stringify(body));};
     try{
       const body=JSON.parse(raw||'{}'),token=(request.headers.authorization??'').replace(/^Bearer /,'');
       if(request.url.startsWith('/api/loom/')){
         if(token!=='fixture-runtime-token')return send(403,{error:'wrong runtime credential'});
+        // Which conversation a house holds (t-2061): the runtime says so before it hands the house a body.
+        if(request.url==='/api/loom/conversations/house'){bound.push(`${body.house}:${body.conversation}`);return send(200,{house:body.house,conversation:body.conversation});}
         if(request.url==='/api/loom/conversations/turn'){const cv=cvOf(body.agent,body.venue,body.place),seq=(seqs.get(cv)??0)+1;seqs.set(cv,seq);return send(200,{conversation:cv,seq});}
         if(request.url==='/api/loom/audit')return send(200,{conversation:body.conversation,seq:body.seq});
         if(request.url==='/api/loom/venues')return send(200,{venues:[{name:'slack',kind:'live',piece:'slack',send:[process.execPath,join(here,'fake-send.mjs')]}]});
@@ -47,7 +49,7 @@ async function serverFor(env,holdReceipts=false){
     }catch{send(500,{error:'fixture request failed'});}
   });});
   await new Promise(r=>server.listen(0,'127.0.0.1',r));
-  return{url:`http://127.0.0.1:${server.address().port}/mcp`,held:()=>held,release,close:()=>new Promise(r=>server.close(r))};
+  return{url:`http://127.0.0.1:${server.address().port}/mcp`,held:()=>held,bound,release,close:()=>new Promise(r=>server.close(r))};
 }
 for(const boundary of ['reserved-before-publication','before-house-receipt','after-house-receipt','after-conversation-commit'])for(const harness of ['claude','codex'])test(`${harness}: actual controller SIGKILL ${boundary} recovers through fresh CLI delivery without duplicate native work`,{skip:!hasAge},async()=>{
   const root=scratch('delivery-controller-death-'),home=join(root,'controller'),house=join(root,'house'),place='dm:os-controller-death',cv=cvOf('art','slack',place);
@@ -66,7 +68,7 @@ for(const boundary of ['reserved-before-publication','before-house-receipt','aft
   houseEnv.LOOM_RUNTIME_NATIVE_HISTORY=join(house,'native');mkdirSync(houseEnv.LOOM_RUNTIME_NATIVE_HISTORY);
   houseEnv.CLAUDE_CONFIG_DIR=house;
   const marker=join(root,'ready-before-conversation-commit.json');
-  const program=`import{readFileSync,writeFileSync,renameSync}from'node:fs';import{deliver}from${JSON.stringify(new URL('../src/delivery.mjs',import.meta.url).href)};import{HouseRunner}from${JSON.stringify(new URL('../src/houserunner.mjs',import.meta.url).href)};import{readHouseLaunch}from${JSON.stringify(new URL('../src/house-launch-journal.mjs',import.meta.url).href)};
+  const program=`import{readFileSync,writeFileSync,renameSync}from'node:fs';import{deliver}from${JSON.stringify(new URL('../src/delivery.mjs',import.meta.url).href)};import{HouseRunner}from${JSON.stringify(new URL('../src/houserunner.mjs',import.meta.url).href)};import{readHouseLaunch}from${JSON.stringify(new URL('../src/house-launch-journal.mjs',import.meta.url).href)};import{coreFrom}from${JSON.stringify(new URL('../src/core.mjs',import.meta.url).href)};
 const boundary=${JSON.stringify(boundary)},marker=${JSON.stringify(marker)};
 const mark=(handle,id)=>{writeFileSync(marker+'.tmp',JSON.stringify({handle,id,pid:process.pid}));renameSync(marker+'.tmp',marker);};
 class Held extends HouseRunner{
@@ -74,7 +76,7 @@ class Held extends HouseRunner{
  async waitPreparedLaunch(handle){const body=await super.waitPreparedLaunch(handle);if(boundary==='after-house-receipt'){mark(handle,body.id);await new Promise(()=>setInterval(()=>{},1000));}return body;}
  acknowledgePreparedLaunch(handle){if(boundary==='after-conversation-commit'){mark(handle,readHouseLaunch(process.env,handle.id).body.id);process.kill(process.pid,'SIGSTOP');}return super.acknowledgePreparedLaunch(handle);}
 }
-let drained;await deliver(process.env,JSON.parse(readFileSync(0,'utf8')),{runner:h=>new Held(process.env,h),onDrain:p=>{drained=p}});await drained;`;
+let drained;await deliver(process.env,JSON.parse(readFileSync(0,'utf8')),{runner:h=>new Held(process.env,h,{bindHouse:b=>coreFrom(process.env).bindHouse(b)}),onDrain:p=>{drained=p}});await drained;`;
   const message={source:'slack',id:'owned-os-death-fixture',agent:'art',venue:'slack',place,label:'fixture',from:{kind:'person',slug:'loren'},kind:'message',at:new Date().toISOString(),text:'harmless isolated controller recovery fixture'};
   const original=child(['--input-type=module','-e',program],env,JSON.stringify(message));let host,replacement,prepared,handle;
   try{
@@ -90,7 +92,7 @@ let drained;await deliver(process.env,JSON.parse(readFileSync(0,'utf8')),{runner
     else{assert.equal(witness.pid,original.process.pid);assert.ok(before.body);assert.equal(before.runs,1);}
     assert.equal(readHouseLaunch(env,handle.id).state,boundary==='reserved-before-publication'?'reserved':boundary==='before-house-receipt'?'published':'ready');
     if(boundary==='reserved-before-publication')assert.equal(existsSync(join(house,'argv.log')),false,'reservation has not invoked a native executable');
-    assert.equal(before.actsFor.owner,false);assert.equal(handle.seat,'p-loren');
+    assert.equal(before.actsFor.owner,false);assert.equal(handle.seat,`p-loren.${cv}`);
     original.process.kill('SIGKILL');assert.equal((await original.done).signal,'SIGKILL');
     assert.equal(host.process.exitCode,null,'the independent house host survives controller death');
     server.release();
@@ -98,6 +100,7 @@ let drained;await deliver(process.env,JSON.parse(readFileSync(0,'utf8')),{runner
     replacement=child([cli,'deliver','tick','--conversation',cv],env);
     const result=await replacement.done;assert.equal(result.code,0,result.stderr);
     const after=loadConv(env,cv),originalId=after.body.split(':')[1];
+    assert.ok(server.bound.includes(`h-1:${cv}`),`core was told h-1 holds this conversation before its body ran: ${JSON.stringify(server.bound)} ${cv}`);
     if(boundary==='reserved-before-publication'){
       assert.equal(readHouseLaunch(env,handle.id).state,'refused','the dead registrar reservation was cancelled before retry');
       assert.notEqual(after.run,expected.run);assert.notEqual(after.sendKey,expected.sender);
@@ -109,9 +112,9 @@ let drained;await deliver(process.env,JSON.parse(readFileSync(0,'utf8')),{runner
       assert.equal(readBody(env,after.body).instance,expected.instance);
     }
     assert.deepEqual(after.actsFor,before.actsFor);assert.equal(after.runs,1);assert.equal(after.starting,undefined);assert.equal(after.launchAcks,undefined);
-    assert.equal(hostOf(env,'art','p-loren').req[handle.rid],undefined);
+    assert.equal(hostOf(env,'art',`p-loren.${cv}`).req[handle.rid],undefined);
     const raw=originalId.replace(/^h-1-/,'');
-    const session=await wait(()=>hostOf(env,'art','p-loren').report?.bodies?.[raw]?.session);
+    const session=await wait(()=>hostOf(env,'art',`p-loren.${cv}`).report?.bodies?.[raw]?.session);
     const bodyEnv={...houseEnv,...(harness==='claude'?{CLAUDE_CODE_SESSION_ID:session}:{CODEX_THREAD_ID:session})};
     const reply=await child([cli,'send','--conversation',cv,'--piece','box','--text','recovered sender proof'],bodyEnv,'',join(house,'work')).done;
     assert.equal(reply.code,0,reply.stdout+reply.stderr);assert.equal(JSON.parse(reply.stdout).posted,true);

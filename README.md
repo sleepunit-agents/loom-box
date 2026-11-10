@@ -436,17 +436,24 @@ own, and no house is ever reused for another:
   shared houses from before: read on old records, never given to a new body. A launch that holds a conversation goes
   only to a seat naming that conversation, or its job's (`houserunner.mjs`, `sharedSeatProblem`).
 - **Core is told which conversation a house holds** before the house is handed its body (`POST /api/loom/
-  conversations/house`, the runtime's only, set once). `conversation_digest` from a body's house writes only there,
-  and nothing at all from a house core was told nothing of. A failed bind is a start that didn't happen.
+  conversations/house`, the runtime's only, set once). `conversation_digest`, `comms_title` and `comms_thread` from a
+  body's house reach only that conversation, and nothing at all from a house core was told nothing of. A failed bind
+  is a start that didn't happen. Houses already up at the cut-over (an unknown principal's, a job's) are told on the
+  service's tick (`bindLiveHouses`); the shared houses from before never are.
 - **Every route the runtime checks against the caller's house** (`send`, `principal`, the continuation calls, `place`,
   the relay's return address, `spawn`, host verbs) now has one conversation behind that house, so a key and session
   id carried out of their house prove nothing anywhere else.
 - **Moving in.** A body of the owner's in the shared owner house from before has moved: it can't speak, ask its
-  principal or continue there (any sibling there could hold its key), and its next message ends it there and resumes
-  it, session and all, in its own house. A person's from her shared house goes to that conversation's own house of hers.
+  principal or continue there (any sibling there could hold its key), and its next message ends it there and starts
+  it fresh, from its digests, in its own house. Its session stays behind: any sibling there was root and could have
+  rewritten it. The same for a person's shared house.
 - **Cost.** One container per conversation at work, about 0.7-1 GB each. The owner's are bounded by the busy limit
   (`LOOM_RUNTIME_BUSY_LIMIT`, bodies per agent), and each house idles out `LOOM_RUNTIME_WARM_IDLE_S` after its body
-  ends. Houses for other people stay capped by `LOOM_RUNTIME_SEAT_HOUSES`, now counted per conversation.
+  ends. Houses for other people stay capped by `LOOM_RUNTIME_SEAT_HOUSES`, now counted per conversation, so its
+  default is 8 (was 4).
+- **Not covered here** (follow-ups): a service's house (a chat bridge runs many conversations in one house), bodies on
+  loom's machine (no house: they share the runtime account), and other pieces that take a conversation a body names
+  (the approvals piece's `--conversation`, the clock's `wake park`, the tasks piece's `--source`).
 
 ### One house per steering principal (t-1952)
 
@@ -491,7 +498,7 @@ one container, so walling conversations apart inside a house isn't possible; wal
   house's (where they are). One in a conversation someone else steers moves at that conversation's next message, or
   idles out (`LOOM_RUNTIME_WARM_IDLE_S`); until then it sits in the owner's house. A proof with no caller at all is
   loom's own CLI on loom's machine, which no house reaches: there the house check doesn't apply.
-- **Cost.** Houses for other people are capped per agent: `LOOM_RUNTIME_SEAT_HOUSES` (default 4; a value outside 1-64
+- **Cost.** Houses for other people are capped per agent: `LOOM_RUNTIME_SEAT_HOUSES` (default 8 since t-2061, one per conversation; a value outside 1-64
   is taken as 4) live
   houses for seats other than the owner's and the asking seat's own (a seat's draining house and its new one count as
   one), counted in the same state write that makes a house (two starts at once can't both pass it). At the cap a

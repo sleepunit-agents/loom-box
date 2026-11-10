@@ -18,7 +18,10 @@ import { loadConv } from '../src/delivery.mjs';
 import { hostOf } from '../src/houserunner.mjs';
 import { load, update } from '../src/state.mjs';
 import { scratch } from './scratch.mjs';
-import { fakeLoomBin } from './delivery-world.mjs';
+import { fakeLoomBin, hostPath } from './delivery-world.mjs';
+
+// The host record of house h-1's seat: one conversation's since t-2061 (art@p-loren.cv-….json).
+const seatHost = (env) => JSON.parse(readFileSync(hostPath(env), 'utf8'));
 
 const here = dirname(fileURLToPath(import.meta.url));
 const cli = join(here, '..', 'src', 'cli.mjs');
@@ -29,7 +32,7 @@ const until = async (f, ms = 20_000) => { const end = Date.now() + ms; while (!f
 
 // Fixture-only lifecycle facts: never dump the conversation, brief, credentials or run key.
 const startFacts = (env, cv, process) => {
-  const c = loadConv(env, cv), h = hostOf(env, 'art', 'p-loren');
+  const c = loadConv(env, cv), h = seatHost(env);
   return JSON.stringify({ hostExit: process.exitCode, hostSignal: process.signalCode,
     bound: !!c?.body, starting: !!c?.starting,
     outcomes: Object.values(c?.outcomes ?? {}).map(x => ({ body: x.body, reason: x.reason })),
@@ -59,6 +62,8 @@ async function loomServer(env) {
       const send = (status, v) => { res.statusCode = status; res.end(JSON.stringify(v)); };
       if (req.url.startsWith('/api/loom/')) {
         if (token !== TOKENS.runtime) return send(403, { error: 'forbidden: core\'s routes take the runtime token' });
+        // Which conversation a house holds (t-2061): said before the house is handed a body.
+        if (req.url === '/api/loom/conversations/house') return send(200, { house: body.house, conversation: body.conversation });
         if (req.url === '/api/loom/conversations/turn') { const cv = cvOf(body.agent, body.venue, body.place); return send(200, { conversation: cv, seq: (seqs[cv] = (seqs[cv] ?? 0) + 1) }); }
         if (req.url === '/api/loom/audit') return send(200, { conversation: body.conversation, seq: body.seq });
         if (req.url === '/api/loom/venues') return send(200, { venues: [{ name: 'slack', kind: 'live', piece: 'slack', send: [process.execPath, join(here, 'fake-send.mjs')] }] });
@@ -121,7 +126,7 @@ test('a delivered body is a session in its agent\'s own house: placed, woken by 
     const house = load(env).houses['h-1'];
     assert.deepEqual([house.agent, house.box], ['art', local()]);
     // Loren's conversation, in a house of hers (t-1952): its seat says whose, its host record is her seat's.
-    assert.equal(house.seat, 'p-loren');
+    assert.match(house.seat, /^p-loren\.cv-[0-9a-f]{12}$/, 'her conversation\'s own house');
     assert.match(house.task, /^loom-runtime body-host --piece box --host-key [0-9a-f]{48}$/, 'its task carries the host\'s one-time boot key');
 
     // The house: its own environment (its agent's token, its box's harness login), nothing of the runtime's.
@@ -148,11 +153,11 @@ test('a delivered body is a session in its agent\'s own house: placed, woken by 
       assert.equal(bodyEnv.claudeConfigDir, H, 'its own Claude configuration, never the control plane configuration');
       assert.ok(bodyEnv.names.includes('LOOM_TOKEN_FILE'), 'its own agent\'s token, the house\'s');
       assert.match(bodyEnv.key, /^[0-9a-f]{48}$/);
-      assert.ok(hostOf(env, 'art', 'p-loren').report.bodies[c.body.split(':')[1].replace(/^h-1-/, '')]);
+      assert.ok(seatHost(env).report.bodies[c.body.split(':')[1].replace(/^h-1-/, '')]);
 
       // The body answers as a real one does: `loom runtime send`, its env only its house's token and its run's key.
       // Its harness's own session id, as Claude Code sets it in a session (CLAUDE_CODE_SESSION_ID): its host reported it.
-      const session = hostOf(env, 'art', 'p-loren').report.bodies[c.body.split(':')[1].replace(/^h-1-/, '')].session;
+      const session = seatHost(env).report.bodies[c.body.split(':')[1].replace(/^h-1-/, '')].session;
       assert.ok(session);
       const bodyCli = { PATH: process.env.PATH, HOME: H, LOOM_URL: loom.url, LOOM_TOKEN_FILE: join(H, 'token'), LOOM_BODY_KEY: bodyEnv.key, CLAUDE_CODE_SESSION_ID: session };
       const ok = await run(['send', '--conversation', a.conversation, '--piece', 'box', '--text', 'Yes, Thursday at 3.'], '', bodyCli, H);
@@ -223,8 +228,8 @@ test('a Codex body in its house answers with `loom runtime send`, naming its Cod
       assert.match(c.body, /^codex:h-1-[0-9a-z]+$/);
       const raw = c.body.split(':')[1].replace(/^h-1-/, '');
       // Its host reports the thread Codex started as the body's session: the one the runtime checks a send against.
-      await until(() => hostOf(env, 'art', 'p-loren').report?.bodies?.[raw]?.session).catch(e => { e.message += `; lifecycle=${startFacts(env, a.conversation, host)}`; throw e; });
-      const thread = hostOf(env, 'art', 'p-loren').report.bodies[raw].session;
+      await until(() => seatHost(env).report?.bodies?.[raw]?.session).catch(e => { e.message += `; lifecycle=${startFacts(env, a.conversation, host)}`; throw e; });
+      const thread = seatHost(env).report.bodies[raw].session;
       // The body answers as a real Codex one does: a command Codex runs carries CODEX_THREAD_ID (codex-cli 0.162.1,
       // 0.164.0), and no Claude session id (CodexRunner scrubs CLAUDE_CODE_*).
       // Its run's key, as its house keeps it by conversation (bodyhost.mjs keepKey).
@@ -430,31 +435,34 @@ test('a body speaks with its own run\'s key even when its harness gives every se
   const caller = { kind: 'agent', agent: 'art', house: 'h-1' };
   const client = async (p, b) => { const r = await api(env, { now: () => new Date() }, { caller, path: p, body: b }); if (r.status !== 200) throw new Error(r.body.error); return r.body; };
   const hr = new HouseRunner(env, 'claude', { poll: 10 });
+  // One conversation, in its own house (t-2061): its first run's body, then its next run's, under the one daemon.
   const cv1 = 'cv-111111111111';
-  const cv2 = 'cv-222222222222';
-  const first = hr.start({ agent: 'art', brief: 'one', model: 'opus', env: { LOOM_BODY_KEY: 'key-one', LOOM_BODY_CONVERSATION: cv1 } });
+  const seat = `owner.${cv1}`;
+  const first = hr.start({ agent: 'art', brief: 'one', model: 'opus', seat, env: { LOOM_BODY_KEY: 'key-one', LOOM_BODY_CONVERSATION: cv1 } });
   await until(() => load(env).houses['h-1']);
   const host = runBodyHost({ client, runner: () => local, env: { HOME: houseHome, CLAUDE_SECURESTORAGE_CONFIG_DIR: '/run/loom/login/claude' }, hostKey: bootOf(env, 'h-1'), sleep: () => new Promise((r) => setTimeout(r, 10)), beats: 3000, idleS: 0 });
   try {
     const b1 = await first;
-    const b2 = await hr.start({ agent: 'art', brief: 'two', model: 'opus', env: { LOOM_BODY_KEY: 'key-two', LOOM_BODY_CONVERSATION: cv2 } });
+    assert.equal(bodyKeyFor({ HOME: houseHome }, cv1), 'key-one');
+    // Its run ends, and its key goes with it.
+    hr.end({ id: b1.id, agent: 'art', house: 'h-1', seat });
+    await until(() => !existsSync(keyFile({ HOME: houseHome }, cv1)));
+    // Its next run: a new key, and a session the daemon gives the first body's environment.
+    const b2 = await hr.start({ agent: 'art', brief: 'two', model: 'opus', seat, env: { LOOM_BODY_KEY: 'key-two', LOOM_BODY_CONVERSATION: cv1 } });
     const raw2 = b2.id.replace(/^h-1-/, '');
-    // The second session's environment is the first body's: its key alone would speak in cv1.
+    // The second session's environment is the first body's: its key is the ended run's.
     assert.equal(sessions[raw2].LOOM_BODY_KEY, 'key-one');
     const inSession = { ...sessions[raw2], HOME: houseHome };
-    assert.equal(bodyKeyFor(inSession, cv2), 'key-two', 'send finds its own run\'s key, by its conversation');
-    assert.equal(bodyKeyFor(inSession, cv1), 'key-one');
-    assert.equal(statSync(keyFile({ HOME: houseHome }, cv2)).mode & 0o777, 0o600);
-    assert.equal(statSync(dirname(keyFile({ HOME: houseHome }, cv2))).mode & 0o777, 0o700);
+    assert.equal(bodyKeyFor(inSession, cv1), 'key-two', 'send finds its own run\'s key, by its conversation');
+    assert.equal(statSync(keyFile({ HOME: houseHome }, cv1)).mode & 0o777, 0o600);
+    assert.equal(statSync(dirname(keyFile({ HOME: houseHome }, cv1))).mode & 0o777, 0o700);
+    // Another conversation's body is never handed this house.
+    await assert.rejects(hr.start({ agent: 'art', brief: 'x', model: 'opus', seat, env: { LOOM_BODY_KEY: 'k', LOOM_BODY_CONVERSATION: 'cv-222222222222' } }), /never runs in cv-111111111111's house/);
     assert.equal(bodyKeyFor({ HOME: houseHome, LOOM_BODY_KEY: 'from-env', LOOM_BODY_CONVERSATION: 'cv-333333333333' }, 'cv-333333333333'), 'from-env', 'no file: the environment\'s, for the conversation it names');
     assert.equal(bodyKeyFor({ HOME: houseHome, LOOM_BODY_KEY: 'from-env' }, 'cv-333333333333'), undefined, 'never for a conversation it doesn\'t name (t-2053)');
     assert.equal(keyFile({ HOME: houseHome }, '../../etc/x'), null, 'a conversation id only ever names its own file');
-    // A body that ends takes its key with it.
-    hr.end({ id: b1.id, agent: 'art', house: 'h-1' });
-    await until(() => !existsSync(keyFile({ HOME: houseHome }, cv1)));
-    assert.equal(existsSync(keyFile({ HOME: houseHome }, cv2)), true);
   } finally {
-    writeFileSync(join(env.LOOM_BOX_DATA, 'delivery', 'hosts', 'art.json'), JSON.stringify({ agent: 'art', house: 'h-2', req: {}, stop: {}, inbox: {} }));
+    writeFileSync(hostPath(env), JSON.stringify({ agent: 'art', seat, house: 'h-2', req: {}, stop: {}, inbox: {} }));
     await host;
   }
 });

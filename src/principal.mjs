@@ -184,24 +184,17 @@ export function seatOf(p, conversation) {
 
 /**
  * Whether a conversation's own session (its slot) may follow it from seat `was` to seat `now`: resumed in the seat it
- * began in; moved from the owner's work into this conversation's own unknown house (no one else's bodies are there; a
- * relay's answer into his thread lands that way); or from a shared house from before (t-2061) into this conversation's
- * own house of the same principal. Never into another person's house, and never out of a person's to anyone else: a
- * session a person steered goes nowhere but that person's, so one person's context never reaches another's work, and
- * the owner's house never inherits a session someone else steered. Otherwise the session is dropped and a fresh body
- * reads the digests.
+ * began in, or moved from the owner's work in this conversation's own house into its own unknown house (no one else's
+ * bodies are there; a relay's answer into his thread lands that way). Never into a person's house, never out of one to
+ * anyone else, and never out of a shared house from before (t-2061: `owner`, `p-<person>`, or none recorded): any
+ * sibling there was root and could have rewritten the session, so it doesn't follow into a house of its own. Otherwise
+ * the session is dropped and a fresh body reads the digests.
  */
 export function carriesSession(was, now, conversation) {
-  const w = was ?? OWNER_SEAT;
-  const n = now ?? OWNER_SEAT;
-  if (w === n) return true;
+  // The same seat (a local body's, which has none, included): its own session, where it was.
+  if (was === now) return true;
   const own = /^cv-[0-9a-f]{12}$/.test(conversation ?? '') ? conversation : null;
-  if (!own) return false;
-  // The owner's work (his shared house from before, or this conversation's own) into this conversation's own houses.
-  if ((w === OWNER_SEAT || w === `owner.${own}`) && (n === `owner.${own}` || n === `u-${own}`)) return true;
-  // A person's shared house from before into this conversation's own house of that person.
-  const p = /^p-([a-z0-9]+(?:-[a-z0-9]+)*)$/.exec(w);
-  return !!p && n === `p-${p[1]}.${own}`;
+  return !!own && was === `owner.${own}` && now === `u-${own}`;
 }
 
 /** The houses for seats other than the owner's work, at work for an agent in state `s`, but `seat`'s own. */
@@ -212,8 +205,8 @@ export function otherSeatHouses(s, agent, seat) {
   return Object.values(s?.houses ?? {}).filter((h) => h.agent === agent && !h.collection && LIVE.has(h.state) && host(h) && !isOwnerSeat(of(h)) && !/^j-h-[0-9]{1,9}$/.test(of(h)) && of(h) !== seat);
 }
 
-/** The cap on an agent's houses for other people (LOOM_RUNTIME_SEAT_HOUSES, default 4). */
-export const SEAT_HOUSES = 4;
+/** The cap on an agent's houses for other people (LOOM_RUNTIME_SEAT_HOUSES, default 8: one per conversation since t-2061). */
+export const SEAT_HOUSES = 8;
 export const seatCap = (env) => { const v = setting(env ?? {}, 'SEAT_HOUSES'); const n = Number(v); return v !== undefined && Number.isInteger(n) && n >= 1 && n <= 64 ? n : SEAT_HOUSES; };
 /**
  * Why a house for `seat` can't be had at the cap, or null. The owner's work is never capped here: his conversations'

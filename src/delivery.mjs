@@ -85,7 +85,7 @@ import { fileURLToPath } from 'node:url';
 import { AccountsError, accountsFrom, accountsOfRecord, stateAccounts } from './accounts.mjs';
 import { commitPreparedBody, endBody, readBody, resumeBody, startBody } from './bodies.mjs';
 import { CoreError, coreFrom } from './core.mjs';
-import { stoppingHosts, HouseRunner, releaseEmptySeatHouses, seatRoom, sweepSeats, sweepTransfers } from './houserunner.mjs';
+import { bindLiveHouses, stoppingHosts, HouseRunner, releaseEmptySeatHouses, seatRoom, sweepSeats, sweepTransfers } from './houserunner.mjs';
 import { venueKind as kindOf, resolveFor, readModelChoice, readModels, setModelChoice } from './models.mjs';
 import { pieceName, setting } from './piece.mjs';
 import { dropSession, packSession, restoreFiles, SessionSizeError, SessionHistoryMissing } from './sessions.mjs';
@@ -3093,6 +3093,16 @@ export async function tick(env, o = {}, only, mem = new Map()) {
   try { sweepTransfers(env, now, Date.now()); } catch (e) { d.warn(`sweeping transfers: ${e.message}`); }
   // Seat records whose house is over (houserunner.mjs, sweepSeats, t-1952): a guest's or an unknown's, never the owner's.
   try { sweepSeats(env); } catch (e) { d.warn(`sweeping seats: ${e.message}`); }
+  // Houses up before launches told core which conversation they hold (t-2061, the cut-over): told now, the service's
+  // tick only. A shared house from before is never bound (bindLiveHouses).
+  if (o.service === true) {
+    const live = [];
+    for (const c of listConvs(env)) {
+      if (!c.body) continue;
+      try { const rec = readBody(env, c.body); if (rec?.house) live.push({ agent: c.agent, conversation: c.conversation, house: rec.house, seat: rec.seat ?? c.bodyRules?.seat }); } catch { /* no record: nothing to bind */ }
+    }
+    try { await bindLiveHouses(live, typeof d.core?.bindHouse === 'function' ? (b) => d.core.bindHouse(b) : null, d.warn); } catch (e) { d.warn(`binding houses: ${e.message}`); }
+  }
   // Conversations held on a box gone dark (t-2057): the owner is asked whether to carry them on elsewhere.
   try { await askDarkBoxes(env, { convs: listConvs(env), nowMs: now, warn: d.warn }); } catch (e) { d.warn(`asking about dark boxes: ${e.message}`); }
   const warm = limitsOf(env).warmIdleS * 1000;

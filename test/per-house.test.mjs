@@ -206,9 +206,12 @@ test('the session carry rule: only its own seat, or from the owner\'s into the c
   // this conversation's own house of the same principal. Never into another conversation's.
   assert.equal(carriesSession(`owner.${cv}`, `owner.${cv}`, cv), true);
   assert.equal(carriesSession(`owner.${cv}`, `u-${cv}`, cv), true);
-  assert.equal(carriesSession('owner', `owner.${cv}`, cv), true, 'out of the shared owner house into its own');
-  assert.equal(carriesSession(undefined, `owner.${cv}`, cv), true);
-  assert.equal(carriesSession('p-loren', `p-loren.${cv}`, cv), true, 'out of her shared house into this conversation\'s own of hers');
+  assert.equal(carriesSession(undefined, undefined, cv), true, 'a local body (no seat either side): its own');
+  // Never out of a shared house from before: any sibling there could have rewritten it.
+  assert.equal(carriesSession('owner', `owner.${cv}`, cv), false, 'not out of the shared owner house');
+  assert.equal(carriesSession(undefined, `owner.${cv}`, cv), false, 'nor from before seats were kept');
+  assert.equal(carriesSession('owner', `u-${cv}`, cv), false);
+  assert.equal(carriesSession('p-loren', `p-loren.${cv}`, cv), false, 'not out of her shared house either');
   assert.equal(carriesSession('owner', `owner.${other}`, cv), false, 'never into another conversation\'s house');
   assert.equal(carriesSession(`owner.${other}`, `owner.${cv}`, cv), false);
   assert.equal(carriesSession(`owner.${cv}`, 'owner', cv), false, 'never back into a shared house');
@@ -216,10 +219,6 @@ test('the session carry rule: only its own seat, or from the owner\'s into the c
   assert.equal(carriesSession('p-loren', `p-dana.${cv}`, cv), false);
   assert.equal(carriesSession(`p-loren.${cv}`, `owner.${cv}`, cv), false);
   assert.equal(carriesSession(`p-loren.${cv}`, `u-${cv}`, cv), false);
-  assert.equal(carriesSession('owner', 'owner', cv), true);
-  assert.equal(carriesSession(undefined, 'owner', cv), true, 'none recorded is the owner\'s');
-  assert.equal(carriesSession('p-loren', 'p-loren', cv), true);
-  assert.equal(carriesSession('owner', `u-${cv}`, cv), true);
   assert.equal(carriesSession('owner', 'p-loren', cv), false, 'never into a person\'s house');
   assert.equal(carriesSession('p-loren', `u-${cv}`, cv), false, 'never out of one');
   assert.equal(carriesSession('p-loren', 'owner', cv), false, 'his house never inherits a session someone else steered');
@@ -680,7 +679,7 @@ test('two of the owner\'s conversations never share a house: one can\'t speak, a
   assert.equal(holdsRun(w.env, A, stolen, { ...w.o, caller: inA }), true);
 });
 
-test('a body of the owner\'s in the shared house from before moves to its own: nothing it says there stands, its session goes with it', async () => {
+test('a body of the owner\'s in the shared house from before moves to its own: nothing it says there stands, its session stays behind', async () => {
   const w = world();
   household(w.env);
   w.runner.houses = perConversation();
@@ -698,7 +697,8 @@ test('a body of the owner\'s in the shared house from before moves to its own: n
   assert.equal(sent.accepted, undefined);
   assert.match(sent.reason, /moved to another principal's house/);
   assert.equal((await api(w.env, fx, { caller: shared, path: 'principal', body: proof })).status, 409);
-  // Its next message ends it there and resumes it, session and all, in a house of its own.
+  // Its next message ends it there and starts it fresh, from its digests, in a house of its own: its session stays
+  // behind, since any sibling in the shared house could have rewritten it.
   const first = loadConv(w.env, C).body;
   w.runner.finish(first);
   await tick(w.env, w.o);
@@ -707,7 +707,8 @@ test('a body of the owner\'s in the shared house from before moves to its own: n
   const second = loadConv(w.env, C).body;
   assert.notEqual(second, first);
   assert.equal(w.runner.seats[second.split(':')[1]], `owner.${C}`);
-  assert.ok(w.log.slice(n).some((l) => l[0] === 'resume'), 'his session follows it into its own house');
+  assert.equal(w.log.slice(n).some((l) => l[0] === 'resume'), false, 'its session never follows it out of the shared house');
+  assert.match(w.log.slice(n).find((l) => l[0] === 'start')[2], /two/);
 });
 
 test('a launch goes only to its own conversation\'s house (or its job\'s), never a shared one or another\'s', async () => {
@@ -742,4 +743,29 @@ test('a house core won\'t bind to the conversation is handed nothing: the start 
   const hr = new HouseRunner(env, 'claude', { poll: 10, sealer, claimMs: 300, warmMs: 300, now: () => new Date(now), bindHouse: async () => { throw new Error('conflict: h-9 holds cv-0000000000c2'); } });
   await assert.rejects(hr.launch({ agent: 'art', seat, brief: 'x', env: { LOOM_BODY_KEY: 'k', LOOM_BODY_CONVERSATION: 'cv-0000000000c1' } }), (e) => e.nativeNotStarted === true && /core didn't record that h-9 holds cv-0000000000c1/.test(e.message));
   assert.deepEqual(JSON.parse(readFileSync(f, 'utf-8')).req, {}, 'nothing asked of the house');
+});
+
+test('houses up before launches said so are bound at the cut-over: their own conversation\'s, or their job\'s; a shared one never', async () => {
+  const { bindLiveHouses } = await import('../src/houserunner.mjs');
+  const said = [];
+  const bind = async (b) => { said.push(`${b.house}:${b.conversation}`); };
+  const A = 'cv-0000000000d1', B = 'cv-0000000000d2', C = 'cv-0000000000d3', D = 'cv-0000000000d4';
+  const done = await bindLiveHouses([
+    { agent: 'art', conversation: A, house: 'h-61', seat: `u-${A}` },
+    { agent: 'art', conversation: B, house: 'h-62', seat: 'j-h-62' },
+    { agent: 'art', conversation: C, house: 'h-63', seat: 'owner' },
+    { agent: 'art', conversation: D, house: 'h-64', seat: 'p-loren' },
+    { agent: 'art', conversation: A, house: 'h-65', seat: `u-${B}` },
+    { agent: 'art', conversation: B, house: 'h-66', seat: 'j-h-62' },
+    { agent: 'art', conversation: A, house: 'h-67', seat: `owner.${A}~0123456789` },
+  ], bind);
+  assert.deepEqual(said, [`h-61:${A}`, `h-62:${B}`, `h-67:${A}`], 'never a shared house, another conversation\'s, or another house\'s job');
+  assert.deepEqual(done, ['h-61', 'h-62', 'h-67']);
+  // Once a process: told again, nothing new is said.
+  await bindLiveHouses([{ agent: 'art', conversation: A, house: 'h-61', seat: `u-${A}` }], bind);
+  assert.equal(said.length, 3);
+  // A refusal is said and tried again next time.
+  const warned = [];
+  await bindLiveHouses([{ agent: 'art', conversation: C, house: 'h-68', seat: `owner.${C}` }], async () => { throw new Error('conflict'); }, (m) => warned.push(m));
+  assert.match(warned[0], /telling core h-68 holds/);
 });
