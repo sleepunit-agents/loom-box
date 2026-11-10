@@ -105,9 +105,9 @@ def principal_statement():
         why_none(f"the runtime's answer couldn't be read: {type(e).__name__}")
         return None, None
     if not isinstance(out, dict) or out.get("ok") is not True:
+        # Only its answer's reason (the runtime's own words), never its raw stderr, which nothing keeps free of secrets.
         reason = out.get("reason") if isinstance(out, dict) else None
-        last = (r.stderr or "").strip().splitlines()[-1:]
-        why_none(reason if isinstance(reason, str) else last[0] if last else f"the runtime refused (exit {r.returncode})")
+        why_none(reason if isinstance(reason, str) else f"the runtime refused (exit {r.returncode})")
         return None, None
     st = out.get("statement")
     st = st if isinstance(st, str) and 0 < len(st) <= 8000 and not re.search(r"\s", st) else None

@@ -3794,9 +3794,10 @@ export function verifyStatement(env, statement, nowMs = Date.now(), { house } = 
   if (!c || c.agent !== v.agent) return { ok: false, reason: 'this runtime has no record of its conversation' };
   // From the house the call came from (`--house`, the piece API's caller, t-2136): only when that house runs its
   // conversation's body. A statement is a bearer word for 5 minutes, so one another conversation's body was shown (a
-  // relay's text, a task comment) never speaks for it from there. Houses are one conversation's alone (t-2061).
+  // relay's text, a task comment) never speaks for it from there. Houses are one conversation's alone (t-2061). `null`:
+  // a caller in no house, which holds only a statement whose body runs in none (houseProblem).
   if (house !== undefined) {
-    const away = houseProblem(env, c, { kind: 'agent', agent: c.agent, house });
+    const away = houseProblem(env, c, { kind: 'agent', agent: c.agent, ...(house === null ? {} : { house }) });
     if (away) return { ok: false, reason: `not from the house of its conversation's body (${away})` };
   }
   const now = principalOf(env, c);

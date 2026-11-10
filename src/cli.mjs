@@ -618,9 +618,10 @@ async function main(argv, env) {
       }
       if (rest.includes('--verify')) {
         // --house: the house the piece API says the call came from; the statement holds only from its body's (t-2136).
+        // `--house -`: the caller is in no house (a houseless agent token), so a house body's statement doesn't hold.
         const house = rest.includes('--house') ? flag(rest, '--house') : undefined;
-        if (house !== undefined && !/^[A-Za-z0-9._-]{1,64}$/.test(house ?? '')) throw new Fail('principal --verify --house <the caller\'s house id>');
-        const r = verifyStatement(env, (await readStdin()).trim(), Date.now(), { house });
+        if (house !== undefined && house !== '-' && !/^[A-Za-z0-9._-]{1,64}$/.test(house ?? '')) throw new Fail('principal --verify --house <the caller\'s house id, or - for none>');
+        const r = verifyStatement(env, (await readStdin()).trim(), Date.now(), { house: house === '-' ? null : house });
         out(r);
         if (!r.ok) process.exitCode = 1;
         return;

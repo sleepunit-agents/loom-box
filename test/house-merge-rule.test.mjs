@@ -56,7 +56,7 @@ function ruleCheck(w, caller, statement) {
   const argv = ['rule', 'merge', TARGET, '--json', ...(statement ? ['--principal', statement] : [])];
   // The piece's own CLI, run as loom's machine runs it. It won't answer as the piece inside a container (in_a_house:
   // /run/.containerenv), and lanes run these tests in houses: there, that one check is off, nothing else.
-  const shim = "import sys, importlib.machinery as m; a = m.SourceFileLoader('approvals', sys.argv[1]).load_module(); a.in_a_house = lambda: False; sys.argv = ['approvals', *sys.argv[2:]]; a.main()";
+  const shim = "import sys, importlib.util as u, importlib.machinery as m; spec = u.spec_from_loader('approvals', m.SourceFileLoader('approvals', sys.argv[1])); a = u.module_from_spec(spec); spec.loader.exec_module(a); a.in_a_house = lambda: False; sys.argv = ['approvals', *sys.argv[2:]]; a.main()";
   const out = execFileSync('python3', ['-I', '-c', shim, APPROVALS, 'api'], {
     input: JSON.stringify({ path: 'run', caller, body: { argv } }), encoding: 'utf-8',
     // loom's machine: the runtime's own environment (its state, for --verify) and the piece's settings; no body's.
@@ -108,6 +108,8 @@ test('a house body in a job someone else\'s conversation started is theirs, neve
   assert.equal(ruleCheck(w, his.caller, his.r.body.statement).for, 'owner');
   assert.deepEqual([ruleCheck(w, caller, his.r.body.statement).for, ruleCheck(w, caller, his.r.body.statement).tier], ['?', 'ask']);
   assert.equal(ruleCheck(w, his.caller, st.body.statement).for, '?', 'nor hers from his');
+  // Nor from a caller in no house (a houseless agent token): a house body's statement holds only from its house.
+  assert.equal(ruleCheck(w, { kind: 'agent', agent: 'art' }, his.r.body.statement).for, '?');
 });
 
 test('a body left in the shared house from before t-2061 gets no statement, says why, and is someone loom can\'t name', { skip }, async () => {
