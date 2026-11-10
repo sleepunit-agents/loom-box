@@ -484,9 +484,13 @@ test('read 2: heredocs with $\'EOF\', "$D" or ~ delimiters; the house boundary; 
   assert.equal(commandLabel('cat <<"$D" > f\ngit log 482913\n$D'), 'Ran cat');
   assert.equal(commandLabel('cat <<~EOF\n  gh pr view 1\n  EOF\nls'), 'Ran cat, ls');
   assert.ok(!commandLabel('cat <<~EOF\n  gh pr view 482913\n  EOF').includes('482913'));
-  // cleanCards: a private path named; a token-shaped id or tool dropped; a time that isn't one replaced.
+  // cleanCards: a private path named; a token-shaped id renamed to a hash (never itself, t-2109) and a token-shaped tool
+  // dropped; a time that isn't one replaced.
   assert.equal(cleanCards([{ id: 'c', at: 'x', tool: 'B', summary: 'Read /home/art/.config/gh/hosts.yml', state: 'done' }])[0].summary, 'Read a private file');
-  assert.deepEqual(cleanCards([{ id: j('gh', 'p_abcdefghijklmnopqrstuvwxyz0123'), at: 'x', tool: 'B', summary: 's', state: 'done' }]), []);
+  const renamed = cleanCards([{ id: j('gh', 'p_abcdefghijklmnopqrstuvwxyz0123'), at: 'x', tool: 'B', summary: 's', state: 'done' }]);
+  assert.equal(renamed.length, 1);
+  assert.match(renamed[0].id, /^h:[0-9a-f]{16}$/);
+  assert.deepEqual(Object.keys(renamed[0]).sort(), ['at', 'id', 'state', 'summary', 'tool']);
   assert.deepEqual(cleanCards([{ id: 'c', at: 'x', tool: j('sk-', 'ant-api03-abcdefghijklmnopqrstuvwxyz'), summary: 's', state: 'done' }]), []);
   assert.notEqual(cleanCards([{ id: 'c', at: '12345678901234567890', tool: 'B', summary: 's', state: 'done' }])[0].at, '12345678901234567890');
   const cards = claudeCards([{ type: 'assistant', timestamp: j('gh', 'p_abcdefghijklmnopqrstuvwxyz0123'), message: { content: [{ type: 'tool_use', id: 'u', name: j('mcp__x__gh', 'p_abcdefghijklmnopqrstuvwxyz0123'), input: {} }] } }]);
@@ -520,5 +524,39 @@ test('a supplementary variation selector (U+E0100–E01EF) inside a key doesn\'t
       assert.ok(!out.includes(key.slice(0, 12)) && !out.includes(key.slice(14, 26)), JSON.stringify(out));
       assert.ok(!UNPRINTABLE_ONE.test(out), JSON.stringify(out));
     }
+  }
+});
+
+test('cleanCards keeps a house body\'s real steps: Claude tool ids and Codex body-prefixed ids look random, so they are renamed, never dropped (t-2109)', () => {
+  // The two shapes a house host reports (activity.mjs): a Claude tool_use id, and a Codex item under its 24-hex body id.
+  const claude = { id: j('toolu_', '01RkDcxWJbXrN5EuYQ8sWmTe'), at: 'x', tool: 'Bash', summary: 'Ran git', state: 'running' };
+  const codex = { id: j('b0da06aceb4487327941', '5999:item_12'), at: 'x', tool: 'command', summary: 'Ran npm', state: 'done' };
+  const out = cleanCards([claude, codex]);
+  assert.equal(out.length, 2, 'both steps reach core');
+  for (const c of out) {
+    assert.match(c.id, /^[A-Za-z0-9_.:\-]{1,80}$/, 'an id core takes');
+    for (const v of Object.values(c)) if (typeof v === 'string') assert.equal(redact(v), v, `nothing secret-shaped in any field: ${v}`);
+  }
+  // Pinned, so it's the same in every process and every release: a per-process salt or a changed recipe would move
+  // every step already shown onto a new card.
+  assert.equal(out[0].id, 'h:80a76a8431eb9e26');
+  // Stable by id alone: the step reported later, done and with another label, in another sync, is the same card.
+  const [later] = cleanCards([{ ...claude, state: 'done', summary: 'Ran git status', at: '2026-11-10T00:00:00.000Z' }]);
+  assert.equal(later.id, out[0].id);
+  // Distinct steps never meet: ids that share all but their last character, or a long prefix, and the same id at
+  // another place in the list.
+  const near = [j('toolu_', '01RkDcxWJbXrN5EuYQ8sWmTa'), j('toolu_', '01RkDcxWJbXrN5EuYQ8sWmTb'), j('toolu_', '01RkDcxWJbXrN5EuYQ8sWmTe'), j('b0da06aceb4487327941', '5999:item_13')];
+  const ids = cleanCards(near.map((id) => ({ ...claude, id }))).map((c) => c.id);
+  assert.equal(new Set([...ids, out[1].id]).size, 5);
+  assert.equal(ids[2], out[0].id, 'the same id renamed the same wherever it sits');
+  // A house can't name a renamed id: one that already starts h: is renamed too.
+  const [h] = cleanCards([{ ...claude, id: out[0].id }]);
+  assert.notEqual(h.id, out[0].id);
+  // A secret sent as an id never reaches core as itself, nor any 8 characters of it.
+  for (const [name, x] of Object.entries(SECRETS)) {
+    if (name === 'password') continue; // a plain word: redact takes it out only by its context (a flag, a URL), as above
+    const got = cleanCards([{ ...claude, id: x.slice(0, 80) }]);
+    if (/^[A-Za-z0-9_.:\-]{1,80}$/.test(x.slice(0, 80))) assert.equal(got.length, 1, `${name}: kept, renamed`);
+    assert.deepEqual(leaks(JSON.stringify(got)), [], x.slice(0, 4));
   }
 });
