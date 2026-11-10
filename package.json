@@ -291,6 +291,7 @@
       "ask"
     ],
     "grants_store": "grants",
+    "api_serve": ["body-sync"],
     "store": {
       "grants": {
         "writers": "owner"
