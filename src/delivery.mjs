@@ -232,6 +232,10 @@ const num = (v, d) => { const n = Number(v); return v !== undefined && v !== '' 
  * required; unset or unreadable, there are none and such a wake is refused (403): the clock then runs it its old way.
  * "codex": true lets a local body fall back to Codex when Claude's accounts are out; left out, it never does (its
  * guards are Claude Code hooks on loom's machine, which Codex doesn't run: t-1921).
+ * "where": "house" (t-2049, phase 3; default "here") keeps every rule above (the agents, the piece that may deliver one,
+ * the owner's work only) but starts such a wake's body in the agent's own (owner-seat) house on a worker box instead of
+ * on loom's machine: the step that takes Claude bodies off loom's machine. What it needed the machine for comes back as
+ * host verbs (note:runtime/2026-11-10-t2049-phase3-local-bodies-off-loom), not a shell here.
  */
 export function localBodiesOf(env) {
   let v;
@@ -241,7 +245,7 @@ export function localBodiesOf(env) {
   if (!agents.length || typeof v.cwd !== 'string' || !v.cwd.startsWith('/')) return null;
   const args = Array.isArray(v.args) && v.args.every((a) => typeof a === 'string') ? v.args : [];
   const from = typeof v.from === 'string' && PIECE.test(v.from) ? v.from : 'clock';
-  return { agents, cwd: v.cwd, from, ...(typeof v.claude === 'string' && v.claude ? { claude: v.claude } : {}), args, ...(typeof v.path === 'string' && v.path ? { path: v.path } : {}), ...(v.codex === true ? { codex: true } : {}) };
+  return { agents, cwd: v.cwd, from, ...(typeof v.claude === 'string' && v.claude ? { claude: v.claude } : {}), args, ...(typeof v.path === 'string' && v.path ? { path: v.path } : {}), ...(v.codex === true ? { codex: true } : {}), where: v.where === 'house' ? 'house' : 'here' };
 }
 const mismatch = (place, local) => `forbidden: ${place}'s bodies run ${local ? "on loom's machine" : 'in a house'}, and this wake's would not`;
 
@@ -2103,6 +2107,10 @@ async function executeOne(env, op, d, mem) {
       if (asked) err.held = true;
       throw err;
     }
+    // A local conversation whose bodies the owner moved into his house (LOOM_RUNTIME_LOCAL_BODIES "where": "house",
+    // t-2049): past the same owner's-work-only check as a body here (above), in the owner's seat, never anyone else's.
+    const housed = !!c0.local && localBodiesOf(env)?.where === 'house';
+    if (housed) rules = { ...rules, seat: OWNER_SEAT };
     const was = op.slot?.rules ?? {};
     // ...and a session only follows the conversation into a house no one else's bodies would read it in (principal.mjs,
     // carriesSession): never into a person's house that runs their other conversations.
@@ -2125,13 +2133,14 @@ async function executeOne(env, op, d, mem) {
     const runKey = randomBytes(24).toString('hex');
     // A conversation whose bodies run on loom's machine (a local wake's, t-1830): the local runner, in the agent's own
     // folder there, with the PATH the owner set for it. Every other: in the agent's house.
-    const local = !!c0.local;
     // Plan dropped any wake of the other kind; never one reaches a body (t-1830).
-    if (op.msgs.some((x) => x.kind === 'wake' && !isNote(x) && !!x.local !== local)) throw new DeliveryError(mismatch(c0.place, local), 403);
-    const lb = local ? localBodiesOf(env) : null;
-    if (local && !lb?.agents.includes(c0.agent)) throw new DeliveryError(`the runtime runs no local bodies for ${c0.agent} now (LOOM_RUNTIME_LOCAL_BODIES)`, 403);
+    if (op.msgs.some((x) => x.kind === 'wake' && !isNote(x) && !!x.local !== !!c0.local)) throw new DeliveryError(mismatch(c0.place, !!c0.local), 403);
+    // `local` is where the body runs: here, on loom's machine, unless the owner moved local bodies into his house.
+    const local = !!c0.local && !housed;
+    const lb = c0.local ? localBodiesOf(env) : null;
+    if (c0.local && !lb?.agents.includes(c0.agent)) throw new DeliveryError(`the runtime runs no local bodies for ${c0.agent} now (LOOM_RUNTIME_LOCAL_BODIES)`, 403);
     const bodyEnv = d.bodyEnv(runKey, op.cv);
-    if (lb?.path) bodyEnv.PATH = lb.path;
+    if (local && lb?.path) bodyEnv.PATH = lb.path;
     const bodyDeps = { runner: (h) => d.runner(h, local), accounts: d.accounts, now: d.now, fetchImpl: d.fetchImpl, bodyEnv };
     bodyDeps.commitPrepared = (prepared, native, at) => locked(env, () => {
       const current = loadConv(env, op.cv);
