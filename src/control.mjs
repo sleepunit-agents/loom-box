@@ -358,17 +358,25 @@ export function setAgent(env, effects, { agent, repo, houseFile, nested, gpu, br
   const reset = lg === 'default';
   if (typeof lg === 'string') lg = reset ? undefined : lg === 'none' ? [] : lg.split(/[\s,]+/).filter(Boolean);
   if (lg !== undefined && (!Array.isArray(lg) || !lg.every((x) => LOGIN_NAMES.includes(x)))) fail(`logins is a list of ${LOGIN_NAMES.join(', ')} (or empty for none)`);
-  const sc = scopes === undefined ? undefined : parseScopes(scopes);
-  const st = steers === undefined ? undefined : parseSteers(steers);
+  // Blank (the page's form, an untouched field) is not given: only none clears (t-1963).
+  const sc = scopes === undefined || scopes === '' ? undefined : parseScopes(scopes);
+  const st = steers === undefined || steers === '' ? undefined : parseSteers(steers);
   return update(env, (s) => {
     const keep = lg !== undefined ? [...new Set(lg)] : reset ? undefined : s.agents[a]?.logins;
     // Another repo, house file or branch: the image its next house builds isn't known any more (until a box says).
     const was = s.agents[a];
     if (!was || was.repo !== r || (was.houseFile || 'house/house.json') !== file || (was.branch ?? null) !== br) delete s.builds?.[a];
     // Scopes and steers not given stay as they were (t-1963): dropping a scope would widen who gets a secret. A scope
-    // for a secret or tailnet the agent no longer has goes with it.
-    const scoped = Object.fromEntries(Object.entries(sc ?? was?.scopes ?? {}).filter(([k]) => (k.startsWith('tailnet:') ? tn.some((g) => `tailnet:${g.name}` === k) : k in sec)));
-    if (sc) for (const k of Object.keys(sc)) if (!(k in scoped)) fail(`${k} has a scope, and ${a}'s houses don't get it: a secret by the name a house sees, or tailnet:<name>`);
+    // stays with a secret taken away too, so one added back comes back scoped. A new scope must name something the
+    // agent gets (a typo would leave the real one unscoped).
+    const scoped = { ...(sc ?? was?.scopes ?? {}) };
+    const has = (k) => (k.startsWith('tailnet:') ? tn.some((g) => `tailnet:${g.name}` === k) : Object.hasOwn(sec, k));
+    if (sc) for (const k of Object.keys(sc)) if (!has(k) && !Object.hasOwn(was?.scopes ?? {}, k)) fail(`${k} has a scope, and ${a}'s houses don't get it: a secret by the name a house sees, or tailnet:<name>`);
+    // One stored secret under two names is one secret: both names scoped alike, or the other name hands it out.
+    for (const [n, from] of Object.entries(sec)) {
+      const twin = Object.entries(sec).find(([m, f]) => m !== n && f === from && scoped[m] !== scoped[n]);
+      if (twin) fail(`${n} and ${twin[0]} are the same secret (${from}): scope both alike`);
+    }
     const steering = st ?? was?.steers ?? {};
     s.agents[a] = { repo: r, houseFile: file, nested: nest, gpu: gp, branch: br, repoSecret: rs, secrets: sec, ports: pt, tailnets: tn, ...(keep !== undefined ? { logins: keep } : {}),
       ...(Object.keys(scoped).length ? { scopes: scoped } : {}), ...(Object.keys(steering).length ? { steers: steering } : {}) };
@@ -385,9 +393,12 @@ export function setAgent(env, effects, { agent, repo, houseFile, nested, gpu, br
 // Kept here, with the rest of the agent's settings, so neither a box, a body nor the agent's repo can widen it.
 const SCOPE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 const SCOPE_MAX = 40;
+// A scope is one or more of: owner, a project's slug, service:<name> (that service's houses), joined by +.
+const SCOPE_WORD = /^(owner|[a-z0-9]+(-[a-z0-9]+)*|service:[a-z][a-z0-9-]{0,39})$/;
+const scopeOk = (v) => typeof v === 'string' && v.length <= 200 && v.split('+').length <= 10 && v.split('+').every((w) => SCOPE_WORD.test(w));
 
 function parseScopes(v) {
-  if (v === 'none' || v === '') return {};
+  if (v === 'none') return {};
   const list = typeof v === 'string' ? v.split(/[\s,]+/).filter(Boolean) : Array.isArray(v) ? v : Object.entries(v ?? {}).map(([k, x]) => `${k}=${x}`);
   if (list.length === 1 && list[0] === 'none') return {};
   if (list.length > SCOPE_MAX) fail(`scopes: ${SCOPE_MAX} at most`);
@@ -395,7 +406,7 @@ function parseScopes(v) {
   for (const p of list) {
     const [k, sc, ...more] = String(p).split('=');
     const key = k.startsWith('tailnet:') ? (/^tailnet:[a-z][a-z0-9-]{0,31}$/.test(k) ? k : null) : (SECRET_NAME.test(k) ? k : null);
-    if (!key || more.length || !SCOPE.test(sc ?? '') || sc.length > 40) fail('a scope is <secret>=owner, <secret>=<project>, or tailnet:<name>=<project> (like pond-dev-service-token=pond)');
+    if (!key || more.length || !scopeOk(sc)) fail('a scope is <secret>=owner, <secret>=<project>, or tailnet:<name>=<project>, more than one joined by + (like pond-dev-service-token=pond, github-token=owner+service:discord)');
     if (key in out) fail(`${key} is scoped once`);
     out[key] = sc;
   }
@@ -403,7 +414,7 @@ function parseScopes(v) {
 }
 
 function parseSteers(v) {
-  if (v === 'none' || v === '') return {};
+  if (v === 'none') return {};
   const list = typeof v === 'string' ? v.split(/[\s,]+/).filter(Boolean) : Array.isArray(v) ? v : Object.entries(v ?? {}).map(([k, x]) => `${k}=${[].concat(x).join('+')}`);
   if (list.length === 1 && list[0] === 'none') return {};
   if (list.length > SCOPE_MAX) fail(`steers: ${SCOPE_MAX} people at most`);
@@ -428,12 +439,19 @@ function parseSteers(v) {
  */
 export function housePrincipal(s, h) {
   if (isHostHouse(h, s)) {
-    const seat = typeof h.seat === 'string' ? h.seat : OWNER_SEAT;
+    // A body host from before seats were kept can't say: unknown.
+    const seat = typeof h.seat === 'string' ? h.seat : null;
     if (seat === OWNER_SEAT) return { owner: true };
-    const m = /^p-([a-z0-9]+(?:-[a-z0-9]+)*)$/.exec(seat);
-    return m ? { person: m[1] } : { unknown: true };
+    const m = /^p-([a-z0-9]+(?:-[a-z0-9]+)*)$/.exec(seat ?? '');
+    if (m) return { person: m[1] };
+    // A job's seat is the job's own house: whose that is (once, never a chain).
+    const j = /^j-(h-[0-9]{1,9})$/.exec(seat ?? '');
+    const job = j && s.houses?.[j[1]];
+    return job && !isHostHouse(job, s) && !job.service ? housePrincipal(s, job) : { unknown: true };
   }
-  if (h.service) return { owner: true };
+  // A service is its own principal: people other than the owner may steer it (a chat bridge), and a body can ask for
+  // one. It gets what's scoped to it by name (service:<name>), and what isn't scoped.
+  if (h.service) return { service: h.service };
   const p = h.taskActsFor;
   if (!p || typeof p !== 'object' || p.unknown !== false) return { unknown: true };
   const people = Array.isArray(p.people) ? p.people : null;
@@ -447,8 +465,11 @@ export function housePrincipal(s, h) {
 export function inScope(a, p, scope) {
   if (scope === undefined) return true;
   if (p.owner) return true;
-  if (scope === 'owner' || !p.person) return false;
-  return (a.steers?.[p.person] ?? []).includes(scope);
+  const words = String(scope).split('+');
+  if (p.service) return words.includes(`service:${p.service}`);
+  if (!p.person || !Object.hasOwn(a.steers ?? {}, p.person)) return false;
+  const may = a.steers[p.person];
+  return Array.isArray(may) && words.some((w) => w !== 'owner' && !w.startsWith('service:') && may.includes(w));
 }
 
 // ------------------------------------------------------- owner and agents

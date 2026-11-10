@@ -645,15 +645,22 @@ It writes `piece-call`, `loom-runtime` (node by its full path), and `taskstore`/
 ### Scopes: who gets which secret and tailnet (t-1963, t-1964)
 
 An agent's secrets and tailnets go to every house of it unless the owner scopes them, on the agent's Houses tab ("Only
-for", "Who steers which project") or `loom runtime agent <agent> … --scope github-token=owner --scope
-pond-dev-service-token=pond --scope tailnet:fleet=pond --steer patrick=pond`. `owner` is his own work only; a project's
-slug is his work and that of the people he lets steer that project. Whose work a house is for is the runtime's word: a
-body host's seat (owner, `p-<person>`, `u-<conversation>`, t-1952), a task house's `taskActsFor` (the owner's only when
-nobody else steered it), a service house the owner's. A claim never issues what's scoped away, and names it
-(`withheld`) so the box starts the house without it, saying so in its log; anything else the house file wants and
-doesn't get still fails the house. Not given, scopes and steers stay as they were (dropping one would widen who gets a
-secret); `none` clears. The boundary is the house: a seat's house is shared by that principal's conversations, so a
-person let steer pond has pond's secrets in every conversation they steer.
+for", "Who steers which project") or `loom runtime agent <agent> … --scope github-token=owner+service:discord --scope
+pond-dev-service-token=pond --scope tailnet:fleet=pond --steer patrick=pond`. A scope is one or more of, joined by `+`:
+`owner` (the owner's own work), a project's slug (the owner's work, and that of the people he lets steer that
+project), `service:<name>` (that service's houses). Whose work a house is for is the runtime's word: a body host's seat
+(owner, `p-<person>`, `u-<conversation>`, t-1952; a job's `j-h-<n>` is that house's), a task house's `taskActsFor` (the
+owner's only when nobody else steered it), a service house is its own (people other than the owner may steer a chat
+bridge, and a body can ask for one). "The owner" is whom the runtime counts as the agent's owner (owners.mjs): a
+co-owner's word counts as the owner's here as it does everywhere else.
+
+A claim never issues what's scoped away, and names it (`withheld`) so the box starts the house without it, saying so in
+its log; anything else the house file wants and doesn't get still fails the house. Not given or blank, scopes and
+steers stay as they were (dropping one would widen who gets a secret); `none` clears. A scope stays with a secret
+taken away, so one added back comes back scoped; one stored secret under two names must be scoped alike. Secrets are
+handed over when a house starts: houses already running keep what they had until they're stopped. The boundary is
+the house: a seat's house is shared by that principal's conversations, so a person let steer pond has pond's secrets
+in every conversation they steer.
 
 ## How it talks
 

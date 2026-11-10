@@ -91,15 +91,54 @@ test('scopes are the owner\'s: kept when not given, checked against what the age
   assert.equal(call(owner, 'set-agent', { ...ART, scopes: ['tailnet:other=pond'] }).status, 400);
   assert.equal(call(owner, 'set-agent', { ...ART, steers: ['patrick=owner'] }).status, 400);
   assert.equal(call(owner, 'set-agent', { ...ART, steers: ['owner=pond'] }).status, 400);
-  // A secret taken away takes its scope with it.
-  const { 'pond-dev-service-token': _p, ...rest } = ART.secrets;
-  ok(call(owner, 'set-agent', { ...ART, secrets: rest, scopes: undefined }));
-  assert.equal(load(env).agents.art.scopes['pond-dev-service-token'], undefined);
   // none clears; only the household owner sets them at all.
   ok(call(owner, 'set-agent', { ...ART, scopes: 'none', steers: 'none' }));
   assert.deepEqual([load(env).agents.art.scopes, load(env).agents.art.steers], [undefined, undefined]);
   assert.notEqual(call({ kind: 'agent', agent: 'art' }, 'set-agent', ART).status, 200);
   assert.notEqual(call({ kind: 'owner', agents: ['art'] }, 'set-agent', ART).status, 200);
+});
+
+test('a service is its own principal: only what\'s scoped to it by name, and a body can\'t widen that', () => {
+  // A service house (a chat bridge, people other than the owner steer it; any body may ask for one): unscoped things,
+  // and what the owner scoped to that service by name.
+  ok(call(owner, 'set-agent', { ...ART, scopes: ['github-token=owner+service:jobs', 'discord-token=owner', 'pond-dev-service-token=pond+service:jobs', 'tailnet:fleet=pond'] }));
+  const s = load(env);
+  assert.deepEqual(housePrincipal(s, { service: 'discord', task: null }), { service: 'discord' });
+  const a = s.agents.art;
+  assert.equal(inScope(a, { service: 'jobs' }, a.scopes['github-token']), true);
+  assert.equal(inScope(a, { service: 'discord' }, a.scopes['github-token']), false);
+  assert.equal(inScope(a, { service: 'jobs' }, a.scopes['tailnet:fleet']), false);
+  // service:… never reaches a person, and owner never does.
+  assert.equal(inScope({ steers: { jobs: ['pond'] } }, { person: 'jobs' }, 'service:jobs'), false);
+  assert.equal(inScope({ steers: { constructor: ['pond'] } }, { person: 'toString' }, 'pond'), false);
+  assert.equal(inScope({}, { person: 'constructor' }, 'pond'), false);
+});
+
+test('a job\'s seat is its house\'s; a body host that can\'t say whose is unknown', () => {
+  const s = { agents: {}, houses: { 'h-7': { id: 'h-7', task: 'x', taskActsFor: { owner: true, people: [], unknown: false } },
+    'h-8': { id: 'h-8', task: 'x', taskActsFor: { owner: false, people: [], unknown: true } } } };
+  const host = (seat) => ({ kind: 'body-host', ...(seat ? { seat } : {}) });
+  assert.deepEqual(housePrincipal(s, host('j-h-7')), { owner: true });
+  assert.deepEqual(housePrincipal(s, host('j-h-8')), { unknown: true });
+  assert.deepEqual(housePrincipal(s, host('j-h-9')), { unknown: true });
+  assert.deepEqual(housePrincipal(s, host()), { unknown: true });
+});
+
+test('a scope outlives its secret, two names for one secret are scoped alike, and a blank form keeps them', () => {
+  const { 'pond-dev-service-token': _p, ...rest } = ART.secrets;
+  ok(call(owner, 'set-agent', { ...ART, secrets: rest, scopes: undefined }));
+  // Added back without naming a scope: it comes back scoped, never to every house.
+  ok(call(owner, 'set-agent', { ...ART, scopes: undefined }));
+  assert.equal(load(env).agents.art.scopes['pond-dev-service-token'], 'pond');
+  assert.equal(claimFor({ kind: 'body-host', seat: 'p-loren' }).secrets['pond-dev-service-token'], undefined);
+  // The same stored secret under another name: refused unless scoped alike.
+  const twin = { ...ART.secrets, 'gh-ro': 'gh-art' };
+  assert.equal(call(owner, 'set-agent', { ...ART, secrets: twin, scopes: undefined }).status, 400);
+  ok(call(owner, 'set-agent', { ...ART, secrets: twin, scopes: [...ART.scopes, 'gh-ro=owner'] }));
+  // The page's form sends blank fields: nothing changes. Only none clears.
+  ok(call(owner, 'set-agent', { ...ART, scopes: '', steers: '' }));
+  assert.equal(load(env).agents.art.scopes['github-token'], 'owner');
+  assert.deepEqual(load(env).agents.art.steers, { patrick: ['pond'] });
 });
 
 test('the box starts a house without what was withheld, and only that', () => {
