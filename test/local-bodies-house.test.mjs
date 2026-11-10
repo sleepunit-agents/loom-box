@@ -117,3 +117,22 @@ test('a session saved on loom\'s machine is not resumed in the owner\'s house af
   assert.equal(runs.at(-1)[0], 'start');
   assert.equal(readBody(s.w.env, s.conv('lane:z').body).local, undefined);
 });
+
+test('a housed lane\'s saved session expires as its house\'s: loom\'s machine\'s runner is never asked to drop it', async () => {
+  const { w, lwake, conv } = setup(undefined, { house: ['lane:h'] });
+  const { tick } = await import('../src/delivery.mjs');
+  // Every tick asks for the local Codex runner to sweep its homes: only the slot's own harness counts here.
+  const asked = [];
+  const runner = w.o.runner;
+  w.o.runner = (h, local) => { if (h !== 'codex') asked.push(!!local); return runner(h, local); };
+  await deliver(w.env, lwake('lane:h', 'go'), w.o);
+  w.runner.finish(conv('lane:h').body);
+  await tick(w.env, w.o);
+  w.clock.advance(601_000);
+  await tick(w.env, w.o);
+  assert.ok(conv('lane:h').slot?.rules?.seat, 'its session saved in his house');
+  w.clock.advance(60 * 86_400_000);
+  await tick(w.env, w.o);
+  assert.equal(conv('lane:h')?.slot, undefined, 'expired');
+  assert.ok(!asked.includes(true), 'never the local runner');
+});

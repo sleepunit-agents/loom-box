@@ -3038,7 +3038,8 @@ async function retire(env, cv, ref, d, stop) {
 function expireSlot(env, c, d, file = slotFile(env, c.conversation)) {
   rmSync(file, { force: true });
   try {
-    const runner = d.runner(c.slot.harness, c.local);
+    // A local wake's session saved in the owner's house (its rules keep his seat, t-2049) is that house's, not this machine's.
+    const runner = d.runner(c.slot.harness, !!c.local && !c.slot.rules?.seat);
     if (!runner.remote) dropSession(runner, c.slot);
   } catch { /* a harness this machine no longer runs */ }
 }
