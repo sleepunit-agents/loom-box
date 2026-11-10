@@ -70,6 +70,8 @@ const stableLaunchToken = value => {
 const SIGN_READ_MAX = 4 * 1024 * 1024;
 const HELPER_READ_MAX = 2 * 1024 * 1024;
 const SIGN_MEMO = new Map();
+/** The longest unfinished line a sign of life carries between reads; past it, the line's dropped. */
+const REST_MAX = 16 * 1024 * 1024;
 const ACTIVITY_READ_MAX = 16 * 1024 * 1024;
 const jsonLines = (t) => t.split('\n').flatMap((l) => { try { const v = JSON.parse(l); return v && typeof v === 'object' ? [v] : []; } catch { return []; } });
 /** `max` bytes of `p` from `offset` (as text), and the offset after them. */
@@ -79,7 +81,10 @@ function readFrom(p, offset, max) {
     fd = openSync(p, 'r');
     const buf = Buffer.alloc(max);
     const n = readSync(fd, buf, 0, max, offset);
-    return { text: buf.subarray(0, n).toString('utf-8'), next: offset + n };
+    // Up to the last whole UTF-8 character: a character cut by the slice is read whole next time, never as U+FFFD.
+    let end = n;
+    if (n === max) { let k = n - 1, back = 0; while (k >= 0 && back < 4 && (buf[k] & 0xc0) === 0x80) { k--; back++; } if (k >= 0 && buf[k] >= 0xc0) end = k; }
+    return { text: buf.subarray(0, end).toString('utf-8'), next: offset + end };
   } catch { return { text: '', next: offset }; } finally { if (fd !== undefined) try { closeSync(fd); } catch { /* closed */ } }
 }
 const lines = (p) => { try { return readFileSync(p, 'utf-8').split('\n').flatMap((l) => { try { const v = JSON.parse(l); return v && typeof v === 'object' ? [v] : []; } catch { return []; } }); } catch { return []; } };
@@ -373,7 +378,7 @@ export class ClaudeRunner {
       const parts = (m.rest + text).split('\n');
       // The last part is a line not yet ended: kept for the next read (dropped if it's grown past any real line).
       const last = parts.pop() ?? '';
-      m.rest = last.length > this.readMax.sign ? '' : last;
+      m.rest = last.length > REST_MAX ? '' : last;
       for (const l of parts) { try { claudeTokens([JSON.parse(l)], m.seen); } catch { /* not a line of JSON */ } }
       m.offset = next;
     }

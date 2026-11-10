@@ -389,3 +389,18 @@ test('a house\'s card words are sealed on loom\'s disk, and opened again for the
   const got = hr.activity({ id: 'h-1-b0000001', house: 'h-1', agent: 'art' });
   assert.equal(got[0]?.body, '+THE-DIFF-WORDS');
 });
+
+test('a sign of life read in slices never cuts a character in two', () => {
+  const root = scratch('steps-utf8');
+  const proj = join(root, 'projects', '-x');
+  const session = '11111111-2222-3333-4444-999999999999';
+  mkdirSync(proj, { recursive: true });
+  const f = join(proj, `${session}.jsonl`);
+  const a = (id, n, pad) => JSON.stringify({ type: 'assistant', pad, message: { id, usage: { output_tokens: n }, content: [] } });
+  // A slice boundary that lands inside a three-byte character.
+  writeFileSync(f, `${a('m1', 5, '界'.repeat(40))}\n${a('m2', 7, '界'.repeat(40))}\n`);
+  const r = new ClaudeRunner({ projectsDir: join(root, 'projects'), jobsDir: join(root, 'jobs'), readMax: { sign: 101 } });
+  let t;
+  for (let k = 0; k < 20; k++) t = r.signOfLife({ id: 'b', slot: { harness: 'claude', session } }).tokens;
+  assert.equal(t, 12);
+});

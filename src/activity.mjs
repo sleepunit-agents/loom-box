@@ -298,12 +298,6 @@ export const cardTime = (t) => (typeof t === 'string' && /^\d{4}-\d{2}-\d{2}T\d{
 const SGR = /\x1b\[[0-9;]{0,30}m/g;
 const CONTROL = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g;
 
-/**
- * One line of shown text. Normalised first: every terminal code but colour (SGR) goes whole, then every other control
- * and invisible character but a tab, so nothing can sit inside a token. Then the colour-free text is cut to INPUT_MAX
- * and redacted, a private path named. Its colours are kept only when redaction left that text as it was; else it's the
- * redacted text, without them. Nothing is taken out after redaction runs.
- */
 /** A line with every terminal code but a short colour gone whole, and every other unprintable character but a tab. */
 function normLine(line) {
   return String(line)
@@ -317,6 +311,12 @@ function normLine(line) {
     .join('');
 }
 
+/**
+ * One line of shown text. Normalised first: every terminal code but colour (SGR) goes whole, then every other control
+ * and invisible character but a tab, so nothing can sit inside a token. Then the colour-free text is cut to INPUT_MAX
+ * and redacted, a private path named. Its colours are kept only when redaction left that text as it was; else it's the
+ * redacted text, without them. Nothing is taken out after redaction runs.
+ */
 function shownTextLine(line) {
   const norm = normLine(line);
   const plain = norm.replace(SGR, '');
