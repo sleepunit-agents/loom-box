@@ -236,7 +236,8 @@ subscription is the owner's call.
 
 An agent's Houses tab offers Auto, Claude and Codex. A thread can override that
 choice in its Comms menu. Auto on a thread follows its agent's preference; Auto
-on an agent uses the existing model preferences and scorecards. The runtime API
+on an agent uses its runtime Codex default for unspecified new work (see below).
+Saved native sessions keep their existing within-harness resume policy. The runtime API
 `model-choice` reads `{agent?, conversation?}` and saves
 `{agent?, conversation?, harness: "auto"|"claude"|"codex"}` for an authenticated
 owner. A conversation's actual agent is read from its record. Agent tokens cannot
@@ -245,7 +246,9 @@ change the choice, and agent owners cannot change another agent's choice.
 A saved choice affects new turns and does not interrupt a running turn. It
 prefers models on the selected harness over cross-harness scorecard ranking,
 while retaining the model allow-list, tool restrictions and quota checks. When
-that harness is unavailable the same resolver chooses an available fallback.
+that harness is unavailable the same resolver chooses an available fallback,
+subject to the stated-need rule below: selecting Codex does not authorize an
+implicit Claude fallback.
 Switching back can resume the conversation's saved session. The preference is
 stored by the runtime in `state.json` under `modelChoices`, separate from model
 allow-lists; it grants no new model or tool access.
@@ -302,11 +305,11 @@ review in a house until trusted native one-shots have an account binding.
 The control-plane `oneshot-choice` API accepts only the calling agent's running
 house. It derives accounts from that house's box and mounted harnesses, intersects
 them with the agent's model allow-list, and uses `resolveFor`: the same owner
-harness preference, per-agent model order, scorecards and 97% quota boundary as
-bodies. A one-shot uses the worker reserve when the owner enabled enforcement, with
+harness choice, runtime default, stated-need rule and 97% quota boundary as
+bodies. An explicitly preferred model remains subject to scorecards and quota. A one-shot uses the worker reserve when the owner enabled enforcement, with
 the same in-flight worker counts and forecast as ordinary worker admission.
-Without an explicit preference, a body host supplies its assigned model through
-`LOOM_BODY_MODEL`, so a Codex job reviews on Codex. A per-call `--prefer` is a
+Without an explicit preference, a new one-shot uses the runtime's Codex default,
+independently of the model its parent body used. A per-call `--prefer` is a
 preference, never an account or allow-list override. The owner’s saved harness
 choice still wins when it has room.
 The API returns a model, harness, account label and reasons; never an account key
