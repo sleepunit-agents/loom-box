@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { bootstrapScriptTask, bootstrapTask, cancelTask, downTask, taskStatus, upTask } from '../src/taskhost.mjs';
 import { api, setAgent } from '../src/control.mjs';
@@ -143,6 +144,8 @@ test('the allocating parent can cancel its task but another principal house cann
 
 test('a job whose conversation someone else joins leaves its own house, and that house is let go (t-2081)', async () => {
   const w = world();
+  mkdirSync(join(w.env.HOME, '.config', 'loom'), { recursive: true });
+  writeFileSync(join(w.env.HOME, '.config', 'loom', 'household.json'), JSON.stringify({ members: [{ person: 'jonathan', agents: '*' }, { person: 'amelia', agents: '*' }] }));
   const cv = 'cv-0000000a2081';
   const owner = { owner: true, people: [], unknown: false };
   update(w.env, s => { s.houses['h-7'] = { id: 'h-7', agent: 'art', state: 'running', kind: 'body-host', seat: 'j-h-7', job: { house: 'h-7', conversation: cv }, taskActsFor: owner }; });
@@ -153,15 +156,20 @@ test('a job whose conversation someone else joins leaves its own house, and that
   assert.equal(jobSeated(w.env, loadConv(w.env, cv)), true);
   assert.equal(seatMoved(w.env, loadConv(w.env, cv)), false, 'the job\'s own principal keeps it in its house');
   assert.deepEqual(await taskStatus(w.env, caller, w.o), { done: false });
+  // A co-owner's word is the owner's: still the job's own principal (whoever of them spoke).
+  saveConv(w.env, { ...c, actsFor: { ...owner, owners: ['amelia'] } });
+  assert.equal(jobSeated(w.env, loadConv(w.env, cv)), true);
   // A relay's answer from another agent: a sender no one can name.
   saveConv(w.env, { ...c, actsFor: { ...owner, unknown: true } });
   assert.equal(jobSeated(w.env, loadConv(w.env, cv)), false);
   assert.equal(seatMoved(w.env, loadConv(w.env, cv)), true, 'its body is no longer fed in the job\'s house');
+  assert.deepEqual(await taskStatus(w.env, caller, w.o), { done: false }, 'its body there is never cut off mid-turn');
+  saveConv(w.env, { ...c, body: 'claude:h-8-def', actsFor: { ...owner, unknown: true } });
   const st = await taskStatus(w.env, caller, w.o);
   assert.equal(st.done, true, 'the task host exits, so the house and what it was issued go');
   assert.equal(st.ok, false);
   // A person who isn't the owner, likewise.
-  saveConv(w.env, { ...c, actsFor: { owner: true, people: ['loren'], unknown: false } });
-  assert.equal(seatMoved(w.env, loadConv(w.env, cv)), true);
+  saveConv(w.env, { ...c, body: undefined, actsFor: { owner: true, people: ['loren'], unknown: false } });
+  assert.equal(jobSeated(w.env, loadConv(w.env, cv)), false);
   assert.equal((await taskStatus(w.env, caller, w.o)).done, true);
 });

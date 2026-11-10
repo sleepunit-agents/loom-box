@@ -650,8 +650,8 @@ pond-dev-service-token=pond --scope tailnet:fleet=pond --steer patrick=pond`. A 
 `owner` (the owner's own work), a project's slug (the owner's work, and that of the people he lets steer that
 project), `service:<name>` (that service's houses). Whose work a house is for is the runtime's word: a body host's seat
 (owner, `p-<person>`, `u-<conversation>`, t-1952; a job's `j-h-<n>` is that house's, only while its conversation's
-principal is the one it started with: one someone else joined moves to its principal's house, and the job's house is let
-go, t-2081), a task house's `taskActsFor` (the
+principal is the one it started with: one someone else joined moves to its principal's house, and a task's house is let
+go once its body there is gone; an interactive terminal's house stays up with no body in it until it's taken down, t-2081), a task house's `taskActsFor` (the
 owner's only when nobody else steered it), a service house is its own (people other than the owner may steer a chat
 bridge, and a body can ask for one). "The owner" is whom the runtime counts as the agent's owner (owners.mjs): a
 co-owner's word counts as the owner's here as it does everywhere else.

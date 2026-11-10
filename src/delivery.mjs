@@ -1305,7 +1305,10 @@ const conversationSeat = (env, c) => jobSeated(env, c) ? `j-${c.spawn.job.house}
  * with, the one that house's secrets were issued for. One that someone else joined (a relay's answer, a wake loom
  * couldn't say was the owner's) is seated by its principal instead, so its next body runs in that principal's house.
  */
-export const jobSeated = (env, c) => !!c?.spawn?.job && JSON.stringify(principalOf(env, c)) === JSON.stringify(c.spawn.principal);
+export const jobSeated = (env, c) => !!c?.spawn?.job && JSON.stringify(whose(principalOf(env, c))) === JSON.stringify(whose(c.spawn.principal));
+// Whose work a principal is, as a house's secrets are issued (control.mjs, housePrincipal): the owner's whichever owner
+// spoke (a co-owner's word is the owner's), else the person or people and whether anyone unnamed spoke.
+const whose = (p) => (p?.owner === true ? { owner: true } : { for: p?.for ?? null, people: p?.people ?? [], unknown: p?.unknown === true });
 
 export function seatMoved(env, c) {
   if (!c?.body) return false;
