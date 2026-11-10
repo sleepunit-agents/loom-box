@@ -271,13 +271,35 @@ export function gradedOf(rows, model, kind, { since } = {}) {
 }
 
 /** Whether a model has an account with room for the agent: {ok, account?} or {ok: false, reason, out}. */
-function resolveRoom({ agent, m, accounts, now }) {
+function resolveRoom({ agent, m, accounts, now, gate }) {
   const provider = providerOf(m.family);
   if (!provider) return { ok: true };
   if (!accounts) return { ok: true, unread: true };
   // Only an account the model's own harness can run on: a Claude login runs Claude Code, not Codex.
   const mine = accountsFor(accounts, agent, provider).filter((a) => !a.harness || a.harness === m.harness);
-  const acct = mine.find((a) => hasRoom(a, m.window, now));
+  const roomy = mine.filter((a) => hasRoom(a, m.window, now));
+  // A new worker job (allocator.mjs, t-2037, when the owner turned it on): an account with room, but only room it can
+  // take while leaving conversations their reserve until the reset. Of a model's accounts, the one with the most headroom
+  // after the job; across models the role's and owner's order stands, and a model whose accounts are all kept for
+  // conversations has no room, so the next eligible one (a Codex model, say) is chosen as an ordinary pick.
+  if (gate && roomy.length) {
+    const seen = roomy.map((a) => ({ a, v: gate(a, m.window) }));
+    // An account with no reading (an API key, say) is admitted but ranked last: never ahead of a measured login.
+    const tightest = (v) => (v.windows.length ? Math.max(...v.windows.map((r) => r.after + r.reserve)) : Infinity);
+    // An account with no reading is admitted only while no measured account of this model is being held back: else
+    // holding back the subscription would hand the job to a metered key (an API key never has a reading) instead of
+    // the next model, or a wait.
+    const held = seen.some((x) => !x.v.allow);
+    const ok = seen.filter((x) => x.v.allow && (x.v.windows.length || !held)).sort((x, y) => { const a = tightest(x.v), b = tightest(y.v); return a < b ? -1 : a > b ? 1 : 0; });
+    if (ok.length) {
+      const pick = ok[0].a;
+      return { ok: true, account: pick.label ?? pick.name, accountKey: pick.name, admission: ok[0].v.why };
+    }
+    const until = seen.every((x) => typeof x.v.until === 'number') ? Math.min(...seen.map((x) => x.v.until)) : undefined;
+    return { ok: false, reserved: true, reason: seen.map((x) => `${x.a.label ?? x.a.name}: ${x.v.why}`).join('; '),
+      out: { harness: m.harness, ...(until ? { until } : {}) } };
+  }
+  const acct = roomy[0];
   // A body is told the account's label, never its key.
   if (acct) return { ok: true, account: acct.label ?? acct.name, accountKey: acct.name };
   // When the soonest of its accounts has room again, as far as its readings and holds say.
@@ -304,7 +326,7 @@ function resolveRoom({ agent, m, accounts, now }) {
  *   now        the clock, for holds and windows past their reset (accounts.mjs, hasRoom)
  *   all        the whole list, when `models` is only some of it (a resume's harness): the preferred pick is from it
  */
-export function resolveModel({ agent, kind, models, all = models, settings = {}, accounts, scorecards = [], prefer = [], since, avoid = [], harnessChoice = 'auto', now = Date.now() }) {
+export function resolveModel({ agent, kind, models, all = models, settings = {}, accounts, scorecards = [], prefer = [], since, avoid = [], harnessChoice = 'auto', now = Date.now(), gate }) {
   const why = [];
   const allowed = settings.allow?.length ? models.filter((m) => settings.allow.includes(m.id)) : models;
   if (!allowed.length) fail(`${agent} may use none of the runtime's models`, 409);
@@ -312,7 +334,7 @@ export function resolveModel({ agent, kind, models, all = models, settings = {},
   const room = new Map();
   // An avoided harness has no room for this body; its own reason (out of quota) when it has one.
   for (const m of allowed) {
-    const q = resolveRoom({ agent, m, accounts, now });
+    const q = resolveRoom({ agent, m, accounts, now, gate });
     room.set(m.id, avoid.includes(m.harness) && q.ok ? { ok: false, reason: `${m.harness} avoided for this body`, out: { harness: m.harness } } : q);
   }
   if (!accounts) why.push('quota not checked: no box reports here (off the control plane, or LOOM_RUNTIME_ACCOUNTS=none); fails open, as the resolvers before did');
@@ -345,7 +367,15 @@ export function resolveModel({ agent, kind, models, all = models, settings = {},
     room.set(preferred.id, sub);
   }
   if (!usable.length) {
-    const e = new StateError(`no model is left for ${agent}: ${why.join('; ')}`, 409);
+    // A model with room that's kept for conversations: the job waits for it (a held job, its messages queued), rather
+    // than being answered as out of quota, which it isn't.
+    const reserved = allowed.some((m) => room.get(m.id).reserved);
+    const e = new StateError(`${reserved ? `every model ${agent} may use for this job is kept for conversations until its reset` : `no model is left for ${agent}`}: ${why.join('; ')}`, 409);
+    if (reserved) {
+      e.reserved = true;
+      const t = allowed.map((m) => room.get(m.id)).filter((q) => q.reserved && Number.isFinite(q.out?.until)).map((q) => q.out.until);
+      if (t.length) e.until = Math.min(...t);
+    }
     e.out = allowed.map((m) => room.get(m.id).out).filter(Boolean).filter((o, i, all) => all.findIndex((x) => x.harness === o.harness && x.account === o.account) === i);
     throw e;
   }
@@ -358,7 +388,7 @@ export function resolveModel({ agent, kind, models, all = models, settings = {},
     : null;
   if (fallback) why.push(`a fallback: ${preferred.id} (${preferred.harness}) is preferred, and ${gone.reason}`);
   // accountKey: which account, for the runtime's own records (a hold); never told to a body.
-  return { model: pick.id, harness: pick.harness, family: pick.family, kind, ...(r.account ? { account: r.account } : {}), ...(r.accountKey ? { accountKey: r.accountKey } : {}), why,
+  return { model: pick.id, harness: pick.harness, family: pick.family, kind, ...(r.account ? { account: r.account } : {}), ...(r.accountKey ? { accountKey: r.accountKey } : {}), ...(r.admission ? { admission: r.admission } : {}), why,
     preferred: { model: preferred.id, harness: preferred.harness }, ...(fallback ? { fallback } : {}) };
 }
 
@@ -398,9 +428,10 @@ export async function fetchScorecards(env, { kind, since, fetchImpl = fetch } = 
 
 /** Resolve with what the runtime has: its list (only `harness`'s models, if named), the agent's settings, the accounts provider, loom's scorecards. */
 //   role   a worker role's id (t-2036): only its eligible models, most wanted first after `prefer`
+//   gate   a new worker job's capacity admission (allocator.mjs capacityGate, t-2037): never for a pinned job
 //   pin    a worker job's assigned model (t-2038): that model and no other; a job is never moved by a preference,
 //          a new model or a quota reset. Out of quota, it waits (the 409 a caller treats as out of quota).
-export async function resolveFor(env, { agent, venue, venueKind: told, prefer = [], harness, conversation, avoid = [], accounts, now = new Date(), fetchImpl, role, pin } = {}) {
+export async function resolveFor(env, { agent, venue, venueKind: told, prefer = [], harness, conversation, avoid = [], accounts, now = new Date(), fetchImpl, role, pin, gate } = {}) {
   if (!AGENT.test(agent ?? '')) fail('which agent');
   const kind = venueKind(venue, told);
   const s = load(env);
@@ -430,7 +461,8 @@ export async function resolveFor(env, { agent, venue, venueKind: told, prefer = 
   // A pinned job has its model already: the owner's harness choice applies when a job is assigned, not after.
   const choice = pin ? 'auto' : modelChoiceOf(s, agent, conversation).effective;
   const r = resolveModel({ agent, kind, models: list, all, settings: agents[agent] ?? {}, accounts: listed,
-    scorecards: cards.rows, prefer, since, avoid, harnessChoice: choice, now: now.getTime() });
+    scorecards: cards.rows, prefer, since, avoid, harnessChoice: choice, now: now.getTime(), ...(gate && !pin ? { gate } : {}) });
+  if (gate && !pin) r.why.push(`capacity: ${r.admission ?? 'admitted with the conversations\' reserve kept'}`);
   if (choice !== 'auto') r.why.unshift(`owner preference: ${choice}${conversation ? ' for this conversation' : ''}`);
   r.why.unshift(...head);
   if (role && !pin) r.role = typeof role === 'object' ? role.id : role;

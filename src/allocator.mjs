@@ -87,7 +87,7 @@ export function logShadow(dir, entry, { maxBytes = 2_000_000 } = {}) {
   mkdirSync(dir, { recursive: true });
   const file = join(dir, 'allocator-shadow.jsonl');
   try { if (statSync(file).size > maxBytes) renameSync(file, `${file}.1`); } catch { /* none yet */ }
-  const keep = Object.fromEntries(['at', 'kind', 'agent', 'account', 'model', 'decision', 'why', 'windows', 'estimate', 'job'].filter((k) => entry[k] !== undefined).map((k) => [k, entry[k]]));
+  const keep = Object.fromEntries(['at', 'kind', 'agent', 'account', 'model', 'decision', 'why', 'windows', 'estimate', 'job', 'enforced'].filter((k) => entry[k] !== undefined).map((k) => [k, entry[k]]));
   appendFileSync(file, JSON.stringify(keep) + '\n', { mode: 0o600 });
 }
 
@@ -98,7 +98,8 @@ export function readShadow(dir) {
 /**
  * Slice 1b: the readings history forecastBurn needs. One line per account each time its reading is newer (`checked`),
  * {at, account, usage: {window: fraction}, jobs}: `jobs` is how many worker bodies (spawned jobs, wakes) were held when
- * it was recorded, on any account (which account a body draws on isn't kept, so this is the cautious count). Fractions
+ * it was recorded: a number for every account, or (account name) -> number, that account's (slice 3: by the body
+ * record's account key, with bodies of no known account, or still starting, counted on every account). Fractions
  * and counts only, never a brief or a name beyond the account's. Bounded like the shadow log: past `maxBytes` it turns
  * over to .1, so about two files of history (a few weeks at one reading per account every few minutes).
  */
@@ -113,7 +114,7 @@ export function recordReadings(dir, accounts, { jobs = 0, maxBytes = 2_000_000 }
     if (typeof a?.name !== 'string' || typeof checked !== 'number' || !(checked > (last[a.name] ?? 0))) continue;
     const usage = Object.fromEntries(windowsOf(u).filter((w) => typeof u[w] === 'number').map((w) => [w, round(u[w])]));
     if (!Object.keys(usage).length) continue;
-    lines.push(JSON.stringify({ at: checked * 1000, account: a.name, usage, jobs }));
+    lines.push(JSON.stringify({ at: checked * 1000, account: a.name, usage, jobs: typeof jobs === 'function' ? jobs(a.name) : jobs }));
     last[a.name] = checked;
   }
   if (!lines.length) return 0;
@@ -135,4 +136,60 @@ export function readReadings(dir, account) {
     }
   }
   return out.sort((x, y) => x.at - y.at);
+}
+
+// ---- Slice 3: enforcement for new worker jobs, behind the owner's switch (default: shadow) ----
+
+/** A job's guessed use of each window, until the shadow log says better: a fraction per window kind. A guess. */
+export const JOB_ESTIMATE = { h: 0.03, d: 0.005 };
+const estimateFor = (w) => (/^\d+h/.test(w) ? JOB_ESTIMATE.h : JOB_ESTIMATE.d);
+export const MODES = ['shadow', 'enforce'];
+
+/** The owner's switch: {mode: shadow|enforce, changed?}. Shadow until the owner turns it on. */
+export function allocatorOf(s) {
+  const a = s?.allocator ?? {};
+  return { mode: MODES.includes(a.mode) ? a.mode : 'shadow', ...(a.changed ? { changed: a.changed } : {}) };
+}
+
+/** The owner turns enforcement on or off (the runtime page's Worker capacity; no CLI changes it). */
+export function setAllocatorMode(s, { mode, by = 'owner', at = new Date().toISOString() }) {
+  if (!MODES.includes(mode)) throw new Error(`the allocator's mode is ${MODES.join(' or ')}`);
+  s.allocator = { mode, changed: { at, by } };
+  return allocatorOf(s);
+}
+
+/** Which kind of start a conversation's is, for admission: a spawned job, a wake, or a live conversation. */
+// An interactive terminal session is made as a spawn (sessionhost.mjs) but has a person at it: live, never held back.
+export const startKind = (c) => (c?.spawn && !c.spawn.interactive ? 'agent' : c?.spawn ? 'live' : c?.venue === 'wake' ? 'scheduled' : 'live');
+
+/**
+ * The gate models.mjs asks of each account with room, for one new worker start: (account, model's own window?) ->
+ * admit()'s verdict. Its
+ * estimate is JOB_ESTIMATE per window; in flight is the worker bodies held on that account now (`jobsOn`, by account
+ * key: an object, or (name) -> count) each at the same guess. `burnOf(account name)` is forecastBurn's answer for it. Live starts get no gate.
+ */
+export function capacityGate({ kind, jobsOn = {}, burnOf = () => ({}), now = Date.now(), floor, margin }) {
+  if (kind === 'live') return null;
+  return (account, window) => {
+    // Only the windows this model draws on: the general ones, and its own (`7d_opus`) if it names one (hasRoom's rule).
+    const all = account.usage ?? {};
+    const usage = Object.fromEntries(Object.entries(all).filter(([k]) => {
+      const w = k.replace(/^reset_/, '');
+      return !windowsOf({ [w]: 0 }).length || !w.includes('_') || w === window;
+    }));
+    account = { ...account, usage };
+    const ws = windowsOf(usage);
+    // No window read at all (an API key; a login before its first reading): not gated, as its quota isn't (hasRoom).
+    // Held back on "unknown is not room", it would wait forever and say nothing.
+    if (!ws.length) return { allow: true, kind, windows: [], why: 'no usage reading for this account: not gated, as its quota isn\'t' };
+    const estimate = Object.fromEntries(ws.map((w) => [w, estimateFor(w)]));
+    const n = (typeof jobsOn === 'function' ? jobsOn(account.name) : jobsOn[account.name]) ?? 0;
+    const inFlight = Object.fromEntries(ws.map((w) => [w, n * estimateFor(w)]));
+    let burn = {};
+    try { burn = burnOf(account.name) ?? {}; } catch { burn = {}; }
+    const v = admit({ usage: account.usage, kind, estimate, inFlight, burn, now, ...(floor !== undefined ? { floor } : {}), ...(margin !== undefined ? { margin } : {}) });
+    // When this account's tight windows reset (seconds): when it could be tried again at the latest.
+    const resets = v.windows.filter((r) => !r.ok).map((r) => account.usage?.[`reset_${r.window}`]).filter((t) => typeof t === 'number');
+    return { ...v, ...(resets.length ? { until: Math.max(...resets) } : {}) };
+  };
 }
