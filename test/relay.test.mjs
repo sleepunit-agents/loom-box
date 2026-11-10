@@ -787,14 +787,18 @@ describe('relays and answers held to the house holding the conversation (t-2134)
     // Nor from loom's machine (no house) when the reached conversation's body runs in a house.
     const local = await relay(w.env, { agent: 'mark' }, { to: 'art', say: 'looks good from loom\'s machine', reply_to: id }, d);
     assert.match(local.text, /Only where the body of the conversation/);
-    // From the house that holds it: returned to the asker's conversation.
-    const back = await relay(w.env, { agent: 'mark', house: 'h-mark' }, { to: 'art', say: 'looks good', reply_to: id }, d);
+    // From that house, but not as that conversation (a sibling body there, which can't prove it): the relay conversation.
+    const sibling = await relay(w.env, { agent: 'mark', house: 'h-mark' }, { to: 'art', say: 'a sibling answers', reply_to: id }, d);
+    assert.match(sibling.text, /Only where the body of the conversation/);
+    // As the conversation it reached, proved: returned to the asker's conversation.
+    const back = await relay(w.env, { agent: 'mark', house: 'h-mark' }, { to: 'art', say: 'looks good', reply_to: id, conversation: reached }, d, proofM);
     assert.match(back.text, new RegExp(`Returned to ${origin.conversation}`));
     // Its house lists what reached it and its own answer from there; never the sibling's answer from elsewhere.
     const listed = await runFor(w.env, { kind: 'agent', agent: 'mark', house: 'h-mark' }, ['relays', '--conversation', reached], memStore(), undefined, d, proofM);
     assert.equal(listed.exit, 0, listed.stderr);
     assert.match(listed.stdout, new RegExp(`${back.text.slice(0, 10)} `));
     assert.match(listed.stdout, new RegExp(`${id} `));
+    assert.doesNotMatch(listed.stdout, new RegExp(sibling.text.slice(0, 10)));
     assert.equal(listed.stdout.trim().split('\n').length, 2, listed.stdout);
   });
 });
