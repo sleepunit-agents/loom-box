@@ -2200,7 +2200,8 @@ async function executeOne(env, op, d, mem) {
       // A new worker job, with the owner's allocator on (t-2037, slice 3): only an account that leaves conversations
       // their reserve until its reset. A job with an assignment (it ran before: a failover, a home) is slice 4's, never
       // gated here, whatever its pin says now.
-      const gate = !c0.spawn?.assignment && workerGate(env, c0, d);
+      // A capacity failover (slice 4) starts gated too: only on a model whose account has headroom, as routeOf found.
+      const gate = (!c0.spawn?.assignment || way.failover === 'capacity') && workerGate(env, c0, d);
       if (gate) base.gate = gate;
       const go = (avoid) => startBody(env, { ...base, place: c0.place, avoid, brief: startBrief(briefContext, [...notes, ...msgs], run, sends, rules) }, bodyDeps);
       try { r = await go(way.avoid); } catch (e) {
@@ -2280,6 +2281,9 @@ async function executeOne(env, op, d, mem) {
         requeue(c, msgs);
         c.waiting = `waiting for capacity: the model accounts it may use are kept for conversations until their reset; looked at again ${new Date(at).toISOString()}`;
         c.retryAt = at;
+        // A job waiting keeps its session as long as it waits (as one held for its model does): from now.
+        if (c.spawn && c.slot?.until) c.slot.until = new Date(Math.max(Date.parse(c.slot.until), nowMs + windowMs(env, c.venue, c.kind))).toISOString();
+        if (c.spawn && c.home?.until) c.home.until = new Date(Math.max(Date.parse(c.home.until), nowMs + windowMs(env, c.venue, c.kind))).toISOString();
         outcome(c, msgs.map((x) => x.key), { body: 'queued', reason: c.waiting }, nowMs);
         saveConv(env, c);
       });
