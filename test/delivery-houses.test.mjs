@@ -446,7 +446,8 @@ test('a body speaks with its own run\'s key even when its harness gives every se
     assert.equal(bodyKeyFor(inSession, cv1), 'key-one');
     assert.equal(statSync(keyFile({ HOME: houseHome }, cv2)).mode & 0o777, 0o600);
     assert.equal(statSync(dirname(keyFile({ HOME: houseHome }, cv2))).mode & 0o777, 0o700);
-    assert.equal(bodyKeyFor({ HOME: houseHome, LOOM_BODY_KEY: 'from-env' }, 'cv-333333333333'), 'from-env', 'no file: the environment\'s');
+    assert.equal(bodyKeyFor({ HOME: houseHome, LOOM_BODY_KEY: 'from-env', LOOM_BODY_CONVERSATION: 'cv-333333333333' }, 'cv-333333333333'), 'from-env', 'no file: the environment\'s, for the conversation it names');
+    assert.equal(bodyKeyFor({ HOME: houseHome, LOOM_BODY_KEY: 'from-env' }, 'cv-333333333333'), undefined, 'never for a conversation it doesn\'t name (t-2053)');
     assert.equal(keyFile({ HOME: houseHome }, '../../etc/x'), null, 'a conversation id only ever names its own file');
     // A body that ends takes its key with it.
     hr.end({ id: b1.id, agent: 'art', house: 'h-1' });

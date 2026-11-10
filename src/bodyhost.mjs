@@ -8,6 +8,7 @@
 // start, stop and feed. It never reports what it can't see. It leaves when it's had no live body and nothing asked
 // for its idle time (the next delivery asks for a house again), or when the runtime says its bodies are another house's.
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { composeBrief } from './briefs.mjs';
@@ -44,7 +45,7 @@ export function bodyKeyFor(env, conversation) {
   const f = keyFile(env, conversation);
   if (f) { try { const k = readFileSync(f, 'utf-8').trim(); if (k) return k; } catch { /* none kept here */ } }
   // The environment's key is its LOOM_BODY_CONVERSATION's run's: never another conversation's proof (t-2053).
-  return !env.LOOM_BODY_CONVERSATION || env.LOOM_BODY_CONVERSATION === conversation ? env.LOOM_BODY_KEY : undefined;
+  return env.LOOM_BODY_CONVERSATION === conversation ? env.LOOM_BODY_KEY : undefined;
 }
 
 export function keepKey(env, conversation, key) {
@@ -67,8 +68,12 @@ export const bodySession = (env) => {
   const s = env.CLAUDE_CODE_SESSION_ID || env.CODEX_THREAD_ID || undefined;
   return SESSION.test(s ?? '') ? s : undefined;
 };
-/** Where a house says which conversation each of its bodies' sessions holds: <keys>/sessions/<session>, and back. */
-const bySession = (env, session) => (SESSION.test(session ?? '') ? join(keysDir(env), 'sessions', session) : null);
+/**
+ * Where a house says which conversation each of its bodies' sessions holds: <keys>/sessions/<sha256 of the session>,
+ * and back (<keys>/held/<cv>: that hash). Hashed, so the map itself never lists a session id.
+ */
+const sessionHash = (session) => createHash('sha256').update(String(session)).digest('hex');
+const bySession = (env, session) => (SESSION.test(session ?? '') ? join(keysDir(env), 'sessions', sessionHash(session)) : null);
 const byConversation = (env, cv) => (CV.test(cv ?? '') ? join(keysDir(env), 'held', cv) : null);
 
 function writeAtomic(f, text) {
@@ -88,14 +93,15 @@ export function keepSession(env, session, cv) {
   const f = bySession(env, session), g = byConversation(env, cv);
   if (!f || !g) return false;
   writeAtomic(f, cv);
-  writeAtomic(g, session);
+  writeAtomic(g, sessionHash(session));
   return true;
 }
 
 /** Forgets that `session` holds `cv` (its body ended), leaving whatever a later start wrote. */
 export function forgetSession(env, session, cv) {
-  const f = bySession(env, session);
+  const f = bySession(env, session), g = byConversation(env, cv);
   if (f && readTrim(f) === cv) rmSync(f, { force: true });
+  if (g && readTrim(g) === sessionHash(session)) rmSync(g, { force: true });
 }
 
 const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
@@ -117,7 +123,7 @@ export function bodyConversation(env, { waitMs = SESSION_WAIT_MS, sleep = sleepS
   if (!fromEnv) return undefined;
   const holder = readTrim(byConversation(env, fromEnv));
   // No word on that conversation, or it's this session's: the environment stands (a house that writes no map yet).
-  if (!holder || holder === session) return fromEnv;
+  if (!holder || holder === sessionHash(session)) return fromEnv;
   for (let waited = 0; waited < waitMs; waited += 250) {
     sleep(250);
     if ((cv = mine())) return cv;

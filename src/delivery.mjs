@@ -2091,7 +2091,12 @@ async function executeOne(env, op, d, mem) {
     const snapshot = launchSnapshot ?? { run, senderHash: keyHash(runKey).toString('hex'), bodyRules: savedBodyRules(rules, now()), way: { how: way.how, home: !!way.home, ...(way.failover ? { failover: way.failover } : {}) }, ...(c0.nativeRecovery ? { nativeRecovery: c0.nativeRecovery.id } : {}) };
     const keep = commitStartedConversation(env, op, snapshot, r, pending, now(), local ? runKey : undefined);
     if (!keep) endAndForget(env, r, d);
-    else { finishLaunchAck(env, op.cv, d); noteHarness(env, c0.agent, r, d); }
+    else {
+      // A local body whose start didn't name its session yet: its runner can (Claude Code's job record), so its own CLI
+      // reads its conversation from its session, never the daemon's environment (t-2053).
+      if (local) { try { const rec = readBody(env, r.body); const s = d.runner(rec.harness, rec.local).slotOf(bodyOf(r.body, rec))?.session ?? rec.slot?.session; if (s) keepSession(env, s, op.cv); } catch { /* its proof fails closed until it's known */ } }
+      finishLaunchAck(env, op.cv, d); noteHarness(env, c0.agent, r, d);
+    }
   } catch (e) {
     // Once admission may have happened, any later storage/commit failure must
     // retain the prepared attempt for recovery rather than replay its input.
