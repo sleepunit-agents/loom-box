@@ -281,6 +281,7 @@ test('reconciliation transport loss retains indeterminate across restart and ret
   w.setTime(w.binding.expiresAt);
   await w.reload().drain({ current: w.current, post: () => assert.fail('late post'), reconcile: async () => { throw Error('busy'); } });
   assert.equal(w.reload().status(w.handle, w.child, 'final', w.source).state, 'indeterminate');
+  w.setTime(w.binding.expiresAt + 3600000); // past its reconciliation backoff
   await w.reload().drain({ current: w.current, post: () => assert.fail('late post'), reconcile: async () => ({ ok: true, state: 'delivered', id: '42' }) });
   assert.equal(w.reload().status(w.handle, w.child, 'final', w.source).posted, true);
 });
@@ -311,6 +312,7 @@ test('unresolved and attempted reports keep their grant past retention until rec
   await w.reload().drain({ current: w.current, post: () => assert.fail('late post'), reconcile: async () => ({ ok: true, state: 'unresolved' }) });
   assert.equal(w.out.status(w.handle, w.child, 'final').state, 'indeterminate');
   assert.deepEqual(w.reload().collect(), { reports: 0, grants: 0 });
+  w.setTime(deadline + keep + 1 + 3600000);
   await w.reload().drain({ current: w.current, post: () => assert.fail('late post'), reconcile: async () => ({ ok: true, state: 'delivered', id: '7' }) });
   assert.equal(w.out.status(w.handle, w.child, 'final').state, 'delivered');
   assert.deepEqual(w.reload().collect(), { reports: 1, grants: 1 });
@@ -339,4 +341,39 @@ test('a deleted destination ends reconciliation; legacy and uncertain-clock reco
   }
   w.setTime(deadline + 100 * keep);
   assert.deepEqual(w.reload().collect(), { reports: 0, grants: 0 });
+});
+
+test('reconciliation backs off instead of calling core every tick', async (t) => {
+  const w = world(t); bind(w); queue(w);
+  await w.out.drain({ current: w.current, post: async () => { throw new Error('receipt lost'); } });
+  w.setTime(w.binding.expiresAt);
+  let calls = 0;
+  const reconcile = async () => { calls += 1; return { ok: true, state: 'unresolved' }; };
+  for (let i = 0; i < 5; i++) await w.reload().drain({ current: w.current, post: () => assert.fail('late post'), reconcile });
+  assert.equal(calls, 1);
+  w.setTime(w.binding.expiresAt + 10000);
+  await w.reload().drain({ current: w.current, post: () => assert.fail('late post'), reconcile });
+  assert.equal(calls, 2);
+});
+
+test("core's clock-rollback hold (503) keeps the report pending and posts it later", async (t) => {
+  const w = world(t); bind(w); queue(w);
+  await w.out.drain({ current: w.current, post: async () => { throw Object.assign(new Error('continuation clock moved backwards'), { status: 503 }); } });
+  assert.equal(w.out.status(w.handle, w.child, 'final').state, 'pending');
+  w.advance();
+  let posted = 0;
+  await w.reload().drain({ current: w.current, post: async () => { posted += 1; return { ok: true, posted: true }; } });
+  assert.equal(posted, 1);
+  assert.equal(w.out.status(w.handle, w.child, 'final').state, 'delivered');
+});
+
+test("the bound child's own conversation may start again on the same firing, with no new authority", (t) => {
+  const w = world(t), firing = { ...w.binding };
+  w.out.checkFiring(w.handle, firing, w.source, w.child);
+  bind(w);
+  const next = { ...w.child, run: 'run-cccccccccccc' };
+  assert.deepEqual(w.out.checkFiring(w.handle, firing, w.source, next), { expiresAt: firing.expiresAt, bound: true });
+  assert.throws(() => w.out.checkFiring(w.handle, firing, w.source, { ...next, conversation: 'cv-cccccccccccc' }), /already bound/);
+  assert.throws(() => w.out.bind(w.handle, firing, w.source, next), /already bound/);
+  assert.throws(() => w.out.enqueue(w.handle, next, w.source, { id: 'x', text: 'y' }), /bound/);
 });

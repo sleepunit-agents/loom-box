@@ -111,6 +111,10 @@ export function continuationOutbox({ dir, sealer, now = Date.now, lifetimeMs = n
         if (firing.expiresAt !== g.expiresAt) deny('continuation deadline differs');
         if (child?.agent !== g.source.agent || !same(child?.principal, g.source.principal) || child?.resetPending)
           deny('continuation principal differs');
+        // The bound child's own conversation starting again (a quota requeue of the same firing): it starts, with no
+        // new authority (bind refuses any other run). Refusing it would kill the wake's work.
+        if (g.binding && g.binding.wake === firing.wake && g.binding.delivery === firing.delivery && g.binding.child.conversation === child?.conversation)
+          return { expiresAt: g.expiresAt, bound: true };
         if (g.binding) deny('continuation capability is already bound');
         active(id, g, observe());
         if (!wake.test(firing.wake ?? '') || typeof firing.delivery !== 'string' || !firing.delivery || !cv.test(child?.conversation ?? '')) deny('an exact clock firing is required');
@@ -186,15 +190,16 @@ export function continuationOutbox({ dir, sealer, now = Date.now, lifetimeMs = n
             g.expired = true; save(r.grant, g); expireRow(r); save(id, r);
             if (r.state !== 'indeterminate' || !reconcile) return null;
           }
-          if (!recovering && r.state === 'pending' && r.next > time) return null;
+          // Backoff for both: posting by attempts, reconciling by its own count (never a core call every tick).
+          if (r.next > time) return null;
           const source = g && current(g.source.conversation), child = current(r.child.conversation);
           if (!g || !unchanged(g.source, source) || !unchanged(r.child, child) || child.run !== r.child.run) {
             r.state = r.attempts > 0 ? 'indeterminate' : 'failed'; r.reason = 'continuation authority was reset or changed'; save(id, r); return null;
           }
           const reconciliation = recovering || r.state === 'indeterminate';
           if (reconciliation && !reconcile) return null;
-          if (!reconciliation) r.attempts += 1;
-          r.next = now() + Math.min(3600000, 1000 * 2 ** Math.min(r.attempts, 12));
+          if (!reconciliation) r.attempts += 1; else r.reconciles = (r.reconciles ?? 0) + 1;
+          r.next = now() + Math.min(3600000, (reconciliation ? 5000 : 1000) * 2 ** Math.min(reconciliation ? r.reconciles : r.attempts, 12));
           save(id, r);
           return { ...r, reconciliation, target: g.source.target, agent: g.source.agent, conversation: g.source.conversation };
         });
