@@ -19,7 +19,7 @@
 // plan, `items`, its checklist. The body's own words between steps are a `text` card (tool `text`), which delivery
 // shows only for a conversation that acts for the owner alone. A read shows its line count, never what it read.
 import { createHash } from 'node:crypto';
-import { commandLabel, cutInput, cutTo, failWhy, fileName, GONE, INPUT_MAX, part, PRIVATE_FILE, privateFile, privateWords, redact, UNPRINTABLE, UNPRINTABLE_ONE } from './redact.mjs';
+import { commandLabel, commands, cutInput, cutTo, failWhy, fileName, GONE, INPUT_MAX, part, PRIVATE_FILE, privateFile, privateWords, redact, UNPRINTABLE, UNPRINTABLE_ONE } from './redact.mjs';
 
 
 
@@ -335,8 +335,41 @@ function claudeDetail(name, i) {
   }
 }
 
-/** Whether a command names a private file anywhere in it (redact.mjs privateFile, on each of its words). */
-const namesPrivate = (command) => String(command ?? '').slice(0, 20_000).split(/[\s'"`=<>|;&()]+/).some((w) => /[/.\\]/.test(w) && privateFile(w));
+/** The most of a command that's scanned for a private file; past it, it's taken to name one (its output never shows). */
+const SCAN_MAX = 200_000;
+/** Programs whose job is to print the environment or the shell's variables (with nothing else to run). */
+const DUMPS = new Set(['env', 'printenv', 'set', 'export', 'declare', 'typeset', 'compgen', 'alias']);
+/** Programs that print what they're given, and a word that names a secret's file without a path (`cat token`). */
+const READERS = new Set(['cat', 'less', 'more', 'head', 'tail', 'grep', 'egrep', 'fgrep', 'rg', 'bat', 'strings', 'xxd', 'od', 'hexdump', 'base64', 'sed', 'awk', 'jq', 'yq', 'tac', 'nl', 'sort', 'uniq', 'cut', 'tee', 'diff', 'cmp']);
+const SECRET_FILE_WORD = /secret|token|passw|credential|\bcreds?\b|api[_-]?key|private|auth|\.pem\b|\.key\b|\.p12\b|\.pfx\b|\.netrc|\.env\b|htpasswd|keychain|wallet/i;
+const WRAPPERS = new Set(['sudo', 'doas', 'nice', 'nohup', 'time', 'command', 'exec', 'builtin', 'stdbuf', 'ionice', 'chrt']);
+
+/**
+ * Whether a shell step's output must not show (t-2109): its command names a private file in any word (redact.mjs
+ * privateFile, on every word), or a path pattern (a glob: * ? [) that could match one; it prints the environment or
+ * the shell's variables (`env`, `printenv`, a bare `set`, `export -p`); it reads a file named like a secret's
+ * (`cat token`); or it's too long to scan whole. Everything else shows: the default is his work in full.
+ */
+export function namesPrivate(command) {
+  const s = String(command ?? '');
+  if (s.length > SCAN_MAX) return true;
+  const words = s.split(/[\s'"`<>|;&(){}$]+/).flatMap((w) => [w, ...w.split('=').slice(1)]).filter(Boolean);
+  if (words.some((w) => privateFile(w) || /[*?[]/.test(w))) return true;
+  for (const c of commands(s)) {
+    const ws = c.words;
+    let i = 0;
+    while (i < ws.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(ws[i])) i++;
+    while (i < ws.length && (WRAPPERS.has(ws[i]) || (i > 0 && WRAPPERS.has(ws[i - 1]) && /^-|^\d/.test(ws[i])))) i++;
+    const prog = (ws[i] ?? '').split('/').pop();
+    const args = ws.slice(i + 1);
+    if (prog === 'env' && args.every((a) => a.startsWith('-'))) return true;
+    if (['printenv', 'compgen', 'alias'].includes(prog)) return true;
+    if (prog === 'set' && args.length === 0) return true;
+    if (['export', 'declare', 'typeset'].includes(prog) && (args.length === 0 || args.every((a) => a.startsWith('-')))) return true;
+    if (READERS.has(prog) && args.some((a) => !a.startsWith('-') && SECRET_FILE_WORD.test(a))) return true;
+  }
+  return false;
+}
 
 /** Whether a file's contents must never show: no path, a private one, or one whose shown name isn't plain. */
 function hidden(path) {
@@ -361,7 +394,7 @@ function claudeResult(name, r, text, failed, exit, input = {}) {
     case 'Bash': {
       const output = typeof u.stdout === 'string' || typeof u.stderr === 'string' ? [u.stdout, u.stderr].filter(Boolean).join('\n') : text;
       // A command that names a private file (cat a key, read loom's stores) shows its result line, never its output.
-      const body = namesPrivate(input.command) ? '' : shownText(output);
+      const body = namesPrivate(input.command) || String(input.command ?? '').length > MAX_DETAIL ? '' : shownText(output);
       return { result: shellResult({ exit, output, failed }), ...(body ? { body } : {}) };
     }
     case 'Read': { const n = count(u.file?.numLines); return n === null ? {} : { result: `Read ${plural(n, 'line')}` }; }
@@ -481,7 +514,7 @@ export function codexCards(events, prefix = '') {
       if (item.type === 'command_execution') {
         if (Number.isInteger(item.exit_code) && Math.abs(item.exit_code) < 1e6) card.exit = item.exit_code;
         card.result = clean(redact(shellResult({ exit: item.exit_code, output: item.aggregated_output, failed: card.state === 'failed' })));
-        const body = namesPrivate(unwrapShell(item.command)) ? '' : shownText(item.aggregated_output);
+        const body = namesPrivate(unwrapShell(item.command)) || unwrapShell(item.command).length > MAX_DETAIL ? '' : shownText(item.aggregated_output);
         if (body) card.body = body;
       } else if (item.type === 'file_change' && Array.isArray(item.changes)) card.result = `${plural(item.changes.length, 'file')} changed`;
     }
@@ -542,7 +575,7 @@ const DIFFS = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit']);
 /** Whether a card of this tool, with this (gated) target, may carry a body: the same rule the cards made here follow. */
 function bodyAllowed(tool, detail) {
   if (tool === 'text') return true;
-  if (SHELL.has(tool)) return !!detail && !namesPrivate(detail) && !detail.includes(PRIVATE_FILE);
+  if (SHELL.has(tool)) return !!detail && !namesPrivate(detail) && !detail.includes(PRIVATE_FILE) && !/ lines not kept …| … \(line cut\)/.test(detail);
   if (DIFFS.has(tool)) return !!detail && detail !== PRIVATE_FILE && detail !== GONE && !hidden(detail);
   return false;
 }

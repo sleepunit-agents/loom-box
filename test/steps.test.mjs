@@ -216,3 +216,22 @@ test('a house\'s body passes only where one is made here: never on a read, a pri
   assert.equal(keep({ tool: 'Edit', detail: 'a.ts', body: '+x' }), '+x');
   assert.equal(keep({ tool: 'Bash', detail: 'npm test', body: 'ok' }), 'ok');
 });
+
+test('output never shows for a command that prints secrets or the environment, or names a private file in any form', async () => {
+  const { namesPrivate } = await import('../src/activity.mjs');
+  const hides = ['env', 'FOO=1 env', 'sudo -E env', 'printenv', 'printenv GH_TOKEN', 'set', 'export', 'export -p', 'declare -px',
+    'cat .env', 'cat secrets*', 'ls *.pem', 'cat ~/.ssh/id_[re]*', 'cd ~/.config/loom && cat token', 'cat token', 'grep -r api_key .',
+    'head -c 100 creds', 'tail deploy.key', 'x=$(cat /home/art/.config/gh/hosts.yml)', 'echo ok; ' + 'x '.repeat(110_000)];
+  for (const c of hides) assert.equal(namesPrivate(c), true, c.slice(0, 60));
+  const shows = ['npm test', 'git status', 'ls -la src', 'env FOO=1 node x.js', 'set -euo pipefail; npm test', 'export FOO=1 && npm test', 'gh pr checks 603', 'cat README.md'];
+  for (const c of shows) assert.equal(namesPrivate(c), false, c);
+  // A command too long to show whole (its detail cut) shows no output either.
+  const long = `echo start\n${'echo line\n'.repeat(600)}`;
+  const [c] = claudeCards([use('l', 'Bash', { command: long }), res('l', 'OUTPUT', { stdout: 'OUTPUT', stderr: '' })]);
+  assert.equal(c.body, undefined);
+  const [e] = claudeCards([use('v', 'Bash', { command: 'env' }), res('v', `GH_TOKEN=${GH}\nHOME=/home/art`, { stdout: `GH_TOKEN=${GH}\nHOME=/home/art`, stderr: '' })]);
+  assert.equal(e.body, undefined);
+  assert.equal(e.result, '2 lines of output');
+  // A house's card whose detail was cut carries no body.
+  assert.equal(cleanCards([{ id: 'c', at: 'x', tool: 'Bash', summary: 's', state: 'done', detail: 'echo a\n… 40 lines not kept …\necho b', body: 'x' }])[0].body, undefined);
+});
