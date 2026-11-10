@@ -732,6 +732,14 @@ once a condition has held its time. An always-on box (loom's own, a report-only 
 on`) quiet for 10 minutes is dark. `loom runtime health [<box>]` says how each is. `loom runtime join … --report-only`
 makes a box that only reports: it hosts nothing and never upgrades itself from what loom says.
 
+A box with an agent's conversations on it that's silent 10 minutes gets the owner a card: carry them on elsewhere?
+(`src/dark-box.mjs`). To rehearse that without stopping the box, on loom's machine: `loom runtime drill dark <box>
+--agent <a> [--house h-…]… [--for 15m]` (at most 60 minutes; it ends by itself, or with `loom runtime drill end <box>`).
+For that agent only, placement takes the box as long silent, so its warm house there drains and new bodies go to the
+next box that's up; the named houses, and only they, go on a write-off card that starts "Drill:". An Allow writes them
+off, and the box, still polling, is told to stop them on its next poll (seconds: until then the old body may overlap the
+new one, which is what the rehearsal tests).
+
 ## Spawned jobs
 
 A body can hand work to a fresh conversation of the same agent. It runs in an
