@@ -25,6 +25,8 @@ test('the owner adds, changes and removes a role from the runtime page', () => {
   assert.deepEqual(add.fields.find((f) => f.name === 'models').options.map((o) => o.value), ['opus', 'sol']);
   const r = act(env, fx, { action: 'role-set', fields: { ...add.hidden, id: 'coding', description: 'Write and test code', models: 'sol,opus', failover: 'yes', why: 'first role' } });
   assert.equal(r.ok, true, r.message);
+  const again = act(env, fx, { action: 'role-set', fields: { ...roles(env).blocks[0].rows.at(-1).edit.hidden, id: 'coding', description: 'Other', models: 'opus' } });
+  assert.equal(again.ok, false); assert.match(again.message, /already a coding role/);
   assert.deepEqual(readRoles(env).roles.map((x) => [x.id, x.models, x.failover]), [['coding', ['sol', 'opus'], true]]);
   assert.equal(readRoles(env).changed.why, 'first role');
 

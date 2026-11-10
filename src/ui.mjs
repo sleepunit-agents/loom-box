@@ -1163,7 +1163,7 @@ function rolesSection(env) {
     edit: { title: `Change ${r.id}`, action: 'role-set', submit: 'Save', hidden: { ...hidden, id: r.id }, fields: roleFields(list, r) },
     act: { action: 'role-remove', label: 'Remove', fields: { ...hidden, id: r.id }, confirm: `Remove the ${r.id} role? A job already running keeps it; new jobs can't ask for it.` } }));
   rows.push({ label: 'A role', value: 'Add a kind of work agents can hand off', tone: 'muted',
-    edit: { title: 'Add a role', action: 'role-set', submit: 'Add', hidden, fields: roleFields(list) } });
+    edit: { title: 'Add a role', action: 'role-set', submit: 'Add', hidden: { ...hidden, new: '1' }, fields: roleFields(list) } });
   const last = cat.changed ? ` Last change: ${cat.changed.what}${cat.changed.why ? ` (${cat.changed.why})` : ''}, by ${cat.changed.by}.` : '';
   return { id: 'roles', title: 'Work roles', blocks: [{ type: 'panel', rows },
     { type: 'text', tone: 'muted', text: `Agents read these when they hand off a job, and the runtime picks a model from the role's. An agent's own model limits still apply.${last}` }] };
@@ -1594,6 +1594,7 @@ export function act(env, effects, { action, fields: raw = {}, caller: c }, publi
         const by = typeof OWNER.who === 'string' && /^[a-z0-9]+(-[a-z0-9]+)*$/.test(OWNER.who) ? OWNER.who : 'owner';
         if (action === 'role-remove') { setRole(env, { remove: String(fields.id ?? ''), why, by, expect }); return { ok: true, message: `Removed the ${fields.id} role.`, page: '' }; }
         const role = roleFromFields(fields);
+        if (fields.new === '1' && cur.roles.some((x) => x.id === role.id)) return { ok: false, message: `There's already a ${role.id} role: change it from its row.`, page: '' };
         const r = setRole(env, { role, why, by, expect, keep: true });
         const had = cur.roles.some((x) => x.id === role.id);
         return { ok: true, message: `${had ? 'Saved' : 'Added'} the ${role.id} role: ${andList(r.roles.find((x) => x.id === role.id)?.eligible ?? []) || 'no model fits it yet'}.`, page: '' };
