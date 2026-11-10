@@ -572,3 +572,45 @@ test('a Claude job\'s last words are read as its transcript grows, never whole e
   assert.equal(claude.final({ id: 'one' }), null);
   assert.ok(Date.now() - t0 < 2000);
 });
+
+ test('final reads retain a UTF-8 character split across appends and join text parts; shortening and links reset safely', async () => {
+  const { appendFileSync, symlinkSync, unlinkSync } = await import('node:fs');
+  const h = harness(), transcript = join(h.D, 'split.jsonl');
+  const runner = new ClaudeRunner({readMax: {final: 7}});
+  runner.transcriptOf = () => transcript;
+  const event = (words) => JSON.stringify({type: 'assistant', message: {content: words.map(text => ({type: 'text', text}))}});
+  writeFileSync(transcript, event(['old']) + '\n');
+  assert.equal(runner.final({}), 'old');
+  const bytes = Buffer.from(event(['first 界', 'second']) + '\n');
+  const cut = bytes.indexOf(Buffer.from('界')) + 1;
+  appendFileSync(transcript, bytes.subarray(0, cut));
+  assert.equal(runner.final({}), 'old');
+  appendFileSync(transcript, bytes.subarray(cut));
+  assert.equal(runner.final({}), 'first 界\nsecond');
+  writeFileSync(transcript, event(['short']) + '\n');
+  assert.equal(runner.final({}), 'short');
+  const link = join(h.D, 'link.jsonl');
+  symlinkSync(transcript, link);
+  runner.transcriptOf = () => link;
+  assert.equal(runner.final({}), null);
+  unlinkSync(link);
+});
+
+ test('final memo holds 64 transcripts and explicitly reports an oversized line instead of silently returning stale words', async () => {
+  const { openSync, writeSync, closeSync } = await import('node:fs');
+  const h = harness(), runner = new ClaudeRunner();
+  const event = (text) => JSON.stringify({type: 'assistant', message: {content: [{type: 'text', text}]}}) + '\n';
+  const files = Array.from({length: 64}, (_, i) => join(h.D, `memo-${i}.jsonl`));
+  for (const file of files) { writeFileSync(file, event('kept')); runner.transcriptOf = () => file; assert.equal(runner.final({}), 'kept'); }
+  for (const file of files) {
+    const fd = openSync(file, 'r+'); writeSync(fd, 'X', 0); closeSync(fd);
+    runner.transcriptOf = () => file;
+    assert.equal(runner.final({}), 'kept');
+  }
+  const big = join(h.D, 'big.jsonl');
+  writeFileSync(big, event('last') + event('x'.repeat(17 * 1024 * 1024)));
+  runner.transcriptOf = () => big;
+  assert.match(runner.final({}), /transcript line exceeded 16 MiB/);
+  writeFileSync(big, event('new'));
+  assert.equal(runner.final({}), 'new');
+});

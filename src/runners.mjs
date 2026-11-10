@@ -74,9 +74,9 @@ const CODEX_CARD_TIMES = new Map();
 /** Each transcript's last words so far and where its read stopped (ClaudeRunner.final, t-2138), kept for the process. */
 const FINAL_MEMO = new Map();
 /** A transcript line's words: an assistant message's text parts, joined; null for any other line, or one not JSON. */
-function lastWordsOf(l) {
+function lastWordsOf(line) {
   let e;
-  try { e = JSON.parse(l); } catch { return null; }
+  try { e = JSON.parse(line); } catch { return null; }
   if (e?.type !== 'assistant' || !Array.isArray(e.message?.content) || !e.message.content.some((p) => p?.type === 'text')) return null;
   return e.message.content.filter((p) => p?.type === 'text').map((p) => p.text).join('\n');
 }
@@ -100,7 +100,13 @@ function readFrom(p, offset, max) {
     const n = size ? readSync(fd, buf, 0, size, offset) : 0;
     // Up to the last whole UTF-8 character: a character cut by the slice is read whole next time, never as U+FFFD.
     let end = n;
-    if (n === max) { let k = n - 1, back = 0; while (k >= 0 && back < 4 && (buf[k] & 0xc0) === 0x80) { k--; back++; } if (k >= 0 && buf[k] >= 0xc0) end = k; }
+    if (n) {
+      let k = n - 1;
+      while (k >= 0 && n - k <= 4 && (buf[k] & 0xc0) === 0x80) k--;
+      const lead = k >= 0 ? buf[k] : 0;
+      const width = lead >= 0xf0 ? 4 : lead >= 0xe0 ? 3 : lead >= 0xc0 ? 2 : 1;
+      if (k >= 0 && n - k < width) end = k;
+    }
     return { text: buf.subarray(0, end).toString('utf-8'), next: offset + end };
   } catch { return { text: '', next: offset }; } finally { if (fd !== undefined) try { closeSync(fd); } catch { /* closed */ } }
 }
@@ -333,18 +339,24 @@ export class ClaudeRunner {
       if (next === m.offset) break;
       const parts = (m.rest + text).split('\n');
       const tail = parts.pop() ?? '';
+      if (m.skipping) {
+        if (parts.length) { parts.shift(); m.skipping = false; }
+        else { m.rest = ''; m.offset = next; continue; }
+      }
       m.rest = tail.length > REST_MAX ? '' : tail;
       for (const l of parts) {
+        if (l.length > REST_MAX) { m.omitted = true; continue; }
         const w = lastWordsOf(l);
-        if (w !== null) m.last = w;
+        if (w !== null) { m.last = w; m.omitted = false; }
       }
+      if (tail.length > REST_MAX) { m.skipping = true; m.omitted = true; }
       m.offset = next;
     }
     // A last line not yet ended (no newline after it) counts once it's whole JSON, as reading the file whole did.
     const last = (m.rest ? lastWordsOf(m.rest) : null) ?? m.last;
     FINAL_MEMO.delete(f); FINAL_MEMO.set(f, m);
     if (FINAL_MEMO.size > 64) FINAL_MEMO.delete(FINAL_MEMO.keys().next().value);
-    return last;
+    return m.omitted ? `… (transcript line exceeded 16 MiB; last readable words follow)\n${last ?? ''}` : last;
   }
 
   /** Its session's transcript, the newest of that name under projects; null when there's none. */
