@@ -105,7 +105,7 @@ export async function askDarkBoxes(env, { convs, nowMs = Date.now(), warn = (m) 
     if (mine !== x.houses) x = { ...x, houses: mine, conversations: mine.flatMap((h) => x.byHouse?.[h] ?? []) };
     const name = String(boxNameOf(s, x.box)).normalize('NFKC').replace(/[\p{C}\p{Zl}\p{Zp}]/gu, ' ').replace(/[;:"“”]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 40);
     const n = x.conversations.length, mins = Math.floor((nowMs - Date.parse(s.boxes[x.box].lastSeen)) / 60_000);
-    const work = n === 1 ? 'conversation' : `${n} conversations`;
+    const work = n === 0 ? 'work' : n === 1 ? 'conversation' : `${n} conversations`;
     const ask = `The box “${name}” has been silent for ${mins} minutes. Carry on ${cap(x.agent)}'s ${work} from there on another box?`.slice(0, 140);
     const why = `${cap(x.agent)}'s ${work} can't go on until that box answers, or you say it's gone.`;
     const ifYes = `It goes on, on the next box ${cap(x.agent)} may use; it checks what it already did. If the box comes back, it's stopped there.`.slice(0, 140);
