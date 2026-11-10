@@ -19,7 +19,7 @@
 //                  [--logins claude,codex|none|default]       which of a box's logins its houses may have
 //                                                         how its house is made (--port: one it may publish;
 //                                                         --tailnet: a box tailscaled.sock it may use, by name)
-//   loom runtime primary <agent> [<box>...]                    its boxes in order: the first that's up (default: this machine)
+//   loom runtime primary <agent> [<box>...]                    read its box order; pass boxes to set it, --clear for this machine
 //   loom runtime rename-local                                  after renaming this machine: its box takes the new name
 //   loom runtime health [<box>] [--json]                       each box's last health sample and what's wrong now
 //   loom runtime always-on <box> on|off                        silent 10 minutes is an alert (loom's own and report-only boxes always are)
@@ -142,7 +142,7 @@ function ownerAtTerminal(prompt, want) {
     return !!want && line.trim() === want;
   } finally { closeSync(fd); }
 }
-import { addBox, api, down, list, remoteDown, remoteUp, endDrill, revokeBox, setAgent, setBoxWatch, setDrill, setPrimary, up } from './control.mjs';
+import { addBox, api, down, list, remoteDown, remoteUp, endDrill, revokeBox, preferenceList, setAgent, setBoxWatch, setDrill, setPrimary, up } from './control.mjs';
 import { watchOf } from './watch.mjs';
 import { healthWords } from './health.mjs';
 import { realEffects } from './effects.mjs';
@@ -354,7 +354,19 @@ async function main(argv, env) {
       }
       return;
     }
-    case 'primary': { const [agent, ...boxes] = positional(rest); out(setPrimary(env, realEffects(env), { agent, boxes })); return; }
+    case 'primary': {
+      const clear = rest.includes('--clear');
+      if (rest.some((x) => x.startsWith('--') && x !== '--clear')) throw new Fail('primary: unknown flag');
+      const [agent, ...boxes] = rest.filter((x) => x !== '--clear');
+      if (!agent || !/^[a-z][a-z0-9-]{0,39}$/.test(agent)) throw new Fail('primary: name an agent');
+      if (clear && boxes.length) throw new Fail('primary: --clear cannot be combined with boxes');
+      if (!clear && !boxes.length) {
+        const saved = preferenceList(loadState(env), agent);
+        const order = saved.length ? saved : [localBoxName(env)];
+        out({ agent, primary: order[0], boxes: order });
+      } else out(setPrimary(env, realEffects(env), { agent, boxes }));
+      return;
+    }
     case 'up': {
       let task = flag(rest, '--task');
       if (task === '-' || task === undefined) task = await readStdin();
