@@ -234,3 +234,20 @@ test('a client that asks and never reads is cut off before the service holds MAX
   assert.ok(got < 4 * MAX_UNREAD);
   await s.close();
 });
+
+test('round 2: at is when the compute started; a since from the future closes; a failing compute stops counting as read', async () => {
+  const h = home();
+  let t = 1_000_000;
+  let fail = false;
+  const s = await serveManifest({ LOOM_PIECE_HOME: h }, { compute: () => { const was = t; t += 3000; if (fail) throw new Error('no'); return `{"at":${was}}\n`; }, changed: async () => {}, now: () => t, log: quiet });
+  const c = client(s.path);
+  await c.ready;
+  const a = await c.ask(JSON.stringify({ id: 1, op: 'manifest', version: VERSION }));
+  assert.equal(a.at, 1_000_000);
+  assert.equal(await s.tick(), true);
+  fail = true;
+  assert.equal(await s.tick(), false);
+  assert.equal(await s.tick(), false);
+  assert.equal(await c.ask(JSON.stringify({ id: 2, op: 'manifest', version: VERSION, since: t + 60_000 })), null);
+  await s.close();
+});

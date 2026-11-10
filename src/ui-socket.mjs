@@ -95,8 +95,10 @@ export async function serveManifest(env, { compute, changed, now = Date.now, log
   let kept = null;   // {at, stdout, print}
   let asked = 0;
   const fresh = () => {
+    // Stamped when it starts: what it read is from then on, and a move during the compute is newer than it.
+    const at = now();
     const stdout = compute();
-    const next = { at: now(), stdout, print: stablePrint(stdout) };
+    const next = { at, stdout, print: stablePrint(stdout) };
     const moved = kept !== null && kept.print !== next.print;
     kept = next;
     return moved;
@@ -104,12 +106,13 @@ export async function serveManifest(env, { compute, changed, now = Date.now, log
   const answer = (id, version, since) => {
     // An ask for another version: core will run `ui --json` instead, so it isn't loom reading this socket (the
     // heartbeat stays on).
-    if (version === VERSION) asked = now();
     try {
       if (!kept || now() - kept.at >= STALE_MS || (Number.isSafeInteger(since) && since > kept.at)) fresh();
+      if (version === VERSION) asked = now();
       return { id, ok: true, version: VERSION, at: kept.at, stdout: kept.stdout };
     } catch (e) {
       log(`manifest: ${e.message}`);
+      asked = 0;
       return { id, ok: false };
     }
   };
@@ -133,6 +136,8 @@ export async function serveManifest(env, { compute, changed, now = Date.now, log
         try { m = JSON.parse(line); } catch { m = null; }
         // Anything but a manifest request: the connection goes, unanswered.
         if (!m || typeof m !== 'object' || m.op !== 'manifest' || !Number.isSafeInteger(m.id) || m.id < 0) { c.destroy(); return; }
+        // An answer from the future can't be made: asking for one would recompute on every line. The connection goes.
+        if (m.since !== undefined && (!Number.isSafeInteger(m.since) || m.since > now() + 1000)) { c.destroy(); return; }
         // Asking faster than it reads: the connection goes.
         if (c.writableLength > MAX_UNREAD) { c.destroy(); return; }
         c.write(JSON.stringify(answer(m.id, m.version, m.since)) + '\n');
@@ -160,7 +165,8 @@ export async function serveManifest(env, { compute, changed, now = Date.now, log
     async tick() {
       if (!asked || now() - asked >= ACTIVE_MS) return false;
       let moved = false;
-      try { moved = fresh(); } catch (e) { log(`manifest: ${e.message}`); }
+      // One that fails: core gets ok:false and runs `ui --json` meanwhile, so the heartbeat is back on.
+      try { moved = fresh(); } catch (e) { log(`manifest: ${e.message}`); asked = 0; return false; }
       if (moved) { try { await changed(); } catch (e) { log(`couldn't tell core the manifest moved: ${e.message}`); } }
       return true;
     },
