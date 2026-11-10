@@ -491,12 +491,9 @@ export function bodySync(env, caller, body, o = {}) {
     for (const [bid, b] of Object.entries(bodies)) if (Array.isArray(b.cards)) {
       const words = {};
       b.cards = b.cards.map(({ detail, body: said, items, ...rest }) => {
-        // A text card's label is the body's own first line: sealed too, its fixed label kept in the clear instead.
-        // A plan's label holds an item's words (`Plan (1/2): …`): sealed too.
-        const sealsLabel = rest.tool === 'text' || rest.tool === 'TodoWrite' || rest.tool === 'todo_list';
-        const label = sealsLabel ? { summary: rest.summary } : {};
-        const w = { ...(detail ? { detail } : {}), ...(said ? { body: said } : {}), ...(items ? { items } : {}), ...label };
-        if (sealsLabel) rest.summary = rest.fixed ?? (rest.tool === 'text' ? 'Wrote its words' : 'Made a plan');
+        // Every summary can contain the body's words (a shell description or a search pattern too).
+        const w = { ...(detail ? { detail } : {}), ...(said ? { body: said } : {}), ...(items ? { items } : {}), summary: rest.summary };
+        rest.summary = rest.fixed ?? 'Did a step';
         if (Object.keys(w).length) words[rest.id] = w;
         return rest;
       });

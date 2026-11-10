@@ -38,8 +38,10 @@ test('a Claude transcript: tool_use makes a running card, its result done or fai
   assert.equal(cards[1].detail, 'delivery.ts');
 });
 
-test('a Codex run: item.started makes a card, item.completed finishes it; failed stays failed; messages make none', () => {
-  const cards = codexCards(read('codex-events.jsonl'), 'b1:');
+test('a Codex run: item.started makes a card, item.completed finishes it; failed stays failed; own words make text cards', () => {
+  const all = codexCards(read('codex-events.jsonl'), 'b1:');
+  assert.deepEqual(all.filter(c => c.tool === 'text').map(c => [c.id, c.fixed, c.body]), [['b1:item_0', 'Wrote its words', 'I’ll run the two commands in order.'], ['b1:item_3', 'Wrote its words', 'done']]);
+  const cards = all.filter(c => c.tool !== 'text');
   assert.deepEqual(cards.map((c) => [c.id, c.tool, c.summary, c.state]), [
     ['b1:item_1', 'command_execution', 'Ran a command', 'done'], // echo says nothing of what it's for
     ['b1:item_2', 'command_execution', 'Ran ls — exit 2: no such file', 'failed'], // a raw command names no file
@@ -113,7 +115,7 @@ test('the runners read their own records: a Claude session\'s transcript, a Code
   mkdirSync(join(runs, 'k1'), { recursive: true });
   writeFileSync(join(runs, 'k1', 'events.jsonl'), readFileSync(join(here, 'fixtures', 'codex-events.jsonl')));
   const xr = new CodexRunner({ runsDir: runs });
-  assert.deepEqual(xr.activity({ id: 'k1' }).map((c) => c.id), ['k1:item_1', 'k1:item_2']);
+  assert.deepEqual(xr.activity({ id: 'k1' }).map((c) => c.id), ['k1:item_0', 'k1:item_1', 'k1:item_2', 'k1:item_3']);
 });
 
 test('the tick posts loom and bridge bodies\' new and moved cards to core', async () => {

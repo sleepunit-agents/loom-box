@@ -152,7 +152,7 @@ test('tests counts from node, jest, vitest and pytest', () => {
 test('any part that moves is sent again: its label, fixed label, target, result, body, exit, end, plan items, parent', () => {
   const base = { id: 'x', tool: 'Bash', summary: 's', fixed: 'Ran a command', state: 'done', at: 'x', detail: 'd', result: 'no output', body: 'a', exit: 0, end: '2026-11-10T10:00:00.000Z', items: [{ text: 'a', state: 'now' }], parent: 'p' };
   const a = changed([base], {});
-  for (const [k, v] of Object.entries({ summary: 's2', fixed: 'Ran a command — exit 1', detail: 'd2', result: '1 line of output', body: 'b', exit: 1, end: '2026-11-10T10:00:01.000Z', items: [{ text: 'a', state: 'done' }], parent: 'q' })) {
+  for (const [k, v] of Object.entries({ summary: 's2', fixed: 'Ran a command — exit 1', detail: 'd2', result: '1 line of output', body: 'b', exit: 1, limit: 600, end: '2026-11-10T10:00:01.000Z', items: [{ text: 'a', state: 'done' }], parent: 'q' })) {
     assert.equal(changed([{ ...base, [k]: v }], a.next).out.length, 1, k);
   }
   assert.equal(changed([base], a.next).out.length, 0);
@@ -382,7 +382,7 @@ test('a house\'s card words are sealed on loom\'s disk, and opened again for the
   const hosts = join(env.LOOM_BOX_DATA, 'delivery', 'hosts');
   mkdirSync(hosts, { recursive: true });
   writeFileSync(join(hosts, 'art.json'), JSON.stringify({ agent: 'art', house: 'h-1', hostHash: createHash('sha256').update('the-host-key').digest('hex'), req: {}, stop: {}, inbox: {} }));
-  const card = { id: 'c1', at: '2026-11-10T10:00:00.000Z', tool: 'Edit', summary: 'Edited a.ts', fixed: 'Edited a.ts', state: 'done', detail: 'a.ts', body: '+THE-DIFF-WORDS' };
+  const card = { id: 'c1', at: '2026-11-10T10:00:00.000Z', tool: 'Edit', summary: 'THE-SEARCH-OR-SHELL-DESCRIPTION', fixed: 'Edited a.ts', state: 'done', detail: 'a.ts', body: '+THE-DIFF-WORDS' };
   const said = { id: 'w1', at: '2026-11-10T10:00:01.000Z', tool: 'text', summary: 'THE-OWN-WORDS first line', fixed: 'Wrote its words', state: 'done', body: 'THE-OWN-WORDS first line' };
   const plan = { id: 'p1', at: '2026-11-10T10:00:02.000Z', tool: 'TodoWrite', summary: 'Plan (1/2): THE-PLAN-WORDS', fixed: 'Plan (1/2)', state: 'done', items: [{ text: 'THE-PLAN-WORDS', state: 'now' }] };
   bodySync(env, { kind: 'agent', agent: 'art', house: 'h-1' }, { hostKey: 'the-host-key', report: { bodies: { b0000001: { harness: 'claude', status: 'working', cards: [card, said, plan] } }, done: {} } }, { sealer: testSealer });
@@ -392,6 +392,8 @@ test('a house\'s card words are sealed on loom\'s disk, and opened again for the
   const hr = new HouseRunner(env, 'claude', { sealer: testSealer });
   const got = hr.activity({ id: 'h-1-b0000001', house: 'h-1', agent: 'art' });
   assert.equal(got[0]?.body, '+THE-DIFF-WORDS');
+  assert.equal(got[0]?.summary, 'THE-SEARCH-OR-SHELL-DESCRIPTION');
+  assert.equal(everything(hosts).includes(Buffer.from('THE-SEARCH-OR-SHELL-DESCRIPTION')), false);
   assert.deepEqual([got[1]?.summary, got[1]?.body], ['THE-OWN-WORDS first line', 'THE-OWN-WORDS first line'], 'opened again whole');
   // Sealed once a body, and again only when its words move; opened once a blob.
   let seals = 0, opens = 0;
@@ -623,4 +625,13 @@ test('a colour code inside a key\'s BEGIN line can\'t hide the block (t-2109)', 
   const { diffText } = await import('../src/activity.mjs');
   const out = diffText(['+-----BEGIN RSA PRIVATE \x1b[0mKEY-----', '+MIIEowIBAAKCAQEAsecretbase64lineXYZ', '+QyNTUxOQ', '+-----END RSA PRIVATE KEY-----'].join('\n'));
   assert.ok(!out.includes('QyNTUxOQ') && !out.includes('MIIEowIBAAK'));
+});
+
+ test('plain text key delimiters are normalised before block removal, including house words and Codex commentary', () => {
+  const text = 'before\n-----BEGIN PRIVATE \x1b[0mKEY-----\nQyNTUxOQ\n-----END PRIVATE KEY-----\nafter';
+  for (const out of [shownText(text), stepParts({tool: 'text', body: text}).body,
+    codexCards([{type: 'item.completed', item: {id: 'words', type: 'agent_message', text}}])[0].body]) {
+    assert.ok(!out.includes('QyNTUxOQ'));
+    assert.ok(out.includes('before') && out.includes('after'));
+  }
 });

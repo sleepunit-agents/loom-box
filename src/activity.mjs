@@ -385,9 +385,19 @@ export function diffText(text) {
  * most `max`, its head and tail kept around a line saying how many weren't. '' for none.
  */
 export function shownText(text, max = MAX_BODY) {
-  const t = String(text ?? '').slice(0, 2_000_000).replace(/-----BEGIN [A-Z ]{0,40}PRIVATE KEY(?: BLOCK)?-----[\s\S]*?(?:-----END [A-Z ]{0,40}PRIVATE KEY(?: BLOCK)?-----|$)/g, GONE);
-  const { head, middle, tail } = window(t.split('\n'), max);
-  return capLines([...head, ...tail].map(shownTextLine), max, middle.length);
+  let inKey = false;
+  const key = (line) => {
+    const words = line.replace(SGR, '');
+    if (KEY_BEGIN.test(words)) inKey = true;
+    if (!inKey) return false;
+    if (KEY_END.test(words)) inKey = false;
+    return true;
+  };
+  const show = (raw) => { const line = normLine(raw); return key(line) ? GONE : shownTextLine(line); };
+  const { head, middle, tail } = window(String(text ?? '').slice(0, 2_000_000).split('\n'), max);
+  const shown = head.map(show);
+  for (const raw of middle) if (raw.includes('-----')) key(normLine(raw));
+  return capLines([...shown, ...tail.map(show)], max, middle.length);
 }
 
 /** A shell command as Codex runs it (`/usr/bin/bash -lc '…'`), unwrapped to what the body wrote. */
@@ -649,7 +659,16 @@ export function codexCards(events, prefix = '') {
   const cards = new Map();
   for (const e of events) {
     const item = e?.item;
-    if (!item || !CODEX_TYPES.includes(item.type) || typeof item.id !== 'string') continue;
+    if (!item || typeof item.id !== 'string') continue;
+    if (item.type === 'agent_message') {
+      if (e.type !== 'item.completed' || typeof item.text !== 'string' || !item.text.trim()) continue;
+      const id = `${prefix}${item.id}`.slice(0, 80);
+      const text = item.text;
+      const card = { id, at: new Date().toISOString(), tool: 'text', summary: finish(text.split('\n')[0]), fixed: 'Wrote its words', state: 'done' };
+      cards.set(id, lazyBody(card, () => worked('text', text, () => shownText(text, MAX_TEXT))));
+      continue;
+    }
+    if (!CODEX_TYPES.includes(item.type)) continue;
     const id = `${prefix}${item.id}`.slice(0, 80);
     if (!cards.has(id) && ['item.started', 'item.updated', 'item.completed'].includes(e.type)) {
       cards.set(id, { id, at: new Date().toISOString(), tool: toolName(item.type), summary: '', state: item.type === 'todo_list' ? 'done' : 'running' });
@@ -761,7 +780,7 @@ function bodyAllowed(tool, detail) {
 export const baseCard = (c) => ({ id: c.id, at: c.at, tool: c.tool, summary: c.summary, state: c.state });
 
 /** What the record keeps of a card: its state and a short hash of its label (never the label itself). */
-const mark = (c) => `${c.state}:${createHash('sha256').update(JSON.stringify([c.summary, c.fixed, c.detail, c.result, c.body, c.exit, c.end, c.items, c.parent])).digest('hex').slice(0, 8)}`;
+const mark = (c) => `${c.state}:${createHash('sha256').update(JSON.stringify([c.summary, c.fixed, c.detail, c.result, c.body, c.exit, c.limit, c.end, c.items, c.parent])).digest('hex').slice(0, 8)}`;
 
 /**
  * What to post of `cards` given what was posted (`sent`: id → its mark): the new ones and those whose state or label
