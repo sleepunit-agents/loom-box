@@ -20,7 +20,7 @@ import { arch, cpus, homedir, platform, totalmem } from 'node:os';
 import { join as pathJoin } from 'node:path';
 import { newProof } from './enroll.mjs';
 import { BOX_NAME, stateDir } from './state.mjs';
-import { containerName, missingSecrets, parseHouseFile, podmanSecret, runArgs, specFor } from './house.mjs';
+import { containerName, missingSecrets, parseHouseFile, podmanSecret, runArgs, specFor, withoutWithheld } from './house.mjs';
 import { PART_RAW, joinParts, partsOf } from './blobs.mjs';
 import { boxSessions } from './remote.mjs';
 import { sessionsBusy } from './busy.mjs';
@@ -595,7 +595,10 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
       }
       logFd = openSync(pathJoin(dir, 'log'), 'a', 0o600);
       const { repo, mirror } = checkout(env, h, dir, claimed.repoAuth);
-      const house = specFor(parseHouseFile(readFileSync(inside(repo, h.houseFile || 'house/house.json', 'house file'), 'utf-8')), h.service);
+      // What the owner scoped away from this house's work (t-1963: a project's secrets and tailnets, the owner's own):
+      // the house starts without them, its log says so, and anything else the house file wants and doesn't get still fails.
+      const house = withoutWithheld(specFor(parseHouseFile(readFileSync(inside(repo, h.houseFile || 'house/house.json', 'house file'), 'utf-8')), h.service), claimed.withheld,
+        (what) => { writeSync(logFd, `loom-box: not for this house's work: ${what}\n`); log(`${h.id}: starting without ${what} (scoped)`); });
       // Every house gets its own loom token; the rest are what the control plane chose.
       const given = { ...(claimed.secrets || {}), 'loom-token': claimed.token };
       const missing = missingSecrets(house, given);
