@@ -723,11 +723,13 @@ loom runtime host-exec                               loom's machine: the executo
   with no shell, system tools by absolute path, in its own process group (ended whole past its time limit), with a
   PATH of node's dir and the system's only, and keeps the output's last 64 KB, every line through `redact.mjs`, in
   `done/` (7 days, 200 results). Changes run one at a time; reads alongside. One executor at a time
-  (`executor.pid`). A stop finishes what's running and begins nothing more. A request the executor was running when
+  (a kernel lock, `flock` on `executor.lock`, gone with the process however it ends). A verb past its time is a failure. A stop finishes what's running and begins nothing more. A request the executor was running when
   it stopped is recorded as `lost` and never run again. A request file that isn't a private file of the executor's
   user is dropped. The executor trusts the spool as the runtime trusts its own state: anything running as loom's user
   on loom's machine could write it (a local body already has that machine's shell), so the owner's yes is checked by
-  the runtime before spooling, not again by the executor. After `pieces-update runtime`, restart the executor's unit
+  the runtime before spooling, not again by the executor. `art-chain-check` and `deploy-loom` run what `~/Art/bin` holds when they run,
+  and that checkout follows its repo by itself: the owner's yes is for the step by name, not a pinned copy of the
+  script, which is why both ask. After `pieces-update runtime`, restart the executor's unit
   to run the new code. Every step is a line in `host-exec/log.jsonl`, without output.
 - **Answers.** A body's call waits about 2 s; a longer verb answers with its id, and `host result` gives the result
   to the same conversation's holder only (any other is told there's no such request).

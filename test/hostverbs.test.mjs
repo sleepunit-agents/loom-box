@@ -281,3 +281,18 @@ test('a command past its time is ended with everything it started', async () => 
   await new Promise((res) => setTimeout(res, 200));
   assert.throws(() => process.kill(pid, 0), 'the background child is gone too');
 });
+
+test('one executor at a time, by a lock the kernel lets go of when it exits', async () => {
+  const { spawn } = await import('node:child_process');
+  const { fileURLToPath } = await import('node:url');
+  const src = fileURLToPath(new URL('../src/hostverbs.mjs', import.meta.url));
+  const dir = mkdtempSync(join(tmpdir(), 'hx-lock-'));
+  const script = (once) => `import(${JSON.stringify(src)}).then((m) => m.hostExecLoop({ HOME: ${JSON.stringify(dir)}, LOOM_BOX_DATA: ${JSON.stringify(join(dir, 'data'))} }, { once: ${once}, everyMs: 100 })).then(() => console.log('ran'), (e) => console.log('refused: ' + e.message))`;
+  const run = (once) => new Promise((res) => { const c = spawn(process.execPath, ['-e', script(once)]); let out = ''; c.stdout.on('data', (b) => { out += b; }); c.on('close', () => res(out.trim())); });
+  const first = spawn(process.execPath, ['-e', script(false)]);
+  await new Promise((r) => setTimeout(r, 700));
+  assert.match(await run(true), /refused: another host executor is running/);
+  first.kill('SIGKILL');
+  await new Promise((r) => first.on('close', r));
+  assert.equal(await run(true), 'ran', 'free again once the first is gone, even killed');
+});

@@ -15,7 +15,7 @@
 //
 // The executor is its own process so a verb that restarts loom or this piece (deploy-loom, pieces-update runtime) isn't
 // killed with the process that asked for it.
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -24,7 +24,6 @@ import { approvalsFake, approvalsRunAsync, approvalsWhy } from './approvals-call
 import { redact } from './redact.mjs';
 import { setting } from './piece.mjs';
 import { householdOwners, membersOf, ownersOf } from './owners.mjs';
-import { alive } from './state.mjs';
 
 export const HOST_ID = /^hx-[0-9a-f]{16}$/;
 const APPROVAL_ID = /^a-[0-9a-f]{8,32}$/;
@@ -382,7 +381,8 @@ export async function runOne(env, req, exec = runCommand) {
   }
   const [cmd, ...argv] = v.argv(parsed.p, env);
   const r = await exec(cmd, argv, { env: childEnv(env), timeoutMs: v.timeoutMs });
-  const state = r.exit === 0 ? 'done' : 'failed';
+  // Past its time is a failure, whatever the last process said.
+  const state = r.exit === 0 && !r.timedOut ? 'done' : 'failed';
   const note = r.timedOut ? `\n(stopped after ${Math.round(v.timeoutMs / 1000)} s)` : r.spawnError ? `\n(couldn't start ${cmd}: ${r.spawnError})` : '';
   return { id: req.id, verb: req.verb, target: parsed.target, state, exit: r.exit, ...(r.signal ? { signal: r.signal } : {}), ...boundOutput(r.out + note), startedAt: started, endedAt: new Date().toISOString() };
 }
@@ -400,11 +400,12 @@ export function runCommand(cmd, argv, { env, timeoutMs }) {
     try { child = spawn(cmd, argv, { env, shell: false, detached: true, stdio: ['ignore', 'pipe', 'pipe'] }); } catch (e) { resolve({ exit: null, spawnError: e.code ?? e.message, out: '' }); return; }
     let timedOut = false, done = false;
     const group = (sig) => { try { process.kill(-child.pid, sig); } catch { /* gone */ } };
-    const t = setTimeout(() => { timedOut = true; group('SIGTERM'); setTimeout(() => group('SIGKILL'), 10_000).unref(); }, timeoutMs);
+    let kill = null;
+    const t = setTimeout(() => { timedOut = true; group('SIGTERM'); kill = setTimeout(() => group('SIGKILL'), 10_000); kill.unref(); }, timeoutMs);
     child.stdout.on('data', keep);
     child.stderr.on('data', keep);
     child.on('error', (e) => { if (done) return; done = true; clearTimeout(t); resolve({ exit: null, spawnError: e.code ?? e.message, out: out.toString('utf-8') }); });
-    child.on('close', (code, signal) => { if (done) return; done = true; clearTimeout(t); if (timedOut) group('SIGKILL'); resolve({ exit: code, signal, timedOut, out: out.toString('utf-8') }); });
+    child.on('close', (code, signal) => { if (done) return; done = true; clearTimeout(t); if (kill) clearTimeout(kill); if (timedOut) group('SIGKILL'); resolve({ exit: code, signal, timedOut, out: out.toString('utf-8') }); });
   });
 }
 
@@ -471,25 +472,23 @@ function prune(env) {
 /** `loom-runtime host-exec [--once]`: the executor's loop (its own user unit on loom's machine). */
 export async function hostExecLoop(env, { once = false, everyMs = 1000 } = {}) {
   ensureDirs(env);
-  // One executor at a time: a second would take the first's running requests for lost.
-  const lock = join(hostExecDir(env), 'executor.pid');
-  for (let i = 0; ; i++) {
-    try { writeFileSync(lock, String(process.pid), { flag: 'wx', mode: 0o600 }); break; } catch (e) {
-      if (e.code !== 'EEXIST' || i) throw new Error(`another host executor holds ${lock}`);
-      const pid = Number(readFileSync(lock, 'utf-8'));
-      if (Number.isInteger(pid) && pid > 0 && alive(pid)) throw new Error(`another host executor is running (pid ${pid})`);
-      rmSync(lock, { force: true });
-    }
-  }
-  const unlock = () => { try { if (readFileSync(lock, 'utf-8') === String(process.pid)) rmSync(lock, { force: true }); } catch { /* gone */ } };
+  // One executor at a time, held by the kernel: the lock file's open description is flock'd (the shell's
+  // `exec 9>lock; flock -n 9`), and it stays this process's until it exits, however it exits, so a crash or a
+  // reboot never leaves a lock behind and two starts can't both get in.
+  const fd = openSync(join(hostExecDir(env), 'executor.lock'), 'a', 0o600);
+  const r = spawnSync(SYS.flock, ['-n', '-E', '75', '3'], { stdio: ['ignore', 'ignore', 'inherit', fd] });
+  if (r.status === 75) throw new Error('another host executor is running');
+  if (r.error || r.status !== 0) throw new Error(`the executor's lock couldn't be taken (${r.error?.message ?? `exit ${r.status}`})`);
   const state = { busy: new Set(), chain: Promise.resolve(), stopping: false };
-  let current = Promise.resolve();
+  const passes = new Set();
   // A stop lets what's running finish (its unit's TimeoutStopSec bounds that) and begins nothing more.
-  process.on('SIGTERM', () => { state.stopping = true; Promise.all([current, state.chain]).finally(() => { unlock(); process.exit(0); }); });
+  process.on('SIGTERM', () => { state.stopping = true; Promise.all([...passes, state.chain]).finally(() => process.exit(0)); });
   for (;;) {
     if (state.stopping) return;
-    current = execPass(env, { state }).catch((e) => process.stderr.write(`host-exec: ${e.message}\n`));
-    if (once) { await current; await state.chain; unlock(); return; }
+    const p = execPass(env, { state }).catch((e) => process.stderr.write(`host-exec: ${e.message}\n`));
+    passes.add(p);
+    p.finally(() => passes.delete(p));
+    if (once) { await p; await state.chain; return; }
     // A long change (a deploy) doesn't hold up reads: the next pass starts while it runs; `busy` keeps it from being
     // taken for lost, and claiming by rename keeps a request from running twice.
     await new Promise((r) => setTimeout(r, everyMs));
