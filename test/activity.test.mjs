@@ -26,11 +26,12 @@ test('a Claude transcript: tool_use makes a running card, its result done or fai
   const all = JSON.stringify(cards);
   for (const never of ['s3cr3t', 'private reasoning', '/home/art']) assert.ok(!all.includes(never), never);
   cards.splice(1, 1);
-  // A label is never a command line or output (t-1944); the owner's Watching view gets the whole command and a shell
-  // step's output, redacted, in their own fields (t-2109). A read's contents never, anywhere.
+  // A label is never a command line (t-1944); the owner's Watching view gets the whole command, redacted, in its own
+  // field (t-2109). Output and a read's contents never, anywhere.
   for (const c of cards) for (const never of ['npm test', 'OUTPUT-THAT-MUST-NOT-SHOW']) assert.ok(!c.summary.includes(never), never);
   assert.equal(cards[0].detail, 'export TOKEN=…; npm test');
-  assert.deepEqual([cards[0].result, cards[0].body, cards[0].limit], ['failed', 'OUTPUT-THAT-MUST-NOT-SHOW', 120]);
+  assert.deepEqual([cards[0].result, cards[0].body, cards[0].limit], ['failed', undefined, 120]);
+  assert.ok(!all.includes('OUTPUT-THAT-MUST-NOT-SHOW'), 'a step\'s output is never kept or sent (t-2109)');
   assert.ok(!JSON.stringify(cards[1]).includes('OUTPUT-THAT-MUST-NOT-SHOW'), 'a file read never shows what it read');
   assert.equal(cards[1].detail, 'delivery.ts');
 });
@@ -43,9 +44,10 @@ test('a Codex run: item.started makes a card, item.completed finishes it; failed
   ]);
   assert.ok(!cards.some((c) => c.summary.includes('cannot access')), 'never the output in a label');
   assert.deepEqual(cards.map((c) => [c.detail, c.exit, c.result, c.body]), [
-    ['echo hi', 0, '1 line of output', 'hi'],
-    ['ls /nonexistent-dir', 2, 'exit 2', "ls: cannot access '/nonexistent-dir': No such file or directory"],
+    ['echo hi', 0, '1 line of output', undefined],
+    ['ls /nonexistent-dir', 2, 'exit 2', undefined],
   ]);
+  assert.ok(!JSON.stringify(cards).includes('cannot access'), 'never the output (t-2109: on demand is its own task)');
 });
 
 test('Codex\'s other tool items: an MCP call in words, a file change by its path, a search by its words; never a result, a diff or reasoning', () => {
@@ -212,7 +214,7 @@ test('whose words show: only a conversation for the owner alone, read from its p
 
 test('an older core: after its first refusal, plain cards go straight to it; a 409 holds the thread; another 400 is only a warning (t-2109)', async () => {
   const { spawnCall } = await import('../src/spawn.mjs');
-  const rich = (n) => ({ id: `t${n}`, at: 'x', tool: 'Bash', summary: `Step ${n}`, state: 'done', detail: 'npm test', body: 'ok' });
+  const rich = (n) => ({ id: `t${n}`, at: 'x', tool: 'Edit', summary: `Step ${n}`, state: 'done', detail: 'a.ts', body: '+ok' });
   const run = async (answer) => {
     const o = world();
     o.core.commsAnswer = (x) => (x.op === 'spawn' ? { ok: true, id: 'th:abcdefghij' } : { ok: true });
@@ -238,7 +240,7 @@ test('an older core: after its first refusal, plain cards go straight to it; a 4
   assert.deepEqual(gone.map((x) => x.cards.map((c) => c.id)), [['t1']], 'after a 409 nothing more is tried, cards or a sign of life');
   const other = await run((x) => (x.cards.some((c) => c.id === 't1') ? Object.assign(new Error('bad-input: run is the body run'), { status: 400 }) : null));
   const t2 = other.find((x) => x.cards.some((c) => c.id === 't2'));
-  assert.ok(t2 && t2.cards[0].body === 'ok', 'a 400 for another reason isn\'t taken for an older core: later cards go whole');
+  assert.ok(t2 && t2.cards[0].body === '+ok', 'a 400 for another reason isn\'t taken for an older core: later cards go whole');
 });
 
 test('a sign of life alone goes at most every 20 seconds, and only when it moved (t-2109)', async () => {

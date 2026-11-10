@@ -17,20 +17,26 @@ const leak = (s) => { for (let i = 0; i + 8 <= GH.length; i++) if (String(s).inc
 const use = (id, name, input, at = '2026-11-10T10:00:00.000Z') => ({ type: 'assistant', timestamp: at, message: { id: `msg_${id}`, content: [{ type: 'tool_use', id, name, input }] } });
 const res = (id, content, toolUseResult, is_error = false) => ({ type: 'user', timestamp: '2026-11-10T10:00:05.000Z', toolUseResult, message: { content: [{ type: 'tool_result', tool_use_id: id, content, is_error }] } });
 
-test('a shell step: its whole command and whole output, redacted; colours kept; when it ended', () => {
-  const out = Array.from({ length: 10 }, (_, i) => `\x1b[32mline ${i + 1}\x1b[0m`).join('\n');
-  const [c] = claudeCards([use('u1', 'Bash', { command: `GH_TOKEN=${GH} gh pr list\necho second`, description: 'List PRs', timeout: 600000 }), res('u1', out, { stdout: out, stderr: '' })]);
-  assert.equal(c.summary, 'List PRs');
-  assert.equal(c.detail, 'GH_TOKEN=… gh pr list\necho second');
-  assert.equal(c.limit, 600);
-  assert.equal(c.result, '10 lines of output');
-  assert.equal(c.body.split('\n').length, 10);
-  assert.ok(c.body.startsWith('\x1b[32mline 1\x1b[0m'), 'ANSI colour codes kept for a terminal look');
-  assert.equal(c.end, '2026-11-10T10:00:05.000Z');
-  assert.ok(!leak(JSON.stringify(c)));
+test('a long output keeps its head and tail and says how many lines it left out', () => {
+  const t = shownText(Array.from({ length: 20000 }, (_, i) => `row ${i}`).join('\n'));
+  assert.ok(t.length <= MAX_BODY);
+  assert.ok(t.startsWith('row 0\n') && t.endsWith('row 19999'));
+  assert.match(t, /… \d+ lines not kept …/);
 });
 
-test('output: a token, a key block and a token split by a colour code all go; other controls go; private paths are named', () => {
+test('a shell step: its whole command (redacted), its result and exit code, when it ended; its output never, from here or a house', () => {
+  const out = `\x1b[32mline 1\x1b[0m\nOUTPUT-NEVER-KEPT ${GH}`;
+  const [s] = claudeCards([use('u1', 'Bash', { command: `GH_TOKEN=${GH} gh pr list\necho second`, description: 'List PRs', timeout: 600000 }), res('u1', out, { stdout: out, stderr: '' })]);
+  assert.deepEqual([s.summary, s.detail, s.limit, s.result, s.body, s.end], ['List PRs', 'GH_TOKEN=… gh pr list\necho second', 600, '2 lines of output', undefined, '2026-11-10T10:00:05.000Z']);
+  assert.ok(!JSON.stringify(s).includes('OUTPUT-NEVER-KEPT') && !leak(JSON.stringify(s)));
+  const [x] = codexCards([{ type: 'item.completed', item: { id: 'i', type: 'command_execution', command: "/usr/bin/bash -lc 'git status'", aggregated_output: 'OUTPUT-NEVER-KEPT\n', exit_code: 0, status: 'completed' } }], 'b:');
+  assert.deepEqual([x.detail, x.body], ['git status', undefined]);
+  assert.ok(!JSON.stringify(x).includes('OUTPUT-NEVER-KEPT'));
+  // A house that sends a shell step's output: dropped at the boundary.
+  for (const tool of ['Bash', 'command_execution']) assert.equal(cleanCards([{ id: 'c', at: 'x', tool, summary: 's', state: 'done', detail: 'npm test', body: 'OUTPUT' }])[0].body, undefined);
+});
+
+test('shown text (a diff, the body\'s words): a token, a key block and a token split by a colour code go; other controls go; private paths are named', () => {
   const pem = '-----BEGIN OPENSSH PRIVATE KEY-----\nAAAAB3NzaC1yc2EAAAADAQABAAABAQC\n-----END OPENSSH PRIVATE KEY-----';
   const split = `${GH.slice(0, 10)}\x1b[1m${GH.slice(10)}`;
   const t = shownText(`a ${GH}\n${pem}\n${split}\nbell\x07 and \x1b]0;title\x07\ncat /home/art/.config/gh/hosts.yml`);
@@ -38,13 +44,6 @@ test('output: a token, a key block and a token split by a colour code all go; ot
   assert.ok(!t.includes('AAAAB3NzaC1yc2E'), 'key block gone');
   assert.ok(!/[\x07]/.test(t) && !t.includes(']0;'), 'only colour codes survive');
   assert.ok(t.includes('cat a private file'));
-});
-
-test('a long output keeps its head and tail and says how many lines it left out', () => {
-  const t = shownText(Array.from({ length: 20000 }, (_, i) => `row ${i}`).join('\n'));
-  assert.ok(t.length <= MAX_BODY);
-  assert.ok(t.startsWith('row 0\n') && t.endsWith('row 19999'));
-  assert.match(t, /… \d+ lines not kept …/);
 });
 
 test('a failed shell step: its exit code and a test run\'s counts', () => {
@@ -138,7 +137,7 @@ test('a house\'s parts pass the same gate, and a parent id is renamed as its car
 
 test('a Codex command is unwrapped from its shell', () => {
   const [c] = codexCards([{ type: 'item.completed', item: { id: 'i', type: 'command_execution', command: "/usr/bin/bash -lc 'git status'", aggregated_output: 'clean\n', exit_code: 0, status: 'completed' } }], 'b:');
-  assert.deepEqual([c.detail, c.body], ['git status', 'clean']);
+  assert.deepEqual([c.detail, c.body], ['git status', undefined]);
   assert.equal(commandLine("cat > f <<'EOF'\nbody\nEOF"), "cat > f <<'EOF'\nbody\nEOF");
 });
 
@@ -199,14 +198,6 @@ test('a file whose shown name isn\'t plain (a token in its path) shows no diff; 
   assert.ok(plain.body && !leak(plain.body) && !plain.body.includes('hunter2hunter2'), plain.body);
 });
 
-test('a command that names a private file shows its result, never its output', () => {
-  const [c] = claudeCards([use('k', 'Bash', { command: 'cat /home/art/.config/loom/people/jonathan.md' }), res('k', 'PRIVATE PERSON CARD', { stdout: 'PRIVATE PERSON CARD', stderr: '' })]);
-  assert.equal(c.body, undefined);
-  assert.equal(c.result, '1 line of output');
-  const [x] = codexCards([{ type: 'item.completed', item: { id: 'i', type: 'command_execution', command: "/usr/bin/bash -lc 'cat deploy.key'", aggregated_output: 'PRIVATE KEY BODY', exit_code: 0, status: 'completed' } }], 'b:');
-  assert.equal(x.body, undefined);
-});
-
 test('a house\'s body passes only where one is made here: never on a read, a private file\'s edit, or an unplain target', () => {
   const base = { id: 'c', at: 'x', summary: 's', state: 'done' };
   const keep = (c) => cleanCards([{ ...base, ...c }])[0]?.body;
@@ -217,44 +208,6 @@ test('a house\'s body passes only where one is made here: never on a read, a pri
   assert.equal(keep({ tool: 'Bash', detail: 'cat ~/.ssh/id_ed25519', body: 'KEY' }), undefined);
   assert.equal(keep({ tool: 'mcp__loom__recall', detail: 'x', body: 'MEMORY' }), undefined);
   assert.equal(keep({ tool: 'Edit', detail: 'a.ts', body: '+x' }), '+x');
-  assert.equal(keep({ tool: 'Bash', detail: 'npm test', body: 'ok' }), 'ok');
+  assert.equal(keep({ tool: 'Bash', detail: 'npm test', body: 'ok' }), undefined, 'a shell step\'s output never');
 });
 
-test('output shows only for a command that reads as plain words and names nothing private: fail closed otherwise', async () => {
-  const { outputShows, plainWords } = await import('../src/activity.mjs');
-  const hides = [
-    // prints the environment, aliases or variables, wherever it sits
-    'env', 'FOO=1 env', 'sudo -E env', 'sudo -u root env', 'timeout 5 printenv', 'nice -n 19 printenv GH_TOKEN', 'xargs env < list', 'npm test | env',
-    'set', 'export', 'export -p', 'declare -px', 'compgen -v', 'alias',
-    // private files in any word, a value after =, a glob, a directory, a secret-named file to a reader
-    'cat .env', 'cat secrets*', 'ls *.pem', 'cat ~/.ssh/id_[re]*', 'cd ~/.config/loom && cat token', 'tail deploy.key', 'git log -- .env',
-    'npm test --userconfig=/home/art/.npmrc', 'cat /proc/self/environ', 'cat /proc/1234/environ', 'npm test | grep token', 'wc -l < credentials.json',
-    // can't be read as plain words
-    'x=$(cat .env)', 'echo $(cat .env)', 'echo `cat .env`', 'cat $F', 'cat ${HOME}/x', "cat .e''nv", 'cat .e"nv"', 'cat .e\\nv', 'cat "unclosed',
-    "cat <<'EOF' > f\nbody\nEOF", 'cat <<< hi', 'x '.repeat(11_000), 'eval x', 'source ./x.sh', '. ./x.sh',
-    // a shell or interpreter without a plain script: a string, stdin, a pipe into it, xargs into it
-    "bash -c 'cat .env'", "sh -lc 'printenv'", 'bash -s < x.sh', 'bash x.sh', 'cat x.sh | sh', 'npm test | sh', 'curl x | bash', 'echo 1 | node', 'node -', 'node',
-    'node -pe 1', 'node --eval=1', 'node --input-type=module', "python3 -c 'print(open(\"/home/art/.ssh/id_ed25519\").read())'", 'python3 x.py', 'perl -e 1', 'ruby -e 1',
-    'xargs bash', 'ls | xargs cat', 'node /home/art/x.mjs', 'node ../x.mjs',
-    // not on the list: a file's contents, an account's
-    'cat README.md', 'git show HEAD:src/x.ts', 'git cat-file -p HEAD', 'git config --get user.email', 'gh auth status', 'gh secret list', 'npm config list', 'head README.md',
-  ];
-  for (const c of hides) assert.equal(outputShows(c), false, c.slice(0, 70));
-  const shows = ['npm test', 'npm test 2>&1 | tail -20', 'git status', 'git log --oneline -5', 'git -C ~/Code/loom diff --stat', 'ls -la src', 'ls src | wc -l', 'gh pr checks 603', 'gh pr view 1',
-    'nice -n 19 node --test test/x.test.mjs', 'node scripts/build.mjs', 'npx vitest run src/x.test.ts', 'npm --prefix web run build', 'python3 -m pytest -q', 'timeout 600 npm test',
-    'set -euo pipefail; npm test', 'export FOO=1 && npm test', 'cd ~/Code/loom && git status', 'npm test 2>&1 | grep -E "fail|pass"', 'systemctl --user status loom-http', 'journalctl --user -u loom -n 20'];
-  for (const c of shows) assert.equal(outputShows(c), true, c);
-  assert.deepEqual(plainWords("git commit -m 'a b' && npm test | tail").map((c) => [...c]), [['git', 'commit', '-m', 'a b'], ['npm', 'test'], ['tail']]);
-  assert.deepEqual(plainWords('a | b || c').map((c) => c.piped), [false, true, false]);
-  // Fails closed in the cards too: no body, its result line still.
-  const [e] = claudeCards([use('v', 'Bash', { command: 'env' }), res('v', `GH_TOKEN=${GH}\nHOME=/home/art`, { stdout: `GH_TOKEN=${GH}\nHOME=/home/art`, stderr: '' })]);
-  assert.deepEqual([e.body, e.result], [undefined, '2 lines of output']);
-  const [k] = codexCards([{ type: 'item.completed', item: { id: 'i', type: 'command_execution', command: "/usr/bin/bash -lc 'cat .env'", aggregated_output: 'A=PRIVATEVALUE', exit_code: 0, status: 'completed' } }], 'b:');
-  assert.equal(k.body, undefined);
-  const long = `echo start\n${'echo line\n'.repeat(600)}`;
-  const [c] = claudeCards([use('l', 'Bash', { command: long }), res('l', 'OUTPUT', { stdout: 'OUTPUT', stderr: '' })]);
-  assert.equal(c.body, undefined);
-  // A house's card whose detail was cut, or redacted, carries no body.
-  assert.equal(cleanCards([{ id: 'c', at: 'x', tool: 'Bash', summary: 's', state: 'done', detail: 'echo a\n… 40 lines not kept …\necho b', body: 'x' }])[0].body, undefined);
-  assert.equal(cleanCards([{ id: 'c', at: 'x', tool: 'Bash', summary: 's', state: 'done', detail: `echo ${GH}`, body: 'x' }])[0].body, undefined);
-});

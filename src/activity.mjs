@@ -13,11 +13,12 @@
 // in a label.
 // A card may also carry, for the owner's Watching view (t-2109; Jonathan, 2026-11-10: work done for him is shown in
 // full, only other people's words are kept out): `detail`, the step's whole command or target; `result`, one line of
-// fixed phrases (`Read 120 lines`, `3 additions, 1 removal`, `12 passed, 1 failed`, `exit 1`); `body`, a shell step's
-// whole output or an edit's diff, each line redacted (shownText), ANSI colours kept, at most MAX_BODY; `exit`; `limit`,
+// fixed phrases (`Read 120 lines`, `3 additions, 1 removal`, `12 passed, 1 failed`, `exit 1`); `body`, an edit's diff
+// of a file that isn't private, each line redacted (shownText), at most MAX_BODY; `exit`; `limit`,
 // the step's own timeout in seconds; `end`, when it finished; `parent`, the helper (subagent) it ran under; and for a
 // plan, `items`, its checklist. The body's own words between steps are a `text` card (tool `text`), which delivery
-// shows only for a conversation that acts for the owner alone. A read shows its line count, never what it read.
+// shows only for a conversation that acts for the owner alone. A read shows its line count, never what it read; a shell
+// step's output is read only for its fixed phrases and never kept or sent (showing it on demand is its own task).
 import { createHash } from 'node:crypto';
 import { commandLabel, cutInput, cutTo, failWhy, fileName, GONE, INPUT_MAX, part, PRIVATE_FILE, privateFile, privateWords, redact, UNPRINTABLE, UNPRINTABLE_ONE } from './redact.mjs';
 
@@ -335,154 +336,6 @@ function claudeDetail(name, i) {
   }
 }
 
-/** The most of a command that's scanned; past it, the command can't be read whole, so its output never shows. */
-const SCAN_MAX = 20_000;
-/** Programs that print the environment, aliases or secrets: wherever they appear, the output doesn't show. */
-const DUMPS = new Set(['env', 'printenv', 'compgen', 'alias']);
-/** Programs that print what they're given, and a word that names a secret's file without a path (`cat token`). */
-const READERS = new Set(['cat', 'less', 'more', 'head', 'tail', 'grep', 'egrep', 'fgrep', 'rg', 'bat', 'strings', 'xxd', 'od', 'hexdump', 'base64', 'sed', 'awk', 'jq', 'yq', 'tac', 'nl', 'sort', 'uniq', 'cut', 'tee', 'diff', 'cmp', 'wc']);
-const SECRET_FILE_WORD = /secret|token|passw|credential|\bcreds?\b|api[_-]?key|private|auth|\.pem\b|\.key\b|\.p12\b|\.pfx\b|\.netrc|\.env\b|htpasswd|keychain|wallet/i;
-/** Wrappers a stage may run under; every option of theirs, and a number or a duration after them, are skipped. */
-const WRAPPERS = new Set(['nice', 'timeout', 'time', 'nohup', 'stdbuf', 'ionice']);
-/** Steps that print nothing of a file's: allowed anywhere in a chain. */
-const QUIET = new Set(['cd', 'true', 'false', 'sleep', 'mkdir', 'test', '[', ']', 'pwd']);
-/** Filters that print only what they're piped (no file of their own), and their options that take a value. */
-const FILTERS = { head: ['-n', '-c'], tail: ['-n', '-c'], grep: ['-e', '-m', '-A', '-B', '-C', '--max-count'], egrep: ['-e', '-m', '-A', '-B', '-C'], sort: ['-k', '-t'], uniq: [], wc: [], cut: ['-d', '-f', '-c'] };
-/** How many words a filter takes that aren't files (grep's pattern). */
-const FILTER_WORDS = { grep: 1, egrep: 1 };
-const TEST_TOOLS = new Set(['vitest', 'tsc', 'eslint', 'prettier', 'playwright', 'jest', 'pytest']);
-const PLAIN_TOOLS = new Set(['ls', 'wc', 'du', 'df', 'ps', 'uptime', 'date', 'make', 'cargo', 'journalctl', 'echo', ...TEST_TOOLS]);
-
-/** A stage's subcommand: its first word that isn't an option (nor the value of one that takes one), and what follows. */
-function subOf(args, valued = []) {
-  for (let i = 0; i < args.length; i++) {
-    if (valued.includes(args[i])) { i++; continue; }
-    if (!args[i].startsWith('-')) return { sub: args[i], rest: args.slice(i + 1) };
-  }
-  return { sub: '', rest: [] };
-}
-
-/** A script path a runtime may run: relative, inside the work, plain, a script's extension, not private. */
-const scriptPath = (p) => !!p && !/^[/~]|(^|\/)\.\.(\/|$)/.test(p) && /\.(?:m?js|cjs|ts|mts)$/.test(p) && !privateFile(p);
-
-/** Whether one stage, its words already checked, is on the allowlist: its output is work, not a file's contents. */
-function allowed(prog, args, piped) {
-  if (QUIET.has(prog)) return true;
-  if (prog === 'set') return args.length > 0 && args.every((a) => /^[-+][a-zA-Z]+$/.test(a) || a === 'pipefail');
-  if (prog === 'export') return args.length > 0 && args.every((a) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(a));
-  if (Object.hasOwn(FILTERS, prog)) {
-    if (!piped) return false; // a filter given no pipe reads a file of its own
-    let words = 0;
-    for (let i = 0; i < args.length; i++) {
-      if (FILTERS[prog].includes(args[i])) { i++; continue; }
-      if (args[i].startsWith('-')) continue;
-      words++;
-    }
-    return words <= (FILTER_WORDS[prog] ?? 0);
-  }
-  if (PLAIN_TOOLS.has(prog)) return true;
-  if (prog === 'git') { const { sub } = subOf(args, ['-C', '-c', '--git-dir', '--work-tree']); return !!sub && !['show', 'cat-file', 'config', 'credential', 'archive', 'cat', 'bundle'].includes(sub); }
-  if (prog === 'gh') { const { sub } = subOf(args, ['-R', '--repo']); return !!sub && !['auth', 'secret', 'ssh-key', 'gpg-key', 'config', 'variable', 'extension', 'alias'].includes(sub); }
-  if (['npm', 'pnpm', 'yarn'].includes(prog)) {
-    const { sub, rest } = subOf(args, ['--prefix', '-C', '--dir']);
-    if (['run', 'run-script', 'test', 't', 'ci', 'install', 'i'].includes(sub)) return true;
-    if (sub === 'exec') return TEST_TOOLS.has(subOf(rest).sub);
-    return false;
-  }
-  if (prog === 'npx') return TEST_TOOLS.has(subOf(args, ['-p', '--package']).sub);
-  if (prog === 'node') {
-    if (piped) return false; // a runtime reading its stdin
-    // Any flag that runs a string or reads stdin, however it's spelled (-e, -pe, --eval=…, --input-type, -).
-    if (args.some((a) => a === '-' || /^-[a-zA-Z]*[epi]/.test(a) && !a.startsWith('--') || /^--(?:eval|print|interactive|input-type|experimental-repl)/.test(a))) return false;
-    return scriptPath(subOf(args, ['-r', '--require', '--import', '--loader', '--test-name-pattern', '--test-reporter']).sub);
-  }
-  if (prog === 'python' || prog === 'python3') return !piped && args[0] === '-m' && ['pytest', 'unittest'].includes(args[1]);
-  if (prog === 'systemctl') return ['status', 'is-active', 'is-enabled', 'list-units', 'list-timers'].includes(subOf(args, ['-M', '-H']).sub);
-  if (prog === 'docker') return ['ps', 'logs'].includes(subOf(args, ['-H', '--context']).sub);
-  if (prog === 'go') return ['test', 'build', 'vet'].includes(subOf(args).sub);
-  return false;
-}
-
-/**
- * A command line as plain words, by commands (split at ; & | && || and line breaks), dequoted here: a word wholly in
- * single quotes, wholly in double quotes with no $ or \ in it, or bare. Null when it can't be read that way, which
- * fails closed (its output doesn't show): a $( or a backtick, a $ or a \ anywhere, a quote inside a word, a heredoc or
- * herestring (<<), an unclosed quote, or more than SCAN_MAX.
- */
-export function plainWords(command) {
-  const s = String(command ?? '');
-  if (s.length > SCAN_MAX || /\$|`|\\|<</.test(s) || UNPRINTABLE_ONE.test(s.replace(/[\t\n\r]/g, ' '))) return null;
-  const out = [];
-  let cur = [], i = 0, piped = false;
-  const end = () => { if (cur.length) { cur.piped = piped; out.push(cur); } cur = []; piped = false; };
-  while (i < s.length) {
-    const ch = s[i];
-    if (/[;&|\n\r]/.test(ch)) {
-      // A stage after a single | reads the one before it (a pipe); after ; & && || or a line break it's a new command.
-      const pipe = ch === '|' && s[i + 1] !== '|' && s[i - 1] !== '|';
-      end(); i++; if (pipe) piped = true; continue;
-    }
-    if (/\s/.test(ch)) { i++; continue; }
-    if (/[()<>{}]/.test(ch)) { cur.push(ch); i++; continue; }
-    if (ch === "'" || ch === '"') {
-      const close = s.indexOf(ch, i + 1);
-      if (close < 0) return null;
-      const next = s[close + 1];
-      if (next !== undefined && !/[\s;&|()<>]/.test(next)) return null; // a quote inside a word
-      cur.push(s.slice(i + 1, close));
-      i = close + 1;
-      continue;
-    }
-    let j = i;
-    while (j < s.length && !/[\s;&|()<>{}]/.test(s[j])) { if (s[j] === "'" || s[j] === '"') return null; j++; }
-    cur.push(s.slice(i, j));
-    i = j;
-  }
-  end();
-  return out;
-}
-
-/**
- * Whether a shell step's output may show (t-2109; Jonathan, 2026-11-10: his work in full, a secret still a secret).
- * An allowlist, fail-closed: (1) the command reads as plain words (plainWords); (2) no word or `=` value names a
- * private file (redact.mjs privateFile) or is a glob (* ? [) or an environ, nothing prints the environment, aliases or
- * variables (DUMPS, anywhere), and no reader is given a file named like a secret's (`cat token`); (3) every stage of
- * every chain and pipeline is on the allowlist (allowed). Anything else shows its command, exit code and fixed-phrase
- * result, never its output. What does show is still redacted (shownText).
- */
-export function outputShows(command) {
-  // A file descriptor's copy (2>&1, >&2) is no command of its own.
-  const cmds = plainWords(String(command ?? '').replace(/\d*>&\d+/g, ' ').replace(/&>/g, ' > '));
-  if (!cmds || !cmds.length) return false;
-  for (const raw of cmds) {
-    for (const w of raw) {
-      const parts = [w, ...w.split('=').slice(1)];
-      if (parts.some((x) => x && (privateFile(x) || /[*?[]/.test(x) || /environ/.test(x)))) return false;
-      if (DUMPS.has(w.split('/').pop())) return false;
-    }
-    // Redirections: a file read in (`< f`) is checked as a reader's; a file written to holds no output here.
-    const ws = [];
-    for (let i = 0; i < raw.length; i++) {
-      if (raw[i] === '<' || raw[i] === '>') {
-        if (raw[i] === '<') { if (SECRET_FILE_WORD.test(raw[i + 1] ?? '')) return false; }
-        if (/^\d$/.test(ws.at(-1) ?? '')) ws.pop();
-        i++;
-        continue;
-      }
-      if (['(', ')', '{', '}'].includes(raw[i])) return false;
-      ws.push(raw[i]);
-    }
-    let i = 0;
-    while (i < ws.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(ws[i])) i++;
-    if (i === ws.length) continue; // assignments alone
-    while (i < ws.length && WRAPPERS.has(ws[i].split('/').pop())) { i++; while (i < ws.length && (ws[i].startsWith('-') || /^\d+(?:\.\d+)?[smhd]?$/.test(ws[i]))) i++; }
-    const prog = (ws[i] ?? '').split('/').pop(), args = ws.slice(i + 1);
-    if (READERS.has(prog) && args.some((a) => !a.startsWith('-') && SECRET_FILE_WORD.test(a))) return false;
-    if (!allowed(prog, args, raw.piped === true)) return false;
-  }
-  return true;
-}
-
 /** Whether a file's contents must never show: no path, a private one, or one whose shown name isn't plain. */
 function hidden(path) {
   if (typeof path !== 'string' || !path) return true;
@@ -504,11 +357,10 @@ function claudeResult(name, r, text, failed, exit, input = {}) {
   const shows = !hidden(input.file_path ?? input.notebook_path);
   switch (name) {
     case 'Bash': {
+      // A shell step's output is read only for its fixed phrases (exit code, test counts, how many lines), never kept or
+      // sent (t-2109: showing it on demand is its own task).
       const output = typeof u.stdout === 'string' || typeof u.stderr === 'string' ? [u.stdout, u.stderr].filter(Boolean).join('\n') : text;
-      // A command that can't be read whole, or names a private file, or prints the environment (outputShows) shows its
-      // result line, never its output.
-      const body = !outputShows(input.command) || String(input.command ?? '').length > MAX_DETAIL ? '' : shownText(output);
-      return { result: shellResult({ exit, output, failed }), ...(body ? { body } : {}) };
+      return { result: shellResult({ exit, output, failed }) };
     }
     case 'Read': { const n = count(u.file?.numLines); return n === null ? {} : { result: `Read ${plural(n, 'line')}` }; }
     case 'Edit': case 'MultiEdit': { const p = patchLine(u.structuredPatch), body = shows ? patchText(u.structuredPatch) : ''; return p ? { result: p, ...(body ? { body } : {}) } : {}; }
@@ -627,8 +479,6 @@ export function codexCards(events, prefix = '') {
       if (item.type === 'command_execution') {
         if (Number.isInteger(item.exit_code) && Math.abs(item.exit_code) < 1e6) card.exit = item.exit_code;
         card.result = clean(redact(shellResult({ exit: item.exit_code, output: item.aggregated_output, failed: card.state === 'failed' })));
-        const body = !outputShows(unwrapShell(item.command)) || unwrapShell(item.command).length > MAX_DETAIL ? '' : shownText(item.aggregated_output);
-        if (body) card.body = body;
       } else if (item.type === 'file_change' && Array.isArray(item.changes)) card.result = `${plural(item.changes.length, 'file')} changed`;
     }
   }
@@ -683,12 +533,10 @@ export function stepParts(c, idOf = (x) => x) {
   return o;
 }
 
-const SHELL = new Set(['Bash', 'command_execution']);
 const DIFFS = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit']);
 /** Whether a card of this tool, with this (gated) target, may carry a body: the same rule the cards made here follow. */
 function bodyAllowed(tool, detail) {
   if (tool === 'text') return true;
-  if (SHELL.has(tool)) return !!detail && outputShows(detail) && !detail.includes(PRIVATE_FILE) && !detail.includes(GONE);
   if (DIFFS.has(tool)) return !!detail && detail !== PRIVATE_FILE && detail !== GONE && !hidden(detail);
   return false;
 }
