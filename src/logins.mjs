@@ -409,6 +409,13 @@ export function lastRefusal(harness, text) {
     try { v = JSON.parse(line); } catch { continue; }
     const got = read(v);
     if (got) { last = got; continue; }
+    // A later explicit non-quota failure supersedes the earlier quota error.
+    // Generic completion bookkeeping without an error code does not: the CLI
+    // may wrap the same refusal in a result/turn.failed carrying only prose.
+    if (harness === 'claude' && v?.error !== undefined &&
+      (v?.type === 'assistant' && v.isApiErrorMessage === true || v?.type === 'result' && v.is_error === true)) last = null;
+    const payload = v?.type === 'event_msg' ? v.payload : v;
+    if (harness === 'codex' && payload?.type === 'error' && payload.codex_error_info !== undefined) last = null;
     // Work after it (an assistant's real answer, a tool call), or a later turn's start (a prompt): that refusal didn't
     // end the last turn. A session's file holds every turn it had, and one that dies with no output must not inherit
     // an earlier turn's refusal.

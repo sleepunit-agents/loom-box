@@ -127,3 +127,11 @@ test('a recovered refusal followed by an unrelated failure is not quota-retried'
  await assert.rejects(runOneShot(env,{input:'p',cwd:env.HOME},{warn:()=>{},call:async(p)=>{if(p==='oneshot-refused')held=true;return {model:'m',harness:'codex'};},run:async()=>{runs++;return {status:1,stdout:[{type:'error',codex_error_info:'usage_limit_exceeded'},{type:'item.completed',item:{type:'agent_message',text:'recovered'}},{type:'turn.failed',error:{message:'unrelated failure'}}].map(JSON.stringify).join('\n')};}}),/failed/);
  assert.equal(runs,1);assert.equal(held,false);
 });
+test('a later structured non-quota failure supersedes a quota refusal without an answer',async()=>{
+ for(const harness of ['claude','codex']){
+  const env=setup();mkdirSync(join(env.HOME,'.codex'));writeFileSync(join(env.HOME,'.codex','auth.json'),'{}');let runs=0,held=false;
+  const events=harness==='claude'?[{type:'assistant',isApiErrorMessage:true,error:'rate_limit'},{type:'assistant',isApiErrorMessage:true,error:'server_error'},{type:'result',is_error:true,error:'server_error'}]:[{type:'event_msg',payload:{type:'error',codex_error_info:'usage_limit_exceeded'}},{type:'event_msg',payload:{type:'error',codex_error_info:'server_error'}},{type:'turn.failed',error:{message:'failed'}}];
+  await assert.rejects(runOneShot(env,{input:'p',cwd:env.HOME},{warn:()=>{},call:async(p)=>{if(p==='oneshot-refused')held=true;return {model:'m',harness};},run:async()=>{runs++;return {status:1,stdout:events.map(JSON.stringify).join('\n')};}}),/failed/);
+  assert.equal(runs,1);assert.equal(held,false);
+ }
+});
