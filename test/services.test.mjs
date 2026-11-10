@@ -333,4 +333,6 @@ test('from a house, down reaches only itself or a task it started: another\'s is
   assert.equal(ok(call(me, 'down', { id: 'h-924' })).state, 'stopping');
   assert.equal(ok(call(me, 'down', { id: 'h-921' })).state, 'stopping');
   assert.deepEqual(ok(call(me, 'list')).remotes, []);
+  // A task it started, it sees whole (its task, its note), as it may stop it.
+  assert.equal(ok(call(me, 'list')).houses.find((h) => h.id === 'h-924').task, 'my sub-task');
 });

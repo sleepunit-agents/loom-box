@@ -660,7 +660,7 @@ export function list(env, caller) {
     .slice(0, 50)
     // Whose work each body host's house is for (t-1952) is the owner's to read: a body in one of them never learns who
     // steers its agent's other conversations, nor their ids.
-    .map((h) => (caller.kind === 'agent' && typeof caller.house === 'string' && h.id !== caller.house ? houseBrief(h) : houseView(h, { seat: caller.kind === 'owner' })));
+    .map((h) => (caller.kind === 'agent' && typeof caller.house === 'string' && h.id !== caller.house && h.taskFromHouse !== caller.house ? houseBrief(h) : houseView(h, { seat: caller.kind === 'owner' })));
   // Boxes are the household's: its owner sees them all, with their grants; anyone else, the live ones that may host their agents.
   const mine = caller.kind === 'agent' ? [caller.agent] : Array.isArray(caller.agents) ? caller.agents : null;
   const boxes = Object.entries(s.boxes)
