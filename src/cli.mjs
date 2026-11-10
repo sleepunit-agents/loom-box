@@ -108,6 +108,8 @@
 //   loom runtime relays [--thread r-…]                  from a house: its agent's relays, sent and received
 // A body's own place (gates-api.mjs, placeOf; t-1745): proved by its run key and session, in a house or on loom's machine
 //   loom runtime place                                   {conversation, agent, venue, place, label?, members, membersAt?, principal}
+// A file someone sent the body's conversation (files.mjs, t-1961): fetched by the venue's adapter, proved as `place` is
+//   loom runtime file <id> [--out PATH]                  {path, name, size, sha256}; the id is the one its message names
 // The now board (nowboard.mjs): a bridge's POST /api/runtime/now/snapshot | now/event, and from a house:
 //   loom runtime now talking                            its agent's bridges: talking, waiting, how fresh
 // For loom (the piece contract):
@@ -118,6 +120,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
 import { closeSync, openSync, readSync, writeSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 
 /**
  * The owner, at a terminal: the controlling terminal (/dev/tty, not stdin, which a caller can pipe) asks `prompt`, and
@@ -673,6 +676,39 @@ async function main(argv, env) {
       const r = await placeOf(env, mine, bodyProof(env, mine));
       if (!r.ok) throw new Fail(r.reason);
       return out(r.place);
+    }
+    case 'file': {
+      // A file someone sent this body's conversation (files.mjs, t-1961), proved as `place` is: saved to --out, or
+      // under its own name here (never over a file that's there). In a house through the piece API, on loom's machine here.
+      const id = rest.find((x, i) => !x.startsWith('--') && rest[i - 1] !== '--out' && rest[i - 1] !== '--piece');
+      if (!id) throw new Fail('usage: loom runtime file <id> [--out PATH]   (the id is the one its message names)', 2);
+      const mine = ownConversation(env);
+      if (!mine) throw new Fail('loom runtime file: can\'t tell this body\'s own conversation (none mapped for its session, or none in its environment)', 2);
+      const proof = bodyProof(env, mine);
+      const argvOf = (part) => ['file', '--conversation', mine, '--id', id, '--part', String(part)];
+      let ask;
+      if (env.LOOM_URL && env.LOOM_TOKEN_FILE) ask = (part) => pieceCall(env, flag(rest, '--piece'))('run', { argv: argvOf(part), ...proof });
+      else {
+        const { loadConv } = await import('./delivery.mjs');
+        const { runFor } = await import('./gates-api.mjs');
+        const caller = { kind: 'agent', agent: loadConv(env, mine)?.agent };
+        ask = (part) => runFor(env, caller, argvOf(part), undefined, undefined, undefined, proof);
+      }
+      const chunks = [];
+      let first;
+      for (let part = 0; !first || part < first.parts; part++) {
+        const r = await ask(part);
+        if (r.exit || r.ok === false || !r.stdout) throw new Fail((r.stderr || r.reason || r.error || 'loom runtime file: no answer').trim(), r.exit || 1);
+        const a = JSON.parse(r.stdout);
+        if (first && (a.sha256 !== first.sha256 || a.parts !== first.parts)) throw new Fail('loom runtime file: the file changed while it came; ask again');
+        first ??= a;
+        chunks.push(Buffer.from(a.data, 'base64'));
+      }
+      const data = Buffer.concat(chunks);
+      if (data.length !== first.size || createHash('sha256').update(data).digest('hex') !== first.sha256) throw new Fail('loom runtime file: what came isn\'t the whole file; ask again');
+      const dest = flag(rest, '--out') ?? first.name;
+      writeFileSync(dest, data, { flag: 'wx', mode: 0o600 });
+      return out({ path: realpathSync(dest), name: first.name, size: first.size, sha256: first.sha256 });
     }
     case 'relays':
     case 'relay': {
