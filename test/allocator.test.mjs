@@ -168,3 +168,17 @@ test('enforced: an account with no reading (an API key) is admitted but never ch
   assert.equal(resolveModel({ agent: 'art', kind: 'spawn', models: [CLAUDE], accounts: { accounts: [key, sub] }, gate, now: NOW }).accountKey, 'sub');
   assert.equal(resolveModel({ agent: 'art', kind: 'spawn', models: [CLAUDE], accounts: { accounts: [key] }, gate, now: NOW }).accountKey, 'key');
 });
+
+test('enforced: a held-back login never hands the job to a metered key; the next model is tried instead', () => {
+  const sub = login('sub', 'anthropic', { '7d': 0.93, reset_7d: S + 3 * 86400, checked: S });
+  const key = { ...login('key', 'anthropic', {}), kind: 'api-key' };
+  const pro = login('pro', 'openai', { '7d': 0.2, reset_7d: S + 3 * 86400, checked: S });
+  const gate = capacityGate({ kind: 'agent', now: NOW });
+  const r = resolveModel({ agent: 'art', kind: 'spawn', models: [CLAUDE, CODEX], settings: { prefer: ['opus'] }, accounts: { accounts: [sub, key, pro] }, gate, now: NOW });
+  assert.equal(r.model, 'sol');
+  let e;
+  try { resolveModel({ agent: 'art', kind: 'spawn', models: [CLAUDE], accounts: { accounts: [sub, key] }, gate, now: NOW }); } catch (x) { e = x; }
+  assert.equal(e?.reserved, true, 'waits, rather than spend on the key');
+  assert.equal(startKind({ spawn: { interactive: true } }), 'live', 'a terminal session has a person at it');
+  assert.equal(capacityGate({ kind: 'agent', jobsOn: () => 5, now: NOW })(login('max', 'anthropic', { '5h': 0.8, reset_5h: S + 3600, checked: S })).allow, false);
+});

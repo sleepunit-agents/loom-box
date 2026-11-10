@@ -1697,10 +1697,12 @@ const RESERVE_RECHECK_MS = 15 * 60_000;
  * Worker bodies held now, by the account they draw on (their body record's account key): what's in flight against
  * each account, for admission and for the readings history. A body whose record can't be read counts on `unknown`.
  */
-function workerBodiesByAccount(env) {
+function workerBodiesByAccount(env, except) {
   const on = {};
   for (const c of listConvs(env)) {
-    if (!c.body || startKind(c) === 'live') continue;
+    if (c.conversation === except || startKind(c) === 'live') continue;
+    // One mid-start has no body record yet: which account it will draw on isn't known, so it counts on every one.
+    if (!c.body) { if (c.starting) on.unknown = (on.unknown ?? 0) + 1; continue; }
     let key = 'unknown';
     try { key = readBody(env, c.body).accountKey ?? 'unknown'; } catch { /* unreadable: unknown */ }
     on[key] = (on[key] ?? 0) + 1;
@@ -1714,7 +1716,9 @@ function workerGate(env, c, d) {
   if (kind === 'live') return null;
   try { if (allocatorOf(load(env)).mode !== 'enforce') return null; } catch { return null; }
   const dir = deliveryDir(env);
-  return capacityGate({ kind, jobsOn: workerBodiesByAccount(env), burnOf: (name) => forecastBurn(readReadings(dir, name)), now: d.now().getTime() });
+  const on = workerBodiesByAccount(env, c.conversation);
+  const unknown = on.unknown ?? 0;
+  return capacityGate({ kind, jobsOn: (name) => (on[name] ?? 0) + unknown, burnOf: (name) => forecastBurn(readReadings(dir, name)), now: d.now().getTime() });
 }
 
 /** The one conversation commit for a native start or its recovered receipt.
@@ -1726,8 +1730,11 @@ function shadowAdmission(env, c, r, at, enforced = false) {
     const a = list.find((x) => x.name === r.accountKey);
     if (!a) return;
     const kind = startKind(c);
+    // A start the gate admitted: logged as that, not recomputed here over every window (another model's own window
+    // would read as a deferral that never happened).
+    if (enforced) { logShadow(deliveryDir(env), { at: new Date(nowMs).toISOString(), kind, agent: c.agent, account: a.name, model: r.model, decision: 'allow', why: 'admitted by the gate at its start', enforced: true, ...(c.spawn ? { job: c.conversation } : {}) }); return; }
     const v = admit({ usage: a.usage, kind, burn: forecastBurn(readReadings(deliveryDir(env), a.name)), now: nowMs });
-    logShadow(deliveryDir(env), { at: new Date(nowMs).toISOString(), kind, agent: c.agent, account: a.name, model: r.model, decision: v.allow ? 'allow' : 'defer', why: v.why, windows: v.windows, ...(enforced ? { enforced: true } : {}), ...(c.spawn ? { job: c.conversation } : {}) });
+    logShadow(deliveryDir(env), { at: new Date(nowMs).toISOString(), kind, agent: c.agent, account: a.name, model: r.model, decision: v.allow ? 'allow' : 'defer', why: v.why, windows: v.windows, ...(c.spawn ? { job: c.conversation } : {}) });
   } catch { /* a shadow log line, never a reason a start fails */ }
 }
 

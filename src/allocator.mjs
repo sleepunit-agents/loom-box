@@ -99,7 +99,7 @@ export function readShadow(dir) {
  * Slice 1b: the readings history forecastBurn needs. One line per account each time its reading is newer (`checked`),
  * {at, account, usage: {window: fraction}, jobs}: `jobs` is how many worker bodies (spawned jobs, wakes) were held when
  * it was recorded: a number for every account, or (account name) -> number, that account's (slice 3: by the body
- * record's account key, with bodies of no known account counted on every account). Fractions
+ * record's account key, with bodies of no known account, or still starting, counted on every account). Fractions
  * and counts only, never a brief or a name beyond the account's. Bounded like the shadow log: past `maxBytes` it turns
  * over to .1, so about two files of history (a few weeks at one reading per account every few minutes).
  */
@@ -151,7 +151,7 @@ export function allocatorOf(s) {
   return { mode: MODES.includes(a.mode) ? a.mode : 'shadow', ...(a.changed ? { changed: a.changed } : {}) };
 }
 
-/** The owner turns enforcement on or off (the runtime page, `loom runtime allocator`). */
+/** The owner turns enforcement on or off (the runtime page's Worker capacity; no CLI changes it). */
 export function setAllocatorMode(s, { mode, by = 'owner', at = new Date().toISOString() }) {
   if (!MODES.includes(mode)) throw new Error(`the allocator's mode is ${MODES.join(' or ')}`);
   s.allocator = { mode, changed: { at, by } };
@@ -159,13 +159,14 @@ export function setAllocatorMode(s, { mode, by = 'owner', at = new Date().toISOS
 }
 
 /** Which kind of start a conversation's is, for admission: a spawned job, a wake, or a live conversation. */
-export const startKind = (c) => (c?.spawn ? 'agent' : c?.venue === 'wake' ? 'scheduled' : 'live');
+// An interactive terminal session is made as a spawn (sessionhost.mjs) but has a person at it: live, never held back.
+export const startKind = (c) => (c?.spawn && !c.spawn.interactive ? 'agent' : c?.spawn ? 'live' : c?.venue === 'wake' ? 'scheduled' : 'live');
 
 /**
  * The gate models.mjs asks of each account with room, for one new worker start: (account, model's own window?) ->
  * admit()'s verdict. Its
  * estimate is JOB_ESTIMATE per window; in flight is the worker bodies held on that account now (`jobsOn`, by account
- * key) each at the same guess. `burnOf(account name)` is forecastBurn's answer for it. Live starts get no gate.
+ * key: an object, or (name) -> count) each at the same guess. `burnOf(account name)` is forecastBurn's answer for it. Live starts get no gate.
  */
 export function capacityGate({ kind, jobsOn = {}, burnOf = () => ({}), now = Date.now(), floor, margin }) {
   if (kind === 'live') return null;
@@ -182,7 +183,7 @@ export function capacityGate({ kind, jobsOn = {}, burnOf = () => ({}), now = Dat
     // Held back on "unknown is not room", it would wait forever and say nothing.
     if (!ws.length) return { allow: true, kind, windows: [], why: 'no usage reading for this account: not gated, as its quota isn\'t' };
     const estimate = Object.fromEntries(ws.map((w) => [w, estimateFor(w)]));
-    const n = jobsOn[account.name] ?? 0;
+    const n = (typeof jobsOn === 'function' ? jobsOn(account.name) : jobsOn[account.name]) ?? 0;
     const inFlight = Object.fromEntries(ws.map((w) => [w, n * estimateFor(w)]));
     let burn = {};
     try { burn = burnOf(account.name) ?? {}; } catch { burn = {}; }

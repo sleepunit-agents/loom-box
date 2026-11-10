@@ -286,7 +286,11 @@ function resolveRoom({ agent, m, accounts, now, gate }) {
     const seen = roomy.map((a) => ({ a, v: gate(a, m.window) }));
     // An account with no reading (an API key, say) is admitted but ranked last: never ahead of a measured login.
     const tightest = (v) => (v.windows.length ? Math.max(...v.windows.map((r) => r.after + r.reserve)) : Infinity);
-    const ok = seen.filter((x) => x.v.allow).sort((x, y) => { const a = tightest(x.v), b = tightest(y.v); return a < b ? -1 : a > b ? 1 : 0; });
+    // An account with no reading is admitted only while no measured account of this model is being held back: else
+    // holding back the subscription would hand the job to a metered key (an API key never has a reading) instead of
+    // the next model, or a wait.
+    const held = seen.some((x) => !x.v.allow);
+    const ok = seen.filter((x) => x.v.allow && (x.v.windows.length || !held)).sort((x, y) => { const a = tightest(x.v), b = tightest(y.v); return a < b ? -1 : a > b ? 1 : 0; });
     if (ok.length) {
       const pick = ok[0].a;
       return { ok: true, account: pick.label ?? pick.name, accountKey: pick.name, admission: ok[0].v.why };
