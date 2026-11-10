@@ -37,7 +37,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { listConvs } from './delivery.mjs';
-import { boxUp, outdatedHouse, preferenceOf, up } from './control.mjs';
+import { boxUp, drillOf, outdatedHouse, preferenceOf, up } from './control.mjs';
 import { pieceName } from './piece.mjs';
 import { bodyBox } from './placement.mjs';
 import { isParts } from './briefs.mjs';
@@ -871,9 +871,11 @@ export class HouseRunner {
     const at = bodyBox(s, agent, this.harness, this.env, nowMs);
     // Only to a box the owner listed for it: an agent with one primary keeps waiting for that box, as it always did.
     const pref = preferenceOf(s, agent, this.env);
-    if (!at.box || at.box === where || !boxUp(s.boxes?.[at.box], nowMs) || !pref.includes(at.box)) return false;
+    if (!at.box || at.box === where || !boxUp(s.boxes?.[at.box], nowMs, agent) || !pref.includes(at.box)) return false;
     const name = (id) => s.boxes?.[id]?.name ?? id;
-    if (quiet && !boxUp(s.boxes?.[where], nowMs)) return this.drain(agent, house, seat, `its box ${name(where)} went quiet; new bodies go to ${name(at.box)}`);
+    // A drill of its box for this agent (control.mjs drillOf) stands for its host going quiet: its houses there drain too.
+    quiet ||= !!drillOf(s.boxes?.[where], nowMs, agent);
+    if (quiet && !boxUp(s.boxes?.[where], nowMs, agent)) return this.drain(agent, house, seat, `its box ${name(where)} went quiet; new bodies go to ${name(at.box)}`);
     const rank = (id) => { const i = pref.indexOf(id); return i < 0 ? Infinity : i; };
     if (rank(at.box) < rank(where)) return this.drain(agent, house, seat, `${name(at.box)} is ahead of ${name(where)} in ${agent}'s boxes; new bodies go there`);
     return false;

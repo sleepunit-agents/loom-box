@@ -24,6 +24,10 @@
 //   loom runtime health [<box>] [--json]                       each box's last health sample and what's wrong now
 //   loom runtime always-on <box> on|off                        silent 10 minutes is an alert (loom's own and report-only boxes always are)
 //   loom runtime report-only <box> on|off                      it reports its numbers and hosts nothing
+//   loom runtime drill dark <box> --agent a [--house h]... [--for 15m]   a failover test: the box counts as dark for that
+//                                                         agent (its bodies drain to the next box up; the owner is asked
+//                                                         to write off the named houses, on a card that says it's a drill)
+//   loom runtime drill end <box>                               the box is taken as it is again (a drill ends by itself too)
 //   loom runtime remote up <agent> [--box b] [--dir /path]     a box session: Claude's remote-control on the box itself,
 //                                                         in the agent's folder there (the box's whole reach; take it down after)
 //   loom runtime remote down <agent>
@@ -135,7 +139,7 @@ function ownerAtTerminal(prompt, want) {
     return !!want && line.trim() === want;
   } finally { closeSync(fd); }
 }
-import { addBox, api, down, list, remoteDown, remoteUp, revokeBox, setAgent, setBoxWatch, setPrimary, up } from './control.mjs';
+import { addBox, api, down, list, remoteDown, remoteUp, endDrill, revokeBox, setAgent, setBoxWatch, setDrill, setPrimary, up } from './control.mjs';
 import { watchOf } from './watch.mjs';
 import { healthWords } from './health.mjs';
 import { realEffects } from './effects.mjs';
@@ -322,6 +326,13 @@ async function main(argv, env) {
       if (!box || !['on', 'off'].includes(v)) throw new Fail(`usage: loom runtime ${cmd} <box> on|off`, 2);
       out(setBoxWatch(env, realEffects(env), { name: box, [cmd === 'always-on' ? 'alwaysOn' : 'reportOnly']: v }));
       return;
+    }
+    case 'drill': {
+      const [sub, box] = positional(rest);
+      if (sub === 'end' && box) return out(endDrill(env, realEffects(env), { name: box }));
+      const len = /^([0-9]{1,3})m$/.exec(flag(rest, '--for') ?? '15m');
+      if (sub !== 'dark' || !box || !flag(rest, '--agent') || !len) throw new Fail('usage: loom runtime drill dark <box> --agent a [--house h]... [--for 15m] | drill end <box>', 2);
+      return out(setDrill(env, realEffects(env), { name: box, agent: flag(rest, '--agent'), houses: flags(rest, '--house'), forMs: +len[1] * 60_000 }));
     }
     case 'health': {
       const [box] = positional(rest);

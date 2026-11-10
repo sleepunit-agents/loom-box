@@ -118,9 +118,64 @@ export const mayHost = (box, agent, members) => !box.revoked && (box.mayHost ===
 /** How long a box may go unheard before placement passes it by (a box polls every 15 s: eight missed polls). */
 export const PLACE_UP_MS = 2 * 60_000;
 
-/** Whether placement counts a box as up: loom's own always; another heard from in PLACE_UP_MS, hosting, not revoked. */
-export const boxUp = (b, nowMs = Date.now()) => !!b && !b.revoked && !b.reportOnly
-  && (!!b.local || (!!b.lastSeen && nowMs - Date.parse(b.lastSeen) <= PLACE_UP_MS));
+/** Whether placement counts a box as up: loom's own always; another heard from in PLACE_UP_MS, hosting, not revoked.
+ * With `agent`, a drill of that box for that agent (drillOf) counts it as long silent. */
+export const boxUp = (b, nowMs = Date.now(), agent) => !!b && !b.revoked && !b.reportOnly
+  && (!!b.local || (!!heardAt(b, nowMs, agent) && nowMs - Date.parse(heardAt(b, nowMs, agent)) <= PLACE_UP_MS));
+
+/** A drill's longest run, and its default: it ends by itself (t-2057). */
+export const DRILL_MAX_MS = 60 * 60_000;
+export const DRILL_DEFAULT_MS = 15 * 60_000;
+
+/**
+ * The owner's rehearsal of a box going dark for one agent (t-2057), set from loom's machine (`loom runtime drill`), or
+ * null when there's none or it's over. While it runs, the runtime takes that box as silent since WRITE_OFF_AFTER_MS
+ * before the drill began, for that agent only: placement passes it by (its bodies there drain to the next box up), and
+ * the drill's houses, and only they, count as unheard, so the owner gets the write-off card for them, marked as a drill.
+ * The box itself keeps polling: once its houses are written off it's told to stop them, as a box that came back is.
+ */
+export function drillOf(b, nowMs = Date.now(), agent) {
+  const d = b?.drill;
+  if (!d || b.local || !(Date.parse(d.until) > nowMs)) return null;
+  return agent === undefined || d.agent === agent ? d : null;
+}
+
+/** When the box was last heard, as the runtime decides by it for `agent`: a drill's held time while it runs. */
+export const heardAt = (b, nowMs = Date.now(), agent) => drillOf(b, nowMs, agent)?.lastSeen ?? b?.lastSeen;
+
+/**
+ * Start a drill (drillOf) of a box for an agent, for `forMs` (at most DRILL_MAX_MS), with the agent's live houses there
+ * that it may write off (none: placement only). Never loom's own box, a revoked or report-only one, or a service's house.
+ */
+export function setDrill(env, effects, { name, agent, houses = [], forMs = DRILL_DEFAULT_MS }) {
+  return update(env, (s) => {
+    const id = resolveBox(s, name);
+    const b = s.boxes[id];
+    if (b.local) fail(`${boxNameOf(s, id)} is loom's own machine; it can't be drilled`, 409);
+    if (b.revoked || b.reportOnly) fail(`${boxNameOf(s, id)} hosts nothing now`, 409);
+    if (!AGENT_NAME.test(agent ?? '') || !s.agents?.[agent]) fail(`${agent} isn't an agent here`, 404);
+    if (!(Number.isFinite(forMs) && forMs >= 60_000 && forMs <= DRILL_MAX_MS)) fail(`a drill runs 1 to ${DRILL_MAX_MS / 60_000} minutes`, 400);
+    const hs = [...new Set(houses)];
+    for (const h of hs) {
+      const x = s.houses[h];
+      if (!x || x.box !== id || x.agent !== agent || !LIVE.has(x.state) || x.service) fail(`${h} isn't a live house of ${agent}'s on ${boxNameOf(s, id)}`, 409);
+    }
+    const at = Date.parse(now(effects));
+    // Held from the start, so a card filed during the drill stays one stretch of silence.
+    b.drill = { agent, houses: hs.sort(), at: new Date(at).toISOString(), until: new Date(at + forMs).toISOString(), lastSeen: new Date(at - WRITE_OFF_AFTER_MS).toISOString() };
+    return { box: id, name: boxNameOf(s, id), drill: b.drill };
+  });
+}
+
+/** End a box's drill: it's heard from as it really is again. */
+export function endDrill(env, effects, { name }) {
+  return update(env, (s) => {
+    const id = resolveBox(s, name);
+    const had = !!s.boxes[id].drill;
+    delete s.boxes[id].drill;
+    return { box: id, name: boxNameOf(s, id), ended: had };
+  });
+}
 
 /** The owner's ordered box preference for an agent, as set (box ids, first first): [] when none is set. A primary set
  * before the list (t-2048) is a list of one. */
@@ -142,7 +197,7 @@ export function preferenceOf(s, agent, env) {
  */
 export function primaryOf(s, agent, env, nowMs = Date.now()) {
   const pref = preferenceOf(s, agent, env);
-  return pref.find((id) => boxUp(s.boxes[id] ?? { local: true }, nowMs)) ?? pref[0];
+  return pref.find((id) => boxUp(s.boxes[id] ?? { local: true }, nowMs, agent)) ?? pref[0];
 }
 
 /** Where a house goes, or a StateError saying why nowhere. */
@@ -166,7 +221,7 @@ export function placeHouse(s, agent, { box, needs = [] }, env, nowMs = Date.now(
         : `no one box that may host ${agent} has all of ${needs.join(', ')}`, 409);
     }
     // The first box of its preference that has it and is up; then its primary as before.
-    const preferred = preferenceOf(s, agent, env).find((id) => fits.includes(id) && boxUp(s.boxes[id], nowMs));
+    const preferred = preferenceOf(s, agent, env).find((id) => fits.includes(id) && boxUp(s.boxes[id], nowMs, agent));
     if (preferred) return preferred;
     const primary = primaryOf(s, agent, env, nowMs);
     if (fits.includes(primary)) return primary;
@@ -1139,8 +1194,9 @@ export function writeOffBox(env, effects, { name, agent, houses: asked, lastSeen
     if (b.local) fail(`${boxNameOf(s, id)} is loom's own machine; its houses can't be written off`, 409);
     const at = Date.parse(now(effects));
     // The card was for one stretch of silence: a box heard from since then isn't written off on it.
-    if (lastSeen !== undefined && b.lastSeen !== lastSeen) fail(`${boxNameOf(s, id)} has been heard from since you were asked`, 409);
-    if (b.lastSeen && at - Date.parse(b.lastSeen) < WRITE_OFF_AFTER_MS) fail(`${boxNameOf(s, id)} was heard from in the last ${WRITE_OFF_AFTER_MS / 60_000} minutes; its houses aren't written off`, 409);
+    const seen = heardAt(b, at, agent);
+    if (lastSeen !== undefined && seen !== lastSeen) fail(`${boxNameOf(s, id)} has been heard from since you were asked`, 409);
+    if (seen && at - Date.parse(seen) < WRITE_OFF_AFTER_MS) fail(`${boxNameOf(s, id)} was heard from in the last ${WRITE_OFF_AFTER_MS / 60_000} minutes; its houses aren't written off`, 409);
     const want = Array.isArray(asked) ? new Set(asked.filter((x) => typeof x === 'string')) : null;
     const done = [];
     for (const h of Object.values(s.houses)) {
@@ -1148,7 +1204,7 @@ export function writeOffBox(env, effects, { name, agent, houses: asked, lastSeen
       if (agent !== undefined && h.agent !== agent) continue;
       if (want && !want.has(h.id)) continue;
       // Checked again under the lock: a house whose own body host spoke since the card was answered is running.
-      if (heard?.(h.id)) continue;
+      if (heard?.(h.id, s)) continue;
       if (h.tokenLabel) revokeOrQueue(s, effects, h.tokenLabel);
       h.state = 'lost'; h.updated = now(effects); h.note = `written off: its box ${boxNameOf(s, id)} went dark`;
       h.writtenOff = { at: now(effects), box: id };
