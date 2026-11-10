@@ -389,7 +389,7 @@ test('large cards go in posts of at most 512 KB; a 413 is an older core\'s cap: 
   assert.deepEqual(qc.at(-1).cards, [{ id: 'e1', at: 'x', tool: 'Edit', summary: 'Edited f1.ts', state: 'done' }]);
 });
 
-test('cards made while a thread was held as gone wait untold, and go once the hold is over (t-2109)', async () => {
+test('cards a 409 answered, and those made while the thread was held as gone, wait untold and go once the hold is over (t-2109)', async () => {
   const { spawnCall } = await import('../src/spawn.mjs');
   const o = world();
   o.core.commsAnswer = (x) => (x.op === 'spawn' ? { ok: true, id: 'th:abcdefghij' } : { ok: true });
@@ -405,7 +405,8 @@ test('cards made while a thread was held as gone wait untold, and go once the ho
   o.clock.advance(11 * 60_000);
   await tick(o.env, o.o);
   const sent = o.core.activityCalls.filter((a) => a.conversation === r.handle);
-  assert.deepEqual(sent.at(-1).cards.map((c) => c.id), ['t2'], 'the card made during the hold is told after it');
+  // A 409 refuses no card: those it answered and those made during the hold all go once it's over.
+  assert.deepEqual(sent.at(-1).cards.map((c) => c.id), ['t1', 't2'], 'every card the 409 left untold is told after it');
 });
 
 test('a job\'s own house is trusted for a step\'s command line and its own words only where the conversation is the owner\'s alone; else fixed labels only (t-2109, coordinator 2026-11-10)', async () => {

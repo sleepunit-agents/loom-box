@@ -28,6 +28,8 @@ import { nativePendingInbox } from './native-inbox.mjs';
 export const CARDS_MAX = 256 * 1024;
 /** At most how many bytes a whole report carries (t-2109): core takes 1 MB a call, with room for the call around it. */
 export const REPORT_MAX = 900 * 1024;
+/** At most how many characters of packed session parts a report carries (one part is at most PART_CHARS). */
+export const PACKED_MAX = 400 * 1024;
 /**
  * A report's cards trimmed so the whole report fits in `max` bytes (t-2109): one report carries every body's, beside
  * packed session parts and finals, so several threads in one house share one budget. The newest cards, across its
@@ -40,9 +42,26 @@ export function fitCards(report, max) {
   if (total <= max) return report;
   let room = max - (total - all.reduce((k, x) => k + x.n, 0));
   const keep = new Set();
-  for (const x of all.sort((p, q) => (p.at < q.at ? 1 : p.at > q.at ? -1 : q.i - p.i))) { if (x.n > room) break; room -= x.n; keep.add(`${x.id}\0${x.i}`); }
+  // A card that doesn't fit stops its own body's older ones only (each keeps its newest), not the other bodies'.
+  const stopped = new Set();
+  for (const x of all.sort((p, q) => (p.at < q.at ? 1 : p.at > q.at ? -1 : q.i - p.i))) { if (stopped.has(x.id)) continue; if (x.n > room) { stopped.add(x.id); continue; } room -= x.n; keep.add(`${x.id}\0${x.i}`); }
   for (const [id, b] of Object.entries(report.bodies)) if (Array.isArray(b.cards)) b.cards = b.cards.filter((_, i) => keep.has(`${id}\0${i}`));
   return report;
+}
+/**
+ * The session parts a report carries: at most PACKED_MAX of them, the longest waiting first (each beat sends the next
+ * ones), so a report with several bodies packing at once still fits core's cap (t-2109); at least one, whatever its size.
+ */
+export function packedParts(packing, history) {
+  const packed = {};
+  let size = 0;
+  for (const [id, p] of [...packing].sort((x, y) => x[1].since - y[1].since)) {
+    const n = String(p.parts[p.next] ?? '').length;
+    if (Object.keys(packed).length && size + n > PACKED_MAX) continue;
+    size += n;
+    packed[id] = { part: p.next, parts: p.parts.length, data: p.parts[p.next], ...(history ? { pending: p.pending } : {}), ...(p.omitted ? { omitted: p.omitted } : {}) };
+  }
+  return packed;
 }
 /** The newest of `cards` whose JSON fits in `max` bytes, in their order (none dropped from the middle). */
 export function newestWithin(cards, max) {
@@ -263,10 +282,7 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
       bodies[id] = { ...(tickerAction ? { tickerAction, tickerObservedAt: new Date(now()).toISOString() } : {}), harness: b.harness, status, ...(slot?.session ? { session: slot.session } : {}), feedable: !!r.inbox, pending, ...(turn ? { turn } : {}), ...(typeof final === 'string' ? { final } : {}), ...(cards ? { cards } : {}), ...(alive ? { alive } : {}) };
     }
     await reportUsage(turnsOver);
-    const packed = {};
-    for (const [id, p] of [...packing]) {
-      packed[id] = { part: p.next, parts: p.parts.length, data: p.parts[p.next], ...(history ? { pending: p.pending } : {}), ...(p.omitted ? { omitted: p.omitted } : {}) };
-    }
+    const packed = packedParts(packing, history);
     let got;
     const sent = acks;
     const report = { bodies, done, packed, inboxAck: sent, caps: ['parts', 'native-admission', ...(history ? ['native-history'] : [])], starting: [...new Set([...launching.keys(), ...uncertain.keys(), ...Object.keys(done)])] };

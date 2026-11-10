@@ -369,7 +369,7 @@ export const hostTask = (env, bootKey) => `loom-runtime body-host --piece ${piec
  */
 const RENAMED = 'h:';
 /** A body's cards' words as last sealed, and their mark (bodySync, t-2109); and blobs opened, by their hash. In memory. */
-const CARD_SEALS = new WeakMap();
+const CARD_SEALS = new Map();
 const CARD_OPENS = new Map();
 /** A card's id as it may leave the house boundary: itself, or RENAMED and 16 hex of its hash (cleanCards, below). */
 const cardId = (raw) => (redact(raw) === raw && !raw.startsWith(RENAMED) ? raw : `${RENAMED}${createHash('sha256').update(raw).digest('hex').slice(0, 16)}`);
@@ -499,10 +499,10 @@ export function bodySync(env, caller, body, o = {}) {
         return rest;
       });
       if (!Object.keys(words).length) continue;
-      const json = JSON.stringify(words), key = `${caller.agent}\0${caller.house}\0${bid}`;
+      // By its store, agent, house and body: a sealer is made anew each sync, so it can't be the key.
+      const json = JSON.stringify(words), key = `${dataDir(env)}\0${caller.agent}\0${caller.house}\0${bid}`;
       const mark = createHash('sha256').update(json).digest('hex');
-      if (!CARD_SEALS.has(sealer)) CARD_SEALS.set(sealer, new Map());
-      const seals = CARD_SEALS.get(sealer), was = seals.get(key);
+      const seals = CARD_SEALS, was = seals.get(key);
       if (was?.mark === mark) { b.cardWords = was.sealed; continue; }
       try { b.cardWords = sealer.seal(Buffer.from(json)).toString('base64'); } catch { continue; }
       seals.delete(key); seals.set(key, { mark, sealed: b.cardWords });

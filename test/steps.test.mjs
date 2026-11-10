@@ -393,13 +393,14 @@ test('a house\'s card words are sealed on loom\'s disk, and opened again for the
   assert.deepEqual([got[1]?.summary, got[1]?.body], ['THE-OWN-WORDS first line', 'THE-OWN-WORDS first line'], 'opened again whole');
   // Sealed once a body, and again only when its words move; opened once a blob.
   let seals = 0, opens = 0;
-  const counting = { seal: (b) => { seals++; return testSealer.seal(b); }, open: (b) => { opens++; return testSealer.open(b); } };
-  const sync = (cards) => bodySync(env, { kind: 'agent', agent: 'art', house: 'h-1' }, { hostKey: 'the-host-key', report: { bodies: { b0000001: { harness: 'claude', status: 'working', cards } }, done: {} } }, { sealer: counting });
+  // A sealer made anew each call, as a sync makes one.
+  const counting = () => ({ seal: (b) => { seals++; return testSealer.seal(b); }, open: (b) => { opens++; return testSealer.open(b); } });
+  const sync = (cards) => bodySync(env, { kind: 'agent', agent: 'art', house: 'h-1' }, { hostKey: 'the-host-key', report: { bodies: { b0000001: { harness: 'claude', status: 'working', cards } }, done: {} } }, { sealer: counting() });
   sync([card, said]); sync([card, said]);
-  assert.equal(seals, 1, 'unchanged words aren\'t sealed again');
+  assert.equal(seals, 0, 'unchanged words aren\'t sealed again (sealed by the first sync above)');
   sync([card, { ...said, body: 'THE-OWN-WORDS moved' }]);
-  assert.equal(seals, 2);
-  const hr2 = new HouseRunner(env, 'claude', { sealer: counting });
+  assert.equal(seals, 1);
+  const hr2 = new HouseRunner(env, 'claude', { sealer: counting() });
   for (let k = 0; k < 3; k++) hr2.activity({ id: 'h-1-b0000001', house: 'h-1', agent: 'art' });
   assert.equal(opens, 1, 'one blob opened once');
 });
@@ -463,4 +464,44 @@ test('a key block in a diff goes whole, every line from BEGIN to END, its last s
   const out = diffText(['+echo hi', ...key.map((l) => `+${l}`), '+done'].join('\n'));
   assert.ok(!out.includes('QyNTUxOQAAACBx') && !out.includes('b3BlbnNzaC1'));
   assert.ok(out.startsWith('+echo hi') && out.endsWith('+done'));
+});
+
+test('where words won\'t go they aren\'t read: a lazy diff isn\'t worked out (t-2109)', () => {
+  let reads = 0;
+  const c = { id: 'e', at: '2026-11-10T10:00:00.000Z', tool: 'Edit', summary: 'Edited a.ts', fixed: 'Edited a.ts', state: 'done', detail: 'a.ts' };
+  Object.defineProperty(c, 'body', { enumerable: true, get() { reads++; return '+x'; } });
+  assert.deepEqual(stepParts(c, undefined, { words: false }), { fixed: 'Edited a.ts' });
+  assert.equal(reads, 0);
+  const r = { id: 'r', at: c.at, tool: 'Read', summary: 'Read a.ts', state: 'done', detail: 'a.ts' };
+  Object.defineProperty(r, 'body', { enumerable: true, get() { reads++; return 'contents'; } });
+  stepParts(r);
+  assert.equal(reads, 0, 'nor on a tool that never keeps one');
+});
+
+test('a long diff is worked out at its head and tail only, says how many lines it left out, and a key block across the cut still goes whole (t-2109)', async () => {
+  const { diffText } = await import('../src/activity.mjs');
+  // Under the 2,000,000 characters a diff is read to.
+  const lines = Array.from({ length: 30_000 }, (_, i) => `+line ${i} ${'x'.repeat(40)}`);
+  // A key whose BEGIN is in the middle (not worked out) and whose last lines are in the tail.
+  lines.splice(29_000, 0, '+-----BEGIN OPENSSH PRIVATE KEY-----');
+  lines.splice(29_998, 0, '+QyNTUxOQAAACBx', '+-----END OPENSSH PRIVATE KEY-----');
+  lines.splice(15_000, 0, '+-----BEGIN RSA PRIVATE KEY-----', '+MIIEowIBAAKCAQEA', '+-----END RSA PRIVATE KEY-----');
+  const t0 = Date.now();
+  const out = diffText(lines.join('\n'));
+  assert.ok(Date.now() - t0 < 2000);
+  assert.ok(out.length <= MAX_BODY);
+  assert.ok(!out.includes('QyNTUxOQAAACBx') && !out.includes('MIIEowIBAAKCAQEA'));
+  const n = Number(/… (\d+) lines not kept …/.exec(out)?.[1]);
+  assert.equal(n + out.split('\n').length - 1, lines.length, 'every line counted, kept or not');
+  assert.ok(out.startsWith('+line 0 ') && out.endsWith(`+line 29999 ${'x'.repeat(40)}`));
+});
+
+test('a report carries at most PACKED_MAX of session parts, the longest waiting first, at least one (t-2109)', async () => {
+  const { PACKED_MAX, packedParts } = await import('../src/bodyhost.mjs');
+  const part = 'p'.repeat(360 * 1024);
+  const packing = new Map([['b1', { parts: [part, part], next: 0, since: 3 }], ['b2', { parts: [part], next: 0, since: 1 }], ['b3', { parts: [part], next: 0, since: 2 }]]);
+  const one = packedParts(packing, false);
+  assert.deepEqual(Object.keys(one), ['b2'], 'the longest waiting');
+  assert.ok(Object.values(one).reduce((k, p) => k + p.data.length, 0) <= PACKED_MAX);
+  assert.deepEqual(Object.keys(packedParts(new Map([['b9', { parts: ['x'.repeat(PACKED_MAX + 1)], next: 0, since: 0 }]]), false)), ['b9'], 'at least one');
 });

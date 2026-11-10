@@ -328,16 +328,31 @@ function shownTextLine(line) {
 
 /** Lines already shown (each through shownTextLine), at most `max`: their head and tail around a line saying how many
  * weren't kept. Nothing is redacted or taken out of a line here. */
-function capLines(lines, max) {
+function capLines(lines, max, more = 0) {
   while (lines.length && !lines.at(-1).trim()) lines.pop();
   while (lines.length && !lines[0].trim()) lines.shift();
   const all = lines.join('\n');
-  if (all.length <= max) return all;
+  if (all.length <= max && !more) return all;
   const head = [], tail = [];
   let h = 0, k = 0;
   for (const l of lines) { if (h + l.length + 1 > max / 2) break; head.push(l); h += l.length + 1; }
   for (let i = lines.length - 1; i >= head.length; i--) { if (k + lines[i].length + 1 > max / 2 - 40) break; tail.unshift(lines[i]); k += lines[i].length + 1; }
-  return [...head, `… ${lines.length - head.length - tail.length} lines not kept …`, ...tail].join('\n');
+  return [...head, `… ${lines.length - head.length - tail.length + more} lines not kept …`, ...tail].join('\n');
+}
+
+/**
+ * The raw lines worth working on to show at most `max` (t-2109): a head and a tail of WINDOW times `max` each, and how
+ * many lines between them weren't (capLines keeps less than either), so a long file isn't redacted whole to keep 32 KB.
+ */
+const WINDOW = 2;
+function window(lines, max) {
+  let n = 0;
+  for (const l of lines) { n += l.length + 1; if (n > 2 * WINDOW * max) break; }
+  if (n <= 2 * WINDOW * max) return { head: lines, middle: [], tail: [] };
+  let h = 0, t = 0, i = 0, j = lines.length;
+  while (i < j && h + lines[i].length + 1 <= WINDOW * max) h += lines[i++].length + 1;
+  while (j > i && t + lines[j - 1].length + 1 <= WINDOW * max) t += lines[--j].length + 1;
+  return { head: lines.slice(0, i), middle: lines.slice(i, j), tail: lines.slice(j) };
 }
 
 const KEY_BEGIN = /-----BEGIN [A-Z ]{0,40}PRIVATE KEY-----/;
@@ -350,13 +365,19 @@ const KEY_END = /-----END [A-Z ]{0,40}PRIVATE KEY-----/;
 export function diffText(text) {
   // Its mark is read after the line is normalised, so nothing invisible before it can hide it. A key block's every line,
   // from its BEGIN to its END whatever its mark, goes whole (redact can't see a key line by line).
+  // Only its head and tail are worked out (window); the lines between are read for a key block's start and end only.
   let inKey = false;
-  return capLines(String(text ?? '').slice(0, 2_000_000).split('\n').map(normLine).map((l) => {
+  const key = (l) => {
     const words = /^[-+ ]/.test(l) ? l.slice(1) : l;
     if (KEY_BEGIN.test(words)) inKey = true;
-    if (inKey) { if (KEY_END.test(words)) inKey = false; return GONE; }
-    return /^[-+ ]/.test(l) ? `${l[0]}${shownTextLine(words)}` : shownTextLine(l);
-  }), MAX_BODY);
+    if (inKey) { if (KEY_END.test(words)) inKey = false; return true; }
+    return false;
+  };
+  const show = (raw) => { const l = normLine(raw); return key(l) ? GONE : /^[-+ ]/.test(l) ? `${l[0]}${shownTextLine(l.slice(1))}` : shownTextLine(l); };
+  const { head, middle, tail } = window(String(text ?? '').slice(0, 2_000_000).split('\n'), MAX_BODY);
+  const shown = head.map(show);
+  for (const raw of middle) if (raw.includes('-----')) key(normLine(raw));
+  return capLines([...shown, ...tail.map(show)], MAX_BODY, middle.length);
 }
 
 /**
@@ -365,7 +386,8 @@ export function diffText(text) {
  */
 export function shownText(text, max = MAX_BODY) {
   const t = String(text ?? '').slice(0, 2_000_000).replace(/-----BEGIN [A-Z ]{0,40}PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]{0,40}PRIVATE KEY-----|$)/g, GONE);
-  return capLines(t.split('\n').map(shownTextLine), max);
+  const { head, middle, tail } = window(t.split('\n'), max);
+  return capLines([...head, ...tail].map(shownTextLine), max, middle.length);
 }
 
 /** A shell command as Codex runs it (`/usr/bin/bash -lc '…'`), unwrapped to what the body wrote. */
@@ -637,24 +659,25 @@ export function cleanAlive(a) {
  * MAX_SUMMARY, `items` at most MAX_ITEMS of {text (100), state done|now|todo}, `end` an ISO time, `parent` an id (as
  * the caller makes it), `exit` and `limit` whole numbers in range.
  */
-export function stepParts(c, idOf = (x) => x) {
+export function stepParts(c, idOf = (x) => x, { words = true } = {}) {
   const o = {};
   // Its fixed label, only in a shape made here (FIXED); else none (delivery then says "Did a step").
   if (typeof c?.fixed === 'string' && c.fixed.length <= MAX_SUMMARY && FIXED.test(c.fixed) && redact(c.fixed) === c.fixed) o.fixed = c.fixed;
   const int = (v, lo, hi) => (Number.isInteger(v) && v >= lo && v <= hi ? v : null);
   const tool = String(c?.tool ?? '');
   // A target only of the shape made here for its tool (detailOk): a command; a file's base name; a search's pattern.
-  if (typeof c?.detail === 'string' && c.detail) { const d = shownText(c.detail.replace(SGR, ''), MAX_DETAIL); if (d && detailOk(tool, d)) o.detail = d; }
+  if (words && typeof c?.detail === 'string' && c.detail) { const d = shownText(c.detail.replace(SGR, ''), MAX_DETAIL); if (d && detailOk(tool, d)) o.detail = d; }
   // A body only where one is made here (bodyAllowed): the body's words, or a diff of a file whose shown name is plain
   // and not private. Never a shell step's output, never a read's.
-  if (typeof c?.body === 'string' && c.body && bodyAllowed(tool, o.detail)) { const t = tool === 'text' ? shownText(c.body, MAX_TEXT) : diffText(c.body); if (t) o.body = t; }
+  // Read only where it may go: its words wanted, and its tool's (a lazy body is worked out only then).
+  if (words && bodyAllowed(tool, o.detail) && typeof c?.body === 'string' && c.body) { const t = tool === 'text' ? shownText(c.body, MAX_TEXT) : diffText(c.body); if (t) o.body = t; }
   // A result is one of the fixed phrases made here (shellResult, claudeResult, codexCards), never a house's prose.
   if (typeof c?.result === 'string' && RESULT.test(c.result) && redact(c.result) === c.result) o.result = c.result;
   const exit = int(c?.exit, -999_999, 999_999); if (exit !== null) o.exit = exit;
   const limit = int(c?.limit, 1, 86_400); if (limit !== null) o.limit = limit;
   if (typeof c?.end === 'string' && cardTime(c.end) === c.end) o.end = c.end;
   if (typeof c?.parent === 'string' && /^[A-Za-z0-9_.:\-]{1,80}$/.test(c.parent)) { const p = idOf(c.parent); if (p) o.parent = p; }
-  if (Array.isArray(c?.items) && c.items.length) {
+  if (words && Array.isArray(c?.items) && c.items.length) {
     o.items = c.items.slice(0, MAX_ITEMS).map((x) => { const t = typeof x?.text === 'string' ? part('text', x.text, 100) : GONE; return { text: t === GONE ? 'an item' : t, state: ['done', 'now', 'todo'].includes(x?.state) ? x.state : 'todo' }; });
   }
   return o;

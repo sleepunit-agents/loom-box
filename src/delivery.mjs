@@ -1577,12 +1577,12 @@ async function activityPass(env, c, d) {
   try { rec = readBody(env, c.body); r = d.runner(rec.harness, rec.local); } catch { return; }
   if (typeof r.activity !== 'function') return;
   const body = bodyOf(c.body, rec);
+  const nowMs = (() => { try { return d.now().getTime(); } catch { return Date.now(); } })();
+  // A thread core said is gone (409) is told nothing for a while (it may be unarchived), nor read: its cards wait, untold.
+  if (held(c, 'noThread', nowMs)) return;
   // Its newest CARDS_KEPT only: what's older was told already, and its words aren't worked out again each pass.
   const cards = shownCards(env, c, (r.activity(body) ?? []).slice(-CARDS_KEPT));
-  const nowMs = (() => { try { return d.now().getTime(); } catch { return Date.now(); } })();
   const { out, next } = changedCards(cards, c.cardsSent ?? {});
-  // A thread core said is gone (409) is told nothing for a while (it may be unarchived): its cards wait, untold.
-  if (held(c, 'noThread', nowMs)) return;
   let alive = null;
   try { alive = cleanAlive(r.signOfLife?.(body)); } catch { /* it can't say */ }
   const old = held(c, 'oldCore', nowMs);
@@ -1608,7 +1608,8 @@ async function activityPass(env, c, d) {
     }
     if (!retold) d.warn(`${c.conversation}: core took none of ${out.length} activity cards${sendAlive ? ' and its sign of life' : ''} (${e.message}); they're not sent again`);
     // A refused sign of life counts as told: it isn't posted again until it moves, past the throttle.
-    saveSent(env, c, next, sendAlive ? alive : null, nowMs, hold);
+    // A 409's cards weren't taken but aren't refused either: they stay untold, so they go once the hold is over.
+    saveSent(env, c, e.status === 409 ? (c.cardsSent ?? {}) : next, sendAlive ? alive : null, nowMs, hold);
     return;
   }
   saveSent(env, c, next, sendAlive ? alive : null, nowMs);
@@ -1633,7 +1634,8 @@ export function shownCards(env, c, cards) {
   // is trusted for the owner alone only, where its body could already post the same text in its own thread as a message
   // (coordinator, 2026-11-10). Where anyone else is, only a fixed label goes, decided here, never by the house.
   return cards.filter((x) => x && (x.tool !== 'text' || ownersAlone)).map((x) => {
-    const { fixed, ...parts } = stepParts(x);
+    // Its words aren't even read where they won't go (a diff is worked out only when it's read).
+    const { fixed, ...parts } = stepParts(x, undefined, { words: ownersAlone });
     if (ownersAlone) return { ...baseCard(x), ...parts };
     // Where someone else is: its fixed label (set where the card was made, never derived from its words), else "Did a
     // step"; no words of any kind (its label, command, diff, plan items); its state, result phrase, times and nesting.
