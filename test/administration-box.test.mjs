@@ -10,6 +10,7 @@ import { boxAdministration, administrationNamespace, administrationJob } from '.
 import { administrativeHost } from '../src/administration-worker.mjs';
 import { deliver, loadConv } from '../src/delivery.mjs';
 import { requestAdministration, administrationApproval, advanceAdministration, queueAdministration, administrationResult } from '../src/administration.mjs';
+import { realSupervisor } from './administration-fixture.mjs';
 
 const box = { kind: 'piece', subject: 'one' }, host = 'linux-' + 'a'.repeat(64);
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -77,9 +78,11 @@ for (const root of [false, true]) test('normal box loop ' + (root ? 'root' : 'ru
   const r = runner(env, client, { ...options, administration: admin }); t.after(() => r.shutdown());
   await r.tick(true);
   const identity = root ? 'root' : 'runner', cap = load(w.env).boxes.one.administration;
-  if (!cap?.identities[identity]) {
-    if (process.env.LOOM_ADMIN_TEST_SUPERVISOR === 'systemd' && (root || process.getuid() !== 0)) assert.fail('required real manager provisioning is unavailable');
-    t.diagnostic('Unsupported OS identity refused before approval; physical loop not exercised for ' + identity + '.');
+  // The physical loop runs production administration jobs, which start real units: only in the systemd suite.
+  if (!cap?.identities[identity] || !realSupervisor) {
+    if (realSupervisor && (root || process.getuid() !== 0)) assert.fail('required real manager provisioning is unavailable');
+    t.diagnostic(cap?.identities[identity] ? 'Physical loop runs only in the systemd suite; not exercised for ' + identity + '.'
+      : 'Unsupported OS identity refused before approval; physical loop not exercised for ' + identity + '.');
     return;
   }
   assert.equal(cap.host, administrativeHost());
