@@ -155,3 +155,37 @@ test('slice 4: a capacity failover starts gated, never on a model whose account 
   c = loadConv(w.env, r.handle);
   assert.equal(c.spawn.assignment.model, 'sol-mini');
 });
+
+test('switch on: a pinned job mid-turn is fed nothing more while its account is kept for conversations; its next turn waits', async () => {
+  const w = setup({ enforce: false, claude: 0.5, codex: 0.3 });
+  const r = await w.spawn();
+  let c = loadConv(w.env, r.handle);
+  const body = c.body;
+  // With room, a message mid-turn goes into its inbox, as before.
+  update(w.env, (s) => setAllocatorMode(s, { mode: 'enforce' }));
+  await spawnCall(w.env, { kind: 'owner' }, { agent: 'art', action: 'say', handle: r.handle, text: 'one more thing' }, w.o);
+  assert.equal(w.log.filter((l) => l[0] === 'feed').length, 1, 'fed while there is room');
+  // Its account now kept for conversations: nothing more is fed mid-turn.
+  w.max.usage = { '7d': 0.93, reset_7d: w.S + 3 * 86400, checked: w.S };
+  await spawnCall(w.env, { kind: 'owner' }, { agent: 'art', action: 'say', handle: r.handle, text: 'and another' }, w.o);
+  c = loadConv(w.env, r.handle);
+  assert.equal(w.log.filter((l) => l[0] === 'feed').length, 1, 'held, not fed');
+  assert.match(c.waiting, /kept for conversations/);
+  assert.equal(c.queue.length, 1);
+  // Its turn ends: the resume is the gated one, so it waits, its session kept, never moved without a failover.
+  w.runner.finish(body);
+  w.clock.advance(60_000);
+  await tick(w.env, w.o);
+  c = loadConv(w.env, r.handle);
+  assert.equal(w.log.filter((l) => l[0] === 'resume').length, 0, 'not resumed while kept');
+  assert.match(c.waiting, /waiting for capacity/);
+  assert.ok(c.slot, 'its session stays');
+  assert.equal(c.spawn.assignment.model, 'opus');
+});
+
+test('switch off: a pinned job mid-turn is fed as before, however full its account', async () => {
+  const w = setup({ enforce: false, claude: 0.93, codex: 0.3 });
+  const r = await w.spawn();
+  await spawnCall(w.env, { kind: 'owner' }, { agent: 'art', action: 'say', handle: r.handle, text: 'one more thing' }, w.o);
+  assert.equal(w.log.filter((l) => l[0] === 'feed').length, 1);
+});
