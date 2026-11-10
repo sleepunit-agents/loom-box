@@ -7,7 +7,7 @@
 // whether its harness can be fed), what it started, and a stopped body's session files in parts; it's answered what to
 // start, stop and feed. It never reports what it can't see. It leaves when it's had no live body and nothing asked
 // for its idle time (the next delivery asks for a house again), or when the runtime says its bodies are another house's.
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -125,13 +125,17 @@ export function bodyConversation(env, { waitMs = SESSION_WAIT_MS, sleep = sleepS
   // environment, so that stands (its thread id is known only after its first event, so its map can lag).
   if (!env.CLAUDE_CODE_SESSION_ID) return fromEnv;
   const holder = readTrim(byConversation(env, fromEnv));
-  // No word on that conversation, or it's this session's: the environment stands (a house that writes no map yet).
-  if (!holder || holder === sessionHash(session)) return fromEnv;
+  // That conversation is this session's: the environment is its own.
+  if (holder === sessionHash(session)) return fromEnv;
+  // A house that keeps no map at all (an older host): the environment stands.
+  if (!holder && !existsSync(join(keysDir(env), 'sessions'))) return fromEnv;
+  // Otherwise its own entry is coming (its host writes it as soon as the start is claimed): wait for it. When the
+  // environment's conversation is known to be another session's, never answer with it; else, as a last resort, it.
   for (let waited = 0; waited < waitMs; waited += 250) {
     sleep(250);
     if ((cv = mine())) return cv;
   }
-  return undefined;
+  return holder ? undefined : fromEnv;
 }
 
 function dropKey(env, conversation, key) {

@@ -187,3 +187,13 @@ test('a Codex body\'s own environment stands while its thread is unmapped: it is
   keepSession({ HOME }, 'sess-old-claude', A);
   assert.equal(bodyConversation({ HOME, LOOM_BODY_CONVERSATION: A, CODEX_THREAD_ID: 'thread-1234' }, { sleep: () => assert.fail('no wait') }), A);
 });
+
+test('a reused spare whose environment names an ended conversation waits for its own entry rather than answering with it', () => {
+  const HOME = home();
+  keepSession({ HOME }, 'sess-other', B);                                  // the house keeps a map
+  const env = { HOME, LOOM_BODY_CONVERSATION: A, CLAUDE_CODE_SESSION_ID: 'sess-spare' };   // A: no holder any more
+  let n = 0;
+  assert.equal(bodyConversation(env, { sleep: () => { if (++n === 2) keepSession({ HOME }, 'sess-spare', B); } }), B);
+  // Nothing ever comes: the environment's, as before, and the runtime decides.
+  assert.equal(bodyConversation({ ...env, CLAUDE_CODE_SESSION_ID: 'sess-never' }, { waitMs: 500, sleep: () => {} }), A);
+});
