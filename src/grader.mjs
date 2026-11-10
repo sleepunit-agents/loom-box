@@ -216,13 +216,15 @@ export function answerOf(harness, stdout) {
     if (d?.is_error || typeof d?.result !== 'string') throw new GraderError('claude’s run failed');
     return d.result;
   }
-  let last = null;
+  let last = null, failed = false;
   for (const l of s.split('\n')) {
     let e;
     try { e = JSON.parse(l); } catch { continue; }
-    if (e?.type === 'item.completed' && e.item?.type === 'agent_message' && typeof e.item.text === 'string') last = e.item.text;
-    if (e?.type === 'turn.failed' || e?.type === 'error') throw new GraderError('codex\'s turn failed');
+    if (e?.type === 'item.completed' && e.item?.type === 'agent_message' && typeof e.item.text === 'string') { last = e.item.text; failed = false; }
+    if (e?.type === 'turn.failed' || e?.type === 'error') failed = true;
+    if (e?.type === 'turn.completed') failed = false;
   }
+  if (failed) throw new GraderError('codex’s turn failed');
   if (last === null) throw new GraderError('codex said nothing');
   return last;
 }
@@ -286,19 +288,25 @@ export async function grade(env, grader, { venueKind, entry }, { run = runAsync,
   const input = grader.harness === 'codex' ? `${graderPrompt(venueKind)}\n\n${graderInput(entry)}` : graderInput(entry);
   const px = await proxy(join(dataDir(env), 'review'), EGRESS[grader.harness] ?? []);
   const podEnv = { PATH: env.PATH, HOME: env.HOME, ...(env.XDG_RUNTIME_DIR ? { XDG_RUNTIME_DIR: env.XDG_RUNTIME_DIR } : {}) };
-  let r;
+  let r, timed = false, reading;
   try {
     const argv = graderRunArgs(env, { harness: grader.harness, model: grader.model, kind: venueKind, image: grader.image, name, egress: px.dir });
     r = await run(podmanBin(env), argv, { env: podEnv, input, timeout: timeoutMs });
-  } finally { await px.close(); }
-  const refused = px.denied.size ? ` (egress refused ${[...px.denied].slice(0, 3).join(', ')})` : '';
-  if (r.signal || r.error?.code === 'ETIMEDOUT') {
-    rm(podmanBin(env), ['rm', '-f', name], { env: podEnv, stdio: 'ignore', timeout: 30_000 });
-    throw new GraderError(`the grader took longer than ${Math.round(timeoutMs / 1000)}s${refused}`);
+    timed = !!(r.signal || r.error?.code === 'ETIMEDOUT');
+    reading = lastRateLimit(grader.harness, r.stdout);
+    // Capture a timed-out Codex run's numeric quota before removing its tmpfs.
+    if (timed && grader.harness === 'codex' && !reading) {
+      const snapshot = rm(podmanBin(env), ['exec', name, 'node', '/opt/loom-grader/quota.mjs', '/tmp/cli/.codex/sessions'], { env: podEnv, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 });
+      reading = lastRateLimit('codex', snapshot.stdout);
+    }
+    if (reading && reportUsage) await reportUsage(grader.harness, { ...reading, checked: Math.floor(Date.now() / 1000) });
+  } finally {
+    if (timed) rm(podmanBin(env), ['rm', '-f', name], { env: podEnv, stdio: 'ignore', timeout: 30_000 });
+    await px.close();
   }
-  const reading = lastRateLimit(grader.harness, r.stdout);
+  const refused = px.denied.size ? ` (egress refused ${[...px.denied].slice(0, 3).join(', ')})` : '';
+  if (timed) throw new GraderError(`the grader took longer than ${Math.round(timeoutMs / 1000)}s${refused}`);
   if (!reading && reportUsage) throw new GraderError('grader returned no quota reading (check the pinned image)');
-  if (reading && reportUsage) await reportUsage(grader.harness, { ...reading, checked: Math.floor(Date.now() / 1000) });
   if (r.error) throw new GraderError(`can't run a container: ${r.error.code ?? 'error'}`);
   if (r.status === 99) throw new GraderError(`the image has no ${grader.harness}`);
   if (r.status !== 0 && grader.harness === 'codex') throw new GraderError(`codex exited ${r.status}${refused}`);

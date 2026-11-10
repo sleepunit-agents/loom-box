@@ -114,3 +114,16 @@ test('project Codex config is refused before execution so MCP cannot bypass read
  const env=setup(),tree=join(env.HOME,'frozen');mkdirSync(join(tree,'.codex'),{recursive:true});writeFileSync(join(tree,'.codex','config.toml'),'[mcp_servers.writer]\ncommand="write-service"\n');let launched=false;
  await assert.rejects(runOneShot(env,{input:'p',cwd:tree},{call:async()=>({model:'codex',harness:'codex'}),warn:()=>{},run:async()=>{launched=true;}}),/configuration outside/);assert.equal(launched,false);
 });
+test('successful result-only Claude recovery and Codex stdout recovery keep the answer',async()=>{
+ for(const harness of ['claude','codex']){
+  const env=setup(),calls=[];mkdirSync(join(env.HOME,'.codex'));writeFileSync(join(env.HOME,'.codex','auth.json'),'{}');
+  const events=harness==='claude'?[{type:'result',is_error:true,error:'rate_limit'},{type:'result',is_error:false,result:'done'}]:[{type:'error',codex_error_info:'usage_limit_exceeded'},{type:'item.completed',item:{type:'agent_message',text:'done'}},{type:'turn.completed'}];
+  assert.equal(await runOneShot(env,{input:'p',cwd:env.HOME},{warn:()=>{},call:async(p)=>{calls.push(p);return {model:'m',harness};},run:async()=>({status:0,stdout:events.map(JSON.stringify).join('\n')})}),'done');
+  assert.deepEqual(calls,['oneshot-choice']);
+ }
+});
+test('a recovered refusal followed by an unrelated failure is not quota-retried',async()=>{
+ const env=setup();mkdirSync(join(env.HOME,'.codex'));writeFileSync(join(env.HOME,'.codex','auth.json'),'{}');let runs=0,held=false;
+ await assert.rejects(runOneShot(env,{input:'p',cwd:env.HOME},{warn:()=>{},call:async(p)=>{if(p==='oneshot-refused')held=true;return {model:'m',harness:'codex'};},run:async()=>{runs++;return {status:1,stdout:[{type:'error',codex_error_info:'usage_limit_exceeded'},{type:'item.completed',item:{type:'agent_message',text:'recovered'}},{type:'turn.failed',error:{message:'unrelated failure'}}].map(JSON.stringify).join('\n')};}}),/failed/);
+ assert.equal(runs,1);assert.equal(held,false);
+});

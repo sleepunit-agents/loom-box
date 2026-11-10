@@ -413,6 +413,8 @@ export function lastRefusal(harness, text) {
     // end the last turn. A session's file holds every turn it had, and one that dies with no output must not inherit
     // an earlier turn's refusal.
     if (harness === 'claude' && v?.type === 'assistant' && v.isApiErrorMessage !== true) last = null;
+    if (harness === 'claude' && v?.type === 'result' && !v.is_error && typeof v.result === 'string') last = null;
+    if (harness === 'codex' && (v?.type === 'turn.completed' || v?.type === 'item.completed' && v.item?.type === 'agent_message')) last = null;
     if (harness === 'claude' && v?.type === 'user' && !(Array.isArray(v.message?.content) && v.message.content.some((c) => c?.type === 'tool_result'))) last = null;
     if (harness === 'codex' && (v?.type === 'response_item' || v?.type === 'turn_context' || (v?.type === 'event_msg' && ['user_message', 'task_started'].includes(v.payload?.type)))) last = null;
   }

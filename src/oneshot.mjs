@@ -8,7 +8,7 @@ import { deriveAccounts, stateAccounts } from './accounts.mjs';
 import { membersOf } from './owners.mjs';
 import { resolveFor } from './models.mjs';
 import { shortCallGate } from './delivery.mjs';
-import { lastRateLimit, lastRefusal, codexUsageOnBox, tailOf } from './logins.mjs';
+import { lastRateLimit, lastRefusal, codexUsageOnBox, tailOf, CRED_FILE } from './logins.mjs';
 import { codexLayers } from './runners.mjs';
 import { runAsync, answerOf } from './grader.mjs';
 
@@ -54,7 +54,7 @@ export async function runOneShot(env, { input, cwd, prefer = [], timeout = 600_0
     if (pick.error || pick.ok === false) fail(pick.error || pick.reason);
     if (!['claude', 'codex'].includes(pick.harness) || !/^[A-Za-z0-9][A-Za-z0-9._:/\[\]-]{0,79}$/.test(pick.model ?? '')) fail('invalid runtime choice');
     const dir = mkdtempSync(join(tmpdir(), 'loom-oneshot-'));
-    let r, reading, refusal;
+    let r, reading, refusal, answer;
     try {
       const childEnv = Object.fromEntries(['PATH', 'HOME', 'LANG', 'LC_ALL', 'TMPDIR', 'SSL_CERT_FILE', 'SSL_CERT_DIR', 'NODE_EXTRA_CA_CERTS'].filter(k => typeof env[k] === 'string').map(k => [k, env[k]]));
       if (pick.harness === 'claude') {
@@ -66,15 +66,17 @@ export async function runOneShot(env, { input, cwd, prefer = [], timeout = 600_0
       if (pick.harness === 'codex') {
         if (codexLayers(cwd, { realHome: env.CODEX_HOME || join(env.HOME, '.codex') }).length) fail('Codex configuration outside the fresh home prevents a cold one-shot');
         const home = join(dir, 'codex'); mkdirSync(home);
-        symlinkSync(join(env.CODEX_HOME || join(env.HOME, '.codex'), 'auth.json'), join(home, 'auth.json'));
+        symlinkSync(join(env.CODEX_HOME || join(env.HOME, '.codex'), CRED_FILE.codex), join(home, CRED_FILE.codex));
         childEnv.CODEX_HOME = home;
       }
       warn(`one-shot: ${pick.model} (${pick.harness}) on ${pick.account ?? 'its login'}`);
       r = await run(pick.harness, oneShotArgs(pick.harness, pick.model, cwd), { env: childEnv, input, timeout, cwd, killGroup: true });
       reading = pick.harness === 'codex' ? codexUsageOnBox(childEnv, { root: join(childEnv.CODEX_HOME, 'sessions') }) : lastRateLimit('claude', r.stdout);
-      refusal = lastRefusal(pick.harness, r.stdout);
+      // A completed successful answer outranks an earlier, recovered refusal.
+      if (r.status === 0 && !r.error && !r.signal) { try { answer = answerOf(pick.harness, r.stdout); } catch { /* failed or incomplete */ } }
+      refusal = answer !== undefined ? null : lastRefusal(pick.harness, r.stdout);
       // Codex exec stdout omits structured quota errors; the dedicated rollout has them.
-      if (pick.harness === 'codex' && !refusal) {
+      if (pick.harness === 'codex' && !refusal && answer === undefined) {
         const { readdirSync } = await import('node:fs');
         const walk = p => { try { return readdirSync(p, { withFileTypes: true }).flatMap(e => e.isDirectory() ? walk(join(p, e.name)) : e.isFile() && e.name.endsWith('.jsonl') ? [join(p, e.name)] : []); } catch { return []; } };
         for (const f of walk(join(childEnv.CODEX_HOME, 'sessions'))) refusal ||= lastRefusal('codex', tailOf(f) ?? '');
@@ -91,6 +93,6 @@ export async function runOneShot(env, { input, cwd, prefer = [], timeout = 600_0
     }
     if (refusal && !attempt) { avoid.push(pick.harness); continue; }
     if (r.error || r.signal || r.status !== 0 || refusal) fail('one-shot failed (no prompt or output logged)');
-    return answerOf(pick.harness, r.stdout);
+    return answer ?? answerOf(pick.harness, r.stdout);
   }
 }

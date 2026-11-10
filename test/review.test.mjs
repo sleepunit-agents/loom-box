@@ -484,3 +484,10 @@ test('Codex grader quota extractor emits only numeric metadata and is used by ac
  const result=await grade(env,{harness:'codex',model:'m',image:PIN},{venueKind:'live',entry:{text:'sample'}},{proxy:noProxy,run:async()=>({status:0,stdout:JSON.stringify(event)+'\n'+JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'{"score":4}'}})}),reportUsage:(h,r)=>readings.push([h,r])});
  assert.equal(result.score,4);assert.equal(readings[0][0],'codex');assert.equal(readings[0][1].windows['7d'],.42);
 });
+test('timeout quota is reported before container cleanup for both harnesses',async()=>{
+ for(const harness of ['claude','codex']){
+  const events=[],quota=harness==='claude'?{type:'rate_limit_event',rate_limit_info:{status:'allowed',unifiedWindows:{seven_day:{utilization:.4}}}}:{type:'event_msg',payload:{type:'token_count',rate_limits:{primary:{used_percent:40,window_minutes:10080,resets_at:2000000000}}}};
+  await assert.rejects(grade(envOf(),{harness,model:'m',image:PIN},{venueKind:'live',entry:{text:'sample'}},{proxy:noProxy,run:async()=>({signal:'SIGKILL',stdout:harness==='claude'?JSON.stringify(quota):''}),rm:(_bin,args)=>{events.push(args[0]);return {stdout:JSON.stringify(quota)};},reportUsage:(_h,r)=>{events.push('report');assert.equal(r.windows['7d'],.4);}}),/longer than/);
+  assert.deepEqual(events,harness==='claude'?['report','rm']:['exec','report','rm']);
+ }
+});
