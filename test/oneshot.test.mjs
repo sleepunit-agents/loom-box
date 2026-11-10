@@ -158,7 +158,7 @@ test('trailing quota metadata preserves a Claude result and still reports usage'
 test('a truncated stdout answer cannot discard available Codex rollout usage',async()=>{
  const env=setup();mkdirSync(join(env.HOME,'.codex'));writeFileSync(join(env.HOME,'.codex','auth.json'),'{}');let reported=false,home;
  const run=async(_b,_a,o)=>{home=o.env.CODEX_HOME;const d=new Date(),root=join(home,'sessions',String(d.getUTCFullYear()),String(d.getUTCMonth()+1).padStart(2,'0'),String(d.getUTCDate()).padStart(2,'0'));mkdirSync(root,{recursive:true});writeFileSync(join(root,'rollout.jsonl'),[{type:'response_item',payload:{role:'assistant',type:'message',content:[{text:'done'}]}},{type:'event_msg',payload:{type:'token_count',rate_limits:{primary:{used_percent:20,window_minutes:10080,resets_at:2000000000}}}}].map(JSON.stringify).join('\n'));return {status:0,stdout:JSON.stringify({type:'thread.started',thread_id:'parent'})};};
- await assert.rejects(runOneShot(env,{input:'p',cwd:env.HOME},{run,warn:()=>{},call:async p=>{if(p==='usage'){reported=true;assert.ok(existsSync(home));return {ok:true};}return {model:'m',harness:'codex'};}}),/said nothing/);
+ await assert.rejects(runOneShot(env,{input:'p',cwd:env.HOME},{run,warn:()=>{},call:async p=>{if(p==='usage'){reported=true;assert.ok(existsSync(home));return {ok:true};}return {model:'m',harness:'codex'};}}),/did not complete/);
  assert.equal(reported,true);assert.equal(existsSync(home),false);
 });
 test('a new Codex turn clears the preceding turn’s refusal',()=>{
@@ -178,4 +178,9 @@ test('oversized process output fails closed but preserves later quota events',as
  const env=setup();let reported=false,held=false,runs=0;
  await assert.rejects(runOneShot(env,{input:'p',cwd:env.HOME},{warn:()=>{},run:async()=>{runs++;return captured;},call:async(p,b)=>{if(p==='usage'){reported=true;assert.equal(b.reading.windows['7d'],.7);return {ok:true};}if(p==='oneshot-refused')held=true;return {model:'m',harness:'claude'};}}),/output limit/);
  assert.equal(reported,true);assert.equal(held,false);assert.equal(runs,1);
+});
+test('answer extraction cannot reuse an answer from the preceding turn',()=>{
+ assert.throws(()=>answerOf('codex',[{type:'item.completed',item:{type:'agent_message',text:'old'}},{type:'turn.completed'},{type:'turn.started'}].map(JSON.stringify).join('\n')),/did not complete/);
+ assert.throws(()=>answerOf('claude',[{type:'result',result:'old'},{type:'user',message:{content:'next'}}].map(JSON.stringify).join('\n')),/did not complete/);
+ assert.equal(answerOf('codex',[{type:'item.completed',item:{type:'agent_message',text:'old'}},{type:'turn.started'},{type:'item.completed',item:{type:'agent_message',text:'new'}},{type:'turn.completed'}].map(JSON.stringify).join('\n')),'new');
 });

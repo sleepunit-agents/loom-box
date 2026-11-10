@@ -209,26 +209,10 @@ export function graderRunArgs(env, { harness, model, kind, image, name, egress }
 
 /** The model's own words, from the CLI's output: Claude's `result`, or Codex's last agent message. */
 export function answerOf(harness, stdout) {
-  const s = String(stdout ?? '');
-  const terminal = terminalOutcome(harness, s);
-  if (terminal && terminal.kind !== 'answer') throw new GraderError('the model’s turn failed or did not complete');
-  if (harness === 'claude') {
-    let d;
-    for (const line of s.split('\n')) {
-      let e; try { e = JSON.parse(line); } catch { continue; }
-      if (e?.type === 'result' || !e?.type && e && ('result' in e || 'is_error' in e)) d = e;
-    }
-    if (!d || d.is_error || typeof d.result !== 'string') throw new GraderError('claude’s run failed');
-    return d.result;
-  }
-  let last = null;
-  for (const l of s.split('\n')) {
-    let e;
-    try { e = JSON.parse(l); } catch { continue; }
-    if (e?.type === 'item.completed' && e.item?.type === 'agent_message' && typeof e.item.text === 'string') last = e.item.text;
-  }
-  if (last === null) throw new GraderError('codex said nothing');
-  return last;
+  const terminal = terminalOutcome(harness, stdout);
+  if (terminal?.kind !== 'answer') throw new GraderError('the model’s turn failed or did not complete');
+  if (typeof terminal.answer !== 'string') throw new GraderError(`${harness} said nothing`);
+  return terminal.answer;
 }
 
 /** A finding as core keeps it: one printable line of at most 200 characters, or none. Anything token-like is none. */
