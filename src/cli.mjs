@@ -142,7 +142,7 @@ function ownerAtTerminal(prompt, want) {
     return !!want && line.trim() === want;
   } finally { closeSync(fd); }
 }
-import { addBox, api, down, list, remoteDown, remoteUp, endDrill, revokeBox, preferenceOf, setAgent, setBoxWatch, setDrill, setPrimary, up } from './control.mjs';
+import { addBox, api, down, list, remoteDown, remoteUp, endDrill, revokeBox, preferenceList, setAgent, setBoxWatch, setDrill, setPrimary, up } from './control.mjs';
 import { watchOf } from './watch.mjs';
 import { healthWords } from './health.mjs';
 import { realEffects } from './effects.mjs';
@@ -361,7 +361,8 @@ async function main(argv, env) {
       if (!agent || !/^[a-z][a-z0-9-]{0,39}$/.test(agent)) throw new Fail('primary: name an agent');
       if (clear && boxes.length) throw new Fail('primary: --clear cannot be combined with boxes');
       if (!clear && !boxes.length) {
-        const order = preferenceOf(loadState(env), agent, env);
+        const saved = preferenceList(loadState(env), agent);
+        const order = saved.length ? saved : [localBoxName(env)];
         out({ agent, primary: order[0], boxes: order });
       } else out(setPrimary(env, realEffects(env), { agent, boxes }));
       return;
