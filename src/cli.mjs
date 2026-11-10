@@ -277,6 +277,8 @@ async function main(argv, env) {
       throw new Fail(USAGE, 2);
     }
     case 'api': {
+      // The paths the loom block's api_serve names, from one long-lived process (serve.mjs, t-2065).
+      if (rest.includes('--serve')) return (await import('./serve.mjs')).serveApi(env);
       if (!json) throw new Fail(USAGE, 2);
       return out(await api(env, realEffects(env), JSON.parse(await readStdin())));
     }
