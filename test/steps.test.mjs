@@ -384,9 +384,11 @@ test('a house\'s card words are sealed on loom\'s disk, and opened again for the
   writeFileSync(join(hosts, 'art.json'), JSON.stringify({ agent: 'art', house: 'h-1', hostHash: createHash('sha256').update('the-host-key').digest('hex'), req: {}, stop: {}, inbox: {} }));
   const card = { id: 'c1', at: '2026-11-10T10:00:00.000Z', tool: 'Edit', summary: 'Edited a.ts', fixed: 'Edited a.ts', state: 'done', detail: 'a.ts', body: '+THE-DIFF-WORDS' };
   const said = { id: 'w1', at: '2026-11-10T10:00:01.000Z', tool: 'text', summary: 'THE-OWN-WORDS first line', fixed: 'Wrote its words', state: 'done', body: 'THE-OWN-WORDS first line' };
-  bodySync(env, { kind: 'agent', agent: 'art', house: 'h-1' }, { hostKey: 'the-host-key', report: { bodies: { b0000001: { harness: 'claude', status: 'working', cards: [card, said] } }, done: {} } }, { sealer: testSealer });
+  const plan = { id: 'p1', at: '2026-11-10T10:00:02.000Z', tool: 'TodoWrite', summary: 'Plan (1/2): THE-PLAN-WORDS', fixed: 'Plan (1/2)', state: 'done', items: [{ text: 'THE-PLAN-WORDS', state: 'now' }] };
+  bodySync(env, { kind: 'agent', agent: 'art', house: 'h-1' }, { hostKey: 'the-host-key', report: { bodies: { b0000001: { harness: 'claude', status: 'working', cards: [card, said, plan] } }, done: {} } }, { sealer: testSealer });
   assert.equal(everything(hosts).includes(Buffer.from('THE-DIFF-WORDS')), false, 'never in the clear on disk');
   assert.equal(everything(hosts).includes(Buffer.from('THE-OWN-WORDS')), false, 'a text card\'s label is its words: sealed too');
+  assert.equal(everything(hosts).includes(Buffer.from('THE-PLAN-WORDS')), false, 'a plan\'s label too');
   const hr = new HouseRunner(env, 'claude', { sealer: testSealer });
   const got = hr.activity({ id: 'h-1-b0000001', house: 'h-1', agent: 'art' });
   assert.equal(got[0]?.body, '+THE-DIFF-WORDS');
@@ -396,9 +398,9 @@ test('a house\'s card words are sealed on loom\'s disk, and opened again for the
   // A sealer made anew each call, as a sync makes one.
   const counting = () => ({ seal: (b) => { seals++; return testSealer.seal(b); }, open: (b) => { opens++; return testSealer.open(b); } });
   const sync = (cards) => bodySync(env, { kind: 'agent', agent: 'art', house: 'h-1' }, { hostKey: 'the-host-key', report: { bodies: { b0000001: { harness: 'claude', status: 'working', cards } }, done: {} } }, { sealer: counting() });
-  sync([card, said]); sync([card, said]);
+  sync([card, said, plan]); sync([card, said, plan]);
   assert.equal(seals, 0, 'unchanged words aren\'t sealed again (sealed by the first sync above)');
-  sync([card, { ...said, body: 'THE-OWN-WORDS moved' }]);
+  sync([card, { ...said, body: 'THE-OWN-WORDS moved' }, plan]);
   assert.equal(seals, 1);
   const hr2 = new HouseRunner(env, 'claude', { sealer: counting() });
   for (let k = 0; k < 3; k++) hr2.activity({ id: 'h-1-b0000001', house: 'h-1', agent: 'art' });
@@ -597,4 +599,28 @@ test('padding can\'t hide a secret taken in: sudo -S or a private write far alon
   for (const s of ['sudo '.repeat(12_000), '> '.repeat(30_000), 'tee '.repeat(15_000)]) secretIn(s);
   assert.ok(Date.now() - t0 < 1000);
   assert.equal(secretIn('sudo ls'), false);
+});
+
+test('sudo reading a password from stdin in any flag form shows no command (t-2109)', async () => {
+  const { secretIn } = await import('../src/activity.mjs');
+  for (const c of ['echo pw | sudo -Sk apt install x', 'echo pw | sudo -kSv ls', 'echo pw | sudo --stdin apt install x', 'echo pw | sudo -S ls']) assert.equal(secretIn(c), true, c);
+  assert.equal(secretIn('sudo -k ls'), false);
+});
+
+test('a window of many shell steps: commands worked out only for the cards read, and a second pass makes none again (t-2109)', () => {
+  const lines = [];
+  for (let i = 0; i < 1500; i++) lines.push(use(`b${i}`, 'Bash', { command: `cat <<'EOF'\n${'line '.repeat(200)}${i}\nEOF` }));
+  const t0 = Date.now();
+  const cards = claudeCards(lines);
+  assert.ok(Date.now() - t0 < 1500, 'no command worked out while the cards are made');
+  for (const c of cards.slice(-200)) stepParts(c);
+  const t1 = Date.now();
+  for (const c of claudeCards(lines).slice(-200)) stepParts(c);
+  assert.ok(Date.now() - t1 < 1500, 'the second pass from what was made');
+});
+
+test('a colour code inside a key\'s BEGIN line can\'t hide the block (t-2109)', async () => {
+  const { diffText } = await import('../src/activity.mjs');
+  const out = diffText(['+-----BEGIN RSA PRIVATE \x1b[0mKEY-----', '+MIIEowIBAAKCAQEAsecretbase64lineXYZ', '+QyNTUxOQ', '+-----END RSA PRIVATE KEY-----'].join('\n'));
+  assert.ok(!out.includes('QyNTUxOQ') && !out.includes('MIIEowIBAAK'));
 });

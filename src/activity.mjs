@@ -368,7 +368,7 @@ export function diffText(text) {
   // Only its head and tail are worked out (window); the lines between are read for a key block's start and end only.
   let inKey = false;
   const key = (l) => {
-    const words = /^[-+ ]/.test(l) ? l.slice(1) : l;
+    const words = (/^[-+ ]/.test(l) ? l.slice(1) : l).replace(SGR, '');
     if (KEY_BEGIN.test(words)) inKey = true;
     if (inKey) { if (KEY_END.test(words)) inKey = false; return true; }
     return false;
@@ -412,7 +412,7 @@ export function secretIn(command) {
   // Each part of a pipe or list on its own, with linear tests only: sudo reading its password from stdin; a write
   // into a file shown as private.
   for (const part of c.split(/[|;&\n]/)) {
-    if (/\bsudo\b/i.test(part) && /\s-[A-Za-z]*S\b/i.test(part)) return true;
+    if (/\bsudo\b/i.test(part) && /\s(?:-[A-Za-z]*S[A-Za-z]*|--stdin)\b/i.test(part)) return true;
     if (/>|\btee\b/.test(part) && part.includes(PRIVATE_FILE)) return true;
   }
   return false;
@@ -540,21 +540,23 @@ function claudeResult(name, r, text, failed, exit, input = {}) {
  * read whole each time), so what was made is kept for the process by its input's hash, the newest WORKED_MAX of them.
  */
 const WORKED = new Map();
-const WORKED_MAX = 600;
+/** How many of each kind are kept: well over CARDS_KEPT for several conversations at once (a command is small). */
+const WORKED_MAX = { cmd: 8000, text: 2000, 'gate-text': 2000, patch: 1500, write: 1500, 'gate-diff': 1500 };
 function worked(kind, input, make) {
-  const k = `${kind}:${createHash('sha256').update(String(input)).digest('hex')}`;
-  if (WORKED.has(k)) { const v = WORKED.get(k); WORKED.delete(k); WORKED.set(k, v); return v; }
+  if (!WORKED.has(kind)) WORKED.set(kind, new Map());
+  const m = WORKED.get(kind), k = createHash('sha256').update(String(input)).digest('hex');
+  if (m.has(k)) { const v = m.get(k); m.delete(k); m.set(k, v); return v; }
   const v = make();
-  WORKED.set(k, v);
-  if (WORKED.size > WORKED_MAX) WORKED.delete(WORKED.keys().next().value);
+  m.set(k, v);
+  if (m.size > (WORKED_MAX[kind] ?? 1000)) m.delete(m.keys().next().value);
   return v;
 }
 
-function lazyBody(card, make) {
+function lazyBody(card, make, key = 'body') {
   let made = false, v;
-  Object.defineProperty(card, 'body', { enumerable: true, configurable: true,
+  Object.defineProperty(card, key, { enumerable: true, configurable: true,
     get() { if (!made) { made = true; v = make() || undefined; } return v; },
-    set(x) { Object.defineProperty(card, 'body', { value: x, enumerable: true, configurable: true, writable: true }); } });
+    set(x) { Object.defineProperty(card, key, { value: x, enumerable: true, configurable: true, writable: true }); } });
   return card;
 }
 
@@ -583,8 +585,10 @@ export function claudeCards(lines, prefix = '', parent = null) {
         if (cards.has(id)) continue;
         const name = String(c.name ?? ''), input = c.input && typeof c.input === 'object' ? c.input : {};
         const card = { id, at: cardTime(l.timestamp), tool: toolName(c.name), summary: claudeSummary(name, input) || 'Used a tool', fixed: claudeFixed(name, input), state: 'running', ...(parent ? { parent } : {}) };
-        const detail = claudeDetail(name, input), limit = claudeLimit(name, input);
-        if (detail) card.detail = detail;
+        // A shell step's command is worked out only when it's read, as a body is (a window holds thousands).
+        const limit = claudeLimit(name, input);
+        if (name === 'Bash') lazyBody(card, () => claudeDetail(name, input), 'detail');
+        else { const detail = claudeDetail(name, input); if (detail) card.detail = detail; }
         if (limit) card.limit = limit;
         if (name === 'TodoWrite') card.items = planItems((Array.isArray(input.todos) ? input.todos : []).map((t) => ({ text: t?.status === 'in_progress' ? (t.activeForm || t.content) : t?.content, done: t?.status === 'completed', now: t?.status === 'in_progress' })));
         names.set(id, name);
