@@ -454,7 +454,8 @@ export async function fetchScorecards(env, { kind, since, fetchImpl = fetch } = 
 
 /** Resolve with what the runtime has: its list (only `harness`'s models, if named), the agent's settings, the accounts provider, loom's scorecards. */
 //   role   a worker role's id (t-2036): only its eligible models, most wanted first after `prefer`
-//   gate   a new worker job's capacity admission (allocator.mjs capacityGate, t-2037): never for a pinned job
+//   gate   a worker job's capacity admission (allocator.mjs capacityGate, t-2037): a new job's at its start, a pinned
+//          job's at each resume (slice 4)
 //   pin    a worker job's assigned model (t-2038): that model and no other; a job is never moved by a preference,
 //          a new model or a quota reset. Out of quota, it waits (the 409 a caller treats as out of quota).
 export async function resolveFor(env, { agent, venue, venueKind: told, prefer = [], harness, conversation, avoid = [], accounts, now = new Date(), fetchImpl, role, pin, gate } = {}) {
@@ -487,8 +488,8 @@ export async function resolveFor(env, { agent, venue, venueKind: told, prefer = 
   // A pinned job has its model already: the owner's harness choice applies when a job is assigned, not after.
   const choice = pin ? 'auto' : modelChoiceOf(s, agent, conversation).effective;
   const r = resolveModel({ agent, kind, models: list, all, settings: agents[agent] ?? {}, accounts: listed,
-    scorecards: cards.rows, prefer, since, avoid, harnessChoice: choice, now: now.getTime(), ...(gate && !pin ? { gate } : {}) });
-  if (gate && !pin) r.why.push(`capacity: ${r.admission ?? 'admitted with the conversations\' reserve kept'}`);
+    scorecards: cards.rows, prefer, since, avoid, harnessChoice: choice, now: now.getTime(), ...(gate ? { gate } : {}) });
+  if (gate) r.why.push(`capacity: ${r.admission ?? 'admitted with the conversations\' reserve kept'}`);
   if (choice !== 'auto') r.why.unshift(`owner preference: ${choice}${conversation ? ' for this conversation' : ''}`);
   r.why.unshift(...head);
   if (role && !pin) r.role = typeof role === 'object' ? role.id : role;

@@ -389,9 +389,9 @@ async function pinGone(env, c, pin, d) {
 }
 
 /** Whether a job's failover would find a model: its role's (as admitted), or any it may use, off the harnesses avoided. */
-async function roomElsewhere(env, c, avoid, d) {
+async function roomElsewhere(env, c, avoid, d, gate) {
   try {
-    await resolveFor(env, { agent: c.agent, venue: c.venue, venueKind: c.kind, avoid, ...(c.spawn?.role ? { role: c.spawn.role } : {}), accounts: d.accounts, now: d.now(), fetchImpl: d.fetchImpl });
+    await resolveFor(env, { agent: c.agent, venue: c.venue, venueKind: c.kind, avoid, ...(c.spawn?.role ? { role: c.spawn.role } : {}), accounts: d.accounts, now: d.now(), fetchImpl: d.fetchImpl, ...(gate ? { gate } : {}) });
     return true;
   } catch (e) {
     if (e instanceof StateError && (e.status === 409 || e.status === 410)) return false;
@@ -399,13 +399,13 @@ async function roomElsewhere(env, c, avoid, d) {
   }
 }
 
-async function roomOn(env, c, harness, d, pin) {
+async function roomOn(env, c, harness, d, pin, gate) {
   try {
-    await resolveFor(env, { agent: c.agent, venue: c.venue, venueKind: c.kind, harness, pin, accounts: d.accounts, now: d.now(), fetchImpl: d.fetchImpl });
+    await resolveFor(env, { agent: c.agent, venue: c.venue, venueKind: c.kind, harness, pin, accounts: d.accounts, now: d.now(), fetchImpl: d.fetchImpl, ...(gate ? { gate } : {}) });
     return true;
   } catch (e) {
-    // 410: a pinned model gone from the list has no room either.
-    if (e instanceof StateError && (e.status === 409 || e.status === 410)) return false;
+    // 410: a pinned model gone from the list has no room either. Kept for conversations (a gate): no room, said so.
+    if (e instanceof StateError && (e.status === 409 || e.status === 410)) return gate && e.reserved ? { reserved: true, until: e.until } : false;
     throw e;
   }
 }
@@ -1775,7 +1775,7 @@ export function commitStartedConversation(env, op, { run, senderHash, bodyRules,
     // before assignments) gets one here, from the body it runs now. A failover re-pins it, the move kept as lineage.
     if (c.spawn && r.model && (!c.spawn.assignment || (way.failover && c.spawn.assignment.model !== r.model))) {
       const a = { model: r.model, harness: r.harness, family: r.family, at: new Date(at).toISOString(), ...(c.spawn.role ? { role: c.spawn.role.id, roleVersion: c.spawn.role.version } : {}) };
-      if (c.spawn.assignment) c.spawn.lineage = [...(c.spawn.lineage ?? []), { ...c.spawn.assignment, until: new Date(at).toISOString(), why: way.failover === 'rules' ? 'its rules can\'t be kept on that harness' : 'out of quota; failover allowed' }].slice(-8);
+      if (c.spawn.assignment) c.spawn.lineage = [...(c.spawn.lineage ?? []), { ...c.spawn.assignment, until: new Date(at).toISOString(), why: way.failover === 'rules' ? 'its rules can\'t be kept on that harness' : way.failover === 'capacity' ? 'kept for conversations; failover allowed' : 'out of quota; failover allowed' }].slice(-8);
       c.spawn.assignment = a;
     }
     // What capacity admission would have said (allocator.mjs, t-2037): shadow only, a log line, never a decision.
@@ -2200,7 +2200,8 @@ async function executeOne(env, op, d, mem) {
       // A new worker job, with the owner's allocator on (t-2037, slice 3): only an account that leaves conversations
       // their reserve until its reset. A job with an assignment (it ran before: a failover, a home) is slice 4's, never
       // gated here, whatever its pin says now.
-      const gate = !c0.spawn?.assignment && workerGate(env, c0, d);
+      // A capacity failover (slice 4) starts gated too: only on a model whose account has headroom, as routeOf found.
+      const gate = (!c0.spawn?.assignment || way.failover === 'capacity') && workerGate(env, c0, d);
       if (gate) base.gate = gate;
       const go = (avoid) => startBody(env, { ...base, place: c0.place, avoid, brief: startBrief(briefContext, [...notes, ...msgs], run, sends, rules) }, bodyDeps);
       try { r = await go(way.avoid); } catch (e) {
@@ -2280,6 +2281,9 @@ async function executeOne(env, op, d, mem) {
         requeue(c, msgs);
         c.waiting = `waiting for capacity: the model accounts it may use are kept for conversations until their reset; looked at again ${new Date(at).toISOString()}`;
         c.retryAt = at;
+        // A job waiting keeps its session as long as it waits (as one held for its model does): from now.
+        if (c.spawn && c.slot?.until) c.slot.until = new Date(Math.max(Date.parse(c.slot.until), nowMs + windowMs(env, c.venue, c.kind))).toISOString();
+        if (c.spawn && c.home?.until) c.home.until = new Date(Math.max(Date.parse(c.home.until), nowMs + windowMs(env, c.venue, c.kind))).toISOString();
         outcome(c, msgs.map((x) => x.key), { body: 'queued', reason: c.waiting }, nowMs);
         saveConv(env, c);
       });
@@ -2518,6 +2522,17 @@ async function routeOf(env, c0, op, rules, d, cant = []) {
       // A failover only when another eligible model has room: else it waits as any job does (its messages queued).
       if (c0.spawn.failover && await roomElsewhere(env, c0, [...new Set([...avoid, h])], d)) return move('quota');
       throw Object.assign(new DeliveryError(`this job's assigned model ${pin} is out of quota; it waits for it, its session and messages kept`, 503), { held: true });
+    }
+    // Slice 4 (t-2037), with the owner's allocator on: a job continuing on its model takes only what leaves conversations
+    // their reserve until its account's reset. Short of that it waits, its session and messages kept, and is looked at
+    // again (the reserved path); it moves only if its spawn allowed a failover and another eligible model has headroom.
+    const gate = workerGate(env, c0, d);
+    if (gate) {
+      const room = await roomOn(env, c0, h, d, pin, gate);
+      if (room?.reserved) {
+        if (c0.spawn.failover && await roomElsewhere(env, c0, [...new Set([...avoid, h])], d, gate)) return move('capacity');
+        throw Object.assign(new StateError(`this job's assigned model ${pin} is kept for conversations until its account's reset; it waits for room, its session and messages kept`, 409), { reserved: true, ...(Number.isFinite(room.until) ? { until: room.until } : {}) });
+      }
     }
     // Only a refused turn's own retry is dropped (a pinned job waits for its model instead); `cant` always stays.
     const keep = avoid.filter((x) => x !== h || cant.includes(x));
