@@ -1820,6 +1820,15 @@ export function api(env, effects, { caller, path, body }) {
       if (caller.kind !== 'agent') fail('spawn through the API is a body\'s', 403);
       return import('./spawn.mjs').then(async (m) => ({ status: 200, body: await m.spawnCall(env, caller, b, { detach: true }) })).catch(apiError);
     }
+    // No bind operation is exposed: only trusted clock admission may bind a grant.
+    if (['continuation-issue', 'continuation-enqueue', 'continuation-status'].includes(path)) {
+      if (caller.kind !== 'agent') fail('continuations belong to a body, as its own agent', 403);
+      return import('./delivery.mjs').then((m) => ({ status: 200, body: m.continuationCall(env, {
+        action: path.slice('continuation-'.length), conversation: b.conversation,
+        key: b.key, session: typeof b.session === 'string' ? b.session : undefined,
+        handle: b.handle, id: b.id, text: b.text,
+      }, { caller }) })).catch(apiError);
+    }
     if (path === 'principal') {
       if (caller.kind !== 'agent') fail('principal is a body\'s, as its own agent', 403);
       return import('./delivery.mjs').then((m) => { const r = m.bodyPrincipal(env, { conversation: b.conversation, key: b.key, session: typeof b.session === 'string' ? b.session : undefined }, { caller }); return { status: r.ok ? 200 : 409, body: r }; }, apiError);

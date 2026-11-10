@@ -157,7 +157,7 @@ import { join } from 'node:path';
 import { readModels, resolveFor, setModels } from './models.mjs';
 import { endBody, feedBody, listBodies, resumeBody, startBody } from './bodies.mjs';
 import { PART_RAW, joinParts, partsOf } from './blobs.mjs';
-import { answerLoop, deliver, listConvs, post, releaseBody, staleRuns, send, sendOutcome, sendStatus, tick, workingConversations, workingPrint } from './delivery.mjs';
+import { answerLoop, continuationCall, deliver, listConvs, post, releaseBody, staleRuns, send, sendOutcome, sendStatus, tick, workingConversations, workingPrint } from './delivery.mjs';
 import { coreFrom } from './core.mjs';
 import { watchBridges } from './nowboard.mjs';
 import { reviewStatus, reviewTick, runReview } from './review.mjs';
@@ -510,6 +510,21 @@ async function main(argv, env) {
     case 'body': return body(rest, env, json);
     case 'deliver': return delivery(rest, env, json);
     case 'review': return reviewCli(rest, env, json);
+    case 'continuation': {
+      const action = rest[0];
+      if (!['issue', 'enqueue', 'status'].includes(action)) throw new Fail('usage: loom runtime continuation issue|enqueue|status [--conversation cv] [--handle cont] [--id report] [--text words]', 2);
+      const conversation = flag(rest, '--conversation') || ownConversation(env);
+      const session = env.CLAUDE_CODE_SESSION_ID || env.CODEX_THREAD_ID || undefined;
+      const msg = { conversation, key: bodyKeyFor(env, conversation), session,
+        handle: flag(rest, '--handle'), id: flag(rest, '--id'),
+        ...(action === 'enqueue' ? { text: await textOf(rest, '--text') } : {}) };
+      const remote = env.LOOM_URL && env.LOOM_TOKEN_FILE;
+      const answer = remote ? await pieceCall(env, flag(rest, '--piece'))(`continuation-${action}`, msg)
+        : continuationCall(env, { ...msg, action });
+      if (answer?.ok === false) throw new Fail(answer.error ?? answer.reason ?? 'continuation refused');
+      out(answer);
+      return;
+    }
     case 'send': {
       // From a body in its house: through the piece API, as its own agent (its house's token), with its run's key.
       // The key for that conversation as its house keeps it (bodyhost.mjs), else this body's environment's.
@@ -574,6 +589,13 @@ async function main(argv, env) {
       // hand over a wake's principal (only the clock, here, does).
       const { bodyPrincipal, handOverWake, verifyStatement, resetPrincipal } = await import('./delivery.mjs');
       const { AGENT_NAME } = await import('./state.mjs');
+      if (rest.includes('--inspect-continuation')) {
+        const { inspectClockContinuation } = await import('./delivery.mjs');
+        out(inspectClockContinuation(env, { handle: flag(rest, '--inspect-continuation'),
+          statement: (await readStdin()).trim(), agent: flag(rest, '--agent'),
+          scheduledAt: Number(flag(rest, '--scheduled-at')) }));
+        return;
+      }
       if (rest.includes('--verify')) {
         const r = verifyStatement(env, (await readStdin()).trim());
         out(r);
@@ -895,7 +917,8 @@ async function delivery(rest, env, json) {
     const every = Number(flag(rest, '--every')) || 5000;
     let watched = 0;
     for (;;) {
-      try { await tick(env); } catch (err) { process.stderr.write(`loom-runtime deliver: tick: ${err.message}\n`); }
+      // The service's own tick: the only one whose settings become the continuation policy (delivery.mjs).
+      try { await tick(env, { service: true }); } catch (err) { process.stderr.write(`loom-runtime deliver: tick: ${err.message}\n`); }
       await tellAtWork(env);
       // The bridges' outages, noted even while nothing reads the manifest (loom down for a deploy): each half minute.
       if (Date.now() - watched >= WATCH_EVERY_MS) { watched = Date.now(); try { watchBridges(env); } catch (err) { process.stderr.write(`loom-runtime deliver: bridge watch: ${err.message}\n`); } }

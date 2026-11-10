@@ -1,0 +1,104 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { fork, spawn } from 'node:child_process';
+import { createServer } from 'node:http';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { once } from 'node:events';
+import { world } from './delivery-world.mjs';
+import { continuationCall, deliver, deliveryDir, handOverWake, loadConv } from '../src/delivery.mjs';
+
+// Run with CONTINUATION_CORE=/path/to/built/loom npm test. CI without the
+// companion checkout reports a skip rather than substituting a fake core.
+for (const disposition of ['live', 'archive', 'delete', 'delete-crash', 'not-accepted']) test(`real core lost receipt survives late retry with ${disposition} target`, { skip: !process.env.CONTINUATION_CORE, timeout: 45000 }, async (t) => {
+  const w = world();
+  const coreHome = join(w.env.HOME, 'real-core'); mkdirSync(coreHome);
+  let server = fork(new URL('./fixtures/continuation-core.mjs', import.meta.url), [], { env: { ...process.env, LOOM_HOME: coreHome, CONTINUATION_TEST_TIME: '2026-11-02T18:00:00Z' }, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
+  let errors = ''; server.stderr.on('data', b => errors += b);
+  t.after(() => server.kill('SIGKILL'));
+  let setup = await Promise.race([once(server, 'message').then(([x]) => x), once(server, 'exit').then(([c]) => { throw new Error(`core exited ${c}: ${errors}`); })]);
+  w.env.LOOM_HOME = coreHome;
+  const source = await deliver(w.env, w.msg(setup.place, 'owner', { source: 'loom', venue: 'loom', place: setup.place, from: { kind: 'person', slug: 'jonathan' } }), w.o);
+  const args = (cv) => { const c = loadConv(w.env, cv); return { conversation: cv, key: w.runner.envs[c.body.split(':')[1]].LOOM_BODY_KEY, session: w.sessionFor(cv) }; };
+  const grant = continuationCall(w.env, { ...args(source.conversation), action: 'issue' }, w.o);
+  const firing = w.msg('wake:w-abcdef', 'follow up', { source: 'clock', venue: 'wake', id: 'w-abcdef', kind: 'wake', from: { kind: 'schedule' }, continuation: { handle: grant.handle, expiresAt: grant.expiresAt, wake: 'w-abcdef' } });
+  handOverWake(w.env, { agent: 'art', place: firing.place, id: firing.id, for: 'owner' });
+  const child = await deliver(w.env, firing, w.o);
+  const q = { ...args(child.conversation), handle: grant.handle, id: 'final' };
+  const receipt = continuationCall(w.env, { ...q, action: 'enqueue', text: 'process crash report' }, w.o);
+  let accepted; const acceptance = new Promise(r => { accepted = r; });
+  let hold = true; const payloads = []; const answers = [];
+  const proxy = createServer(async (req, res) => {
+    let body = ''; for await (const chunk of req) body += chunk;
+    payloads.push(JSON.parse(body));
+    if (hold && disposition === 'not-accepted') { accepted(); return; }
+    const answer = await fetch(`http://127.0.0.1:${setup.port}${req.url}`, { method: req.method, headers: { authorization: `Bearer ${setup.token}`, 'content-type': 'application/json' }, body });
+    const text = await answer.text(); answers.push({ status: answer.status, text });
+    if (hold) { accepted(); return; }
+    res.writeHead(answer.status, { 'content-type': 'application/json' }); res.end(text);
+  });
+  proxy.listen(0, '127.0.0.1'); await once(proxy, 'listening');
+  t.after(() => { proxy.closeAllConnections(); proxy.close(); });
+  writeFileSync(w.env.LOOM_RUNTIME_TOKEN_FILE, setup.token);
+  const worker = (at = '2026-11-02T18:00:00Z') => spawn(process.execPath, ['--input-type=module', '-e', `
+    import { drainContinuations } from './src/delivery.mjs';
+    import { testSealer } from './test/delivery-world.mjs';
+    await drainContinuations(JSON.parse(process.env.BENCH_ENV), { sealer: testSealer, now: () => new Date(${JSON.stringify(at)}), venues: () => ({ loom: { adapter: 'core' } }) });
+  `], { cwd: resolve(import.meta.dirname, '..'), env: { ...process.env, BENCH_ENV: JSON.stringify({ ...w.env, LOOM_RUNTIME_LOOM_URL: `http://127.0.0.1:${proxy.address().port}/mcp` }) }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const first = worker(); t.after(() => first.kill('SIGKILL'));
+  await acceptance;
+  if (disposition !== 'not-accepted') assert.equal(answers[0].status, 200, answers[0].text);
+  else assert.equal(answers.length, 0, 'no adapter acceptance before SIGKILL');
+  const ended = once(first, 'exit'); first.kill('SIGKILL'); assert.equal((await ended)[1], 'SIGKILL');
+  w.clock.advance(6 * 60 * 60 * 1000);
+  assert.equal(continuationCall(w.env, { ...q, action: 'status' }, w.o).state, 'pending');
+  const swept = once(server, 'message'); server.send({ action: 'sweep' });
+  assert.deepEqual((await swept)[0], { applied: 'sweep' });
+  // Beyond both 14-day word retention and the short turn-idempotency cache.
+  // Archive must retain the receipt; deletion must revoke the target.
+  if (!['live', 'not-accepted'].includes(disposition)) {
+    const applied = once(server, 'message'); server.send({ action: disposition });
+    assert.deepEqual((await applied)[0], { applied: disposition });
+    if (disposition === 'delete-crash') {
+      const dead = once(server, 'exit'); server.kill('SIGKILL'); await dead;
+      server = fork(new URL('./fixtures/continuation-core.mjs', import.meta.url), [], { env: { ...process.env, LOOM_HOME: coreHome, CONTINUATION_TEST_TIME: '2026-11-02T18:00:00Z', CONTINUATION_PLACE: setup.place }, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
+      let restartError = ''; server.stderr.on('data', b => restartError += b);
+      setup = await Promise.race([once(server, 'message').then(([x]) => x), once(server, 'exit').then(([c]) => { throw new Error(`restarted core exited ${c}: ${restartError}`); })]);
+      writeFileSync(w.env.LOOM_RUNTIME_TOKEN_FILE, setup.token);
+    }
+  }
+  const advanced = once(server, 'message'); server.send({ action: 'clock', at: '2027-02-04T00:00:00Z' });
+  assert.deepEqual((await advanced)[0], { applied: 'clock' });
+  hold = false;
+  const second = worker('2027-02-04T00:00:00Z');
+  t.after(() => second.kill('SIGKILL'));
+  let secondErr = ''; second.stderr.on('data', b => secondErr += b);
+  assert.equal((await once(second, 'exit'))[0], 0, secondErr);
+  assert.equal(payloads.length, 2, 'fresh runtime must reconcile uncertain acceptance after cutoff');
+  assert.equal(payloads[0].op, 'post');
+  assert.equal(payloads[1].op, 'reconcile');
+  assert.deepEqual({ ...payloads[1], op: 'post' }, payloads[0]);
+  const reconciled = JSON.parse(answers.at(-1).text);
+  assert.equal(reconciled.state, disposition.startsWith('delete') ? 'deleted' : disposition === 'not-accepted' ? 'not-accepted' : 'delivered');
+  const terminal = disposition.startsWith('delete') ? 'indeterminate' : disposition === 'not-accepted' ? 'expired' : 'delivered';
+  w.clock.advance(Date.parse('2027-02-04T00:00:00Z') - w.clock.now().getTime());
+  assert.equal(continuationCall(w.env, { ...q, action: 'status' }, w.o).state, terminal);
+  // Another fresh process cannot retry terminal reports or recreate a deleted reply.
+  const third = worker('2027-03-04T00:00:00Z'); t.after(() => third.kill('SIGKILL'));
+  assert.equal((await once(third, 'exit'))[0], 0);
+  assert.equal(payloads.length, disposition.startsWith('delete') ? 3 : 2);
+  w.clock.advance(Date.parse('2027-03-04T00:00:00Z') - w.clock.now().getTime());
+  assert.throws(() => continuationCall(w.env, { ...q, action: 'enqueue', text: 'changed late report' }, w.o), /expired|different text/);
+  assert.equal(payloads.slice(1).every(p => p.op === 'reconcile'), true, 'fresh processes only look up after cutoff');
+  assert.throws(() => continuationCall(w.env, { ...q, action: 'enqueue', session: 'borrowed', id: 'stolen', text: 'no' }, w.o), /session/);
+  const { default: Sqlite } = await import(`${process.env.CONTINUATION_CORE}/node_modules/better-sqlite3/lib/index.js`);
+  const db = new Sqlite(join(coreHome, 'comms.db'), { readonly: true });
+  try { assert.equal(db.prepare('SELECT COUNT(*) AS n FROM comms_messages WHERE id = ?').get(receipt.ref).n, disposition.startsWith('delete') || disposition === 'not-accepted' ? 0 : 1); } finally { db.close(); }
+  if (disposition.startsWith('delete')) {
+    const household = new Sqlite(join(coreHome, 'household.db'), { readonly: true });
+    try {
+      assert.equal(household.prepare('SELECT COUNT(*) AS n FROM comms_deleted WHERE id = ?').get(setup.place).n, 1);
+      assert.equal(household.prepare('SELECT COUNT(*) AS n FROM comms_delete_pending WHERE id = ?').get(setup.place).n, 0);
+    } finally { household.close(); }
+  }
+});

@@ -104,6 +104,7 @@ import { raiseAlert } from './alerthook.mjs';
 import { changed as changedCards } from './activity.mjs';
 import { keepKey, keepSession } from './bodyhost.mjs';
 import { spawnCap } from './spawn.mjs';
+import { continuationOutbox } from './continuation-outbox.mjs';
 import { admit, logShadow } from './allocator.mjs';
 import { readRelays } from './relay.mjs';
 import { householdOwners, membersOf, ownersOf } from './owners.mjs';
@@ -650,7 +651,7 @@ const str = (v, max, min = 1) => typeof v === 'string' && v.length >= min && v.l
 /** The deliver body (agent-runtime.md, "The deliver contract"), checked whole: `source` (the calling piece) is core's, added as it forwards. */
 export function parseDelivery(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) fail('a delivery is a JSON object');
-  const bad = Object.keys(raw).find((k) => !['id', 'agent', 'venue', 'place', 'label', 'from', 'kind', 'at', 'text', 'source', 'local'].includes(k));
+  const bad = Object.keys(raw).find((k) => !['id', 'agent', 'venue', 'place', 'label', 'from', 'kind', 'at', 'text', 'source', 'local', 'continuation'].includes(k));
   if (bad !== undefined) fail(`a delivery has no key ${JSON.stringify(bad)}`);
   if (!str(raw.id, MAX_ID)) fail(`id is the source's own id for the message, 1-${MAX_ID} characters`);
   if (!AGENT_NAME.test(raw.agent ?? '')) fail('agent is an agent id');
@@ -667,6 +668,12 @@ export function parseDelivery(raw) {
   if (!PIECE.test(raw.source ?? '')) fail('source is the calling piece, as core forwards it');
   if (raw.local !== undefined && raw.local !== true) fail('local is true, or left out');
   if (raw.local === true && (raw.venue !== 'wake' || raw.kind !== 'wake' || raw.from.kind !== 'schedule')) fail('local is only for a wake from a schedule, on venue wake');
+  if (raw.continuation !== undefined) {
+    const c = raw.continuation;
+    if (!c || typeof c !== 'object' || Array.isArray(c) || Object.keys(c).some((k) => !['handle', 'wake', 'expiresAt'].includes(k)) ||
+        !/^cont-[0-9a-f]{64}$/.test(c.handle ?? '') || !/^w-[0-9a-f]{6}$/.test(c.wake ?? '') || !Number.isSafeInteger(c.expiresAt) || c.expiresAt <= 0) fail('continuation is an opaque handle and exact wake id');
+    if (raw.source !== 'clock' || raw.venue !== 'wake' || raw.kind !== 'wake' || raw.from.kind !== 'schedule') throw new DeliveryError('only the authenticated clock may carry a continuation wake', 403);
+  }
   return { ...raw };
 }
 
@@ -820,7 +827,7 @@ async function deliverOnce(env, raw, o) {
           else c.control.resume = true;
         }
         // Whom the clock said a wake is for stays with it while it waits (t-1975): a reset re-notes it as that, never more.
-        c.queue.push({ key, id: m.id, at: m.at, from: m.from, kind: m.kind, ...(wake ? { wakeFor: wakeFor ?? '-', ...(wakeFor === undefined ? { noWord: true } : {}) } : {}), ...(local ? { local: true } : {}), ...(o.deferPeer === true && m.from.kind === 'agent' ? { untilIdle: true } : {}), ...(tier ? { tier } : {}), ...(owner ? { owner: true } : {}), ...(tierUnread ? { tierUnread: true } : {}), ...(sealed ? { sealed } : { mem: true }) });
+        c.queue.push({ ...(m.continuation ? { clockContinuation: d.sealer.seal(Buffer.from(JSON.stringify({ ...m.continuation, delivery: m.id }))).toString('base64') } : {}), key, id: m.id, at: m.at, from: m.from, kind: m.kind, ...(wake ? { wakeFor: wakeFor ?? '-', ...(wakeFor === undefined ? { noWord: true } : {}) } : {}), ...(local ? { local: true } : {}), ...(o.deferPeer === true && m.from.kind === 'agent' ? { untilIdle: true } : {}), ...(tier ? { tier } : {}), ...(owner ? { owner: true } : {}), ...(tierUnread ? { tierUnread: true } : {}), ...(sealed ? { sealed } : { mem: true }) });
       }
       c.last = d.now().toISOString();
       saveConv(env, c);
@@ -1713,6 +1720,8 @@ export function commitStartedConversation(env, op, { run, senderHash, bodyRules,
     }
     c.body = r.body;
     c.run = run;
+    // Bind only a confirmed admission; uncertain input must retire before replay.
+    c.continuationAdmissions = r.inputUncertain ? [] : op.msgs.filter(x => x.clockContinuation).map(x => ({ run, sealed: x.clockContinuation, child: { conversation: c.conversation, run, agent: c.agent, principal: principalOf(env, c), reset: c.actsFor?.reset ?? null, resetPending: !!c.resetPending, target: { venue: c.venue, place: c.place } } }));
     if (houseLaunch) c.launchAcks = [...(c.launchAcks ?? []).filter(h => h.id !== houseLaunch.id), houseLaunch];
     // A local body speaks with its run's key as a house's body does: from the keys dir (bodyhost.mjs, keyFile), as
     // `claude --bg` gives every session its daemon's environment, not this launch's (t-1830).
@@ -1883,6 +1892,14 @@ async function recoverPreparedStart(env, op, d) {
   }
 }
 
+function checkContinuationLaunch(env, op, d) {
+  const outbox = continuationsOf(env, d, {});
+  for (const m of op.msgs.filter(x => x.clockContinuation)) {
+    const firing = JSON.parse(d.sealer.open(Buffer.from(m.clockContinuation, 'base64')).toString('utf8'));
+    outbox.checkFiring(firing.handle, firing, continuationSnapshot(env, outbox.sourceConversation(firing.handle)), continuationSnapshot(env, op.cv));
+  }
+}
+
 function preparedLaunch(env, op, d, context) {
   return async ({ runner, harness, options, resume, prepared }) => {
     const attempt = createHash('sha256').update(op.mark + '\0' + harness).digest('hex').slice(0, 12);
@@ -1900,6 +1917,7 @@ function preparedLaunch(env, op, d, context) {
         locked(env, () => {
           const c = loadConv(env, op.cv);
           if (!ours(c, op) || c.control) throw Object.assign(Error('its house launch was cancelled before publication'), { nativeNotStarted: true });
+          checkContinuationLaunch(env, op, d);
           const snapshot = context.snapshot(); snapshot.houseLaunch = handle;
           Object.assign(c.starting.prepared, { phase: 'prepared', handle, intentHash: handle.intentHash, snapshot });
           saveConv(env, c);
@@ -1919,7 +1937,7 @@ function preparedLaunch(env, op, d, context) {
       // The remote protocol is migrated separately. Never mistake this path
       // for a start proven absent merely because its registrar disappears.
       locked(env, () => { const c = loadConv(env, op.cv); if (ours(c, op)) { c.starting.untracked = true; saveConv(env, c); } });
-      try { return await (resume ? runner.resume(resume, options) : runner.start(options)); }
+      try { checkContinuationLaunch(env, op, d); return await (resume ? runner.resume(resume, options) : runner.start(options)); }
       catch (error) {
         if (!error.nativeNotStarted && !error.seatFull) error.nativePending = true;
         throw error;
@@ -1937,6 +1955,10 @@ function preparedLaunch(env, op, d, context) {
       if (!ours(c, op) || c.control) {
         cancelReservedLaunch(env, id);
         throw Object.assign(Error('its native start was cancelled before admission'), { nativeNotStarted: true });
+      }
+      try { checkContinuationLaunch(env, op, d); } catch (error) {
+        cancelReservedLaunch(env, id);
+        throw Object.assign(error, { nativeNotStarted: true });
       }
       const previous = c.starting.prepared;
       if (previous && previous.id !== id && readLaunch(env, previous.id)?.state !== 'refused') throw Object.assign(Error('its previous native start remains unresolved'), { nativePending: true });
@@ -2903,6 +2925,8 @@ export async function tick(env, o = {}, only, mem = new Map()) {
       if (h && !c.control) { c.control = { id: randomBytes(12).toString('hex'), at: d.now().toISOString(), state: c.body || c.starting ? 'pending' : 'held', house: h.house }; saveConv(env, c); }
     }
   });
+  // Follow-up reports (t-2004): never a reason the rest of the tick doesn't run.
+  try { await drainContinuations(env, o); } catch (e) { d.warn(`continuations: ${e.message}`); }
   discardPass(env, d);
   if (only) await drain(env, only, d, mem);
   const now = d.now().getTime();
@@ -3212,6 +3236,111 @@ function holderProblem(env, d, c, { key, session }, does = 'speaks in it', calle
 }
 
 /**
+ * How long a continuation may report, from its issue (t-2004): LOOM_RUNTIME_CONTINUATION_DAYS, 1-13, default 7 (under the 14-day idle window a conversation record is kept, so a reset it records can't be forgotten while a grant still names it). One
+ * absolute deadline is sealed at issue and carried to the clock and core; nothing renews it. Its records are collected
+ * LOOM_RUNTIME_CONTINUATION_KEEP_DAYS (1-90, default 7) after that deadline, once their outcome is final.
+ */
+// The runtime service's own settings, written by its tick (policyFile): a body's local CLI runs continuationCall in its
+// own process and environment, and a body never chooses its own deadline, so it reads the service's, not its env's.
+const policyFile = (env) => join(deliveryDir(env), 'continuation-policy.json');
+function envPolicy(env) {
+  const days = (name, dflt, lo, hi) => { const n = env[name] === undefined || env[name] === '' ? dflt : Number(env[name]); return Number.isInteger(n) && n >= lo && n <= hi ? n : null; };
+  return { days: days('LOOM_RUNTIME_CONTINUATION_DAYS', 7, 1, 13), keepDays: days('LOOM_RUNTIME_CONTINUATION_KEEP_DAYS', 7, 1, 90) ?? 7 };
+}
+function continuationPolicy(env, o = {}, own = false) {
+  let p = own ? envPolicy(env) : null;
+  if (!p) { try { p = JSON.parse(readFileSync(policyFile(env), 'utf8')); } catch { p = envPolicy(env); } }
+  const life = Number.isInteger(p?.days) && p.days >= 1 && p.days <= 13 ? p.days : null;
+  const keep = Number.isInteger(p?.keepDays) && p.keepDays >= 1 && p.keepDays <= 90 ? p.keepDays : 7;
+  return { lifetimeMs: o.continuationLifetimeMs ?? (life === null ? null : life * DAY_MS), retainMs: o.continuationRetainMs ?? keep * DAY_MS };
+}
+const continuationsOf = (env, d, o, own = false) => continuationOutbox({ dir: join(deliveryDir(env), 'continuations'), sealer: d.sealer, now: () => d.now().getTime(), warn: d.warn ?? (() => {}), ...continuationPolicy(env, o, own) });
+
+// Runtime-owned snapshots only. Neither a body nor the clock supplies these fields.
+export function continuationSnapshot(env, conversation) {
+  const c = loadConv(env, conversation);
+  if (!c) return null;
+  return { conversation: c.conversation, run: c.run, agent: c.agent,
+    principal: principalOf(env, c), reset: c.actsFor?.reset ?? null,
+    resetPending: !!c.resetPending, target: { venue: c.venue, place: c.place } };
+}
+
+// Only core currently promises transactional stable-ref deduplication. Resolve
+// the registry afresh, but never rebuild payload fields from a newer body/run.
+export async function drainContinuations(env, o = {}) {
+  const d = depsOf(env, o);
+  // The service's tick (`deliver run`, o.service): its settings are the policy (above), kept where a body's own process
+  // reads them. Any other tick (a body's `deliver tick`) reads the file, never writes it.
+  if (o.service === true) try {
+    const want = JSON.stringify(envPolicy(env));
+    let have = null; try { have = readFileSync(policyFile(env), 'utf8'); } catch { /* none yet */ }
+    if (have !== want) { const tmp = `${policyFile(env)}.${process.pid}.tmp`; writeFileSync(tmp, want, { mode: 0o600 }); renameSync(tmp, policyFile(env)); }
+  } catch { /* the env's policy still applies to this tick */ }
+  const outbox = continuationsOf(env, d, o, o.service === true);
+  await outbox.drain({ current: (cv) => continuationSnapshot(env, cv), reconcile: async (p) => {
+    const venue = (await d.venues())?.[p.target.venue];
+    if (!coreAdapted(venue)) return { permanent: true, reason: 'continuation destination has no core reconciliation contract' };
+    return d.core.comms({ op: 'reconcile', place: p.target.place, agent: p.agent, ref: p.ref,
+      text: p.text, run: p.run, expiresAt: p.expiresAt, ...(p.on ? { on: p.on } : {}) });
+  }, post: async (p) => {
+    // A registry outage is transient; venueOf intentionally swallows that
+    // distinction for ordinary sends, so do not use it for durable reports.
+    const venue = (await d.venues())?.[p.target.venue];
+    if (!coreAdapted(venue)) return { permanent: true, reason: 'continuation destination has no core idempotency contract' };
+    const answer = await d.core.comms({ op: 'post', place: p.target.place, agent: p.agent, ref: p.ref,
+      text: p.text, run: p.run, expiresAt: p.expiresAt, ...(p.on ? { on: p.on } : {}) });
+    return answer?.ok === true && typeof answer.id === 'string' && answer.id.length > 0 ? { ok: true, posted: true } : answer;
+  } });
+  outbox.collect({ every: 3600000 });
+}
+
+// Local clock bridge only; there is no body/API operation for inspecting grants.
+export function inspectClockContinuation(env, { handle, statement, agent, scheduledAt }, o = {}) {
+  if (env.LOOM_PIECE_NAME !== 'clock' || env.HOUSE_ID)
+    throw new StateError('continuation inspection belongs to the local clock', 403);
+  const d = depsOf(env, o);
+  const issuer = verifyStatement(env, statement, d.now().getTime());
+  if (!issuer.ok || issuer.agent !== agent) throw new StateError('no authenticated continuation issuer', 403);
+  const outbox = continuationsOf(env, d, o);
+  const source = continuationSnapshot(env, outbox.sourceConversation(handle));
+  return outbox.inspect(handle, source, issuer, scheduledAt);
+}
+
+// Holder boundary. There is deliberately no body-callable bind.
+export function continuationCall(env, { action, conversation, key, session, handle, id, text }, o = {}) {
+  const d = depsOf(env, o), c = loadConv(env, conversation);
+  if (!c) throw new StateError('no continuation conversation here', 403);
+  if (o.caller && (o.caller.kind !== 'agent' || o.caller.agent !== c.agent))
+    throw new StateError('only its own agent may use a continuation', 403);
+  const problem = holderProblem(env, d, c, { key, session }, 'uses a continuation', o.caller);
+  if (problem) throw new StateError(problem, 403);
+  const outbox = continuationsOf(env, d, o);
+  const child = continuationSnapshot(env, conversation);
+  if (action === 'issue') {
+    const grant = outbox.issue(child);
+    // Issuing is activity: the record outlives the grant's deadline (13 days at most, under the 14-day idle window),
+    // so a reset made while it's live is never forgotten and the grant matched again.
+    locked(env, () => { const x = loadConv(env, conversation); if (x) { x.last = d.now().toISOString(); saveConv(env, x); } });
+    return grant;
+  }
+  if (action !== 'enqueue' && action !== 'status') throw new StateError('unknown continuation action', 400);
+  const source = continuationSnapshot(env, outbox.sourceConversation(handle));
+  // Recover admission-to-binding after a runtime crash. These sealed records came
+  // only from core-authenticated clock delivery and the successful start/resume commit.
+  for (const a of c.continuationAdmissions ?? []) {
+    if (a.run !== c.run) continue;
+    const firing = JSON.parse(d.sealer.open(Buffer.from(a.sealed, 'base64')).toString('utf8'));
+    if (firing.handle === handle) outbox.bind(handle, { wake: firing.wake, delivery: firing.delivery, expiresAt: firing.expiresAt }, source, a.child);
+  }
+  if (action === 'enqueue') {
+    let rec = null;
+    try { rec = c.body ? readBody(env, c.body) : null; } catch { /* no harness annotation */ }
+    return outbox.enqueue(handle, child, source, { id, text }, { on: rec?.switched ? harnessWords(rec.harness) : null });
+  }
+  return outbox.status(handle, child, id, source);
+}
+
+/**
  * On whose behalf the body holding a conversation acts (principal.mjs, t-1943): {ok, for, owner, people, statement},
  * or {ok: false, reason}. Proven as `send` is (holderProblem), by its own agent: the statement, signed with the
  * runtime's key, is what a piece checks (`loom runtime principal --verify`); the run's key never leaves here.
@@ -3394,6 +3523,8 @@ export function resetPrincipal(env, conversation, { agent, approval } = {}) {
     delete c.slot; delete c.home; delete c.fallback;
     // The run that heard what came before speaks no more: its key is gone now, not when its body is ended.
     if (c.body) { c.resetPending = true; delete c.sendKey; }
+    // A reset is activity: the record (and the reset it holds) outlives any continuation issued before it (t-2004).
+    c.last = new Date().toISOString();
     saveConv(env, c);
     // Still no one's on loom's machine (something unplaced arrived after he was asked): said, so his Allow isn't "done".
     return { ok: true, conversation, ...(c.local && localForeign(env, c) ? { stillForeign: true } : {}) };

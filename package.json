@@ -130,6 +130,18 @@
         "name": "LOOM_RUNTIME_TASK_COMMENT",
         "label": "How a stopped stuck body is noted on its task",
         "hint": "a JSON argv with {task} and {text}; unset: taskstore comment {task} {text} when taskstore is on the local bodies' PATH; off: never"
+      },
+      {
+        "name": "LOOM_RUNTIME_CONTINUATION_DAYS",
+        "label": "Days a follow-up report capability lasts",
+        "default": "7",
+        "hint": "1-13; a wake can carry it until then, and nothing renews it. Anything else stops new ones"
+      },
+      {
+        "name": "LOOM_RUNTIME_CONTINUATION_KEEP_DAYS",
+        "label": "Days finished follow-up reports are kept after their deadline",
+        "default": "7",
+        "hint": "1-90"
       }
     ],
     "services": [
@@ -297,7 +309,9 @@
       "ask"
     ],
     "grants_store": "grants",
-    "api_serve": ["body-sync"],
+    "api_serve": [
+      "body-sync"
+    ],
     "store": {
       "grants": {
         "writers": "owner"
