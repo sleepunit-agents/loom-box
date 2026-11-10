@@ -3003,17 +3003,22 @@ function sessionOf(d, ref) {
  * current run: the same proof `send` takes (LOOM_BODY_KEY, the harness session). The relay's return address uses it
  * (relay.mjs, originOf): a body that proves its conversation needs nothing else to name it.
  */
-export function holdsRun(env, cv, { key, session } = {}, o = {}) {
+export function holdsRun(env, cv, proof = {}, o = {}) {
+  return !!heldConv(env, cv, proof, o);
+}
+
+/** holdsRun's answer as the conversation record it proved against (or null): what was proved is what's read (t-1953). */
+export function heldConv(env, cv, { key, session } = {}, o = {}) {
   const c = loadConv(env, cv);
   const want = typeof c?.sendKey === 'string' && /^[0-9a-f]{64}$/.test(c.sendKey) ? Buffer.from(c.sendKey, 'hex') : null;
-  if (!want || !c.body || typeof key !== 'string' || !key || !timingSafeEqual(keyHash(key), want)) return false;
+  if (!want || !c.body || typeof key !== 'string' || !key || !timingSafeEqual(keyHash(key), want)) return null;
   // From a house, only the body's own (t-1952): a key carried out of its house proves nothing in another.
-  if (houseProblem(env, c, o.caller)) return false;
+  if (houseProblem(env, c, o.caller)) return null;
   // Nor from a body whose conversation has moved to another principal's house (t-1952).
-  if (seatMoved(env, c)) return false;
+  if (seatMoved(env, c)) return null;
   // Fail closed (unlike send's, kept as it was): a body whose session the runner can't name proves nothing yet.
   const own = sessionOf({ ...depsOf(env, o), env }, c.body);
-  return !!own && session === own;
+  return own && session === own ? c : null;
 }
 
 /**

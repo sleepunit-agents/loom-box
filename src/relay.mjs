@@ -26,8 +26,9 @@ import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync, appendFileSync, mkdirSync } from 'node:fs';
 import { delimiter, dirname, join } from 'node:path';
 import { coreFrom } from './core.mjs';
-import { deliver, deliveryDir, holdsRun, listConvs, loadConv } from './delivery.mjs';
+import { deliver, deliveryDir, heldConv, holdsRun, listConvs, loadConv } from './delivery.mjs';
 import { readBody } from './bodies.mjs';
+import { principalOf } from './principal.mjs';
 import { GRANTS, KEY, householdOf, paired } from './grants.mjs';
 import { setting } from './piece.mjs';
 import { loomStore } from './store.mjs';
@@ -102,9 +103,21 @@ export function approvalsInstalled(env) {
   return dirs.some((d) => existsSync(join(d, 'loom-approvals')));
 }
 
-/** Spend an approval for exactly this relay, as the calling agent's body (`--as`): '' when spent, else why not. */
-function spendApproval(env, aid, target, caller) {
-  const r = spawnSync(env.LOOM_BIN || 'loom', ['approvals', 'use', aid, '--kind', 'relay', '--target', target, '--as', JSON.stringify(caller)],
+/**
+ * On whose behalf a relay spends an approval (t-1953): whom the conversation the caller proved it holds acts for (the
+ * owner, or the one person), else '-', someone loom can't name. Never the owner by default: a relay whose body didn't
+ * prove its conversation (the MCP tool, which carries no proof) can't spend an approval asked for the owner or a person.
+ */
+export function relayPrincipal(env, proven) {
+  if (!proven) return '-';
+  const p = principalOf(env, proven);
+  if (p.owner === true) return 'owner';
+  return typeof p.for === 'string' && /^[a-z0-9]+(-[a-z0-9]+)*$/.test(p.for) && p.for !== 'owner' ? p.for : '-';
+}
+
+/** Spend an approval for exactly this relay, as the calling agent's body (`--as`), for whom it acts (`--on-behalf`): '' when spent, else why not. */
+function spendApproval(env, aid, target, caller, onBehalf = '-') {
+  const r = spawnSync(env.LOOM_BIN || 'loom', ['approvals', 'use', aid, '--kind', 'relay', '--target', target, '--as', JSON.stringify(caller), '--on-behalf', onBehalf],
     { env, encoding: 'utf-8', timeout: 30_000 });
   if (r.error) return `the approvals piece didn't run (${r.error.message})`;
   return r.status === 0 ? '' : ((r.stderr || r.stdout || '').trim().slice(-300) || `exit ${r.status}`);
@@ -228,8 +241,11 @@ export async function relay(env, caller, args, d = depsOf(env), proof = {}) {
     if (!d.approvals.installed()) no(`relay: the household doesn't pair ${from} with ${to}, and no approvals piece is installed to allow one relay: the owner pairs them on the runtime's page (Permissions)`);
     if (!approval) no(`relay: the household doesn't pair ${from} with ${to} (the runtime's Permissions). Ask the owner for this one, in plain words: approvals request --kind relay --target ${target} --what 'relay to ${to}' --ask 'OK for ${cap(from)} to ask ${cap(to)} about <what, no ids>?' --why '<one line>' --if-yes '<what you do>' --if-no '<what you do instead>', then relay again with approval set to its id once it's allowed`);
     if (!APPROVAL_ID.test(approval)) no('relay: approval is an approval id (a-…)');
-    const why = d.approvals.spend(approval, target, caller);
-    if (why) no(`relay: approval ${approval} isn't allowed for a relay from ${from} to ${to}: ${why}`);
+    // Spent only for whom it was asked (t-1953): the asking conversation's principal, when the caller proved it holds it.
+    // Whom it's for is read from the very record the proof was checked against, never a later or earlier read.
+    const proven = origin && proof.key ? heldConv(env, origin.conversation, proof, { caller }) : null;
+    const why = d.approvals.spend(approval, target, caller, relayPrincipal(env, proven));
+    if (why) no(`relay: approval ${approval} isn't allowed for a relay from ${from} to ${to}: ${why}${proven ? '' : '. A relay that hasn\'t proved its conversation acts for someone loom can\'t name: from your shell (in a house, or a body on loom\'s machine), `loom runtime relay` proves it'}`);
   }
 
   // Its words' shape too (loops.mjs, shapeOf: a hash, never the words): near-identical relays back and forth are a
@@ -269,7 +285,7 @@ export function depsOf(env) {
     core: coreFrom(env, { timeoutMs: 100_000 }),
     store: () => loomStore(env),
     household: () => householdOf(env),
-    approvals: { installed: () => approvalsInstalled(env), spend: (aid, target, caller) => spendApproval(env, aid, target, caller) },
+    approvals: { installed: () => approvalsInstalled(env), spend: (aid, target, caller, onBehalf) => spendApproval(env, aid, target, caller, onBehalf) },
     now: () => Date.now(),
     append: (row) => appendRelay(env, row),
   };

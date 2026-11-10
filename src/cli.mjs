@@ -658,7 +658,23 @@ async function main(argv, env) {
     case 'relays':
     case 'relay': {
       if (cmd === 'relays' || rest[0] !== 'tool') {
-        if (!env.LOOM_URL || !env.LOOM_TOKEN_FILE) throw new Fail('loom runtime relay and relays are a body\'s, from its house (its token: LOOM_URL and LOOM_TOKEN_FILE): loom runtime relay --to <agent> --say <text>; the tool core runs is `relay tool`', 2);
+        if ((!env.LOOM_URL || !env.LOOM_TOKEN_FILE) && ownConversation(env)) {
+          // A body on loom's machine (a local wake, t-1953): no house token, so here, as `place` is. Only with its proof
+          // (its run's key and session): it relays as its conversation's agent, and spends an approval for whom that
+          // conversation acts. Without the proof nothing is sent: loom's machine is no shortcut past it.
+          const mine = ownConversation(env);
+          const { loadConv, holdsRun } = await import('./delivery.mjs');
+          const c = loadConv(env, mine);
+          const proof = bodyProof(env, mine);
+          const caller = { kind: 'agent', agent: c?.agent };
+          if (!c?.agent || !proof.key || !holdsRun(env, mine, proof, { caller })) throw new Fail(`loom runtime relay: this body can't prove it holds ${mine} (its run's key and session), so it can't relay from here`, 1);
+          const named = rest.includes('--conversation') ? rest[rest.indexOf('--conversation') + 1] : undefined;
+          if (named !== undefined && named !== mine) throw new Fail(`relay: --conversation is this body's own (${mine}); a relay's answer comes back only to the conversation that asked`, 2);
+          const argv = [cmd, ...rest, ...(cmd === 'relay' && named === undefined ? ['--conversation', mine] : [])];
+          const { runFor } = await import('./gates-api.mjs');
+          return runAnswer(await runFor(env, caller, argv, undefined, undefined, undefined, cmd === 'relay' ? proof : {}));
+        }
+        if (!env.LOOM_URL || !env.LOOM_TOKEN_FILE) throw new Fail('loom runtime relay and relays are a body\'s, from its house (its token: LOOM_URL and LOOM_TOKEN_FILE) or a body on loom\'s machine (LOOM_BODY_CONVERSATION): loom runtime relay --to <agent> --say <text>; the tool core runs is `relay tool`', 2);
         // A relay from a body names its own conversation (LOOM_BODY_CONVERSATION, unless it names one) and proves it
         // holds it, as `send` does: its run's key and harness session, in the body of the call, never in argv.
         let argv = [cmd, ...rest];
