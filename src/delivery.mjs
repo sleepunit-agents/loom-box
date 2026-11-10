@@ -74,6 +74,7 @@ import { observation } from './ticker.mjs';
 // runs look like a crash loop (a failure streak, the same output again and again, relay ping-pong, start-stop churn)
 // is paused before its next body: what comes is recorded and waits; a note on the conversation says why, and the owner
 // gets one ask with Resume (what waited starts) and Dismiss (what waited is dropped). Nothing else is ever paused.
+import { askDarkBoxes } from './dark-box.mjs';
 import { houseLaunchHandle, readHouseLaunch } from './house-launch-journal.mjs';
 import { spawn as nodeSpawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
@@ -890,6 +891,39 @@ function statusOf(env, c, d) {
   } catch { return 'unknown'; }
 }
 
+const HOUSE_BODY = /^(?:claude|codex):(h-[0-9]{1,9})-/;
+const HOUSE_OVER = new Set(['stopping', 'done', 'failed', 'stopped', 'lost']);
+/**
+ * Whether a body's house is on its way out or gone (t-2079): draining, stopping, saving its history, ended, or not on
+ * the record at all. A body on loom's own machine (no house in its ref) never is.
+ */
+export function houseLetGo(env, houses, ref) {
+  let house = HOUSE_BODY.exec(ref ?? '')?.[1];
+  try { const rec = readBody(env, ref); if (typeof rec.house === 'string') house = rec.house; } catch { /* its ref says */ }
+  if (!house) return false;
+  const h = houses?.[house];
+  return !h || !!h.draining || !!h.collection || HOUSE_OVER.has(h.state);
+}
+
+/**
+ * `loom runtime body end` (t-2079): the owner ended this body, so no conversation keeps it as its body, nor a retirement
+ * waiting on it (a retirement whose house will never send its history held its spawn slot for hours). The conversation
+ * resumes from its digests, or its saved slot, on its next message.
+ */
+export function releaseBody(env, ref) {
+  return locked(env, () => {
+    const released = [];
+    for (const c of listConvs(env)) {
+      if (c.body !== ref && c.retiring?.body !== ref) continue;
+      if (c.body === ref) { delete c.body; delete c.idleSince; delete c.nativeRetirement; }
+      if (c.retiring?.body === ref) delete c.retiring;
+      saveConv(env, c);
+      released.push(c.conversation);
+    }
+    return released;
+  });
+}
+
 const registrarAlive = marker => Number.isSafeInteger(marker?.pid) && marker.pid > 0
   && (marker.boot && marker.birth ? launchWorkerAlive(marker) !== false : alive(marker.pid));
 const isStarting = c => !!c.starting && (!!c.starting.prepared || c.starting.untracked || c.starting.protocol !== 2 || registrarAlive(c.starting));
@@ -1214,8 +1248,14 @@ function plan(env, cv, d, mem) {
     return { cv, type: 'loop-note', reason: loop.reason };
   }
   const { busy, idle } = census(env, c.agent, d, now);
-  if (c.spawn && listConvs(env).filter((x) => x.agent === c.agent && x.spawn && x.conversation !== cv &&
-    (isStarting(x, now) || (x.body && statusOf(env, x, d) === 'working'))).length >= spawnCap(env)) return wait('spawn cap: waiting for another spawn to finish');
+  if (c.spawn) {
+    // A body whose house is draining, stopping, over or gone holds no slot (t-2079): one stuck saving its history held
+    // a slot for hours while queued spawns waited.
+    let houses = {};
+    try { houses = load(env).houses ?? {}; } catch { /* unreadable state: every body counts, as before */ }
+    if (listConvs(env).filter((x) => x.agent === c.agent && x.spawn && x.conversation !== cv &&
+      (isStarting(x, now) || (x.body && !houseLetGo(env, houses, x.body) && statusOf(env, x, d) === 'working'))).length >= spawnCap(env)) return wait('spawn cap: waiting for another spawn to finish');
+  }
   const limits = limitsOf(env);
   if (st === 'idle') {
     // Its own body, warm, its turn over: resumed in the same session, if the agent has a slot free. (Resumed in its
@@ -1617,6 +1657,8 @@ async function execute(env, op, d, mem) {
     locked(env, () => {
       const c = loadConv(env, op.cv);
       if (!ours(c, op)) return;
+      // Its body released while this was in flight (`body end`, t-2079): nothing is left to wait on.
+      if (op.retirement ? c.retiring?.id !== op.retirement : op.type === 'retire' && c.body !== op.body) { delete c.starting; saveConv(env, c); return; }
       const { cv, mark: _mark, retirement: _retirement, ...work } = op;
       // Queued text stays sealed across a restart, just as it does on a start marker.
       if (work.msgs) {
@@ -2866,6 +2908,8 @@ export async function tick(env, o = {}, only, mem = new Map()) {
   try { sweepTransfers(env, now, Date.now()); } catch (e) { d.warn(`sweeping transfers: ${e.message}`); }
   // Seat records whose house is over (houserunner.mjs, sweepSeats, t-1952): a guest's or an unknown's, never the owner's.
   try { sweepSeats(env); } catch (e) { d.warn(`sweeping seats: ${e.message}`); }
+  // Conversations held on a box gone dark (t-2057): the owner is asked whether to carry them on elsewhere.
+  try { await askDarkBoxes(env, { convs: listConvs(env), nowMs: now, warn: d.warn }); } catch (e) { d.warn(`asking about dark boxes: ${e.message}`); }
   const warm = limitsOf(env).warmIdleS * 1000;
   const stuckAfter = stuckAfterOf(env);
   for (const c of listConvs(env)) if (c.launchAcks?.length) finishLaunchAck(env, c.conversation, d);

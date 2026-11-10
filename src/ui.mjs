@@ -3,6 +3,7 @@ import { checkLoginExpiry, loginExpiryAsks, loginExpiry } from './login-expiry.m
 // boxes, what each has and may host, the houses asked for, and the owner's
 // controls. Data only; loom renders it. Every action is the owner's (the page
 // is), and a box's credential is shown once, in the message after adding it.
+import { writeOffApproved } from './dark-box.mjs';
 import { principalOf } from './principal.mjs';
 import { approvalsFake, approvalsRun, approvalsWhy } from './approvals-call.mjs';
 import { appendFileSync, existsSync, readFileSync, statfsSync } from 'node:fs';
@@ -113,7 +114,7 @@ function spendApproval(env, aid, kind, target, agent, { onBehalf } = {}) {
   const fx = approvalsFake(env);
   if (fx) return fx.spend(aid, target, agent, kind);
   // A reset is spent as the runtime filed it (runtimeAs); a grant as the agent, as t-1970 pinned.
-  const as = kind === 'principal-reset' ? runtimeAs(agent) : JSON.stringify({ kind: 'agent', agent });
+  const as = kind === 'principal-reset' || kind === 'box-write-off' ? runtimeAs(agent) : JSON.stringify({ kind: 'agent', agent });
   const r = approvalsRun(env, ['use', aid, '--kind', kind, '--target', target, '--as', as, ...(onBehalf ? ['--on-behalf', onBehalf] : [])]);
   // Spent is exactly what approvals says when it spent one (`<id>: used`), never just an exit 0 from something else.
   if (!r.error && r.status === 0 && (r.stdout || '').trim() === `${aid}: used`) return '';
@@ -1333,6 +1334,8 @@ function houseFacts(c) {
     { label: 'Tailnets', value: (c.tailnets ?? []).map((g) => g.name).join(', ') || 'none' },
     { label: 'Branch', value: c.branch || 'default' }, { label: 'Repo secret', value: c.repoSecret || 'none' },
     { label: 'Secrets a house gets', value: Object.entries(c.secrets || {}).map(([k, v]) => (k === v ? k : `${k} (from ${v})`)).join(', ') || 'none' },
+    { label: 'Only for', value: Object.entries(c.scopes || {}).map(([k, v]) => `${k}: ${v.split('+').map((w) => (w === 'owner' ? 'your own work' : w.startsWith('service:') ? `the ${w.slice(8)} service` : `the ${w} project`)).join(', ')}`).join('; ') || 'every house gets everything' },
+    { label: 'Who steers which project', value: Object.entries(c.steers || {}).map(([k, v]) => `${k}: ${v.join(', ')}`).join('; ') || 'only you' },
   ];
 }
 
@@ -1365,6 +1368,9 @@ function agentForm(agent, c) {
     { name: 'branch', label: 'Branch', kind: 'text', value: c?.branch ?? '' },
     { name: 'repo_secret', label: 'Repo secret', kind: 'text', value: c?.repoSecret ?? '', hint: 'A secrets-store name, for a private repo over https' },
     { name: 'secrets', label: 'Secrets', kind: 'text', value: Object.entries(c?.secrets || {}).map(([k, v]) => `${k}=${v}`).join(', '), hint: 'name-in-house=store-name, comma separated' },
+    // t-1963: who gets what. Blank keeps them as they are; none clears them.
+    { name: 'scopes', label: 'Only for', kind: 'text', value: Object.entries(c?.scopes || {}).map(([k, v]) => `${k}=${v}`).join(', '), hint: 'secret=owner (only your own work), secret=pond or tailnet:fleet=pond (your work and that of people you let steer pond), +service:discord for that service too; comma separated. Left blank, nothing changes; none clears them' },
+    { name: 'steers', label: 'Who steers which project', kind: 'text', value: Object.entries(c?.steers || {}).map(([k, v]) => `${k}=${v.join('+')}`).join(', '), hint: 'person=project, like patrick=pond: their work gets that project\'s secrets and tailnets. Left blank, nothing changes; none clears them' },
   ].map((f) => (f.value === '' ? (({ value: _v, ...r }) => r)(f) : f)) };
 }
 
@@ -1575,6 +1581,7 @@ export function act(env, effects, { action, fields: raw = {}, caller: c }, publi
         return { ok: true, message: `${who(r.agent)}'s houses ${fields.on === 'on' ? 'may' : 'may not'} have ${what} from their next start.`, page: '' };
       }
       case 'reset-approved': return resetApproved(env, c, fields);
+      case 'writeoff-approved': return writeOffApproved(env, effects, c, fields, spendApproval);
       case 'gates-allow': case 'gates-deny': case 'gates-merge': case 'grants-set': case 'relay-set': case 'relay-pair': case 'grant-approved': {
         const st = permsStore(env);
         if (!st) return { ok: false, message: 'The runtime reads its permissions from loom\'s store when loom runs it.' };

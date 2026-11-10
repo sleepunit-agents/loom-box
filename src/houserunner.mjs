@@ -226,6 +226,14 @@ function recordOfHouse(env, agent, house) {
   return null;
 }
 
+/** Whether a house's own body host has reported lately (t-2057): its box's silence is no proof its bodies stopped. */
+export function houseHeard(env, agent, house, nowMs = Date.now()) {
+  try {
+    const found = recordOfHouse(env, agent, house);
+    return !!found && freshRec(houseRec(found.h, house), house, nowMs);
+  } catch { return true; } // Unreadable: never take it for silence.
+}
+
 /**
  * Seat records that are over: no house that's live, nothing draining, nothing asked. The owner's is kept (it's the
  * agent's own); an unknown conversation's or a person's goes, and comes back with its next body.
@@ -401,6 +409,8 @@ export function bodySync(env, caller, body, o = {}) {
     const startingUnknown = malformedStarting || (x.admissionProtocol === true && !caps.includes('native-admission'));
     if (caps.includes('native-admission')) x.admissionProtocol = true;
     const current = load(env).houses?.[house];
+    // Written off while its box was dark (t-2057): its bodies' conversations went on elsewhere; it has nothing left to do.
+    if (current?.writtenOff) return { exit: true, reason: 'the owner wrote this house off while its box was dark' };
     if (current?.nativeHistory?.plan) return { exit: true, reason: 'its box is collecting this physically stopped house' };
     const stopping = current?.state === 'stopping' && !current.job && !current.session;
     if (stopping) {
@@ -592,7 +602,9 @@ export function nativeCollectionExchange(env, { agent, house, plan, requiredHost
     const collection = x.offlineCollection;
     if (collection.plan !== plan) fail('native collection plan changed');
     const transferDir = key => partDir(env, agent, house, 'nc-' + createHash('sha256').update(plan + '\0' + key).digest('hex').slice(0, 40));
-    const result = () => ({ plan, complete: collection.complete === true, entries: collection.entries.map(e => ({ ...e, received: !!collection.done[e.key] })) });
+    // Given up on (t-2079): a box that waited past its limit records what it couldn't save as lost; the house finishes.
+    const incomplete = () => Object.values(collection.done).some(d => d.reason === 'collection-timeout');
+    const result = () => ({ plan, complete: collection.complete === true, ...(incomplete() ? { incomplete: 'collection-timeout' } : {}), entries: collection.entries.map(e => ({ ...e, received: !!collection.done[e.key] })) });
     if (q.phase === 'plan') return result();
     if (q.phase === 'finish') {
       if (collection.entries.some(e => !collection.done[e.key])) fail('native session collection has not been acknowledged');
@@ -609,7 +621,7 @@ export function nativeCollectionExchange(env, { agent, house, plan, requiredHost
     const entry = collection.entries.find(e => e.key === q.key);
     if (!entry) fail('native collection entry belongs to another plan');
     if (q.phase === 'loss') {
-      if (q.reason !== 'missing-history' || !validPendingInbox(q.pending ?? null)) fail('invalid native history-loss receipt');
+      if (!['missing-history', 'collection-timeout'].includes(q.reason) || !validPendingInbox(q.pending ?? null)) fail('invalid native history-loss receipt');
       if (entry.transfer) fail('an existing native transfer cannot be replaced by a loss receipt');
       const pending = q.pending ?? null, prior = collection.done[entry.key];
       if (prior) {
@@ -649,7 +661,7 @@ export function nativeCollectionExchange(env, { agent, house, plan, requiredHost
         x.report ??= { bodies: {}, done: {}, caps: [] }; x.report.bodies ??= {};
         x.report.bodies[entry.bodyId] = { ...(x.report.bodies[entry.bodyId] ?? {}), harness: entry.harness, status: 'ended', feedable: false };
       }
-      collection.done[entry.key] = { lost: true, pending, ...(consumed ? { consumed: true } : {}), ...(entry.bodyId ? { bodyId: entry.bodyId } : {}), ...(entry.session ? { session: entry.session } : {}) };
+      collection.done[entry.key] = { lost: true, pending, ...(q.reason !== 'missing-history' ? { reason: q.reason } : {}), ...(consumed ? { consumed: true } : {}), ...(entry.bodyId ? { bodyId: entry.bodyId } : {}), ...(entry.session ? { session: entry.session } : {}) };
       writeJson(hostFile(env, agent, seat), h);
       return { plan, received: true };
     }
@@ -775,7 +787,7 @@ export class HouseRunner {
       const h = this.host(agent, seat);
       let takes = !!h.house && houseTakes(this.env, h.house);
       // An older image than the agent's current build: drained, and the next body goes to a fresh house (t-1764).
-      if (takes && !/^j-h-[0-9]{1,9}$/.test(seat) && (this.drain(agent, h.house, seat) || (!fresh(h, now) && this.leaveDownBox(agent, h.house, seat, now)))) takes = false;
+      if (takes && !/^j-h-[0-9]{1,9}$/.test(seat) && (this.drain(agent, h.house, seat) || this.leaveForPreferred(agent, h.house, seat, now, !fresh(h, now)))) takes = false;
       else if (fresh(h, now) && takes) {
         // Handed out (its launch writes the request next): marked, so the cap's release never stops it in between.
         hostLocked(this.env, () => { const x = loadHost(this.env, agent, seat); if (x.house === h.house) { x.handedAt = now; writeJson(hostFile(this.env, agent, seat), x); } });
@@ -844,19 +856,27 @@ export class HouseRunner {
   }
 
   /**
-   * The agent's house is on a box that's gone quiet (no host report, the box unheard for PLACE_UP_MS) while another box
-   * of its preference is up and may run its body (t-2048): that house drains, as an outdated one does, and the next
-   * body gets a fresh house there. Its own bodies stay its (held, never written off: the box may come back).
+   * The agent's house isn't on the box its next body would go to (t-2048, t-2070): that house drains, as an outdated one
+   * does, and the next body gets a fresh house there. Either its box has gone quiet (no host report, the box unheard for
+   * PLACE_UP_MS) while another box of its preference is up and may run its body, or a box ahead of it in the agent's
+   * order is up and may (the order changed, or that box came back): a lower box takes no new bodies once a better one
+   * can. Its own bodies stay its (held: the box may come back) until the owner writes them off (t-2057, dark-box.mjs), and it
+   * idles out the usual way.
    */
-  leaveDownBox(agent, house, seat, nowMs) {
+  leaveForPreferred(agent, house, seat, nowMs, quiet) {
     let s;
     try { s = load(this.env); } catch { return false; }
     const where = s.houses?.[house]?.box;
-    if (!where || boxUp(s.boxes?.[where], nowMs)) return false;
+    if (!where) return false;
     const at = bodyBox(s, agent, this.harness, this.env, nowMs);
     // Only to a box the owner listed for it: an agent with one primary keeps waiting for that box, as it always did.
-    if (!at.box || at.box === where || !boxUp(s.boxes?.[at.box], nowMs) || !preferenceOf(s, agent, this.env).includes(at.box)) return false;
-    return this.drain(agent, house, seat, `its box ${s.boxes?.[where]?.name ?? where} went quiet; new bodies go to ${s.boxes?.[at.box]?.name ?? at.box}`);
+    const pref = preferenceOf(s, agent, this.env);
+    if (!at.box || at.box === where || !boxUp(s.boxes?.[at.box], nowMs) || !pref.includes(at.box)) return false;
+    const name = (id) => s.boxes?.[id]?.name ?? id;
+    if (quiet && !boxUp(s.boxes?.[where], nowMs)) return this.drain(agent, house, seat, `its box ${name(where)} went quiet; new bodies go to ${name(at.box)}`);
+    const rank = (id) => { const i = pref.indexOf(id); return i < 0 ? Infinity : i; };
+    if (rank(at.box) < rank(where)) return this.drain(agent, house, seat, `${name(at.box)} is ahead of ${name(where)} in ${agent}'s boxes; new bodies go there`);
+    return false;
   }
 
   /** Reserve a stable request without handing any work to its host. The caller
@@ -1070,8 +1090,14 @@ export class HouseRunner {
     return x && (collecting || x.offlineCollection?.complete === true || freshRec(x, body.house, this.now().getTime())) ? x : null;
   }
 
+  /** The owner wrote its house off while its box was dark (t-2057): over, whatever its last report said. */
+  writtenOff(body) {
+    try { return !!load(this.env).houses?.[body.house]?.writtenOff; } catch { return false; }
+  }
+
   entry(body) {
     const raw = rawOf(body);
+    if (raw && this.writtenOff(body)) return { status: 'ended', feedable: false };
     const x = raw ? this.rec(body) : null;
     if (!x) return null;
     const entry = x.report?.bodies?.[raw] ?? { status: 'ended' };
@@ -1095,6 +1121,8 @@ export class HouseRunner {
       if (receipt && receipt.consumed !== true) return true;
       const h = load(this.env).houses?.[body.house];
       if (!h) return true; // Missing ownership metadata is not physical termination.
+      // The owner's write-off stands for the termination its dark box can't report (t-2057).
+      if (h.writtenOff && h.agent === body.agent) return false;
       if (h?.agent === body.agent && h.nativeHistory?.v === 1 && !h.nativeHistory.complete) return true;
       return !!h && !h.collection && h.agent === body.agent && ['wanted', 'starting', 'running', 'stopping'].includes(h.state);
     } catch { return true; } // An unreadable control plane cannot prove termination either.
@@ -1150,6 +1178,8 @@ export class HouseRunner {
     // can narrow replay; unknown receipts replay all runtime-owned fed copies.
     const final = this.finalInbox(body);
     if (final) return final.ready ? final.pending : null;
+    // Written off (t-2057): its last report can't say what it heard after it, so every one fed is unheard.
+    if (this.writtenOff(body)) return null;
     const x = raw ? this.rec(body) : null;
     if (!x) return null;
     return [...new Set([...(x.inbox?.[raw] ?? []).map((y) => y.key), ...(x.report.bodies[raw]?.pending ?? [])])];
@@ -1160,6 +1190,8 @@ export class HouseRunner {
     const raw = rawOf(body), x = raw ? houseRec(this.host(body.agent, this.seatFor(body)), body.house) : null;
     if (!x?.offlineCollection) return undefined;
     const receipt = collectionReceipt(x, raw);
+    // Written off mid-collection (t-2057): no receipt is coming from the dark box; it retires as a loss (pack()).
+    if (!receipt && this.writtenOff(body)) return undefined;
     if (!receipt) return { ready: false };
     return { ready: true, lost: receipt.lost === true, pending: Array.isArray(receipt.pending)
       ? [...new Set([...(x.inbox?.[raw] ?? []).map(y => y.key), ...receipt.pending])] : null };
@@ -1222,6 +1254,9 @@ export class HouseRunner {
     const owner = houseRec(this.host(body.agent, this.seatFor(body)), body.house);
     const receipt = collectionReceipt(owner, raw);
     if (!existsSync(f) && receipt && receipt.consumed !== true) throw new RunnerError('acknowledged native collection pack is unavailable; ownership remains held');
+    // Written off (t-2057): no host is left to send it, and its history stays on the dark box. Retired as a loss, with
+    // its notice: whatever it did after its last word may have happened.
+    if (!existsSync(f) && collecting?.writtenOff && collecting.agent === body.agent) throw new SessionHistoryMissing();
     if (!existsSync(f) && collecting?.nativeHistory?.v === 1 && collecting.collection?.phase === 'native') throw new RunnerError('native session collection is still pending on its box');
     // No key here: no slot, at once. It's stopped, and its session stays in its house (thrown away with it).
     if (!this.canSeal()) {

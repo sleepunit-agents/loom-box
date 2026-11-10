@@ -13,6 +13,9 @@
 //   loom runtime agent <agent> --repo <url> [--house-file house/house.json] [--nested] [--gpu]
 //                  [--branch b] [--repo-secret <store-name>] [--secret as=from]... [--port n]...
 //                  [--tailnet name=/run/…/tailscaled.sock]...
+//                  [--scope <secret>=owner|<project>]... [--scope tailnet:<name>=<project>]... [--steer <person>=<project>[+…]]...
+//                                                        (t-1963: a scoped secret or tailnet goes only to houses whose work
+//                                                        may have it: the owner's, or a person's he lets steer that project)
 //                  [--logins claude,codex|none|default]       which of a box's logins its houses may have
 //                                                         how its house is made (--port: one it may publish;
 //                                                         --tailnet: a box tailscaled.sock it may use, by name)
@@ -147,7 +150,7 @@ import { join } from 'node:path';
 import { readModels, resolveFor, setModels } from './models.mjs';
 import { endBody, feedBody, listBodies, resumeBody, startBody } from './bodies.mjs';
 import { PART_RAW, joinParts, partsOf } from './blobs.mjs';
-import { answerLoop, continuationCall, deliver, listConvs, post, staleRuns, send, sendOutcome, sendStatus, tick, workingConversations, workingPrint } from './delivery.mjs';
+import { answerLoop, continuationCall, deliver, listConvs, post, releaseBody, staleRuns, send, sendOutcome, sendStatus, tick, workingConversations, workingPrint } from './delivery.mjs';
 import { coreFrom } from './core.mjs';
 import { watchBridges } from './nowboard.mjs';
 import { reviewStatus, reviewTick, runReview } from './review.mjs';
@@ -277,6 +280,8 @@ async function main(argv, env) {
       throw new Fail(USAGE, 2);
     }
     case 'api': {
+      // The paths the loom block's api_serve names, from one long-lived process (serve.mjs, t-2065).
+      if (rest.includes('--serve')) return (await import('./serve.mjs')).serveApi(env);
       if (!json) throw new Fail(USAGE, 2);
       return out(await api(env, realEffects(env), JSON.parse(await readStdin())));
     }
@@ -300,7 +305,9 @@ async function main(argv, env) {
     case 'agent': {
       const [agent] = positional(rest);
       const secrets = Object.fromEntries(flags(rest, '--secret').map((p) => { const [k, v] = p.split('='); return [k, v ?? k]; }));
-      out(setAgent(env, realEffects(env), { agent, repo: flag(rest, '--repo'), houseFile: flag(rest, '--house-file'), nested: rest.includes('--nested'), gpu: rest.includes('--gpu'), branch: flag(rest, '--branch'), repoSecret: flag(rest, '--repo-secret'), secrets, ports: flags(rest, '--port'), tailnets: flags(rest, '--tailnet'), logins: flag(rest, '--logins') }));
+      out(setAgent(env, realEffects(env), { agent, repo: flag(rest, '--repo'), houseFile: flag(rest, '--house-file'), nested: rest.includes('--nested'), gpu: rest.includes('--gpu'), branch: flag(rest, '--branch'), repoSecret: flag(rest, '--repo-secret'), secrets, ports: flags(rest, '--port'), tailnets: flags(rest, '--tailnet'), logins: flag(rest, '--logins'),
+        // Not given: kept as they are (dropping a scope would widen who gets a secret); `none` clears.
+        scopes: flags(rest, '--scope').length ? flags(rest, '--scope') : undefined, steers: flags(rest, '--steer').length ? flags(rest, '--steer') : undefined }));
       return;
     }
     case 'remote': {
@@ -816,7 +823,12 @@ async function body(rest, env, json) {
     if (!r.fed) process.exitCode = 3;
     return said(r, r.fed ? `${ref}: fed` : `${ref}: not fed: ${r.reason}`);
   }
-  if (sub === 'end') return said(endBody(env, ref), `${ref}: ended`);
+  if (sub === 'end') {
+    const r = endBody(env, ref);
+    // Its conversation lets it go too (t-2079): no record keeps an ended body as its own.
+    const released = releaseBody(env, ref);
+    return said({ ...r, released }, `${ref}: ended${released.length ? ` (released from ${released.join(', ')})` : ''}`);
+  }
   if (sub === 'list') {
     const l = listBodies(env);
     if (json) return out(l);

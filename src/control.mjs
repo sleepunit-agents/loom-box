@@ -8,7 +8,7 @@ import { checkLoginExpiry } from './login-expiry.mjs';
 // It is not a scheduler. A house goes where it's told (a box), or to the one
 // permitted box that has what it needs, or to the agent's primary. If that
 // doesn't name exactly one box, it says why and starts nothing.
-import { OWNER_SEAT, SEAT, seatCapProblem } from './principal.mjs';
+import { OWNER_SEAT, SEAT, principalOf, seatCapProblem } from './principal.mjs';
 import { ownCommit } from './version.mjs';
 import { pieceName } from './piece.mjs';
 import { randomBytes } from 'node:crypto';
@@ -316,7 +316,7 @@ export function setPrimary(env, effects, { agent, box, boxes }) {
  * uses and the secrets-store name they come from. Kept here, not read from
  * the repo, so neither a box nor the repo can widen it.
  */
-export function setAgent(env, effects, { agent, repo, houseFile, nested, gpu, branch, repoSecret, secrets, ports, tailnets, logins }) {
+export function setAgent(env, effects, { agent, repo, houseFile, nested, gpu, branch, repoSecret, secrets, ports, tailnets, logins, scopes, steers }) {
   const a = str(agent, 'an agent', 40);
   if (!AGENT_NAME.test(a)) fail('an agent name is lowercase letters, digits and dashes');
   const r = str(repo, 'the repo', 400);
@@ -358,14 +358,137 @@ export function setAgent(env, effects, { agent, repo, houseFile, nested, gpu, br
   const reset = lg === 'default';
   if (typeof lg === 'string') lg = reset ? undefined : lg === 'none' ? [] : lg.split(/[\s,]+/).filter(Boolean);
   if (lg !== undefined && (!Array.isArray(lg) || !lg.every((x) => LOGIN_NAMES.includes(x)))) fail(`logins is a list of ${LOGIN_NAMES.join(', ')} (or empty for none)`);
+  // Blank (the page's form, an untouched field) is not given: only none clears (t-1963).
+  const blank = (v) => v === undefined || v === null || v === '' || (Array.isArray(v) && !v.length) || (typeof v === 'object' && !Array.isArray(v) && !Object.keys(v).length);
+  const sc = blank(scopes) ? undefined : parseScopes(scopes);
+  const st = blank(steers) ? undefined : parseSteers(steers);
   return update(env, (s) => {
     const keep = lg !== undefined ? [...new Set(lg)] : reset ? undefined : s.agents[a]?.logins;
     // Another repo, house file or branch: the image its next house builds isn't known any more (until a box says).
     const was = s.agents[a];
     if (!was || was.repo !== r || (was.houseFile || 'house/house.json') !== file || (was.branch ?? null) !== br) delete s.builds?.[a];
-    s.agents[a] = { repo: r, houseFile: file, nested: nest, gpu: gp, branch: br, repoSecret: rs, secrets: sec, ports: pt, tailnets: tn, ...(keep !== undefined ? { logins: keep } : {}) };
+    // Scopes and steers not given stay as they were (t-1963): dropping a scope would widen who gets a secret. A scope
+    // stays with a secret taken away too, so one added back comes back scoped. A new scope must name something the
+    // agent gets (a typo would leave the real one unscoped).
+    const scoped = { ...(sc ?? was?.scopes ?? {}) };
+    const has = (k) => (k.startsWith('tailnet:') ? tn.some((g) => `tailnet:${g.name}` === k) : Object.hasOwn(sec, k));
+    if (sc) for (const k of Object.keys(sc)) if (!has(k) && !Object.hasOwn(was?.scopes ?? {}, k)) fail(`${k} has a scope, and ${a}'s houses don't get it: a secret by the name a house sees, or tailnet:<name>`);
+    // One stored secret under two names is one secret: both names scoped alike, or the other name hands it out.
+    // A scoped name renamed is the same secret too: its old store, now under another name, keeps the scope.
+    // Each scope remembers the store it was for (scopeStores), so a rename over several saves still finds it.
+    const storeOf = (k) => (Object.hasOwn(sec, k) ? sec[k] : was?.scopeStores?.[k] ?? was?.secrets?.[k]);
+    const scopeStores = Object.fromEntries(Object.keys(scoped).filter((k) => !k.startsWith('tailnet:') && typeof storeOf(k) === 'string').map((k) => [k, storeOf(k)]));
+    const stores = [...Object.entries(sec), ...Object.entries(scopeStores).filter(([k]) => !Object.hasOwn(sec, k))];
+    for (const [n, from] of stores) {
+      const twin = stores.find(([m, f]) => m !== n && f === from && scoped[m] !== scoped[n]);
+      if (twin) fail(`${n} and ${twin[0]} are the same secret (${from}): scope both alike`);
+    }
+    // And one tailscaled socket under two names is one tailnet.
+    for (const g of tn) {
+      const twin = tn.find((x) => x.name !== g.name && x.socket === g.socket && scoped[`tailnet:${x.name}`] !== scoped[`tailnet:${g.name}`]);
+      if (twin) fail(`tailnets ${g.name} and ${twin.name} are the same socket: scope both alike`);
+    }
+    const steering = st ?? was?.steers ?? {};
+    s.agents[a] = { repo: r, houseFile: file, nested: nest, gpu: gp, branch: br, repoSecret: rs, secrets: sec, ports: pt, tailnets: tn, ...(keep !== undefined ? { logins: keep } : {}),
+      ...(Object.keys(scoped).length ? { scopes: scoped, scopeStores } : {}), ...(Object.keys(steering).length ? { steers: steering } : {}) };
     return { agent: a, ...s.agents[a] };
   });
+}
+
+// ------------------------------------------------------- scopes (t-1963, t-1964)
+// Jonathan, 2026-11-08: "we need some kind of scope to attach things to. pond work can get pond approved stuff". A
+// secret or tailnet the owner scopes goes only to the houses whose work may have it: `owner` (his own work only) or a
+// project's slug (his work, and that of the people he lets steer that project: steers, "patrick=pond"). Unscoped ones
+// go to every house of the agent, as before. Whose work a house is for is the runtime's word (t-1952): a body host's
+// seat, a task house's taskActsFor; a service house is the owner's (its house file names what each service gets).
+// Kept here, with the rest of the agent's settings, so neither a box, a body nor the agent's repo can widen it.
+const SCOPE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+const SCOPE_MAX = 40;
+// A scope is one or more of: owner, a project's slug, service:<name> (that service's houses), joined by +.
+const SCOPE_WORD = /^(owner|[a-z0-9]+(-[a-z0-9]+)*|service:[a-z][a-z0-9-]{0,39})$/;
+const scopeOk = (v) => typeof v === 'string' && v.length <= 200 && v.split('+').length <= 10 && v.split('+').every((w) => SCOPE_WORD.test(w));
+
+function parseScopes(v) {
+  if (v === 'none') return {};
+  const list = typeof v === 'string' ? v.split(/[\s,]+/).filter(Boolean) : Array.isArray(v) ? v : Object.entries(v ?? {}).map(([k, x]) => `${k}=${x}`);
+  if (list.length === 1 && list[0] === 'none') return {};
+  if (list.length > SCOPE_MAX) fail(`scopes: ${SCOPE_MAX} at most`);
+  const out = {};
+  for (const p of list) {
+    const [k, sc, ...more] = String(p).split('=');
+    const key = k.startsWith('tailnet:') ? (/^tailnet:[a-z][a-z0-9-]{0,31}$/.test(k) ? k : null) : (SECRET_NAME.test(k) ? k : null);
+    if (!key || more.length || !scopeOk(sc)) fail('a scope is <secret>=owner, <secret>=<project>, or tailnet:<name>=<project>, more than one joined by + (like pond-dev-service-token=pond, github-token=owner+service:discord)');
+    if (key in out) fail(`${key} is scoped once`);
+    out[key] = sc;
+  }
+  return out;
+}
+
+function parseSteers(v) {
+  if (v === 'none') return {};
+  const list = typeof v === 'string' ? v.split(/[\s,]+/).filter(Boolean) : Array.isArray(v) ? v : Object.entries(v ?? {}).map(([k, x]) => `${k}=${[].concat(x).join('+')}`);
+  if (list.length === 1 && list[0] === 'none') return {};
+  if (list.length > SCOPE_MAX) fail(`steers: ${SCOPE_MAX} people at most`);
+  const out = {};
+  for (const p of list) {
+    const [person, projects, ...more] = String(p).split('=');
+    const ps = String(projects ?? '').split('+').filter(Boolean);
+    if (more.length || !SCOPE.test(person ?? '') || person.length > 40 || person === 'owner' || !ps.length || ps.length > 10
+        || !ps.every((x) => SCOPE.test(x) && x.length <= 40 && x !== 'owner')) {
+      fail('a steer is <person>=<project>[+<project>…] (like patrick=pond): whose work may have that project\'s secrets and tailnets. owner is only ever the owner');
+    }
+    if (person in out) fail(`${person} is named once`);
+    out[person] = [...new Set(ps)];
+  }
+  return out;
+}
+
+/**
+ * Whose work a house is for, as scopes read it: {owner: true}, {person}, or {unknown: true}. A body host's seat
+ * (owner, p-<person>, u-<conversation>); a task house's taskActsFor (the owner's only when nobody else steered it, one
+ * person's when only they did); a service house the owner's. Anything else, or a record that can't say: unknown.
+ */
+export function housePrincipal(s, h, env) {
+  if (isHostHouse(h, s)) {
+    // A body host from before seats were kept can't say: unknown.
+    const seat = typeof h.seat === 'string' ? h.seat : null;
+    if (seat === OWNER_SEAT) return { owner: true };
+    const m = /^p-([a-z0-9]+(?:-[a-z0-9]+)*)$/.exec(seat ?? '');
+    if (m) return { person: m[1] };
+    // A job's seat is the job's own house: whose that is (once, never a chain).
+    // The task house itself becomes the job's body host (taskhost.mjs, bootstrapTask): its own taskActsFor.
+    const j = /^j-(h-[0-9]{1,9})$/.exec(seat ?? '');
+    const job = j && s.houses?.[j[1]];
+    if (!job || job.service || (j[1] !== h.id && isHostHouse(job, s))) return { unknown: true };
+    return taskPrincipal(env, h.agent, job.taskActsFor);
+  }
+  // A service is its own principal: people other than the owner may steer it (a chat bridge), and a body can ask for
+  // one. It gets what's scoped to it by name (service:<name>), and what isn't scoped.
+  if (h.service) return { service: h.service };
+  return taskPrincipal(env, h.agent, h.taskActsFor);
+}
+
+/**
+ * A task's taskActsFor as a principal, read now by the runtime's own rule (principal.mjs, principalOf): the owner's only
+ * when nobody else steered it and whoever spoke as owner still is one, one person's, else unknown.
+ */
+function taskPrincipal(env, agent, p) {
+  if (!p || typeof p !== 'object' || p.unknown !== false || !Array.isArray(p.people)) return { unknown: true };
+  const v = principalOf(env ?? {}, { agent, actsFor: p });
+  if (v.owner === true && !v.people.length) return { owner: true };
+  if (v.owner !== true && typeof v.for === 'string' && SCOPE.test(v.for) && v.people.length === 1) return { person: v.for };
+  return { unknown: true };
+}
+
+/** Whether a house for `p` (housePrincipal) gets what's scoped to `scope` under agent config `a`. Unscoped: yes. */
+export function inScope(a, p, scope) {
+  if (scope === undefined) return true;
+  if (p.owner) return true;
+  const words = String(scope).split('+');
+  if (p.service) return words.includes(`service:${p.service}`);
+  if (!p.person || !Object.hasOwn(a.steers ?? {}, p.person)) return false;
+  const may = a.steers[p.person];
+  return Array.isArray(may) && words.some((w) => w !== 'owner' && !w.startsWith('service:') && may.includes(w));
 }
 
 // ------------------------------------------------------- owner and agents
@@ -593,7 +716,8 @@ function pollState(env, effects, caller, { facts, sessions, harnesses, usage, lo
           // A house asked for with a GPU need gets the box's GPU (t-1616).
           gpu: (h.needs ?? []).some((n) => /^gpu(:|$)/.test(n)) };
       }),
-      stop: mine.filter((h) => h.state === 'stopping' && !h.cooperativeStop).map((h) => h.id),
+      // A written-off house it still has (it came back): stopped, and what it says after that isn't taken (t-2057).
+      stop: mine.filter((h) => (h.state === 'stopping' && !h.cooperativeStop) || (h.writtenOff && !h.writtenOff.stopped)).map((h) => h.id),
       // Its body hosts' houses, running: the box checks their agents' repos for a newer image (build-check).
       bodyHosts: mine.filter((h) => h.state === 'running' && !h.collection && isHostHouse(h, s)).map((h) => ({ id: h.id, agent: h.agent, known: !!h.build })),
       // Taken by this box and not over: one the box doesn't have (it restarted) is lost.
@@ -647,12 +771,19 @@ export function claim(env, effects, caller, { id, nativeHistory }) {
     }
     try {
       const secrets = {};
+      // Whose work this house is for, and what's scoped away from it (t-1963): never issued, and named to the box so
+      // its house starts without them rather than not at all.
+      const p = housePrincipal(s, h, env);
+      const withheld = { secrets: [], tailnets: [] };
       for (const [as, from] of Object.entries(a.secrets || {})) {
         // A mapping from before the brokers went (sub:<provider>): nothing is issued; the house file's logins say
         // which of the box's own logins it uses.
         if (SUB_SOURCE.test(from)) continue;
+        if (!inScope(a, p, a.scopes?.[as])) { withheld.secrets.push(as); continue; }
         secrets[as] = effects.secret(from, { agent: h.agent, house: h.id });
       }
+      const tailnets = (a.tailnets ?? []).map(parseTailnetGrant).filter(Boolean)
+        .filter((g) => inScope(a, p, a.scopes?.[`tailnet:${g.name}`]) || !withheld.tailnets.push(g.name));
       // Which of this box's logins the house may have mounted: logged in here (the box's own report), granted to
       // the agent (loginsOf), and only on a box its owner owns. A box lent to the agent runs its work, not on its
       // owner's login: the login file is readable from inside the house (docs/model-accounts.md).
@@ -668,7 +799,8 @@ export function claim(env, effects, caller, { id, nativeHistory }) {
       const saved = key ? stateMeta(env, s, key) : undefined;
       // The state itself comes after, a part at a time (state-part): just its shape here.
       const state = saved ? { bytes: saved.bytes, sha256: saved.sha256, parts: partsOf(saved.bytes) } : null;
-      return { id, agent: h.agent, token, secrets, logins, repoAuth, nested: !!a.nested, gpu: !!a.gpu, ports: (a.ports ?? []).map(parsePortGrant).filter(Boolean), tailnets: (a.tailnets ?? []).map(parseTailnetGrant).filter(Boolean), ...(h.nativeHistory ? { nativeHistory: { v: 1 } } : {}), ...(h.service ? { service: h.service } : {}), ...(h.slot ? { slot: h.slot } : {}), ...(key ? { state } : {}) };
+      return { id, agent: h.agent, token, secrets, logins, repoAuth, nested: !!a.nested, gpu: !!a.gpu, ports: (a.ports ?? []).map(parsePortGrant).filter(Boolean), tailnets,
+        ...(withheld.secrets.length || withheld.tailnets.length ? { withheld } : {}), ...(h.nativeHistory ? { nativeHistory: { v: 1 } } : {}), ...(h.service ? { service: h.service } : {}), ...(h.slot ? { slot: h.slot } : {}), ...(key ? { state } : {}) };
     } catch (err) {
       // The house stays waiting; the token it was about to get goes (or is queued to).
       revokeOrQueue(s, effects, label);
@@ -829,6 +961,8 @@ export function nativeCollection(env, effects, caller, body) {
     const h = s.houses[body.id];
     if (!h || h.box !== caller.subject || h.nativeHistory?.plan !== context.plan) fail('native collection ownership changed', 409);
     h.nativeHistory.complete = true;
+    // Finished incomplete (t-2079): the box gave up waiting; what it saved is kept, the rest is recorded as lost.
+    if (result.incomplete) h.nativeHistory.incomplete ??= { reason: result.incomplete, at: now(effects) };
   });
   return result;
 }
@@ -839,6 +973,11 @@ export function report(env, effects, caller, { id, state, exit, log, build }) {
     boxOf(s, caller);
     const h = s.houses[id];
     if (!h || h.box !== caller.subject) fail(`no house ${id} for this box`, 404);
+    // Written off while its box was dark (t-2057): its end is noted, so the box stops being told to stop it; nothing else.
+    if (h.writtenOff) {
+      if (TERMINAL.has(state) && !h.writtenOff.stopped) { h.writtenOff.stopped = now(effects); h.updated = now(effects); }
+      return houseView(h);
+    }
     // A cooperative Down exits naturally after native collection and Git rescue.
     // The box sees a clean completion; retain the owner's explicit stop intent.
     if (h.cooperativeStop && state === 'done' && exit === 0) state = 'stopped';
@@ -979,6 +1118,46 @@ export function serviceDown(env, effects, caller, body) {
     const h = s.houses[svc.house];
     if (h && LIVE.has(h.state)) { h.state = h.state === 'wanted' ? 'stopped' : 'stopping'; h.updated = now(effects); }
     return { service: key, want: 'down', house: svc.house, state: h?.state };
+  });
+}
+
+/** How long a box must have been silent before the owner may write off its houses (t-2057): the alwaysOn alert's. */
+export const WRITE_OFF_AFTER_MS = 10 * 60_000;
+
+/**
+ * The bodies' houses on a box that's gone dark, written off (t-2057): the owner's call, as a forced service move is.
+ * Each live house there that isn't a service (those move with `service move --force`) is lost, its token revoked,
+ * and its native history counted as terminated without recovery, so the runtime retires its bodies with the loss
+ * notice ("effects may already have happened") and their conversations go on in a house on the next box of the agent's
+ * list. If the box comes back it's told to stop each of them, and nothing they say is taken. Only a box silent for
+ * WRITE_OFF_AFTER_MS, never loom's own; `agent`, when given, only its houses; `houses`, when given, are exactly the ones the owner was asked about.
+ */
+export function writeOffBox(env, effects, { name, agent, houses: asked, lastSeen, heard }) {
+  return update(env, (s) => {
+    const id = resolveBox(s, name);
+    const b = s.boxes[id];
+    if (b.local) fail(`${boxNameOf(s, id)} is loom's own machine; its houses can't be written off`, 409);
+    const at = Date.parse(now(effects));
+    // The card was for one stretch of silence: a box heard from since then isn't written off on it.
+    if (lastSeen !== undefined && b.lastSeen !== lastSeen) fail(`${boxNameOf(s, id)} has been heard from since you were asked`, 409);
+    if (b.lastSeen && at - Date.parse(b.lastSeen) < WRITE_OFF_AFTER_MS) fail(`${boxNameOf(s, id)} was heard from in the last ${WRITE_OFF_AFTER_MS / 60_000} minutes; its houses aren't written off`, 409);
+    const want = Array.isArray(asked) ? new Set(asked.filter((x) => typeof x === 'string')) : null;
+    const done = [];
+    for (const h of Object.values(s.houses)) {
+      if (h.box !== id || !LIVE.has(h.state) || h.service) continue;
+      if (agent !== undefined && h.agent !== agent) continue;
+      if (want && !want.has(h.id)) continue;
+      // Checked again under the lock: a house whose own body host spoke since the card was answered is running.
+      if (heard?.(h.id)) continue;
+      if (h.tokenLabel) revokeOrQueue(s, effects, h.tokenLabel);
+      h.state = 'lost'; h.updated = now(effects); h.note = `written off: its box ${boxNameOf(s, id)} went dark`;
+      h.writtenOff = { at: now(effects), box: id };
+      // Its history stays on the dark box: nothing is collected, and that is the recorded outcome.
+      if (h.nativeHistory?.v === 1 && !h.nativeHistory.complete) { h.nativeHistory.complete = true; h.nativeHistory.writtenOff = true; }
+      delete h.collection;
+      done.push(h.id);
+    }
+    return { box: id, name: boxNameOf(s, id), writtenOff: done };
   });
 }
 
