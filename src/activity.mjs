@@ -249,13 +249,9 @@ function shownTextLine(line) {
   return r === plain ? norm : cut === plain ? r : `${r} … (line cut)`;
 }
 
-/**
- * Text as the owner's view shows it (t-2109): a key block taken out whole, then each line through shownTextLine; at
- * most `max`, its head and tail kept around a line saying how many weren't. '' for none.
- */
-export function shownText(text, max = MAX_BODY) {
-  const t = String(text ?? '').slice(0, 2_000_000).replace(/-----BEGIN [A-Z ]{0,40}PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]{0,40}PRIVATE KEY-----|$)/g, GONE);
-  const lines = t.split('\n').map(shownTextLine);
+/** Lines already shown (each through shownTextLine), at most `max`: their head and tail around a line saying how many
+ * weren't kept. Nothing is redacted or taken out of a line here. */
+function capLines(lines, max) {
   while (lines.length && !lines.at(-1).trim()) lines.pop();
   while (lines.length && !lines[0].trim()) lines.shift();
   const all = lines.join('\n');
@@ -265,6 +261,23 @@ export function shownText(text, max = MAX_BODY) {
   for (const l of lines) { if (h + l.length + 1 > max / 2) break; head.push(l); h += l.length + 1; }
   for (let i = lines.length - 1; i >= head.length; i--) { if (k + lines[i].length + 1 > max / 2 - 40) break; tail.unshift(lines[i]); k += lines[i].length + 1; }
   return [...head, `… ${lines.length - head.length - tail.length} lines not kept …`, ...tail].join('\n');
+}
+
+/**
+ * A diff as shown: each line's content redacted apart from its mark (+, -, space), so `+NAME=value` is an assignment to
+ * redact and `-print(…)` isn't read as a `-p` flag; a hunk header as itself; at most MAX_BODY.
+ */
+export function diffText(text) {
+  return capLines(String(text ?? '').slice(0, 2_000_000).split('\n').map((l) => (/^[-+ ]/.test(l) ? `${l[0]}${shownTextLine(l.slice(1))}` : shownTextLine(l))), MAX_BODY);
+}
+
+/**
+ * Text as the owner's view shows it (t-2109): a key block taken out whole, then each line through shownTextLine; at
+ * most `max`, its head and tail kept around a line saying how many weren't. '' for none.
+ */
+export function shownText(text, max = MAX_BODY) {
+  const t = String(text ?? '').slice(0, 2_000_000).replace(/-----BEGIN [A-Z ]{0,40}PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]{0,40}PRIVATE KEY-----|$)/g, GONE);
+  return capLines(t.split('\n').map(shownTextLine), max);
 }
 
 /** A shell command as Codex runs it (`/usr/bin/bash -lc '…'`), unwrapped to what the body wrote. */
@@ -286,10 +299,9 @@ function patchText(patch) {
     if (!h || typeof h !== 'object') continue;
     const n = (v) => (Number.isInteger(v) && v >= 0 ? v : 0);
     out.push(`@@ -${n(h.oldStart)},${n(h.oldLines)} +${n(h.newStart)},${n(h.newLines)} @@`);
-    // Each line's content is redacted apart from its mark (+, -, space), so `+NAME=value` is an assignment to redact.
-    for (const l of Array.isArray(h.lines) ? h.lines : []) if (typeof l === 'string') out.push(/^[-+ ]/.test(l) ? `${l[0]}${shownTextLine(l.slice(1).replace(/\n/g, ' '))}` : shownTextLine(l));
+    for (const l of Array.isArray(h.lines) ? h.lines : []) if (typeof l === 'string') out.push(l.replace(/\n/g, ' '));
   }
-  return shownText(out.join('\n'));
+  return diffText(out.join('\n'));
 }
 
 const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
@@ -368,7 +380,7 @@ function claudeResult(name, r, text, failed, exit, input = {}) {
     case 'Read': { const n = count(u.file?.numLines); return n === null ? {} : { result: `Read ${plural(n, 'line')}` }; }
     case 'Edit': case 'MultiEdit': { const p = patchLine(u.structuredPatch), body = shows ? patchText(u.structuredPatch) : ''; return p ? { result: p, ...(body ? { body } : {}) } : {}; }
     case 'Write': {
-      if (u.type === 'create' && typeof u.content === 'string') { const body = shows ? shownText(u.content.split('\n').map((l) => `+${shownTextLine(l)}`).join('\n')) : ''; return { result: `Wrote ${plural(u.content.split('\n').length, 'line')}`, ...(body ? { body } : {}) }; }
+      if (u.type === 'create' && typeof u.content === 'string') { const body = shows ? diffText(u.content.split('\n').map((l) => `+${l}`).join('\n')) : ''; return { result: `Wrote ${plural(u.content.split('\n').length, 'line')}`, ...(body ? { body } : {}) }; }
       const p = patchLine(u.structuredPatch), body = shows ? patchText(u.structuredPatch) : ''; return p ? { result: p, ...(body ? { body } : {}) } : {};
     }
     case 'Grep': { const f = count(u.numFiles), n = count(u.numLines); return n !== null && u.mode === 'content' ? { result: `Found ${plural(n, 'line')}` } : f !== null ? { result: `Found ${plural(f, 'file')}` } : {}; }
@@ -422,7 +434,10 @@ export function claudeCards(lines, prefix = '', parent = null) {
         const exit = code ? Number(code) : undefined;
         if (card.state === 'failed') card.summary = withWhy(card.summary, failWhy({ exit, output: text }));
         if (Number.isInteger(exit)) card.exit = exit;
-        const { result, body } = claudeResult(names.get(card.id), l.toolUseResult, text, card.state === 'failed', exit, inputs.get(card.id));
+        // A line's toolUseResult is its one result's: with several results in one line, whose it is can't be told, so
+        // none of them is read from it (no diff on the wrong card).
+        const own = content.filter((x) => x?.type === 'tool_result').length === 1 ? l.toolUseResult : undefined;
+        const { result, body } = claudeResult(names.get(card.id), own, text, card.state === 'failed', exit, inputs.get(card.id));
         if (result) card.result = clean(redact(result));
         if (body) card.body = body;
         if (typeof l.timestamp === 'string' && cardTime(l.timestamp) === l.timestamp) card.end = l.timestamp;
@@ -521,10 +536,11 @@ export function stepParts(c, idOf = (x) => x) {
   const o = {};
   const int = (v, lo, hi) => (Number.isInteger(v) && v >= lo && v <= hi ? v : null);
   const tool = String(c?.tool ?? '');
-  if (typeof c?.detail === 'string' && c.detail) { const d = shownText(c.detail.replace(SGR, ''), MAX_DETAIL); if (d) o.detail = d; }
-  // A body only where one is made here (bodyAllowed): a shell step's output (not for a command that names a private
-  // file), the body's words, a diff of a file whose shown name is plain and not private. A read's never.
-  if (typeof c?.body === 'string' && c.body && bodyAllowed(tool, o.detail)) { const t = shownText(c.body, tool === 'text' ? MAX_TEXT : MAX_BODY); if (t) o.body = t; }
+  // A target only of the shape made here for its tool (detailOk): a command; a file's base name; a search's pattern.
+  if (typeof c?.detail === 'string' && c.detail) { const d = shownText(c.detail.replace(SGR, ''), MAX_DETAIL); if (d && detailOk(tool, d)) o.detail = d; }
+  // A body only where one is made here (bodyAllowed): the body's words, or a diff of a file whose shown name is plain
+  // and not private. Never a shell step's output, never a read's.
+  if (typeof c?.body === 'string' && c.body && bodyAllowed(tool, o.detail)) { const t = tool === 'text' ? shownText(c.body, MAX_TEXT) : diffText(c.body); if (t) o.body = t; }
   // A result is one of the fixed phrases made here (shellResult, claudeResult, codexCards), never a house's prose.
   if (typeof c?.result === 'string' && RESULT.test(c.result) && redact(c.result) === c.result) o.result = c.result;
   const exit = int(c?.exit, -999_999, 999_999); if (exit !== null) o.exit = exit;
@@ -537,12 +553,22 @@ export function stepParts(c, idOf = (x) => x) {
   return o;
 }
 
-const DIFFS = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit']);
+const DIFFS = new Set(['Edit', 'MultiEdit', 'Write']);
+const FILE_TOOLS = new Set(['Read', 'Edit', 'MultiEdit', 'Write', 'NotebookEdit', 'file_change', 'Glob']);
+const SHELL_TOOLS = new Set(['Bash', 'command_execution']);
+/** Whether a target fits what's made here for its tool: a shell step's command; a file tool's base name (no folder);
+ * a search's `"pattern"` and where; nothing for any other tool (a private store's argument never shows). */
+function detailOk(tool, d) {
+  if (SHELL_TOOLS.has(tool)) return true;
+  if (FILE_TOOLS.has(tool)) return d.length <= 80 && !/[/\\\n]/.test(d) && fileName(d) === d;
+  if (tool === 'Grep') return d.length <= 160 && /^"[^"\n]{1,60}"(?: in [^/\\\n]{1,80})?$/.test(d);
+  return false;
+}
 /** The result lines made here, as their shapes: counts and fixed words only. */
 const N = '\\d{1,9}';
 const TESTS = `(?:${N} tests? passed|${N} passed, ${N} failed)`;
 const RESULT = new RegExp(`^(?:(?:exit -?${N}|failed)(?:: ${TESTS})?|${TESTS}|${N} lines? of output|no output|Read ${N} lines?|Wrote ${N} lines?|${N} additions?, ${N} removals?|Found ${N} (?:files?|lines?)|${N} tool uses?|${N} files? changed)$`);
-/** Whether a card of this tool, with this (gated) target, may carry a body: the same rule the cards made here follow. */
+/** Whether a card of this tool, with this (gated) target, may carry a body: the rule claudeResult follows (`shows`). */
 function bodyAllowed(tool, detail) {
   if (tool === 'text') return true;
   if (DIFFS.has(tool)) return !!detail && detail !== PRIVATE_FILE && detail !== GONE && !hidden(detail);

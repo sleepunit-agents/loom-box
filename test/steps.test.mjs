@@ -91,12 +91,12 @@ test('a helper\'s steps nest under the step that started it (Claude Code\'s suba
   writeFileSync(join(proj, `${session}.jsonl`), [l(use('toolu_A', 'Agent', { description: 'Look around' })), l(res('toolu_A', 'done', { totalToolUseCount: 1 }))].join('\n'));
   writeFileSync(join(proj, session, 'subagents', 'agent-abc123.meta.json'), l({ toolUseId: 'toolu_A' }));
   writeFileSync(join(proj, session, 'subagents', 'agent-abc123.jsonl'), [l(use('toolu_B', 'Bash', { command: 'ls' })), l(res('toolu_B', 'a', { stdout: 'a', stderr: '' }))].join('\n'));
-  // A helper whose step isn't in this session is left out.
+  // A helper whose step isn't in what was read stands on its own, never dropped.
   writeFileSync(join(proj, session, 'subagents', 'agent-zzz.meta.json'), l({ toolUseId: 'toolu_OTHER' }));
   writeFileSync(join(proj, session, 'subagents', 'agent-zzz.jsonl'), l(use('toolu_C', 'Bash', { command: 'pwd' })));
   const r = new ClaudeRunner({ projectsDir: join(root, 'projects'), jobsDir: join(root, 'jobs') });
   const cards = r.activity({ id: 'b', slot: { harness: 'claude', session } });
-  assert.deepEqual(cards.map((c) => [c.id, c.tool, c.result, c.parent]), [['toolu_A', 'Agent', '1 tool use', undefined], ['abc123:toolu_B', 'Bash', '1 line of output', 'toolu_A']]);
+  assert.deepEqual(cards.map((c) => [c.id, c.tool, c.result, c.parent]), [['toolu_A', 'Agent', '1 tool use', undefined], ['abc123:toolu_B', 'Bash', '1 line of output', 'toolu_A'], ['zzz:toolu_C', 'Bash', undefined, undefined]]);
 });
 
 test('a sign of life: when its transcript last moved, and its tokens, each message once at its largest, read as the file grows', () => {
@@ -106,7 +106,7 @@ test('a sign of life: when its transcript last moved, and its tokens, each messa
   mkdirSync(proj, { recursive: true });
   const f = join(proj, `${session}.jsonl`);
   const a = (id, n) => JSON.stringify({ type: 'assistant', message: { id, usage: { output_tokens: n }, content: [] } });
-  writeFileSync(f, [a('m1', 10), a('m1', 40), a('m2', 5), JSON.stringify({ type: 'user', message: { content: [] } })].join('\n') + '\n');
+  writeFileSync(f, [a('m1', 10), a('m1', 40), a('m1', 3), a('m2', 5), JSON.stringify({ type: 'user', message: { content: [] } })].join('\n') + '\n');
   const r = new ClaudeRunner({ projectsDir: join(root, 'projects'), jobsDir: join(root, 'jobs') });
   const body = { id: 'b', slot: { harness: 'claude', session } };
   const one = r.signOfLife(body);
@@ -235,7 +235,7 @@ test('shown text keeps to its bounds: a command to MAX_DETAIL, the body\'s words
   const [t] = claudeCards([{ type: 'assistant', timestamp: '2026-11-10T10:00:00.000Z', message: { id: 'm', content: [{ type: 'text', text: words }] } }]);
   assert.ok(t.body.length <= MAX_TEXT);
   assert.equal(stepParts({ tool: 'text', body: words }).body.length <= MAX_TEXT, true);
-  assert.equal(stepParts({ detail: cmd }).detail.length <= MAX_DETAIL, true);
+  assert.equal(stepParts({ tool: 'Bash', detail: cmd }).detail.length <= MAX_DETAIL, true);
 });
 
 test('a sign of life is when the record last moved: Claude\'s transcript, Codex\'s events; a house\'s report of it is checked', async () => {
@@ -264,4 +264,54 @@ test('a sign of life is when the record last moved: Claude\'s transcript, Codex\
   assert.equal(rep({ at: 'soon\x1b[2J' }), undefined);
   assert.equal(rep('x'), undefined);
   void statSync;
+});
+
+test('a removed line that starts like a flag keeps its words; a diff is redacted once, apart from its marks', () => {
+  const patch = [{ oldStart: 1, oldLines: 2, newStart: 1, newLines: 1, lines: ['-print("hello world")', '-pkg install x', '+keep()'] }];
+  const [c] = claudeCards([use('e', 'Edit', { file_path: '/home/art/Code/x/a.py' }), res('e', 'ok', { structuredPatch: patch })]);
+  assert.equal(c.body, '@@ -1,2 +1,1 @@\n-print("hello world")\n-pkg install x\n+keep()');
+  assert.equal(stepParts(c).body, c.body, 'and the gate leaves it as it is');
+});
+
+test('a house\'s target is only the shape made here for its tool: a file\'s base name, a search, a command; a private store\'s never', () => {
+  const d = (tool, detail) => stepParts({ tool, detail }).detail;
+  assert.equal(d('Read', '/home/art/Code/private-client/plans/q4.md'), undefined);
+  assert.equal(d('Read', 'q4.md'), 'q4.md');
+  assert.equal(d('Edit', '.env'), 'a private file', 'named, as made here');
+  assert.equal(d('mcp__loom__recall', 'what Art remembered about Loren'), undefined);
+  assert.equal(d('Grep', '"sleep(" in test'), '"sleep(" in test');
+  assert.equal(d('Grep', 'anything at all'), undefined);
+  assert.equal(d('Bash', 'npm test'), 'npm test');
+});
+
+test('two results in one line: neither reads the line\'s structured result, so no diff lands on the wrong card', () => {
+  const patch = [{ oldStart: 1, oldLines: 1, newStart: 1, newLines: 1, lines: ['-A=PRIVATEVALUE1', '+A=PRIVATEVALUE2'] }];
+  const both = { type: 'user', timestamp: '2026-11-10T10:00:05.000Z', toolUseResult: { structuredPatch: patch }, message: { content: [
+    { type: 'tool_result', tool_use_id: 'e1', content: 'ok' }, { type: 'tool_result', tool_use_id: 'e2', content: 'ok' }] } };
+  const cards = claudeCards([use('e1', 'Edit', { file_path: '/home/art/Code/x/.env' }), use('e2', 'Edit', { file_path: '/home/art/Code/x/a.ts' }), both]);
+  assert.deepEqual(cards.map((c) => [c.state, c.body]), [['done', undefined], ['done', undefined]]);
+  assert.ok(!JSON.stringify(cards).includes('PRIVATEVALUE'));
+});
+
+test('runners read at most their limits a pass: a transcript\'s tail, a helper\'s tail, a sign of life in slices', async () => {
+  const root = scratch('steps-bounds');
+  const proj = join(root, 'projects', '-x');
+  const session = '11111111-2222-3333-4444-888888888888';
+  mkdirSync(join(proj, session, 'subagents'), { recursive: true });
+  const l = (o) => JSON.stringify(o);
+  const filler = l({ type: 'user', message: { content: [] }, pad: 'x'.repeat(2000) });
+  // An old step far back, then filler past the window, then a new step.
+  writeFileSync(join(proj, `${session}.jsonl`), [l(use('old', 'Bash', { command: 'ls' })), ...Array(20).fill(filler), l(use('new', 'Bash', { command: 'pwd' }))].join('\n') + '\n');
+  writeFileSync(join(proj, session, 'subagents', 'agent-h1.meta.json'), l({ toolUseId: 'new' }));
+  writeFileSync(join(proj, session, 'subagents', 'agent-h1.jsonl'), [l(use('hold', 'Bash', { command: 'ls' })), ...Array(20).fill(filler), l(use('hnew', 'Bash', { command: 'date' }))].join('\n') + '\n');
+  const r = new ClaudeRunner({ projectsDir: join(root, 'projects'), jobsDir: join(root, 'jobs'), readMax: { activity: 10_000, helper: 10_000, sign: 10_000 } });
+  const body = { id: 'b', slot: { harness: 'claude', session } };
+  assert.deepEqual(r.activity(body).map((c) => c.id), ['new', 'h1:hnew']);
+  // The sign of life reads the file in slices: no tokens until it has caught up.
+  const a = (id, n) => l({ type: 'assistant', message: { id, usage: { output_tokens: n }, content: [] } });
+  writeFileSync(join(proj, `${session}.jsonl`), [a('m1', 5), ...Array(20).fill(filler), a('m2', 7)].join('\n') + '\n');
+  const firsts = [];
+  for (let k = 0; k < 6; k++) firsts.push(r.signOfLife(body).tokens);
+  assert.equal(firsts[0], undefined, 'not caught up after one slice');
+  assert.equal(firsts.at(-1), 12);
 });

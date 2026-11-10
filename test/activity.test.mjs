@@ -270,7 +270,9 @@ test('where someone else is, or a former owner spoke, no words and no command, o
   const o = world();
   o.core.commsAnswer = (x) => (x.op === 'spawn' ? { ok: true, id: 'th:abcdefghij' } : { ok: true });
   o.runner.activity = () => [{ id: 'w', at: 'x', tool: 'text', summary: 'Loren said hi', state: 'done', body: 'Loren said hi' },
-    { id: 't1', at: 'x', tool: 'Bash', summary: 'Saved the note', state: 'done', detail: 'npm test', body: 'what Loren said', result: '1 line of output' }];
+    { id: 't1', at: 'x', tool: 'Bash', summary: 'Saved the note', state: 'done', detail: 'npm test', body: 'what Loren said', result: '1 line of output' },
+    { id: 'p', at: 'x', tool: 'TodoWrite', summary: 'Plan (1/2): Reply to Loren about the rent', state: 'done', items: [{ text: 'Reply to Loren about the rent', state: 'now' }, { text: 'x', state: 'todo' }] },
+    { id: 'm', at: 'x', tool: 'mcp__loom__relay', summary: 'Messaged mark: "Loren wants the rent by Friday"', state: 'done' }];
   const r = await spawnCall(o.env, { kind: 'owner' }, { agent: 'art', brief: 'x' }, o.o);
   // Its stored actsFor still says the owner; its principal now holds a former owner, a person.
   const c = loadConv(o.env, r.handle);
@@ -278,13 +280,18 @@ test('where someone else is, or a former owner spoke, no words and no command, o
   saveConv(o.env, c);
   await tick(o.env, o.o); await tick(o.env, o.o);
   const sent = o.core.activityCalls.filter((a) => a.conversation === r.handle).flatMap((a) => a.cards);
-  assert.deepEqual(sent.map((x) => [x.tool, x.detail, x.body, x.result]), [['Bash', undefined, undefined, '1 line of output']]);
+  assert.deepEqual(sent.map((x) => [x.tool, x.summary, x.detail, x.body, x.items, x.result]), [
+    ['Bash', 'Saved the note', undefined, undefined, undefined, '1 line of output'],
+    ['TodoWrite', 'Plan (1/2)', undefined, undefined, undefined, undefined],
+    ['mcp__loom__relay', 'Messaged mark', undefined, undefined, undefined, undefined]]);
+  assert.ok(!JSON.stringify(sent).includes('Loren'));
   // A bridge chat with a person: the same.
   const b = world();
   b.runner.activity = o.runner.activity;
   await deliver(b.env, b.msg('dm:U1', 'hi'), b.o);
   await tick(b.env, b.o);
-  for (const x of b.core.activityCalls.flatMap((a) => a.cards)) assert.deepEqual([x.tool, x.detail, x.body], ['Bash', undefined, undefined]);
+  for (const x of b.core.activityCalls.flatMap((a) => a.cards)) { assert.equal(x.detail, undefined); assert.equal(x.body, undefined); assert.equal(x.items, undefined); }
+  assert.ok(!JSON.stringify(b.core.activityCalls).includes('Loren'));
 });
 
 test('every card goes through the one gate where the owner is alone too: no shell output, no field core doesn\'t know (t-2109)', async () => {
@@ -321,4 +328,32 @@ test('a 409\'s hold is kept on the record, so another delivery process keeps it 
   const r = await spawnCall(o.env, { kind: 'owner' }, { agent: 'art', brief: 'x' }, o.o);
   await tick(o.env, o.o); await tick(o.env, o.o);
   assert.ok(Number.isFinite(loadConv(o.env, r.handle).activityHeld?.noThread));
+});
+
+test('a sign of life a core refuses isn\'t posted again until it moves; an older core\'s "cards is a list" refusal is one too; a pending reset shows no words (t-2109)', async () => {
+  const { spawnCall } = await import('../src/spawn.mjs');
+  const mk = async (answer, cards = [{ id: 't1', at: 'x', tool: 'Bash', summary: 's', state: 'done' }]) => {
+    const o = world();
+    o.core.commsAnswer = (x) => (x.op === 'spawn' ? { ok: true, id: 'th:abcdefghij' } : { ok: true });
+    o.runner.activity = () => cards;
+    o.runner.signOfLife = () => ({ at: '2026-11-10T10:00:00.000Z' });
+    o.core.activity = async (x) => { o.core.activityCalls.push(x); const e = answer(x); if (e) throw e; return { ok: true }; };
+    const r = await spawnCall(o.env, { kind: 'owner' }, { agent: 'art', brief: 'x' }, o.o);
+    return { o, r, calls: () => o.core.activityCalls.filter((a) => a.conversation === r.handle) };
+  };
+  // A sign of life alone, refused for another reason: told once, not again while it doesn't move.
+  const a = await mk((x) => (!x.cards.length ? Object.assign(new Error('core refused comms/activity: bad-input: run is the body run'), { status: 400 }) : null));
+  for (let k = 0; k < 4; k++) { await tick(a.o.env, a.o.o); a.o.clock.advance(30_000); }
+  assert.ok(a.calls().filter((x) => !x.cards.length).length <= 1);
+  // An older core's refusal of a sign of life alone: held as an older core (no more of it).
+  const b = await mk((x) => (!x.cards.length ? Object.assign(new Error('core refused comms/activity: bad-input: cards is a list of 1-50'), { status: 400 }) : x.alive ? Object.assign(new Error('core refused comms/activity: bad-input: card 0 has unknown keys: x'), { status: 400 }) : null), []);
+  for (let k = 0; k < 4; k++) { await tick(b.o.env, b.o.o); b.o.clock.advance(30_000); }
+  assert.equal(b.calls().filter((x) => !x.cards.length).length, 1);
+  assert.ok(Number.isFinite(loadConv(b.o.env, b.r.handle).activityHeld?.oldCore));
+  // A reset pending: its words don't show, though the owner spoke since.
+  const c = await mk(() => null, [{ id: 'w', at: 'x', tool: 'text', summary: 'Loren said hi', state: 'done', body: 'Loren said hi' }, { id: 't1', at: 'x', tool: 'Bash', summary: 's', state: 'done', detail: 'npm test' }]);
+  const rec = loadConv(c.o.env, c.r.handle); rec.resetPending = true; saveConv(c.o.env, rec);
+  await tick(c.o.env, c.o.o); await tick(c.o.env, c.o.o);
+  const cs = c.calls().flatMap((x) => x.cards);
+  assert.deepEqual(cs.map((x) => [x.tool, x.detail]), [['Bash', undefined]]);
 });

@@ -1580,14 +1580,21 @@ async function activityPass(env, c, d) {
   // The body's own words between steps only where it works for the owner alone (t-2109): never where someone else is
   // in the conversation, whose words its own might carry. Read from its principal now (principalOf: a former owner
   // counts as a person), as localForeign reads it, never from the stored field alone.
-  const ownersAlone = wordsShown(env, c);
+  // Not while a reset is pending (its body was started before it: what it heard then isn't known to be the owner's),
+  // nor for a body whose rules were made for a person.
+  const ownersAlone = !c.resetPending && !c.bodyRules?.grantFor && !(c.bodyRules?.members?.length) && wordsShown(env, c);
   // Every card through the one gate (activity.mjs stepParts), made here or reported by a house. Where someone else is
   // in the conversation, a step's words (its command, output, diff, plan items) don't go either: theirs could be in
   // them. Its label, tool, state, result line and times do (Jonathan, 2026-11-10: other people summarized).
   const cards = (r.activity(body) ?? []).filter((x) => x && (x.tool !== 'text' || ownersAlone)).map((x) => {
     const parts = stepParts(x);
-    if (!ownersAlone) { delete parts.detail; delete parts.body; delete parts.items; }
-    return { ...baseCard(x), ...parts };
+    const base = baseCard(x);
+    if (!ownersAlone) {
+      delete parts.detail; delete parts.body; delete parts.items;
+      // A label that quotes words (a plan's item, a message's first line) keeps only its fixed part.
+      base.summary = String(base.summary).replace(/^(Plan \(\d+\/\d+\)):.*$/s, '$1').replace(/^(Messaged [^:"]{1,60}): ".*$/s, '$1');
+    }
+    return { ...base, ...parts };
   });
   const nowMs = (() => { try { return d.now().getTime(); } catch { return Date.now(); } })();
   const { out, next } = changedCards(cards, c.cardsSent ?? {});
@@ -1615,8 +1622,9 @@ async function activityPass(env, c, d) {
       const plain = out.filter((x) => x.tool !== 'text').map(baseCard);
       try { if (plain.length) { await post(plain, null); retold = true; } } catch (e2) { if (e2?.status !== 409 && e2?.status !== 400) throw e2; }
     }
-    if (!retold && out.length) d.warn(`${c.conversation}: core took none of ${out.length} activity cards (${e.message}); they're not sent again`);
-    saveSent(env, c, next, null, nowMs, hold);
+    if (!retold) d.warn(`${c.conversation}: core took none of ${out.length} activity cards${sendAlive ? ' and its sign of life' : ''} (${e.message}); they're not sent again`);
+    // A refused sign of life counts as told: it isn't posted again until it moves, past the throttle.
+    saveSent(env, c, next, sendAlive ? alive : null, nowMs, hold);
     return;
   }
   saveSent(env, c, next, sendAlive ? alive : null, nowMs);
@@ -1644,9 +1652,10 @@ const HOLD_MS = 10 * 60_000;
  * How a core from before t-2109 refuses the further parts, in its own words (loom src/comms.ts postActivity before
  * t-2109): "bad-input: card N has unknown keys: …" for a card's new field, and "bad-input: cards is a list of 1-50" for
  * a sign of life with no cards (an older core reads no `alive`); core.mjs puts "core refused comms/activity: " before
- * it. Any other refusal isn't an older core's.
+ * it. Any other refusal isn't an older core's. Core pins both wordings in its own tests (loom
+ * src/comms-agents.integration.test.ts, t-2109), so a change there fails there first.
  */
-const OLD_CORE = /(?:^|: )bad-input: (?:card \d+ has unknown keys\b|cards is a list of 1-\d+$)/;
+const OLD_CORE = /(?:^|: )bad-input: (?:card \d+ has unknown keys\b|cards is a list of 1-\d+)/;
 
 const newRun = () => `run-${randomBytes(6).toString('hex')}`;
 

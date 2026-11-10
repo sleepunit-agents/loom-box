@@ -142,7 +142,9 @@ export class ClaudeRunner {
   harness = 'claude';
   static TOKEN_LINE = '(bridge spawn token {token}: ignore this line)';
 
-  constructor({ claude = 'claude', jobsDir = join(homedir(), '.claude', 'jobs'), projectsDir, args = [], inboxDir, usageDir = usageDirOf(), node = process.execPath, run = spawnSync, sleep = sleepMs, claimPolls = 10, token = hex8 } = {}) {
+  constructor({ claude = 'claude', jobsDir = join(homedir(), '.claude', 'jobs'), projectsDir, args = [], inboxDir, usageDir = usageDirOf(), node = process.execPath, run = spawnSync, sleep = sleepMs, claimPolls = 10, token = hex8, readMax = {} } = {}) {
+    // How much it reads of a transcript a pass (t-2109): its steps, a helper's, its sign of life.
+    this.readMax = { activity: ACTIVITY_READ_MAX, helper: HELPER_READ_MAX, sign: SIGN_READ_MAX, ...readMax };
     Object.assign(this, { claude, jobsDir, args, usageDir, node, run, sleep, claimPolls, token });
     this.inbox = inboxDir ? inbox(inboxDir, { run }) : null;
     // Claude Code keeps a session's transcript at <config>/projects/<cwd, slugged>/<session>.jsonl (and its tool
@@ -329,7 +331,7 @@ export class ClaudeRunner {
     if (!f) return [];
     // Its newest ACTIVITY_READ_MAX of transcript, never the whole of a long session each pass. A step whose start is
     // older than that and whose end lands inside it stays as last told (its end can't be matched).
-    const cards = claudeCards(jsonLines(tailOf(f, ACTIVITY_READ_MAX) ?? ''));
+    const cards = claudeCards(jsonLines(tailOf(f, this.readMax.activity) ?? ''));
     // Its helpers (subagents), each under the step that started it (t-2109): Claude Code keeps a helper's transcript
     // beside the session's, `<session>/subagents/agent-<id>.jsonl`, and its meta names that step (`toolUseId`).
     const dir = join(f.slice(0, -'.jsonl'.length), 'subagents');
@@ -340,10 +342,10 @@ export class ClaudeRunner {
       const agent = n.slice('agent-'.length, -'.meta.json'.length);
       let meta;
       try { meta = JSON.parse(readFileSync(join(dir, n), 'utf-8')); } catch { continue; }
+      // Its step, when the session's window still holds it; else its steps stand on their own (never dropped).
       const parent = typeof meta?.toolUseId === 'string' && cards.some((c) => c.id === meta.toolUseId) ? meta.toolUseId : null;
-      if (!parent) continue;
       // A helper's transcript is read from its end, at most HELPER_READ_MAX: its newest steps.
-      cards.push(...claudeCards(jsonLines(tailOf(join(dir, `agent-${agent}.jsonl`), HELPER_READ_MAX) ?? ''), `${agent}:`, parent));
+      cards.push(...claudeCards(jsonLines(tailOf(join(dir, `agent-${agent}.jsonl`), this.readMax.helper) ?? ''), `${agent}:`, parent ?? undefined));
     }
     // In the order they happened, so a host's "newest 100" keeps the newest of the body's and its helpers' alike.
     return cards.map((c, i) => [c, i]).sort((x, y) => (x[0].at < y[0].at ? -1 : x[0].at > y[0].at ? 1 : x[1] - y[1])).map(([c]) => c);
@@ -365,11 +367,11 @@ export class ClaudeRunner {
     let m = memos.get(f);
     if (!m || st.size < m.offset) m = { offset: 0, seen: new Map(), rest: '' };
     if (st.size > m.offset) {
-      const { text, next } = readFrom(f, m.offset, SIGN_READ_MAX);
+      const { text, next } = readFrom(f, m.offset, this.readMax.sign);
       const parts = (m.rest + text).split('\n');
       // The last part is a line not yet ended: kept for the next read (dropped if it's grown past any real line).
       const last = parts.pop() ?? '';
-      m.rest = last.length > SIGN_READ_MAX ? '' : last;
+      m.rest = last.length > this.readMax.sign ? '' : last;
       for (const l of parts) { try { claudeTokens([JSON.parse(l)], m.seen); } catch { /* not a line of JSON */ } }
       m.offset = next;
     }
@@ -702,7 +704,10 @@ export class CodexRunner {
   /** Its tool steps as activity cards (activity.mjs), from its events: item ids repeat per run, so they carry its id. */
   tickerAction(body) { return codexActionNow(tickerLines(join(this.runsDir, body.id, 'events.jsonl'))); }
 
-  activity(body) { return codexCards(this.events(body.id), `${body.id}:`); }
+  activity(body) {
+    // Its newest ACTIVITY_READ_MAX of events (t-2109), never the whole of a long run each pass.
+    return codexCards(jsonLines(tailOf(join(this.runsDir, body.id, 'events.jsonl'), ACTIVITY_READ_MAX) ?? ''), `${body.id}:`);
+  }
 
   /** Its last sign of life (t-2109): when its events were last written. Codex says its tokens only at a turn's end. */
   signOfLife(body) {
