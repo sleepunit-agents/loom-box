@@ -140,14 +140,18 @@ export function principalOf(env, c) {
 }
 
 /**
- * Whether a conversation's body works for the owner alone (t-2109), so its own words may show in his view: its
- * principal now (principalOf, whose people include a former owner) is the owner, known, with no person in it, and at
- * most one owner spoke (several owners' words are each other's). Fails closed: anything it can't read says no.
+ * Whether a conversation's body works for the owner alone (t-2109), so its own words and its steps' words may show in
+ * his view: its principal now (principalOf, whose people include a former owner) is the owner, known, with no person
+ * in it, and at most one owner spoke (several owners' words are each other's). Fails closed: anything it can't read
+ * says no.
  */
-export function wordsShown(p, c) {
-  if (!p || p.owner !== true || p.unknown || !Array.isArray(p.people) || p.people.length) return false;
-  const spoke = Array.isArray(c?.actsFor?.owners) ? new Set(c.actsFor.owners) : new Set();
-  return spoke.size <= 1;
+export function wordsShown(env, c) {
+  try {
+    const p = principalOf(env, c);
+    if (p.owner !== true || p.unknown || !Array.isArray(p.people) || p.people.length) return false;
+    const spoke = Array.isArray(c?.actsFor?.owners) ? new Set(c.actsFor.owners.filter((x) => PERSON.test(x))) : new Set();
+    return spoke.size <= 1 && (c.actsFor.owners ?? []).every((x) => PERSON.test(x));
+  } catch { return false; }
 }
 
 // ─── Seats: whose house a body runs in (t-1952) ────────────────────────────

@@ -197,21 +197,24 @@ test('the body\'s own words go only where it works for the owner alone; its sign
 });
 
 test('whose words show: only a conversation for the owner alone, read from its principal now (t-2109)', async () => {
-  const { wordsShown, principalOf } = await import('../src/principal.mjs');
-  const owner = { for: 'jonathan', owner: true, people: [] };
-  assert.equal(wordsShown(owner, { actsFor: { owner: true, owners: ['jonathan'] } }), true);
-  assert.equal(wordsShown(owner, { actsFor: { owner: true } }), true, 'a wake the clock called the owner\'s');
-  assert.equal(wordsShown(owner, { actsFor: { owner: true, owners: ['jonathan', 'amelia'] } }), false, 'two owners spoke: each other\'s words');
-  assert.equal(wordsShown({ ...owner, unknown: true }, {}), false, 'unknown');
-  assert.equal(wordsShown({ for: 'loren', owner: false, people: ['loren'] }, {}), false, 'a person in it');
-  assert.equal(wordsShown({ for: null, owner: false, people: [] }, {}), false, 'not the owner');
-  assert.equal(wordsShown(null, {}), false, 'nothing read');
-  // principalOf counts a former owner as a person: such a conversation's words never show.
-  const w = world();
-  const p = principalOf(w.env, { agent: 'art', actsFor: { owner: true, people: [], unknown: false, owners: ['someone-gone'] } });
-  assert.equal(wordsShown(p, { actsFor: { owners: ['someone-gone'] } }), false);
+  const { wordsShown } = await import('../src/principal.mjs');
+  const { mkdtempSync, writeFileSync: write } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  // A household with two owners of every agent.
+  const home = mkdtempSync(join(tmpdir(), 'words-'));
+  write(join(home, 'household.json'), JSON.stringify({ members: [{ person: 'jonathan', agents: '*' }, { person: 'amelia', agents: '*' }] }));
+  const env = { LOOM_HOME: home };
+  const c = (actsFor) => ({ agent: 'art', conversation: 'cv-000000000001', actsFor });
+  assert.equal(wordsShown(env, c({ owner: true, people: [], unknown: false, owners: ['jonathan'] })), true);
+  assert.equal(wordsShown(env, c({ owner: true, people: [], unknown: false })), true, 'a wake the clock called the owner\'s');
+  assert.equal(wordsShown(env, c({ owner: true, people: [], unknown: false, owners: ['jonathan', 'amelia'] })), false, 'two owners spoke: each other\'s words');
+  assert.equal(wordsShown(env, c({ owner: true, people: [], unknown: true })), false, 'unknown');
+  assert.equal(wordsShown(env, c({ owner: true, people: ['loren'], unknown: false })), false, 'a person in it');
+  assert.equal(wordsShown(env, c({ owner: false, people: [], unknown: false })), false, 'not the owner');
+  assert.equal(wordsShown(env, c({ owner: true, people: [], unknown: false, owners: ['someone-gone'] })), false, 'a former owner is a person now');
+  assert.equal(wordsShown(env, c({ owner: true, people: [], unknown: false, owners: ['Not A Slug'] })), false, 'a word it can\'t read');
+  assert.equal(wordsShown(env, { agent: 'art' }), false, 'no record');
 });
-
 test('an older core: after its first refusal, plain cards go straight to it; a 409 holds the thread; another 400 is only a warning (t-2109)', async () => {
   const { spawnCall } = await import('../src/spawn.mjs');
   const rich = (n) => ({ id: `t${n}`, at: 'x', tool: 'Edit', summary: `Step ${n}`, state: 'done', detail: 'a.ts', body: '+ok' });
@@ -282,4 +285,40 @@ test('where someone else is, or a former owner spoke, no words and no command, o
   await deliver(b.env, b.msg('dm:U1', 'hi'), b.o);
   await tick(b.env, b.o);
   for (const x of b.core.activityCalls.flatMap((a) => a.cards)) assert.deepEqual([x.tool, x.detail, x.body], ['Bash', undefined, undefined]);
+});
+
+test('every card goes through the one gate where the owner is alone too: no shell output, no field core doesn\'t know (t-2109)', async () => {
+  const { spawnCall } = await import('../src/spawn.mjs');
+  const o = world();
+  o.core.commsAnswer = (x) => (x.op === 'spawn' ? { ok: true, id: 'th:abcdefghij' } : { ok: true });
+  o.runner.activity = () => [{ id: 't1', at: 'x', tool: 'Bash', summary: 'Ran npm test', state: 'done', detail: 'npm test', body: 'OUTPUT', result: 'Loren says hi', bogus: 1 }];
+  const r = await spawnCall(o.env, { kind: 'owner' }, { agent: 'art', brief: 'x' }, o.o);
+  await tick(o.env, o.o); await tick(o.env, o.o);
+  const [card] = o.core.activityCalls.filter((a) => a.conversation === r.handle).flatMap((a) => a.cards);
+  assert.deepEqual(card, { id: 't1', at: 'x', tool: 'Bash', summary: 'Ran npm test', state: 'done', detail: 'npm test' });
+});
+
+test('told marks are kept for every card still read, so a long run\'s steps aren\'t told again (t-2109)', () => {
+  const cards = Array.from({ length: 600 }, (_, i) => ({ id: `c${i}`, at: 'x', tool: 'Bash', summary: 's', state: 'done' }));
+  let sent = {}, told = 0;
+  for (let k = 0; k < 20; k++) { const x = changed(cards, sent); told += x.out.length; sent = x.next; }
+  assert.equal(told, 600, 'each told once, 50 a pass');
+  assert.equal(Object.keys(sent).length, 600);
+  let again = 0;
+  for (let k = 0; k < 3; k++) { const x = changed(cards, sent); again += x.out.length; sent = x.next; }
+  assert.equal(again, 0, 'and never again');
+  // Ids no longer read go first once it's past 400.
+  const later = changed(cards.slice(300), sent);
+  assert.ok(Object.keys(later.next).length <= 400 || Object.keys(later.next).length === 300);
+});
+
+test('a 409\'s hold is kept on the record, so another delivery process keeps it (t-2109)', async () => {
+  const { spawnCall } = await import('../src/spawn.mjs');
+  const o = world();
+  o.core.commsAnswer = (x) => (x.op === 'spawn' ? { ok: true, id: 'th:abcdefghij' } : { ok: true });
+  o.runner.activity = () => [{ id: 't1', at: 'x', tool: 'Bash', summary: 's', state: 'done' }];
+  o.core.activity = async (x) => { o.core.activityCalls.push(x); throw Object.assign(new Error('core refused comms/activity: conflict: that conversation has no live thread'), { status: 409 }); };
+  const r = await spawnCall(o.env, { kind: 'owner' }, { agent: 'art', brief: 'x' }, o.o);
+  await tick(o.env, o.o); await tick(o.env, o.o);
+  assert.ok(Number.isFinite(loadConv(o.env, r.handle).activityHeld?.noThread));
 });

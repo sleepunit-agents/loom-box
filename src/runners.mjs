@@ -70,6 +70,8 @@ const stableLaunchToken = value => {
 const SIGN_READ_MAX = 4 * 1024 * 1024;
 const HELPER_READ_MAX = 2 * 1024 * 1024;
 const SIGN_MEMO = new Map();
+const ACTIVITY_READ_MAX = 16 * 1024 * 1024;
+const jsonLines = (t) => t.split('\n').flatMap((l) => { try { const v = JSON.parse(l); return v && typeof v === 'object' ? [v] : []; } catch { return []; } });
 /** `max` bytes of `p` from `offset` (as text), and the offset after them. */
 function readFrom(p, offset, max) {
   let fd;
@@ -325,7 +327,9 @@ export class ClaudeRunner {
   activity(body) {
     const f = this.transcriptOf(body);
     if (!f) return [];
-    const cards = claudeCards(lines(f));
+    // Its newest ACTIVITY_READ_MAX of transcript, never the whole of a long session each pass. A step whose start is
+    // older than that and whose end lands inside it stays as last told (its end can't be matched).
+    const cards = claudeCards(jsonLines(tailOf(f, ACTIVITY_READ_MAX) ?? ''));
     // Its helpers (subagents), each under the step that started it (t-2109): Claude Code keeps a helper's transcript
     // beside the session's, `<session>/subagents/agent-<id>.jsonl`, and its meta names that step (`toolUseId`).
     const dir = join(f.slice(0, -'.jsonl'.length), 'subagents');
@@ -339,28 +343,17 @@ export class ClaudeRunner {
       const parent = typeof meta?.toolUseId === 'string' && cards.some((c) => c.id === meta.toolUseId) ? meta.toolUseId : null;
       if (!parent) continue;
       // A helper's transcript is read from its end, at most HELPER_READ_MAX: its newest steps.
-      const tail = tailOf(join(dir, `agent-${agent}.jsonl`), HELPER_READ_MAX) ?? '';
-      cards.push(...claudeCards(tail.split('\n').flatMap((l) => { try { const v = JSON.parse(l); return v && typeof v === 'object' ? [v] : []; } catch { return []; } }), `${agent}:`, parent));
+      cards.push(...claudeCards(jsonLines(tailOf(join(dir, `agent-${agent}.jsonl`), HELPER_READ_MAX) ?? ''), `${agent}:`, parent));
     }
     // In the order they happened, so a host's "newest 100" keeps the newest of the body's and its helpers' alike.
     return cards.map((c, i) => [c, i]).sort((x, y) => (x[0].at < y[0].at ? -1 : x[0].at > y[0].at ? 1 : x[1] - y[1])).map(([c]) => c);
   }
 
-  /** Its session's transcript, when it has one. */
-  transcriptOf(body) {
-    const session = this.slotOf(body)?.session;
-    if (typeof session !== 'string' || !SESSION.test(session)) return null;
-    for (const p of dirs(this.roots.projects)) {
-      const f = join(this.roots.projects, p, `${session}.jsonl`);
-      if (existsSync(f)) return f;
-    }
-    return null;
-  }
 
   /**
    * Its last sign of life (t-2109): when its transcript was last written, and how many tokens it has written so far
-   * (each assistant message's output_tokens once, its largest). Read as it grows: only the bytes written since the last
-   * read, at most SIGN_READ_MAX a time, so a long session is never read whole again.
+   * (each assistant message's output_tokens once, its largest). Read as it grows, at most SIGN_READ_MAX a pass, from
+   * where the last pass of this process stopped (SIGN_MEMO); its tokens are said only once it's caught up.
    */
   signOfLife(body) {
     const f = this.transcriptOf(body);
@@ -384,7 +377,8 @@ export class ClaudeRunner {
     if (memos.size > 64) memos.delete(memos.keys().next().value);
     let tokens = 0;
     for (const n of m.seen.values()) tokens += n;
-    return { at: new Date(st.mtimeMs).toISOString(), ...(m.seen.size ? { tokens } : {}) };
+    // Its tokens only once it's read to the end: a count of part of it isn't its total.
+    return { at: new Date(st.mtimeMs).toISOString(), ...(m.seen.size && m.offset >= st.size ? { tokens } : {}) };
   }
 
   end(body, env) {

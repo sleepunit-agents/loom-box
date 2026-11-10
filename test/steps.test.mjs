@@ -211,3 +211,57 @@ test('a house\'s body passes only where one is made here: never on a read, a pri
   assert.equal(keep({ tool: 'Bash', detail: 'npm test', body: 'ok' }), undefined, 'a shell step\'s output never');
 });
 
+
+test('terminal codes go whole, whatever their form, so none can hide a token: charset, private CSI, long colour, long OSC, short escapes', () => {
+  for (const sep of ['\x1b(B', '\x1b[>4;2m', '\x1b[0;1;38;2;255;255;255;48;2;128;128;128m', `\x1b]8;;${'x'.repeat(2500)}\x07`, '\x1b7', '\x1b=', '\x1b[2K', '\x1b[?25l']) {
+    const t = shownText(`x ${GH.slice(0, 12)}${sep}${GH.slice(12)} y`);
+    assert.ok(!leak(t) && !t.includes('\x1b'), JSON.stringify([sep.slice(0, 12), t]));
+  }
+  assert.equal(shownText('\x1b[1;32mok\x1b[0m'), '\x1b[1;32mok\x1b[0m', 'a short colour stays');
+});
+
+test('a house\'s result line is one of the fixed phrases made here, never its prose', () => {
+  const r = (result) => stepParts({ result }).result;
+  for (const ok of ['exit 1: 11 passed, 1 failed', 'failed', '3 tests passed', '12 lines of output', 'no output', 'Read 120 lines', '2 additions, 1 removal', 'Wrote 2 lines', 'Found 3 files', '7 tool uses', '1 file changed']) assert.equal(r(ok), ok);
+  for (const bad of ['Loren asked about the party', 'exit 1: see you at 5', `exit 1: ${GH}`, 'Read the notes']) assert.equal(r(bad), undefined, bad);
+});
+
+test('shown text keeps to its bounds: a command to MAX_DETAIL, the body\'s words to MAX_TEXT', async () => {
+  const { MAX_DETAIL, MAX_TEXT } = await import('../src/activity.mjs');
+  const cmd = Array.from({ length: 2000 }, (_, i) => `echo ${i}`).join('\n');
+  const [c] = claudeCards([use('d', 'Bash', { command: cmd })]);
+  assert.ok(c.detail.length <= MAX_DETAIL && c.detail.includes('lines not kept'));
+  const words = Array.from({ length: 4000 }, (_, i) => `word ${i}`).join('\n');
+  const [t] = claudeCards([{ type: 'assistant', timestamp: '2026-11-10T10:00:00.000Z', message: { id: 'm', content: [{ type: 'text', text: words }] } }]);
+  assert.ok(t.body.length <= MAX_TEXT);
+  assert.equal(stepParts({ tool: 'text', body: words }).body.length <= MAX_TEXT, true);
+  assert.equal(stepParts({ detail: cmd }).detail.length <= MAX_DETAIL, true);
+});
+
+test('a sign of life is when the record last moved: Claude\'s transcript, Codex\'s events; a house\'s report of it is checked', async () => {
+  const { statSync, utimesSync } = await import('node:fs');
+  const { CodexRunner } = await import('../src/runners.mjs');
+  const { cleanReport } = await import('../src/houserunner.mjs');
+  const root = scratch('steps-at');
+  const proj = join(root, 'projects', '-x');
+  const session = '11111111-2222-3333-4444-777777777777';
+  mkdirSync(proj, { recursive: true });
+  const f = join(proj, `${session}.jsonl`);
+  writeFileSync(f, '{}\n');
+  const when = new Date('2026-11-10T08:00:00.000Z');
+  utimesSync(f, when, when);
+  const r = new ClaudeRunner({ projectsDir: join(root, 'projects'), jobsDir: join(root, 'jobs') });
+  assert.equal(r.signOfLife({ id: 'b', slot: { harness: 'claude', session } }).at, when.toISOString());
+  mkdirSync(join(root, 'runs', 'k1'), { recursive: true });
+  writeFileSync(join(root, 'runs', 'k1', 'events.jsonl'), '{}\n');
+  utimesSync(join(root, 'runs', 'k1', 'events.jsonl'), when, when);
+  assert.deepEqual(new CodexRunner({ runsDir: join(root, 'runs') }).signOfLife({ id: 'k1' }), { at: when.toISOString() });
+  assert.equal(new CodexRunner({ runsDir: join(root, 'runs') }).signOfLife({ id: 'nope' }), null);
+  // From a house: an ISO time and whole tokens only.
+  const rep = (alive) => cleanReport({ bodies: { abcd1234: { harness: 'claude', status: 'working', alive } } }).bodies.abcd1234.alive;
+  assert.deepEqual(rep({ at: '2026-11-10T08:00:00.000Z', tokens: 12 }), { at: '2026-11-10T08:00:00.000Z', tokens: 12 });
+  assert.deepEqual(rep({ at: '2026-11-10T08:00:00.000Z', tokens: -1 }), { at: '2026-11-10T08:00:00.000Z' });
+  assert.equal(rep({ at: 'soon\x1b[2J' }), undefined);
+  assert.equal(rep('x'), undefined);
+  void statSync;
+});

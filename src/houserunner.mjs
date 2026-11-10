@@ -394,7 +394,7 @@ export function cleanCards(cards) {
   });
 }
 
-function cleanReport(r) {
+export function cleanReport(r) {
   const bodies = {};
   for (const [id, b] of Object.entries(r?.bodies ?? {}).slice(0, 64)) {
     if (!BODY_ID.test(id) || !b || typeof b !== 'object') continue;

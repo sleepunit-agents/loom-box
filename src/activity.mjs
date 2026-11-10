@@ -234,8 +234,11 @@ function shownTextLine(line) {
   // list, redact.mjs UNPRINTABLE: controls, format and invisible characters, line and paragraph separators, lone
   // surrogates, private and unassigned code points).
   const norm = String(line)
-    .replace(/\x1b\][^\x07\x1b]{0,2000}(?:\x07|\x1b\\)?/g, '')
-    .replace(/\x1b\[[0-9;?]{0,30}[A-Za-ln-z]/g, '')
+    // OSC (a title, a link) to its end; any CSI (ECMA-48: parameters, intermediates, a final byte) but a colour of at
+    // most 30 parameter characters; any other escape with its intermediates and final byte (ESC ( B, ESC 7, ESC =).
+    .replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\|$)/g, '')
+    .replace(/\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]/g, (m) => (/^\x1b\[[0-9;]{0,30}m$/.test(m) ? m : ''))
+    .replace(/\x1b[\x20-\x2f]*[\x30-\x7e]/g, (m) => (/^\x1b\[/.test(m) ? m : ''))
     .split(/(\x1b\[[0-9;]{0,30}m)/)
     .map((seg, i) => (i % 2 ? seg : seg.replace(UNPRINTABLE, (m) => m.replace(/[^\t]/gu, ''))))
     .join('');
@@ -522,7 +525,8 @@ export function stepParts(c, idOf = (x) => x) {
   // A body only where one is made here (bodyAllowed): a shell step's output (not for a command that names a private
   // file), the body's words, a diff of a file whose shown name is plain and not private. A read's never.
   if (typeof c?.body === 'string' && c.body && bodyAllowed(tool, o.detail)) { const t = shownText(c.body, tool === 'text' ? MAX_TEXT : MAX_BODY); if (t) o.body = t; }
-  if (typeof c?.result === 'string' && c.result) { const r = part('text', c.result, MAX_SUMMARY); if (r !== GONE && !UNPRINTABLE_ONE.test(r)) o.result = r; }
+  // A result is one of the fixed phrases made here (shellResult, claudeResult, codexCards), never a house's prose.
+  if (typeof c?.result === 'string' && RESULT.test(c.result) && redact(c.result) === c.result) o.result = c.result;
   const exit = int(c?.exit, -999_999, 999_999); if (exit !== null) o.exit = exit;
   const limit = int(c?.limit, 1, 86_400); if (limit !== null) o.limit = limit;
   if (typeof c?.end === 'string' && cardTime(c.end) === c.end) o.end = c.end;
@@ -534,6 +538,10 @@ export function stepParts(c, idOf = (x) => x) {
 }
 
 const DIFFS = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit']);
+/** The result lines made here, as their shapes: counts and fixed words only. */
+const N = '\\d{1,9}';
+const TESTS = `(?:${N} tests? passed|${N} passed, ${N} failed)`;
+const RESULT = new RegExp(`^(?:(?:exit -?${N}|failed)(?:: ${TESTS})?|${TESTS}|${N} lines? of output|no output|Read ${N} lines?|Wrote ${N} lines?|${N} additions?, ${N} removals?|Found ${N} (?:files?|lines?)|${N} tool uses?|${N} files? changed)$`);
 /** Whether a card of this tool, with this (gated) target, may carry a body: the same rule the cards made here follow. */
 function bodyAllowed(tool, detail) {
   if (tool === 'text') return true;
@@ -558,8 +566,13 @@ export function changed(cards, sent = {}) {
   const next = { ...sent };
   for (const c of cards) if (next[c.id] === c.state) next[c.id] = mark(c);
   for (const c of out) next[c.id] = mark(c);
-  // Keep the record bounded: the newest 400 ids.
+  // Keep the record bounded: every card still in what was read (or each would be told again, t-2109), and of the rest,
+  // the newest, to 400 in all.
   const keys = Object.keys(next);
-  if (keys.length > 400) for (const k of keys.slice(0, keys.length - 400)) delete next[k];
+  if (keys.length > 400) {
+    const now = new Set(cards.map((c) => c.id));
+    let over = keys.length - Math.max(400, now.size);
+    for (const k of keys) { if (over <= 0) break; if (!now.has(k)) { delete next[k]; over--; } }
+  }
   return { out, next };
 }
