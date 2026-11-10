@@ -35,6 +35,8 @@ test('clock fire process reaches authenticated core delivery and binds only its 
   t.after(()=>{bridge.closeAllConnections();bridge.close();});
   const bridgeUrl=`http://127.0.0.1:${bridge.address().port}`;
   const coreHome=join(w.env.HOME,'core'); mkdirSync(coreHome);
+  // An out-of-range lifetime fails closed in the production executable (default is 7 days).
+  w.env.LOOM_RUNTIME_CONTINUATION_DAYS='0';
   const core=fork(new URL('./fixtures/continuation-core.mjs',import.meta.url),[],{env:{...process.env,...w.env,LOOM_HOME:coreHome,CONTINUATION_BRIDGE:bridgeUrl,CONTINUATION_RUNTIME_CLI:join(import.meta.dirname,'../src/cli.mjs')},stdio:['ignore','ignore','pipe','ipc']});
   t.after(()=>core.kill('SIGKILL'));
   let errors='';core.stderr.on('data',b=>errors+=b);
@@ -46,7 +48,7 @@ test('clock fire process reaches authenticated core delivery and binds only its 
   const source=await deliver(w.env,w.msg(setup.place,'owner',{source:'loom',venue:'loom',place:setup.place,from:{kind:'person',slug:'jonathan'}}),w.o);
   const proof=cv=>{const c=loadConv(w.env,cv);return {conversation:cv,key:w.runner.envs[c.body.split(':')[1]].LOOM_BODY_KEY,session:w.sessionFor(cv)};};
   const holder=async(action,b)=>{const r=await fetch(`http://127.0.0.1:${setup.port}/api/runtime/continuation-${action}`,{method:'POST',headers:{authorization:`Bearer ${setup.agentToken}`,'content-type':'application/json'},body:JSON.stringify(b)});return {status:r.status,body:await r.json()};};
-  // Production executable must retain its policy hold. Only this trusted test
+  // A misconfigured production executable refuses to issue. Only this trusted test
   // parent supplies a lifetime; enqueue/status still use the unchanged executable.
   const issued=await holder('issue',proof(source.conversation));
   assert.notEqual(issued.status,200,JSON.stringify(issued));

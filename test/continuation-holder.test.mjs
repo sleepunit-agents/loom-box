@@ -140,3 +140,22 @@ for (const change of ['cutoff', 'deadline']) test(`queued continuation rechecks 
   assert.equal(loadConv(w.env, queued.conversation).body, undefined);
   assert.equal(loadConv(w.env, queued.conversation).continuationAdmissions, undefined);
 });
+
+test('issuance lifetime comes from the runtime policy: 7 days by default, refused when out of range', async () => {
+  const w = world();
+  const r = await deliver(w.env, w.msg('policy', 'hello'), w.o);
+  const c = loadConv(w.env, r.conversation);
+  c.actsFor = { owner: true, people: [], unknown: false };
+  c.bodyRules = { ...c.bodyRules, seat: 'owner' };
+  writeFileSync(join(deliveryDir(w.env), 'conversations', `${c.conversation}.json`), JSON.stringify(c));
+  const args = { action: 'issue', conversation: c.conversation, key: w.runner.envs[c.body.split(':')[1]].LOOM_BODY_KEY, session: w.sessionFor(c.conversation) };
+  const { continuationLifetimeMs: _, ...o } = w.o;
+  const now = w.o.now().getTime();
+  assert.equal(continuationCall(w.env, args, o).expiresAt, now + 7 * 86400000);
+  w.env.LOOM_RUNTIME_CONTINUATION_DAYS = '2';
+  assert.equal(continuationCall(w.env, args, o).expiresAt, now + 2 * 86400000);
+  for (const bad of ['0', '31', '1.5', 'week']) {
+    w.env.LOOM_RUNTIME_CONTINUATION_DAYS = bad;
+    assert.throws(() => continuationCall(w.env, args, o), /policy is not configured/);
+  }
+});

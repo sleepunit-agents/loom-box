@@ -31,7 +31,7 @@ const unchanged = (saved, current) => current && !current.resetPending && same(s
  * a receipt; rename alone isn't a power-loss durability guarantee. Locks never span I/O.
  * post must implement stable-ref idempotency, including identical-payload checking.
  */
-export function continuationOutbox({ dir, sealer, now = Date.now, lifetimeMs = null }) {
+export function continuationOutbox({ dir, sealer, now = Date.now, lifetimeMs = null, retainMs = 7 * 86400000 }) {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const path = (id) => join(dir, `${id}.sealed`);
   const read = (id) => {
@@ -213,11 +213,41 @@ export function continuationOutbox({ dir, sealer, now = Date.now, lifetimeMs = n
           if (!['pending', 'indeterminate', 'expired'].includes(r.state)) return;
           if (result?.ok && (row.reconciliation ? result.state === 'delivered' && typeof result.id === 'string' && result.id.length > 0 : result.posted === true)) { r.state = 'delivered'; r.posted = true; delete r.reason; }
           else if (row.reconciliation && result?.ok && result.state === 'not-accepted') { r.state = 'expired'; r.reason = 'core fenced acceptance and found no accepted report'; }
+          // Core's thread tombstone refuses every later post: nothing can land there again.
+          else if (row.reconciliation && result?.ok && result.state === 'deleted') { r.state = 'withdrawn'; r.reason = 'the destination thread was deleted'; }
           else if (result?.permanent) { r.state = 'indeterminate'; r.reason = String(result.reason ?? 'destination refused report').slice(0, 300); }
           // An accepted/pending response alone never means delivered.
           save(id, r);
         });
       }
+    },
+    // Bounded retention. Only after the shared deadline plus retainMs, and only
+    // terminal outcomes: an expired grant can never bind, enqueue or post again
+    // (every path checks the deadline against the persisted highwater), so its
+    // records may go. Pending/indeterminate rows stay until drain resolves them,
+    // and a grant stays while any row still names it. Legacy records are held.
+    collect() {
+      return locked(() => {
+        let time;
+        try { time = observe(); } catch { return { reports: 0, grants: 0 }; } // Hold during clock uncertainty.
+        const names = readdirSync(dir);
+        const old = (x) => x?.version === 2 && Number.isSafeInteger(x.expiresAt) && x.expiresAt + retainMs <= time;
+        const held = new Set();
+        let reports = 0, grants = 0;
+        for (const n of names.filter((n) => /^report-[0-9a-f]{64}\.sealed$/.test(n))) {
+          const id = n.slice(0, -7), r = read(id);
+          if (!r) continue;
+          if (old(r) && ['delivered', 'expired', 'failed', 'withdrawn'].includes(r.state)) { rmSync(path(id), { force: true }); reports += 1; }
+          else held.add(r.grant);
+        }
+        for (const n of names.filter((n) => /^grant-[0-9a-f]{64}\.sealed$/.test(n))) {
+          const id = n.slice(0, -7);
+          if (held.has(id)) continue;
+          if (old(read(id))) { rmSync(path(id), { force: true }); grants += 1; }
+        }
+        if (reports || grants) { const dd = openSync(dir, 'r'); try { fsyncSync(dd); } finally { closeSync(dd); } }
+        return { reports, grants };
+      });
     },
   };
 }

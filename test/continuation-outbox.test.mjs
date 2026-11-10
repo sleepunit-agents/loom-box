@@ -271,7 +271,7 @@ for (const answer of [
   } });
   assert.equal(calls, 1);
   const status = w.reload().status(w.handle, w.child, 'final', w.source);
-  assert.equal(status.state, answer.state === 'delivered' ? 'delivered' : answer.state === 'not-accepted' ? 'expired' : 'indeterminate');
+  assert.equal(status.state, answer.state === 'delivered' ? 'delivered' : answer.state === 'not-accepted' ? 'expired' : answer.state === 'deleted' ? 'withdrawn' : 'indeterminate');
   assert.equal(status.attempts, 1);
 });
 
@@ -283,4 +283,60 @@ test('reconciliation transport loss retains indeterminate across restart and ret
   assert.equal(w.reload().status(w.handle, w.child, 'final', w.source).state, 'indeterminate');
   await w.reload().drain({ current: w.current, post: () => assert.fail('late post'), reconcile: async () => ({ ok: true, state: 'delivered', id: '42' }) });
   assert.equal(w.reload().status(w.handle, w.child, 'final', w.source).posted, true);
+});
+
+test('collection waits for the deadline plus retention and a final outcome, then removes grant and report', async (t) => {
+  const w = world(t), deadline = 1000 + w.options.lifetimeMs, keep = 7 * 86400000;
+  bind(w); queue(w);
+  // Unbound sibling grant with no reports: collected on the same schedule.
+  const other = w.out.issue(w.source).handle;
+  await w.out.drain({ current: w.current, post: async () => ({ ok: true, posted: true }) });
+  assert.equal(w.out.status(w.handle, w.child, 'final').state, 'delivered');
+  w.setTime(deadline + keep - 1);
+  assert.deepEqual(w.reload().collect(), { reports: 0, grants: 0 });
+  w.setTime(deadline + keep);
+  assert.deepEqual(w.reload().collect(), { reports: 1, grants: 2 });
+  assert.deepEqual(readdirSync(w.dir).filter(n => /^(grant|report)-/.test(n)), []);
+  // A collected capability grants nothing: not a status, a new report, a bind or a firing.
+  for (const f of [() => w.out.status(w.handle, w.child, 'final'), () => queue(w, 'again'), () => bind(w),
+    () => w.out.bind(other, { ...w.binding }, w.source, w.child), () => w.out.checkFiring(other, w.binding, w.source, w.child)])
+    assert.throws(f, /bound|unknown|reset or changed/);
+});
+
+test('unresolved and attempted reports keep their grant past retention until reconciled', async (t) => {
+  const w = world(t), deadline = 1000 + w.options.lifetimeMs, keep = 7 * 86400000;
+  bind(w); queue(w);
+  await w.out.drain({ current: w.current, post: async () => { throw new Error('receipt lost'); } });
+  w.setTime(deadline + keep + 1);
+  await w.reload().drain({ current: w.current, post: () => assert.fail('late post'), reconcile: async () => ({ ok: true, state: 'unresolved' }) });
+  assert.equal(w.out.status(w.handle, w.child, 'final').state, 'indeterminate');
+  assert.deepEqual(w.reload().collect(), { reports: 0, grants: 0 });
+  await w.reload().drain({ current: w.current, post: () => assert.fail('late post'), reconcile: async () => ({ ok: true, state: 'delivered', id: '7' }) });
+  assert.equal(w.out.status(w.handle, w.child, 'final').state, 'delivered');
+  assert.deepEqual(w.reload().collect(), { reports: 1, grants: 1 });
+});
+
+test('a deleted destination ends reconciliation; legacy and uncertain-clock records are never collected', async (t) => {
+  const w = world(t), deadline = 1000 + w.options.lifetimeMs, keep = 7 * 86400000;
+  bind(w); queue(w);
+  await w.out.drain({ current: w.current, post: async () => { throw new Error('receipt lost'); } });
+  w.setTime(deadline);
+  let calls = 0;
+  const reconcile = async () => { calls += 1; return { ok: true, state: 'deleted' }; };
+  await w.reload().drain({ current: w.current, post: () => assert.fail('late post'), reconcile });
+  await w.reload().drain({ current: w.current, post: () => assert.fail('late post'), reconcile });
+  assert.equal(calls, 1);
+  assert.equal(w.out.status(w.handle, w.child, 'final').state, 'withdrawn');
+  // Clock moved backwards: hold, collect nothing.
+  w.setTime(deadline - 5);
+  assert.deepEqual(w.reload().collect(), { reports: 0, grants: 0 });
+  // Legacy (no version) records are held whatever their age.
+  const { writeFileSync } = await import('node:fs');
+  for (const file of readdirSync(w.dir).filter(n => /^(grant|report)-/.test(n))) {
+    const path = join(w.dir, file), record = JSON.parse(w.options.sealer.open(readFileSync(path)));
+    delete record.version;
+    writeFileSync(path, w.options.sealer.seal(Buffer.from(JSON.stringify(record))));
+  }
+  w.setTime(deadline + 100 * keep);
+  assert.deepEqual(w.reload().collect(), { reports: 0, grants: 0 });
 });

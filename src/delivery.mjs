@@ -1868,7 +1868,7 @@ async function recoverPreparedStart(env, op, d) {
 }
 
 function checkContinuationLaunch(env, op, d) {
-  const outbox = continuationOutbox({ dir: join(deliveryDir(env), 'continuations'), sealer: d.sealer, now: () => d.now().getTime() });
+  const outbox = continuationsOf(env, d, {});
   for (const m of op.msgs.filter(x => x.clockContinuation)) {
     const firing = JSON.parse(d.sealer.open(Buffer.from(m.clockContinuation, 'base64')).toString('utf8'));
     outbox.checkFiring(firing.handle, firing, continuationSnapshot(env, outbox.sourceConversation(firing.handle)), continuationSnapshot(env, op.cv));
@@ -3209,6 +3209,18 @@ function holderProblem(env, d, c, { key, session }, does = 'speaks in it', calle
   return null;
 }
 
+/**
+ * How long a continuation may report, from its issue (t-2004): LOOM_RUNTIME_CONTINUATION_DAYS, 1-30, default 7. One
+ * absolute deadline is sealed at issue and carried to the clock and core; nothing renews it. Its records are collected
+ * LOOM_RUNTIME_CONTINUATION_KEEP_DAYS (0-90, default 7) after that deadline, once their outcome is final.
+ */
+function continuationPolicy(env, o = {}) {
+  const days = (name, dflt, lo, hi) => { const n = env[name] === undefined || env[name] === '' ? dflt : Number(env[name]); return Number.isInteger(n) && n >= lo && n <= hi ? n : null; };
+  const life = days('LOOM_RUNTIME_CONTINUATION_DAYS', 7, 1, 30), keep = days('LOOM_RUNTIME_CONTINUATION_KEEP_DAYS', 7, 0, 90);
+  return { lifetimeMs: o.continuationLifetimeMs ?? (life === null ? null : life * DAY_MS), retainMs: o.continuationRetainMs ?? (keep ?? 7) * DAY_MS };
+}
+const continuationsOf = (env, d, o) => continuationOutbox({ dir: join(deliveryDir(env), 'continuations'), sealer: d.sealer, now: () => d.now().getTime(), ...continuationPolicy(env, o) });
+
 // Runtime-owned snapshots only. Neither a body nor the clock supplies these fields.
 export function continuationSnapshot(env, conversation) {
   const c = loadConv(env, conversation);
@@ -3222,7 +3234,7 @@ export function continuationSnapshot(env, conversation) {
 // the registry afresh, but never rebuild payload fields from a newer body/run.
 export async function drainContinuations(env, o = {}) {
   const d = depsOf(env, o);
-  const outbox = continuationOutbox({ dir: join(deliveryDir(env), 'continuations'), sealer: d.sealer, now: () => d.now().getTime(), lifetimeMs: o.continuationLifetimeMs });
+  const outbox = continuationsOf(env, d, o);
   await outbox.drain({ current: (cv) => continuationSnapshot(env, cv), reconcile: async (p) => {
     const venue = (await d.venues())?.[p.target.venue];
     if (!coreAdapted(venue)) return { permanent: true, reason: 'continuation destination has no core reconciliation contract' };
@@ -3237,6 +3249,7 @@ export async function drainContinuations(env, o = {}) {
       text: p.text, run: p.run, expiresAt: p.expiresAt, ...(p.on ? { on: p.on } : {}) });
     return answer?.ok === true && typeof answer.id === 'string' && answer.id.length > 0 ? { ok: true, posted: true } : answer;
   } });
+  outbox.collect();
 }
 
 // Local clock bridge only; there is no body/API operation for inspecting grants.
@@ -3246,7 +3259,7 @@ export function inspectClockContinuation(env, { handle, statement, agent, schedu
   const d = depsOf(env, o);
   const issuer = verifyStatement(env, statement, d.now().getTime());
   if (!issuer.ok || issuer.agent !== agent) throw new StateError('no authenticated continuation issuer', 403);
-  const outbox = continuationOutbox({ dir: join(deliveryDir(env), 'continuations'), sealer: d.sealer, now: () => d.now().getTime() });
+  const outbox = continuationsOf(env, d, o);
   const source = continuationSnapshot(env, outbox.sourceConversation(handle));
   return outbox.inspect(handle, source, issuer, scheduledAt);
 }
@@ -3259,7 +3272,7 @@ export function continuationCall(env, { action, conversation, key, session, hand
     throw new StateError('only its own agent may use a continuation', 403);
   const problem = holderProblem(env, d, c, { key, session }, 'uses a continuation', o.caller);
   if (problem) throw new StateError(problem, 403);
-  const outbox = continuationOutbox({ dir: join(deliveryDir(env), 'continuations'), sealer: d.sealer, now: () => d.now().getTime(), lifetimeMs: o.continuationLifetimeMs });
+  const outbox = continuationsOf(env, d, o);
   const child = continuationSnapshot(env, conversation);
   if (action === 'issue') return outbox.issue(child);
   if (action !== 'enqueue' && action !== 'status') throw new StateError('unknown continuation action', 400);
