@@ -3414,7 +3414,7 @@ export async function send(env, { conversation, text, key, session, person, via 
  * from what it says. One house per steering principal: a key or session id carried out of its house (by a body set on
  * posing as another conversation) is refused from any other house, an older or newer one of the same seat included.
  */
-function houseProblem(env, c, caller) {
+export function houseProblem(env, c, caller) {
   if (!caller) return null;
   let rec;
   try { rec = readBody(env, c.body); } catch { return 'its body\'s house can\'t be told'; }

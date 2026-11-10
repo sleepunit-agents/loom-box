@@ -77,6 +77,25 @@ test('never across agents: Mark gets the same answer for Art\'s thread as for no
   assert.deepEqual([theirs.exit, theirs.answer.isError], [1, true]);
 });
 
+test('from a house, only the conversation whose body it runs; from a service\'s house, none (t-2118)', async () => {
+  const { w, cv, c } = await comms();
+  // The body's record names its house, as a house runner's start does.
+  const { join } = await import('node:path');
+  const { readFileSync, writeFileSync } = await import('node:fs');
+  const house = 'h-41';
+  const f = join(w.env.LOOM_BOX_DATA || join(w.env.HOME, '.local', 'share', 'loom-box'), 'bodies', `${c.body.replace(':', '-')}.json`);
+  writeFileSync(f, JSON.stringify({ ...JSON.parse(readFileSync(f, 'utf-8')), house }));
+  assert.equal((await trace(w.env, { agent: 'art', house }, { conversation: cv }, { core: w.core })).conversation, cv);
+  for (const who of [{ agent: 'art', house: 'h-999999' }, { agent: 'art', house, service: 'discord' }, { agent: 'art', service: 'discord' }]) {
+    await assert.rejects(trace(w.env, who, { conversation: cv }, { core: w.core }), /no conversation of yours here by that name/);
+  }
+  const other = await traceTool(w.env, ['--agent', 'art', '--house', 'h-999999'], JSON.stringify({ thread }), { core: w.core });
+  assert.deepEqual([other.exit, other.answer.isError], [1, true]);
+  const svc = await traceTool(w.env, ['--agent', 'art', '--house', house, '--service', 'discord'], JSON.stringify({ thread }), { core: w.core });
+  assert.deepEqual([svc.exit, svc.answer.isError], [1, true]);
+  assert.equal((await traceTool(w.env, ['--agent', 'art', '--house', house], JSON.stringify({ thread }), { core: w.core })).exit, 0);
+});
+
 test('core without the trace op (an older loom): the runtime\'s half still answers, and says what it couldn\'t see', async () => {
   const { w } = await comms();
   w.core.commsAnswer = (b) => (b.op === 'trace' ? (() => { throw new Error('core refused comms/adapter: bad-input: op is post, describe or status'); })() : { ok: true });
