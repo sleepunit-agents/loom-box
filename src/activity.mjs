@@ -401,16 +401,21 @@ function unwrapShell(c) {
  * value piped to a login, given to a secrets store, or written into a private file). Its command isn't shown, only its
  * label. Read on the command as written and on it as shown (where a private path reads PRIVATE_FILE).
  */
-const SECRET_IN = /--password-stdin\b|--with-token\b|--token-stdin\b|\bsudo\b[^|;&\n]{0,200}?\s-[A-Za-z]{0,10}S\b|\bgh\s+secret\s+set\b|\bgh\s+auth\s+login\b|\b(?:vault\s+(?:kv\s+)?(?:put|write)|kubectl\s+create\s+secret|docker\s+secret\s+create|secret-tool\s+store|pass\s+(?:insert|edit)|op\s+item\s+(?:create|edit)|aws\s+secretsmanager|gcloud\s+secrets|az\s+keyvault\s+secret\s+set|security\s+add-\w+-password|htpasswd|chpasswd|passwd)\b/i;
+const SECRET_IN = /--password-stdin\b|--with-token\b|--token-stdin\b|\bgh\s+secret\s+set\b|\bgh\s+auth\s+login\b|\b(?:vault\s+(?:kv\s+)?(?:put|write)|kubectl\s+create\s+secret|docker\s+secret\s+create|secret-tool\s+store|pass\s+(?:insert|edit)|op\s+item\s+(?:create|edit)|aws\s+secretsmanager|gcloud\s+secrets|az\s+keyvault\s+secret\s+set|security\s+add-\w+-password|htpasswd|chpasswd|passwd)\b/i;
 const CMD_MAX = 64_000;
-const WRITES_PRIVATE = new RegExp(`(?:>{1,2}|\\btee\\b)[^|;&\\n]{0,200}?${PRIVATE_FILE}`);
 const REDIRECT = /(?:>{1,2}|\btee\b(?:\s+-\w+)*)\s*(['"]?)([^\s'"|;&<>]+)\1/g;
 export function secretIn(command) {
   // Read to CMD_MAX (a command past it isn't shown whole anyway); each scan bounded, so none backtracks far.
   const c = String(command ?? '').slice(0, CMD_MAX);
   if (SECRET_IN.test(c)) return true;
   for (const m of c.matchAll(REDIRECT)) if (privateFile(m[2])) return true;
-  return WRITES_PRIVATE.test(c);
+  // Each part of a pipe or list on its own, with linear tests only: sudo reading its password from stdin; a write
+  // into a file shown as private.
+  for (const part of c.split(/[|;&\n]/)) {
+    if (/\bsudo\b/.test(part) && /\s-[A-Za-z]*S\b/.test(part)) return true;
+    if (/>|\btee\b/.test(part) && part.includes(PRIVATE_FILE)) return true;
+  }
+  return false;
 }
 
 /**

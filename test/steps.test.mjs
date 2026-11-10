@@ -587,3 +587,14 @@ test('a command that takes a secret in shows no command, only its label: logins,
   assert.equal(commandLine('npm test -- deploy'), 'npm test -- deploy');
   assert.equal(commandLine('ls > out.txt'), 'ls > out.txt');
 });
+
+test('padding can\'t hide a secret taken in: sudo -S or a private write far along its part, read in linear time (t-2109)', async () => {
+  const { secretIn } = await import('../src/activity.mjs');
+  assert.equal(secretIn(`echo x | sudo ${'A'.repeat(5000)} -S apt`), true);
+  assert.equal(secretIn(`printf ${'y '.repeat(3000)} > ~/.ssh/id_ed25519`), true);
+  assert.equal(secretIn(`printf ${'y '.repeat(3000)} > a private file`), true, 'as shown');
+  const t0 = Date.now();
+  for (const s of ['sudo '.repeat(12_000), '> '.repeat(30_000), 'tee '.repeat(15_000)]) secretIn(s);
+  assert.ok(Date.now() - t0 < 1000);
+  assert.equal(secretIn('sudo ls'), false);
+});
