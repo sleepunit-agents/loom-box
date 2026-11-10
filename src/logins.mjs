@@ -12,6 +12,7 @@
 // What the box reports up (control.mjs, poll): per harness {installed, loggedIn, method, plan, account}, where
 // `account` is a short hash of what the status command says identifies the account (Claude: orgId and email), so
 // boxes signed in to one account share its quota. The email itself never leaves the box.
+import { setting } from './piece.mjs';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readSync, rmSync } from 'node:fs';
@@ -496,6 +497,22 @@ export function tailOf(path, max = TAIL_BYTES) {
   } catch { return null; } finally { if (fd !== undefined) closeSync(fd); }
 }
 
+// The local daemon's login is private to this machine, never the shared house login.
+// Opted in only on loom's control plane. The native CLI reads its own trusted config;
+// it is NEVER pointed at the shared login directory (whose contents houses can change).
+export function machineClaudeEnabled(env) {
+  try { return JSON.parse(setting(env, 'LOCAL_BODIES') || 'null')?.machineClaudeLogin === true; } catch { return false; }
+}
+export function machineClaudeEnv(env) {
+  return Object.fromEntries(['HOME', 'PATH', 'XDG_RUNTIME_DIR', 'LANG'].filter((k) => env[k]).map((k) => [k, env[k]]));
+}
+export function machineClaudeStatus(env, run = spawnSync) {
+  const r = run(join(env.HOME || homedir(), '.local/bin/claude'), ['auth', 'status', '--json'], {
+    env: machineClaudeEnv(env), cwd: env.HOME || homedir(), encoding: 'utf-8', timeout: 30_000, stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  return { installed: !r.error || r.error.code !== 'ENOENT', ...parseClaudeStatus(r.stdout || '{}') };
+}
+
 // ------------------------------------------------------------------ signing in, with the CLI's own login
 
 /**
@@ -587,21 +604,23 @@ export function whyLoginFailed(harness, { exit, out = '', stage = 'waiting' } = 
  * owner's pasted code to the CLI's stdin. What the CLI prints is only scanned for its link and code; none of it is
  * kept, and loom never opens the credential file it writes.
  */
-export function startLogin(env, harness, { say, spawnImpl = spawn, status, every = 3000, until = LOGIN_MS, agents = [], run = spawnSync, id } = {}) {
+export function startLogin(env, harness, { say, spawnImpl = spawn, status, every = 3000, until = LOGIN_MS, agents = [], run = spawnSync, id, machine = false } = {}) {
   const def = LOGIN_HARNESSES[harness];
   if (!def) throw new LoginError(`no harness ${JSON.stringify(harness)} to log in`);
   // In a throwaway container (cliRunArgs), with a pty from `script` here so the CLI prints its prompt. Claude writes
   // its new credential straight into the shared dir (its secure-storage dir); Codex's is renamed in, in the container.
-  const img = loginImage(env, agents, { run });
-  if (!img.image) throw new LoginError(img.why);
-  const bad = credentialState(env, harness);
+  if (machine && harness !== 'claude') throw new LoginError('only Claude has a machine login');
+  const img = machine ? {} : loginImage(env, agents, { run });
+  if (!machine && !img.image) throw new LoginError(img.why);
+  const bad = machine ? null : credentialState(env, harness);
   if (bad && bad !== 'absent') throw new LoginError(`the ${def.label} login dir isn't safe to use: ${bad}`);
-  status ??= () => cliStatus(env, harness, img.image, run);
-  const bin = podmanBin(env);
+  status ??= machine ? () => machineClaudeStatus(env, run) : () => cliStatus(env, harness, img.image, run);
+  const before = machine ? status() : null;
+  const bin = machine ? join(env.HOME || homedir(), '.local/bin/claude') : podmanBin(env);
   const q = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
-  const name = id ? loginContainer(id) : undefined;
-  const cmd = [bin, ...cliRunArgs(env, harness, 'login', img.image, { name })].map(q).join(' ');
-  const child = spawnImpl('script', ['-qfec', cmd, '/dev/null'], { env: podEnv(env), stdio: ['pipe', 'pipe', 'pipe'] });
+  const name = !machine && id ? loginContainer(id) : undefined;
+  const cmd = [bin, ...(machine ? def.login : cliRunArgs(env, harness, 'login', img.image, { name }))].map(q).join(' ');
+  const child = spawnImpl('script', ['-qfec', cmd, '/dev/null'], { ...(machine ? { cwd: env.HOME || homedir() } : {}), env: machine ? { ...machineClaudeEnv(env), BROWSER: '/bin/false', NO_COLOR: '1' } : podEnv(env), stdio: ['pipe', 'pipe', 'pipe'] });
   let out = '';
   let over = false;
   let reported = false;
@@ -640,7 +659,8 @@ export function startLogin(env, harness, { say, spawnImpl = spawn, status, every
     setTimeout(() => {
       if (over) return;
       const st = status();
-      if (st?.loggedIn) return finish({ state: 'done' });
+      if (st?.loggedIn && (!machine || (code === 0 && (!before?.loginExpiresAt || Date.parse(st.loginExpiresAt) > Date.parse(before.loginExpiresAt) + 60_000)))) return finish({ state: 'done' });
+      if (machine && st?.loggedIn && code === 0) return finish(failed('The login ended without extending this machine’s sign-in. Try again.', code));
       finish(failed(whyLoginFailed(harness, { exit: code, out: out.replace(ANSI, ''), stage: !reported ? 'link' : pasted ? 'code' : 'waiting' }), code));
     }, 500);
   });

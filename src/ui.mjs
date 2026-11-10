@@ -1019,6 +1019,7 @@ function boxPage(env, id, nowMs, caller = OWNER) {
         machineRow(b),
         ...(b.lastSeen || b.local ? runtimePanelRows(env, b, nowMs, may) : []),
         ...harnessPanelRows(s, b, nowMs, may),
+        ...(b.local && b.machineHarnesses?.claude ? harnessPanelRows(s, b, nowMs, may, 'machine') : []),
         // When it last came back, and its units failing (watch.mjs).
         ...watchRowsOf(env, b.id, nowMs),
         // Whether silence is an alert, and whether it hosts anything: the owner's (control.mjs, setBoxWatch).
@@ -1092,27 +1093,29 @@ const loginWords = (st) => [st?.method, st?.plan ? st.plan.charAt(0).toUpperCase
  * Each harness on a box, as a panel row: not reported yet, not installed, unhealthy, signing in (its page), logged
  * in (how, and its plan; "Log in again"), or not (a "Log in" button; after a failed try, why, and "Try again").
  */
-function harnessPanelRows(s, b, nowMs, may = true) {
+function harnessPanelRows(s, b, nowMs, may = true, scope = undefined) {
   const rows = [];
   for (const [h, def] of Object.entries(LOGIN_HARNESSES)) {
-    const st = b.harnesses?.[h];
-    if (!st) { rows.push({ label: def.label, value: 'Not reported yet', tone: 'muted' }); continue; }
-    if (!st.installed) { rows.push({ label: def.label, value: st.unhealthy ? 'Can\'t sign in here' : 'Not installed', detail: st.unhealthy ? st.unhealthy : `${def.bin} isn't installed on ${b.label}`, tone: 'muted' }); continue; }
-    if (st.unhealthy) { rows.push({ label: def.label, value: 'Not used', detail: `Its login folder has something in it that shouldn't be (${st.unhealthy})`, tone: 'bad' }); continue; }
-    const mine = Object.values(s.logins ?? {}).filter((l) => l.box === b.id && l.harness === h).sort((x, y) => Date.parse(y.created) - Date.parse(x.created));
+    if (scope && h !== 'claude') continue;
+    const st = (scope ? b.machineHarnesses : b.harnesses)?.[h];
+    const label = scope ? `${def.label} on this machine` : def.label;
+    if (!st) { rows.push({ label, value: 'Not reported yet', tone: 'muted' }); continue; }
+    if (!st.installed) { rows.push({ label, value: st.unhealthy ? 'Can\'t sign in here' : 'Not installed', detail: st.unhealthy ? st.unhealthy : `${def.bin} isn't installed on ${b.label}`, tone: 'muted' }); continue; }
+    if (st.unhealthy) { rows.push({ label, value: 'Not used', detail: `Its login folder has something in it that shouldn't be (${st.unhealthy})`, tone: 'bad' }); continue; }
+    const mine = Object.values(s.logins ?? {}).filter((l) => l.box === b.id && l.harness === h && l.scope === scope).sort((x, y) => Date.parse(y.created) - Date.parse(x.created));
     const under = mine.find((l) => !['done', 'failed'].includes(l.state));
-    const start = { action: 'login-start', fields: { box: b.id, harness: h } };
-    if (under) { rows.push({ label: def.label, value: 'Signing in…', tone: 'warn', ...(may ? { page: `login/${under.id}` } : {}) }); continue; }
+    const start = { action: 'login-start', fields: { box: b.id, harness: h, ...(scope ? { scope } : {}) } };
+    if (under) { rows.push({ label, value: 'Signing in…', tone: 'warn', ...(may ? { page: `login/${under.id}` } : {}) }); continue; }
     const expiry = loginExpiry(st, nowMs);
     if (st.loggedIn && expiry) {
-      rows.push({ label: def.label, value: expiry.expired ? 'Login expired' : `Login ends in ${expiry.days} day${expiry.days === 1 ? '' : 's'}`,
+      rows.push({ label, value: expiry.expired ? 'Login expired' : `Login ends in ${expiry.days} day${expiry.days === 1 ? '' : 's'}`,
         detail: [loginWords(st), 'Renew this login to keep running'].filter(Boolean).join('; '), tone: expiry.severity,
         ...(may ? { act: { ...start, label: 'Renew login', tone: 'primary' } } : {}) });
       continue;
     }
-    if (st.loggedIn) { rows.push({ label: def.label, value: 'Logged in', ...(loginWords(st) ? { detail: loginWords(st) } : {}), tone: 'ok', ...(may ? { act: { ...start, label: 'Log in again' } } : {}) }); continue; }
+    if (st.loggedIn) { rows.push({ label, value: 'Logged in', ...(loginWords(st) ? { detail: loginWords(st) } : {}), tone: 'ok', ...(may ? { act: { ...start, label: 'Log in again' } } : {}) }); continue; }
     const lastFail = mine[0]?.state === 'failed' ? mine[0] : null;
-    rows.push({ label: def.label, value: 'Not logged in', detail: lastFail ? `Last try: ${lastFail.error}` : 'Installed; nobody has signed in yet', tone: lastFail ? 'bad' : 'warn',
+    rows.push({ label, value: 'Not logged in', detail: lastFail ? `Last try: ${lastFail.error}` : 'Installed; nobody has signed in yet', tone: lastFail ? 'bad' : 'warn',
       ...(may ? { act: { ...start, label: lastFail ? 'Try again' : `Log in ${def.label}`, tone: 'primary' } } : lastFail ? {} : {}) });
   }
   return rows;
@@ -1266,20 +1269,20 @@ function loginPage(env, id, nowMs = Date.now()) {
       refresh = 3;
     }
   } else if (l.state === 'done') {
-    const how = loginWords(l) || loginWords(box.harnesses?.[l.harness]);
+    const how = loginWords(l) || loginWords((l.scope === 'machine' ? box.machineHarnesses : box.harnesses)?.[l.harness]);
     blocks.push({ type: 'callout', tone: 'ok', title: `✓ ${def.label} logged in${how ? ` (${how})` : ''}`,
-      text: `${where} is signed in. Its own ${def.bin} keeps the login and refreshes it; houses there that ask for it use it.` });
+      text: l.scope === 'machine' ? `${where}'s local Claude daemon is signed in. This is this machine's own login.` : `${where} is signed in. Its own ${def.bin} keeps the login and refreshes it; houses there that ask for it use it.` });
   } else {
     blocks.push({ type: 'callout', tone: 'bad', title: `${def.label} didn't log in`, text: l.error || 'It ended without saying why.' });
     if (l.detail || Number.isInteger(l.exit)) {
       blocks.push({ type: 'details', summary: `What ${def.bin} said`, meta: Number.isInteger(l.exit) ? `exit ${l.exit}` : '', blocks: [
         ...(l.detail ? [{ type: 'code', text: l.detail }] : []), ...(Number.isInteger(l.exit) ? [{ type: 'text', tone: 'muted', text: `It exited with status ${l.exit}.` }] : [])] });
     }
-    blocks.push({ type: 'buttons', items: [{ action: 'login-start', label: 'Try again', tone: 'primary', fields: { box: l.box, harness: l.harness } }] });
+    blocks.push({ type: 'buttons', items: [{ action: 'login-start', label: 'Try again', tone: 'primary', fields: { box: l.box, harness: l.harness, ...(l.scope ? { scope: l.scope } : {}) } }] });
   }
   if (!['done', 'failed', 'cancel'].includes(l.state)) blocks.push({ type: 'buttons', items: [{ action: 'login-cancel', label: 'Cancel', tone: 'danger', fields: { id } }] });
   blocks.push({ type: 'link', text: 'Back to Boxes', page: '' });
-  return { title: `Log ${where} in to ${def.label}`, sections: [{ id: 'login', title: 'Sign-in', blocks }], ...(refresh ? { refresh } : {}) };
+  return { title: `Log ${where} in to ${def.label}${l.scope === 'machine' ? ' on this machine' : ''}`, sections: [{ id: 'login', title: 'Sign-in', blocks }], ...(refresh ? { refresh } : {}) };
 }
 
 /** One box session: how it is, and its link once it has one. */

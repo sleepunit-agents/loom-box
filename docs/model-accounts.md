@@ -272,3 +272,20 @@ window and 0.5% of a daily or weekly one, the same for each job already running 
   account is short of the reserve, it waits, keeping its session and messages, and is checked again within 15
   minutes. It moves only if its spawn allowed a failover and another eligible model has headroom. Its lineage then
   says it was "kept for conversations; failover allowed".
+
+## The local Claude daemon
+
+The legacy machine daemon uses the native CLI's private `~/.claude` login,
+not the shared house login. Renewing one never renews the other. On loom's
+own box only, `"machineClaudeLogin":true` in `LOOM_RUNTIME_LOCAL_BODIES` adds **Claude on this
+machine** to its Model logins panel. Its separate expiry warning leads to
+that row; Renew login runs the native CLI's own login against its own trusted
+config. The same owner-only flow takes the provider code. Status uses only
+`claude auth status --json`; no credential is read or copied by loom.
+
+This is an explicit exception for the trusted local daemon, not the box's
+shared login runner. It never points a host CLI at the shared login dir.
+Remote boxes cannot report or request this target, houses never get this
+private login, and it is never offered as a house account. A failed/cancelled
+renewal cannot count the old, still-working login as successful: the CLI must
+exit successfully and extend the reported hard deadline.

@@ -19,7 +19,7 @@ import { joinPoll, joinRequest } from './enroll.mjs';
 import { checkDark, noteReport } from './watch.mjs';
 import { MAX_PARTS, PART_RAW, drop, partsOf, putPart, putWhole, readPart } from './blobs.mjs';
 import { parsePortGrant, parseTailnetGrant } from './house.mjs';
-import { CODE, LOGIN_NAMES, scrubCliOutput } from './logins.mjs';
+import { CODE, LOGIN_NAMES, machineClaudeEnabled, scrubCliOutput } from './logins.mjs';
 import { boxOwner, mayHaveLogin, mayUseLogin, membersOf, ownersAllow } from './owners.mjs';
 
 const TERMINAL = new Set(['done', 'failed', 'stopped', 'lost']);
@@ -652,7 +652,7 @@ export function list(env, caller) {
   const mine = caller.kind === 'agent' ? [caller.agent] : Array.isArray(caller.agents) ? caller.agents : null;
   const boxes = Object.entries(s.boxes)
     .filter(([, b]) => householdOwner(caller) || (!b.revoked && mine?.some((a) => mayHost(b, a, members))))
-    .map(([id, b]) => ({ id, name: b.name ?? id, local: !!b.local, facts: factsOf(b), lastSeen: b.lastSeen, harnesses: harnessesOf(b, householdOwner(caller)),
+    .map(([id, b]) => ({ id, name: b.name ?? id, local: !!b.local, facts: factsOf(b), lastSeen: b.lastSeen, harnesses: harnessesOf(b, householdOwner(caller)), ...(b.local && b.machineHarnesses ? { machineHarnesses: harnessesOf({ harnesses: b.machineHarnesses }, householdOwner(caller)) } : {}),
       ...(householdOwner(caller) ? { runtime: b.runtime ?? null, mayHost: b.mayHost, owner: boxOwner(b, members), lentTo: b.lentTo ?? [], revoked: b.revoked ?? null, created: b.created, reportOnly: !!b.reportOnly, alwaysOn: !!b.alwaysOn } : {}) }));
   const primary = caller.kind === 'agent' ? primaryOf(s, caller.agent, env) : undefined;
   const services = Object.entries(s.services ?? {})
@@ -714,7 +714,7 @@ export function poll(env, effects, caller, body = {}) {
   return out;
 }
 
-function pollState(env, effects, caller, { facts, sessions, harnesses, usage, loginsRunning, runtime, reportOnly } = {}) {
+function pollState(env, effects, caller, { facts, sessions, harnesses, machineHarnesses, usage, loginsRunning, runtime, reportOnly } = {}) {
   const f = facts === undefined ? null : listOf(facts, 'facts', FACT, 32);
   const running = runningReport(loginsRunning);
   const rt = runtimeReport(runtime);
@@ -730,6 +730,8 @@ function pollState(env, effects, caller, { facts, sessions, harnesses, usage, lo
     // Once: the box asks (joined with --report-only), and the owner's word after that stands, off included.
     if (reportOnly === true && !b.local && !b.reportOnlyAsked) { b.reportOnly = true; b.reportOnlyAsked = true; }
     const ro = !!b.reportOnly;
+    if (b.local && machineHarnesses !== undefined) b.machineHarnesses = machineClaudeEnabled(env)
+      ? stamp(harnessReport({ claude: machineHarnesses?.claude }) ?? {}, now(effects)) : {};
     if (hs) b.harnesses = stamp(hs, now(effects));
     // The household's own salt for account keys (accounts.mjs): made once, never shown.
     s.accountSalt ??= randomBytes(16).toString('hex');
@@ -763,7 +765,7 @@ function pollState(env, effects, caller, { facts, sessions, harnesses, usage, lo
           const code = l.codeWaiting ? takeCode(env, l.id, Date.parse(now(effects))) : null;
           if (l.codeWaiting && !code) { l.state = 'failed'; l.error = 'The code expired before the box took it; start again.'; delete l.link; }
           delete l.codeWaiting;
-          const out = { id: l.id, harness: l.harness, state: l.state, ...(code ? { code } : {}) };
+          const out = { id: l.id, harness: l.harness, ...(l.scope === 'machine' ? { scope: 'machine' } : {}), state: l.state, ...(code ? { code } : {}) };
           if (l.state === 'wanted') { l.state = 'starting'; l.updated = now(effects); if (running) l.run = running.run; }
           if (l.state === 'cancel') { l.state = 'failed'; l.error ??= 'Cancelled.'; delete l.link; }
           return out;
@@ -1625,22 +1627,24 @@ function expireLogins(s, effects) {
 }
 
 /** The owner starts a login on a box: the box runs the CLI's own login there on its next poll. */
-export function loginStart(env, effects, { box, harness }) {
+export function loginStart(env, effects, { box, harness, scope }) {
+  if (scope !== undefined && scope !== 'machine') fail('unknown login scope');
   if (!LOGIN_NAMES.includes(harness)) fail(`harness is one of ${LOGIN_NAMES.join(', ')}`);
   return update(env, (s) => {
     const id = resolveBox(s, box);
     const b = s.boxes[id];
     if (b.revoked) fail(`${boxNameOf(s, id)} is revoked`, 409);
-    if (b.harnesses && b.harnesses[harness] && !b.harnesses[harness].installed) fail(`${boxNameOf(s, id)} doesn't have ${harness} installed`, 409);
+    if (scope === 'machine' && (!b.local || !machineClaudeEnabled(env) || harness !== 'claude' || !b.machineHarnesses?.claude?.installed)) fail('Machine Claude login is not enabled on this box', 409);
+    if (scope !== 'machine' && b.harnesses && b.harnesses[harness] && !b.harnesses[harness].installed) fail(`${boxNameOf(s, id)} doesn't have ${harness} installed`, 409);
     s.logins ??= {};
     expireLogins(s, effects);
     // One under way is the same login (two clicks, two tabs). One the box doesn't have any more was failed above
     // (expireLogins) or at its last poll (settleLogins), so "Log in" always gets a live one.
     for (const l of Object.values(s.logins)) {
-      if (l.box === id && l.harness === harness && !['done', 'failed'].includes(l.state)) return { id: l.id, box: id, harness, state: l.state, again: true };
+      if (l.box === id && l.harness === harness && l.scope === scope && !['done', 'failed'].includes(l.state)) return { id: l.id, box: id, harness, state: l.state, again: true };
     }
     const lid = `l-${randomBytes(6).toString('hex')}`;
-    s.logins[lid] = { id: lid, box: id, harness, state: 'wanted', created: now(effects), updated: now(effects) };
+    s.logins[lid] = { id: lid, box: id, harness, ...(scope ? { scope } : {}), state: 'wanted', created: now(effects), updated: now(effects) };
     return { id: lid, box: id, harness, state: 'wanted' };
   });
 }
@@ -1683,7 +1687,7 @@ export function loginView(env, id) {
 }
 
 /** The box says how a login is going: its link (and a device code), then done or failed. */
-export function loginReport(env, effects, caller, { id, state, link, userCode, kind, error, detail, exit, harnesses }) {
+export function loginReport(env, effects, caller, { id, state, link, userCode, kind, error, detail, exit, harnesses, machineHarnesses }) {
   if (!['waiting', 'done', 'failed'].includes(state)) fail('a login is waiting, done or failed');
   if (link !== undefined && !(typeof link === 'string' && /^https:\/\/(claude\.com|claude\.ai|auth\.openai\.com)\/\S{1,2000}$/.test(link))) fail('not a sign-in link');
   if (userCode !== undefined && !(typeof userCode === 'string' && /^[A-Z0-9]{4}-[A-Z0-9]{4,5}$/.test(userCode))) fail('not a device code');
@@ -1692,6 +1696,8 @@ export function loginReport(env, effects, caller, { id, state, link, userCode, k
     const b = boxOf(s, caller);
     const l = s.logins?.[id];
     if (!l || l.box !== caller.subject) fail(`no login ${id} for this box`, 404);
+    if (b.local && machineHarnesses !== undefined) b.machineHarnesses = machineClaudeEnabled(env)
+      ? stamp(harnessReport({ claude: machineHarnesses?.claude }) ?? {}, now(effects)) : {};
     if (hs) b.harnesses = stamp(hs, now(effects));
     if (['done', 'failed'].includes(l.state)) return { ok: true };
     l.state = state; l.updated = now(effects);
@@ -1708,7 +1714,7 @@ export function loginReport(env, effects, caller, { id, state, link, userCode, k
     }
     // Logged in: what the CLI's status says it is, for the page's "✓ Claude logged in (claude.ai, Max)".
     if (state === 'done') {
-      const st = (hs ?? b.harnesses ?? {})[l.harness];
+      const st = (l.scope === 'machine' ? b.machineHarnesses ?? {} : hs ?? b.harnesses ?? {})[l.harness];
       if (st?.method) l.method = st.method;
       if (st?.plan) l.plan = st.plan;
     }

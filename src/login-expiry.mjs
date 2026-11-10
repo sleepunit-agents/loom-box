@@ -14,11 +14,13 @@ function conditions(s, now) {
   const out = [];
   for (const [box, b] of Object.entries(s.boxes)) {
     if (b.revoked || b.reportOnly) continue;
-    for (const [harness, st] of Object.entries(b.harnesses ?? {})) {
-      const x = loginExpiry(st, now);
-      if (!x) continue;
-      const label = harness === 'claude' ? 'Claude' : harness === 'codex' ? 'Codex' : harness;
-      out.push({ ...x, box, harness, text: `${label} login on ${b.name ?? box} ${x.expired ? 'has expired' : `ends in ${x.days} day${x.days === 1 ? '' : 's'}`}` });
+    for (const [scope, reports] of [[null, b.harnesses], ...(b.local ? [['machine', b.machineHarnesses]] : [])]) {
+      for (const [harness, st] of Object.entries(reports ?? {})) {
+        const x = loginExpiry(st, now);
+        if (!x) continue;
+        const label = harness === 'claude' ? 'Claude' : harness === 'codex' ? 'Codex' : harness;
+        out.push({ ...x, box, harness, ...(scope ? { scope } : {}), text: `${label}${scope ? ' machine' : ''} login on ${b.name ?? box} ${x.expired ? 'has expired' : `ends in ${x.days} day${x.days === 1 ? '' : 's'}`}` });
+      }
     }
   }
   return out;
@@ -33,12 +35,12 @@ export function checkLoginExpiry(env, now = Date.now(), o = {}) {
   update(env, (s) => {
     const next = {};
     for (const x of conditions(s, now)) {
-      const key = `${x.box}:${x.harness}`, stage = x.expired ? 'expired' : x.severity;
+      const key = `${x.box}:${x.harness}${x.scope ? ':machine' : ''}`, stage = x.expired ? 'expired' : x.severity;
       const previous = s.loginExpiryAlerts?.[key];
       const changed = !previous || previous.end !== x.end || previous.stage !== stage;
       if (changed || now - previous.said >= DAY) {
         calls.push({ source: 'runtime-login', severity: x.severity, summary: x.text,
-          facts: { box: x.box, harness: x.harness, expires: x.end } });
+          facts: { box: x.box, harness: x.harness, ...(x.scope ? { scope: x.scope } : {}), expires: x.end } });
         next[key] = { end: x.end, stage, said: now };
       } else next[key] = previous;
     }
