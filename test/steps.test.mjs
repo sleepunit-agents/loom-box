@@ -80,6 +80,13 @@ test('the plan is a checklist: each item done, now or todo', () => {
   assert.deepEqual(c.items, [{ text: 'Find it', state: 'done' }, { text: 'Fixing it', state: 'now' }, { text: 'Ship it', state: 'todo' }]);
   const [x] = codexCards([{ type: 'item.updated', item: { id: 'p', type: 'todo_list', items: [{ text: 'A', completed: true }, { text: 'B', completed: false }] } }], 'b:');
   assert.deepEqual(x.items, [{ text: 'A', state: 'done' }, { text: 'B', state: 'now' }]);
+  const [updated] = codexCards([
+    {type:'item.started',item:{id:'p',type:'todo_list',items:[{text:'A',completed:false},{text:'B',completed:false}]}},
+    {type:'item.updated',item:{id:'p',type:'todo_list',items:[{text:'A',completed:true},{text:'B revised',completed:true}]}},
+  ], 'b:');
+  assert.deepEqual(updated.items, [{text:'A',state:'done'},{text:'B revised',state:'done'}]);
+  assert.equal(updated.fixed,'Plan (2/2)');
+  assert.equal(updated.state,'done');
 });
 
 test('a helper\'s steps nest under the step that started it (Claude Code\'s subagents/ beside the session)', () => {
@@ -439,7 +446,9 @@ test('a house\'s report carries at most CARDS_MAX of cards, the newest, so large
   const big = (i) => ({ id: `e${i}`, at: '2026-11-10T10:00:00.000Z', tool: 'Edit', summary: `Edited f${i}.ts`, fixed: `Edited f${i}.ts`, state: 'done', detail: `f${i}.ts`, body: `+${'x'.repeat(31_000)}` });
   const all = Array.from({ length: 40 }, (_, i) => big(i));
   const kept = newestWithin(all, CARDS_MAX);
-  assert.ok(kept.length > 0 && kept.length < 40);
+  assert.equal(kept.length, 8, 'all eight newest cards fit, a ninth exceeds the budget');
+  assert.deepEqual(kept.map(c => c.id), all.slice(-8).map(c => c.id));
+  assert.ok(all.slice(-9).reduce((n,c) => n + Buffer.byteLength(JSON.stringify(c)) + 1,0) > CARDS_MAX);
   assert.equal(kept.at(-1).id, 'e39', 'the newest kept');
   assert.deepEqual(kept.map((c) => c.id), all.slice(40 - kept.length).map((c) => c.id), 'none dropped from the middle');
   const report = cleanReport({ bodies: { b0000001: { harness: 'claude', status: 'working', cards: kept } } });

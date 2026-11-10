@@ -354,8 +354,12 @@ test('a sign of life a core refuses isn\'t posted again until it moves; an older
   };
   // A sign of life alone, refused for another reason: told once, not again while it doesn't move.
   const a = await mk((x) => (!x.cards.length ? Object.assign(new Error('core refused comms/activity: bad-input: run is the body run'), { status: 400 }) : null));
-  for (let k = 0; k < 4; k++) { await tick(a.o.env, a.o.o); a.o.clock.advance(30_000); }
-  assert.ok(a.calls().filter((x) => !x.cards.length).length <= 1);
+  await tick(a.o.env, a.o.o); await tick(a.o.env, a.o.o);
+  a.o.runner.signOfLife = () => ({at:'2026-11-10T10:00:30.000Z'});
+  a.o.clock.advance(30_000); await tick(a.o.env,a.o.o);
+  assert.equal(a.calls().filter(x => !x.cards.length).length,1,'one actual alive-only refusal');
+  for (let k = 0; k < 4; k++) { a.o.clock.advance(30_000); await tick(a.o.env, a.o.o); }
+  assert.equal(a.calls().filter((x) => !x.cards.length).length,1,'refusal is not retried');
   // An older core's refusal of a sign of life alone: held as an older core (no more of it).
   const b = await mk((x) => (!x.cards.length ? Object.assign(new Error('core refused comms/activity: bad-input: cards is a list of 1-50'), { status: 400 }) : x.alive ? Object.assign(new Error('core refused comms/activity: bad-input: card 0 has unknown keys: x'), { status: 400 }) : null), []);
   for (let k = 0; k < 4; k++) { await tick(b.o.env, b.o.o); b.o.clock.advance(30_000); }
