@@ -37,7 +37,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { listConvs } from './delivery.mjs';
-import { boxUp, drillOf, outdatedHouse, preferenceOf, up } from './control.mjs';
+import { boxUp, drillOf, factsOf, meets, outdatedHouse, preferenceOf, up } from './control.mjs';
 import { pieceName } from './piece.mjs';
 import { bodyBox } from './placement.mjs';
 import { isParts } from './briefs.mjs';
@@ -793,6 +793,9 @@ export class HouseRunner {
       let takes = !!h.house && houseTakes(this.env, h.house);
       // An older image than the agent's current build: drained, and the next body goes to a fresh house (t-1764).
       if (takes && !/^j-h-[0-9]{1,9}$/.test(seat) && (this.drain(agent, h.house, seat) || this.leaveForPreferred(agent, h.house, seat, now, !fresh(h, now), needs))) takes = false;
+      // A needs house whose box no longer has what its bodies need (a label taken off, t-2092): drained, as an outdated
+      // one is, and the next body asks for a house on a box that has them (or is refused, saying what's missing).
+      else if (takes && needs.length && !this.boxStillHas(h.house, needs)) takes = !this.drain(agent, h.house, seat, `its box no longer has ${needs.join(', ')}`);
       else if (fresh(h, now) && takes) {
         // Handed out (its launch writes the request next): marked, so the cap's release never stops it in between.
         hostLocked(this.env, () => { const x = loadHost(this.env, agent, seat); if (x.house === h.house) { x.handedAt = now; writeJson(hostFile(this.env, agent, seat), x); } });
@@ -830,6 +833,13 @@ export class HouseRunner {
       if (Date.now() > end) throw new RunnerError(`${agent}'s house ${h.house ?? ''} didn't start its body host in ${this.warmMs / 1000} s`);
       await sleep(this.poll);
     }
+  }
+
+  boxStillHas(house, needs) {
+    let s;
+    try { s = load(this.env); } catch { return true; }  // unreadable: the start reads it again
+    const b = s.boxes?.[s.houses?.[house]?.box];
+    return !!b && needs.every((n) => meets(factsOf(b), n));
   }
 
   /**

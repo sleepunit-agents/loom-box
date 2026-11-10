@@ -213,10 +213,21 @@ export function eligibleOf(list, role) {
 }
 
 /** The catalog: {version, roles: [{…role, eligible: [id]}], changed?, log}. */
+/**
+ * A role as stored, read the way it's written now (t-2092): a role saved before needs were box facts kept them as
+ * words, and is read with those words as its note and no needs; anything in a list that isn't a fact is dropped.
+ */
+function storedRole(x) {
+  const { needs, ...rest } = x;
+  if (typeof needs === 'string') return { ...rest, ...(rest.note === undefined && needs.trim() ? { note: needs.trim() } : {}) };
+  const facts = Array.isArray(needs) ? needs.filter((n) => typeof n === 'string' && NEED.test(n)) : [];
+  return facts.length ? { ...rest, needs: facts } : rest;
+}
+
 export function rolesOf(s) {
   const { list } = modelsOf(s);
   const r = s.roles ?? { version: 0, list: [], log: [] };
-  return { version: r.version, roles: r.list.map((x) => ({ ...x, eligible: eligibleOf(list, x).map((m) => m.id) })), ...(r.changed ? { changed: r.changed } : {}), log: r.log ?? [] };
+  return { version: r.version, roles: r.list.map((x) => ({ ...storedRole(x), eligible: eligibleOf(list, x).map((m) => m.id) })), ...(r.changed ? { changed: r.changed } : {}), log: r.log ?? [] };
 }
 export const readRoles = (env) => rolesOf(load(env));
 

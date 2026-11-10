@@ -129,3 +129,34 @@ test('a launch carries its needs: its house is the needs house, on the box that 
   assert.equal(hostOf(env, 'art', 'p-loren').house, undefined, 'the person\'s plain house is not this one');
   assert.equal(load(env).houses['h-1'].seat, 'p-loren');
 });
+
+test('a role stored before needs were facts (words) reads as its note, and breaks nothing', () => {
+  setModels(env, { list: [{ id: 'opus', harness: 'claude', family: 'anthropic' }] });
+  update(env, (s) => { s.roles = { version: 1, list: [{ id: 'big', description: 'Big jobs', models: ['opus'], needs: 'a long context' }], log: [] }; });
+  const r = roleOf(load(env), 'big');
+  assert.equal(r.needs, undefined);
+  assert.equal(r.note, 'a long context');
+  const row = page(env, { path: '' }).sections.find((s) => s.id === 'roles').blocks[0].rows.find((x) => x.label === 'big');
+  assert.equal(row.edit.fields.find((f) => f.name === 'needs').value, undefined);
+  assert.equal(hostKeyOf('owner', 'a long context'), 'owner', 'words never make a key');
+});
+
+test('a needs house whose box loses what its bodies need is drained; the next asks for a box that has it', async () => {
+  const asked = [];
+  const upFn = (e, f, who, b, own) => {
+    const id = `h-${asked.length + 1}`;
+    asked.push(b.box);
+    update(env, (s) => { s.houses[id] = { id, agent: 'art', box: b.box, state: 'running', task: b.task, kind: 'body-host', seat: own.seat }; });
+    return { id };
+  };
+  const hr = new HouseRunner(env, 'claude', { poll: 5, warmMs: 40, up: upFn, now: () => new Date(T0) });
+  const key = hostKeyOf('owner', ['disk:2tb']);
+  await assert.rejects(hr.warm('art', key, ['disk:2tb']), /didn't start/);
+  assert.deepEqual(asked, [idOf('rig')]);
+  // Only rig is in art's order, so the box order alone would never move it: the lost fact does.
+  ok(call('set-primary', { agent: 'art', boxes: ['rig'] }));
+  update(env, (s) => { s.boxes[idOf('rig')].facts = ['gpu:nvidia-geforce-rtx-5090']; s.boxes[idOf('one')].facts = ['disk:2tb']; });
+  await assert.rejects(hr.warm('art', key, ['disk:2tb']), /didn't start/);
+  assert.deepEqual(asked, [idOf('rig'), idOf('one')]);
+  assert.equal(load(env).houses['h-1'].draining.reason, 'its box no longer has disk:2tb');
+});

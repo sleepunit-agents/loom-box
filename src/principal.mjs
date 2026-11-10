@@ -149,7 +149,7 @@ export const OWNER_SEAT = 'owner';
  */
 export const HOST_KEY = /^(owner|p-[a-z0-9]+(-[a-z0-9]+)*|u-cv-[0-9a-f]{12}|j-h-[0-9]{1,9})(~[0-9a-f]{10})?$/;
 export const needsKey = (needs) => {
-  const n = [...new Set((needs ?? []).map(String))].sort();
+  const n = [...new Set((Array.isArray(needs) ? needs : []).map(String))].sort();
   return n.length ? createHash('sha256').update(n.join('\n')).digest('hex').slice(0, 10) : '';
 };
 export const hostKeyOf = (seat, needs) => { const k = needsKey(needs); return k ? `${seat}~${k}` : seat; };

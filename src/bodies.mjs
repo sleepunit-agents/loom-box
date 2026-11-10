@@ -91,7 +91,7 @@ export function commitPreparedBody(env, prepared, body, at = new Date().toISOStr
  * Never placed blind: refused, with what's missing.
  */
 function needsMet(env, runner, needs) {
-  if (!needs?.length || runner.remote) return;
+  if (!Array.isArray(needs) || !needs.length || runner.remote) return;
   let here;
   try { here = Object.values(load(env).boxes ?? {}).find((b) => b.local); } catch { here = null; }
   const missing = needs.filter((n) => !meets(factsOf(here ?? {}), n));
