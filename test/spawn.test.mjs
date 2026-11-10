@@ -266,3 +266,16 @@ test('a report collected after another agent\'s answer joined is never kept as t
   assert.equal(loadConv(w.env, r.handle).spawn.kept, undefined);
   await assert.rejects(spawnCall(w.env, owner, { agent: 'art', handle: r.handle, action: 'result' }, w.o), /spawned principal has changed/);
 });
+
+test('a stated Claude need survives spawn admission and is recorded on the body', async () => {
+  const { setModelChoice } = await import('../src/models.mjs');
+  const { readBody } = await import('../src/bodies.mjs');
+  const w = world();
+  setModelChoice(w.env, { agent: 'art', harness: 'auto' });
+  const modelNeed = 'authorization: independently review permission boundaries';
+  const r = await start(w, { prefer: 'opus', modelNeed });
+  assert.equal(r.body, 'started');
+  const c = loadConv(w.env, r.handle);
+  assert.equal(c.spawn.modelNeed, modelNeed);
+  assert.equal(readBody(w.env, c.body).modelNeed, modelNeed);
+});

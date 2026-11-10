@@ -129,11 +129,14 @@ export function setModels(env, { list, agent, allow, prefer, default: defaultMod
     const agents = { ...cur.agents };
     // A list that drops a model drops it from every agent's settings too.
     for (const [a, v] of Object.entries(agents)) {
-      agents[a] = Object.fromEntries(Object.entries(v).map(([k, ids]) => [k, k === 'default' ? (next.some(m => m.id === ids) ? ids : DEFAULT_MODEL) : ids.filter((id) => next.some((m) => m.id === id))]));
+      agents[a] = Object.fromEntries(Object.entries(v).map(([k, ids]) => [k, k === 'default' ? (next.some(m => m.id === ids && m.harness === 'codex') ? ids : DEFAULT_MODEL) : ids.filter((id) => next.some((m) => m.id === id))]));
     }
     if (agent !== undefined) {
       if (!AGENT.test(agent)) fail('which agent');
       agents[agent] = { ...agents[agent], ...checkAgentModels(next, { allow, prefer, ...(defaultModel !== undefined ? { default: defaultModel } : {}) }) };
+    }
+    for (const id of [cur.default, ...Object.values(cur.agents).map(v => v.default)].filter(Boolean)) {
+      if (next.some(m => m.id === id && m.harness !== 'codex')) fail(`default ${id} must remain a Codex model`);
     }
     const fallback = agent === undefined ? defaultModel ?? cur.default : cur.default;
     if (agent === undefined && defaultModel !== undefined && !next.some(m => m.id === fallback && m.harness === 'codex')) fail('default must name a listed Codex model');
@@ -494,7 +497,7 @@ export async function resolveFor(env, { agent, venue, venueKind: told, prefer = 
   if (!pin && !harness && !explicitClaude) all = all.filter(m => m.harness !== 'claude');
   const list = harness ? all.filter((m) => m.harness === harness) : all;
   const effectiveDefault = agents[agent]?.default ?? defaultModel;
-  const implicitDefault = !pin && !prefer.length && !explicitClaude;
+  const implicitDefault = !pin && !harness && !prefer.length && !explicitClaude;
   if (implicitDefault) prefer = [effectiveDefault, ...all.filter(m => m.harness === 'codex').map(m => m.id)];
   if (modelNeed) head.push(`stated model need: ${modelNeed}`);
   if (!pin && !harness && !explicitClaude) head.push(`runtime default: ${effectiveDefault}; Claude needs an explicit authorization, privacy or coordinator reason`);

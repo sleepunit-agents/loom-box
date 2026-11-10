@@ -47,7 +47,6 @@ export function oneShotArgs(harness, model, cwd) {
 
 export async function runOneShot(env, { input, cwd, prefer = [], modelNeed, timeout = 600_000 }, { call, run = runAsync, warn = s => process.stderr.write(`${s}\n`) } = {}) {
   if (!env.HOUSE_ID || !call) fail('one-shot needs a runtime house and its piece connection');
-  if (!prefer.length && env.LOOM_BODY_MODEL) prefer = [env.LOOM_BODY_MODEL];
   const avoid = [];
   for (let attempt = 0; attempt < 2; attempt++) {
     const pick = await call('oneshot-choice', { prefer, avoid, ...(modelNeed ? { modelNeed } : {}) });

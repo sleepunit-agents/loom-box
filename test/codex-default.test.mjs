@@ -41,3 +41,15 @@ test('settings validate Codex defaults and keep the global default when changing
   setModels(env, { list: [gpt, opus] });
   assert.equal(readModels(env).agents.art.default, gpt.id);
 });
+test('resumes retain their old preference and cannot acquire the new default', async () => {
+  const { env, pick } = setup();
+  setModels(env, { agent: 'art', prefer: ['other'] });
+  assert.equal((await pick({ harness: 'codex' })).model, 'other');
+  assert.equal((await pick()).model, gpt.id);
+});
+test('a catalog edit cannot turn any saved default into a Claude model', () => {
+  const { env } = setup();
+  assert.throws(() => setModels(env, { list: [opus, other, { ...gpt, harness: 'claude', family: 'anthropic' }] }), /remain a Codex/);
+  setModels(env, { agent: 'art', default: 'other' });
+  assert.throws(() => setModels(env, { list: [opus, gpt, { ...other, harness: 'claude', family: 'anthropic' }] }), /remain a Codex/);
+});

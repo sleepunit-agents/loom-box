@@ -184,3 +184,14 @@ test('answer extraction cannot reuse an answer from the preceding turn',()=>{
  assert.throws(()=>answerOf('claude',[{type:'result',result:'old'},{type:'user',message:{content:'next'}}].map(JSON.stringify).join('\n')),/did not complete/);
  assert.equal(answerOf('codex',[{type:'item.completed',item:{type:'agent_message',text:'old'}},{type:'turn.started'},{type:'item.completed',item:{type:'agent_message',text:'new'}},{type:'turn.completed'}].map(JSON.stringify).join('\n')),'new');
 });
+
+test('a new unspecified one-shot uses runtime default rather than an old body model', async () => {
+ const env = { ...setup(), LOOM_BODY_MODEL: 'old-codex' };
+ mkdirSync(join(env.HOME,'.codex')); writeFileSync(join(env.HOME,'.codex','auth.json'),'{}');
+ let preference;
+ const result = await runOneShot(env,{input:'p',cwd:env.HOME},{warn:()=>{},call:async(path,b)=>{
+  if(path==='oneshot-choice'){preference=b.prefer;return {model:'gpt-6.1-sol',harness:'codex'};}
+  return {ok:true};
+ },run:async()=>({status:0,stdout:JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'ok'}})})});
+ assert.equal(result,'ok'); assert.deepEqual(preference,[]);
+});
