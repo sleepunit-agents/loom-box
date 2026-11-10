@@ -10,8 +10,8 @@ import { cvOf, fakeRunner, world } from './delivery-world.mjs';
 import { scratch } from './scratch.mjs';
 
 const base = { agents: ['art'], cwd: '/home/art/Art', path: '/home/art/Art/bin:/usr/bin' };
-function setup(where) {
-  const w = world({ LOOM_RUNTIME_LOCAL_BODIES: JSON.stringify({ ...base, ...(where ? { where } : {}) }) });
+function setup(where, extra = {}) {
+  const w = world({ LOOM_RUNTIME_LOCAL_BODIES: JSON.stringify({ ...base, ...(where ? { where } : {}), ...extra }) });
   const localRunner = fakeRunner([], scratch('rt-local-'));
   const asked = [];
   w.o.runner = (h, local) => { asked.push(!!local); return local ? localRunner : w.runner; };
@@ -27,6 +27,32 @@ test('the setting: "here" by default, "house" only when said', () => {
   assert.equal(localBodiesOf({ LOOM_RUNTIME_LOCAL_BODIES: JSON.stringify(base) }).where, 'here');
   assert.equal(localBodiesOf({ LOOM_RUNTIME_LOCAL_BODIES: JSON.stringify({ ...base, where: 'house' }) }).where, 'house');
   assert.equal(localBodiesOf({ LOOM_RUNTIME_LOCAL_BODIES: JSON.stringify({ ...base, where: 'elsewhere' }) }).where, 'here');
+  assert.deepEqual(localBodiesOf({ LOOM_RUNTIME_LOCAL_BODIES: JSON.stringify({ ...base, house: ['lane:letters', 'lane:letters', 7, '', 'x'.repeat(201)] }) }).house, ['lane:letters']);
+  assert.equal(localBodiesOf({ LOOM_RUNTIME_LOCAL_BODIES: JSON.stringify({ ...base, house: 'lane:letters' }) }).house, undefined);
+});
+
+test('"house": [places] moves only those lanes into his house, one at a time; the rest stay on loom\'s machine', async () => {
+  const { w, asked, lwake, conv } = setup(undefined, { house: ['lane:letters'] });
+  await deliver(w.env, lwake('lane:boot', 'boot'), w.o);
+  assert.ok(asked.includes(true), 'a lane not named still runs here');
+  assert.equal(readBody(w.env, conv('lane:boot').body).local, true);
+  assert.equal(conv('lane:boot').bodyRules?.seat, undefined);
+  const starts = w.log.filter((l) => l[0] === 'start').length;
+  const r = await deliver(w.env, lwake('lane:letters', 'letters'), w.o);
+  assert.equal(r.body, 'started');
+  assert.equal(w.log.filter((l) => l[0] === 'start').length, starts + 1, 'started by the house runner');
+  const c = conv('lane:letters');
+  assert.equal(c.local, true);
+  assert.equal(c.bodyRules.seat, `owner.${c.conversation}`);
+  assert.equal(readBody(w.env, c.body).local, undefined);
+});
+
+test('"house": [places] keeps the owner\'s-work-only rule: a named lane\'s wake nobody can say is his gets no body', async () => {
+  const { w, asked, lwake, conv } = setup(undefined, { house: ['lane:x'] });
+  const r = await deliver(w.env, lwake('lane:x', 'do it', { handOver: null }), w.o);
+  assert.notEqual(r.body, 'started');
+  assert.equal(conv('lane:x').body, undefined);
+  assert.equal(asked.length, 0);
 });
 
 test('default: a local wake\'s body runs on loom\'s machine, as before', async () => {
@@ -90,4 +116,23 @@ test('a session saved on loom\'s machine is not resumed in the owner\'s house af
   const runs = s.w.log.filter((l) => l[0] === 'start' || l[0] === 'resume');
   assert.equal(runs.at(-1)[0], 'start');
   assert.equal(readBody(s.w.env, s.conv('lane:z').body).local, undefined);
+});
+
+test('a housed lane\'s saved session expires as its house\'s: loom\'s machine\'s runner is never asked to drop it', async () => {
+  const { w, lwake, conv } = setup(undefined, { house: ['lane:h'] });
+  const { tick } = await import('../src/delivery.mjs');
+  // Every tick asks for the local Codex runner to sweep its homes: only the slot's own harness counts here.
+  const asked = [];
+  const runner = w.o.runner;
+  w.o.runner = (h, local) => { if (h !== 'codex') asked.push(!!local); return runner(h, local); };
+  await deliver(w.env, lwake('lane:h', 'go'), w.o);
+  w.runner.finish(conv('lane:h').body);
+  await tick(w.env, w.o);
+  w.clock.advance(601_000);
+  await tick(w.env, w.o);
+  assert.ok(conv('lane:h').slot?.rules?.seat, 'its session saved in his house');
+  w.clock.advance(60 * 86_400_000);
+  await tick(w.env, w.o);
+  assert.equal(conv('lane:h')?.slot, undefined, 'expired');
+  assert.ok(!asked.includes(true), 'never the local runner');
 });
