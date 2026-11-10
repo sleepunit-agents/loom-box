@@ -109,7 +109,7 @@ export function redact(s, { max = INPUT_MAX } = {}) {
   let t = cutInput(s, max).replace(INVISIBLE, '');
   for (const re of SHAPES) t = t.replace(re, GONE);
   // A URL's user and password: scheme://user:pass@host → scheme://…@host.
-  t = t.replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@'"]+@/gi, `$1${GONE}@`);
+  t = t.replace(/\b([a-z][a-z0-9+.-]{0,30}:\/\/)[^\s/@'"]+@/gi, `$1${GONE}@`);
   // Headers that carry a credential, quoted or not: their whole value.
   t = t.replace(/\b((?:proxy-)?authorization|x-api-key|api-key|x-auth-token|private-token|cookie|set-cookie)(\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^'"\n]+)/gi, `$1$2${GONE}`);
   t = t.replace(/\b(Bearer|Basic|Token)\s{1,500}[A-Za-z0-9._~+/=-]{8,500}/gi, `$1 ${GONE}`);
