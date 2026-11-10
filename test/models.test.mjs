@@ -151,5 +151,5 @@ test('resolveFor puts it together: the runtime\'s list, the agent\'s settings, t
   assert.equal((await resolveFor({ ...env, LOOM_RUNTIME_SCORECARDS: cards }, { agent: 'art', venue: 'wake', harness: 'claude', accounts })).model, 'model-a');
   // A provider that can't list fails open.
   const broken = { list: () => { throw new Error('down'); } };
-  assert.equal((await resolveFor({ ...env, LOOM_RUNTIME_SCORECARDS: 'off' }, { agent: 'art', venue: 'wake', accounts: broken })).model, 'model-a');
+  assert.equal((await resolveFor({ ...env, LOOM_RUNTIME_SCORECARDS: 'off' }, { agent: 'art', venue: 'wake', accounts: broken })).model, 'model-b');
 });

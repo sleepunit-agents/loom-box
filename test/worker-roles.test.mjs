@@ -24,13 +24,14 @@ const owner = { kind: 'owner' };
 function workers() {
   const w = world();
   setModels(w.env, { list: [OPUS, SONNET, SOL], agent: 'art', prefer: ['opus'] });
+  setModelChoice(w.env, { agent: 'art', harness: 'auto' });
   const codex = fakeRunner(w.log, join(w.env.HOME, 'cx'), 'codex');
   const max = acct('max', 'anthropic');
   const pro = acct('pro', 'openai');
   w.o.runner = (h) => (h === 'codex' ? codex : w.runner);
   w.o.accounts = staticAccounts({ accounts: [max, pro] });
   w.o.alert = () => true;
-  const spawn = (q) => spawnCall(w.env, owner, { agent: 'art', brief: 'Do the job', ...q }, w.o);
+  const spawn = (q) => spawnCall(w.env, owner, { agent: 'art', brief: 'Do the job', modelNeed: 'coordinator: exercise role assignment and cross-harness recovery', ...q }, w.o);
   const say = (handle, text) => spawnCall(w.env, owner, { agent: 'art', action: 'say', handle, text }, w.o);
   const runs = () => w.log.filter((l) => l[0] === 'start' || l[0] === 'resume');
   const out = (a) => { a.usage = { '7d': 0.99, reset_7d: Math.floor(w.clock.now().getTime() / 1000) + 3600 }; };
@@ -65,14 +66,14 @@ test('the catalog is versioned, checked against the model list, logged, and drop
 test('a role narrows the models and never widens what the agent may use', async () => {
   const w = workers();
   setRole(w.env, { role: { id: 'coding', description: 'Write and fix code', models: ['sol', 'opus'] } });
-  const r = await resolveFor(w.env, { agent: 'art', venue: 'relay', role: 'coding', accounts: w.o.accounts });
+  const r = await resolveFor(w.env, { agent: 'art', venue: 'relay', role: 'coding', modelNeed: 'coordinator: exercise role allow-list intersection', accounts: w.o.accounts });
   assert.equal(r.model, 'sol', 'the role\'s own order, ahead of the agent\'s preference');
   assert.match(r.why[0], /role coding \(catalog v1\): eligible sol, opus/);
   // The agent may use only opus: the role can't give it sol.
   setModels(w.env, { agent: 'art', allow: ['opus'] });
-  assert.equal((await resolveFor(w.env, { agent: 'art', venue: 'relay', role: 'coding', accounts: w.o.accounts })).model, 'opus');
+  assert.equal((await resolveFor(w.env, { agent: 'art', venue: 'relay', role: 'coding', modelNeed: 'coordinator: exercise role allow-list intersection', accounts: w.o.accounts })).model, 'opus');
   setModels(w.env, { agent: 'art', allow: ['sonnet'] });
-  await assert.rejects(resolveFor(w.env, { agent: 'art', venue: 'relay', role: 'coding', accounts: w.o.accounts }), /may use none/);
+  await assert.rejects(resolveFor(w.env, { agent: 'art', venue: 'relay', role: 'coding', modelNeed: 'coordinator: exercise role allow-list intersection', accounts: w.o.accounts }), /may use none/);
 });
 
 test('only the household owner edits the catalog; any agent reads it', async () => {

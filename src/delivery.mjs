@@ -407,7 +407,7 @@ async function pinGone(env, c, pin, d) {
 /** Whether a job's failover would find a model: its role's (as admitted), or any it may use, off the harnesses avoided. */
 async function roomElsewhere(env, c, avoid, d, gate) {
   try {
-    await resolveFor(env, { agent: c.agent, venue: c.venue, venueKind: c.kind, avoid, ...(c.spawn?.role ? { role: c.spawn.role } : {}), accounts: d.accounts, now: d.now(), fetchImpl: d.fetchImpl, ...(gate ? { gate } : {}) });
+    await resolveFor(env, { agent: c.agent, venue: c.venue, venueKind: c.kind, conversation: c.conversation, avoid, modelNeed: c.spawn?.modelNeed, ...(c.spawn?.role ? { role: c.spawn.role } : {}), accounts: d.accounts, now: d.now(), fetchImpl: d.fetchImpl, ...(gate ? { gate } : {}) });
     return true;
   } catch (e) {
     if (e instanceof StateError && (e.status === 409 || e.status === 410)) return false;
@@ -2290,7 +2290,7 @@ async function executeOne(env, op, d, mem) {
       ...(c0.nativeRecovery ? { nativeRecovery: c0.nativeRecovery.id } : {}),
       way: { how: way.how, home: !!way.home, ...(way.file ? { file: way.file } : {}), ...(way.failover ? { failover: way.failover } : {}), ...(base.gate ? { gated: true } : {}) },
     } });
-    const base = { activity: true, agent: c0.agent, venue: c0.venue, venueKind: c0.kind, prefer: c0.spawn?.prefer ? [c0.spawn.prefer] : [], cwd: local ? lb.cwd : d.cwd, deny: rules.deny, guest: rules.guest, ...(local ? { local: true } : {}), ...(rules.seat ? { seat: rules.seat } : {}), ...jobModel(c0), ...(Array.isArray(c0.spawn?.role?.needs) && c0.spawn.role.needs.length ? { needs: c0.spawn.role.needs } : {}) };
+    const base = { activity: true, agent: c0.agent, venue: c0.venue, venueKind: c0.kind, prefer: c0.spawn?.prefer ? [c0.spawn.prefer] : [], modelNeed: c0.spawn?.modelNeed, cwd: local ? lb.cwd : d.cwd, deny: rules.deny, guest: rules.guest, ...(local ? { local: true } : {}), ...(rules.seat ? { seat: rules.seat } : {}), ...jobModel(c0), ...(Array.isArray(c0.spawn?.role?.needs) && c0.spawn.role.needs.length ? { needs: c0.spawn.role.needs } : {}) };
     // Out of quota (t-1907): which session this run continues, on which harness. Its home slot, when the harness it
     // switched away from has room again; its own slot, when that one's harness has room; else a fresh body elsewhere.
     // A deny list Codex can't keep (a tool within a server, a built-in: runners.mjs, codexDeny) keeps this body off

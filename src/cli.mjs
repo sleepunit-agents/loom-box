@@ -533,7 +533,7 @@ async function main(argv, env) {
       const { runOneShot } = await import('./oneshot.mjs');
       const seconds = Number(flag(rest, '--timeout') ?? 600);
       if (!Number.isInteger(seconds) || seconds < 1 || seconds > 86400) throw new Fail('timeout is 1-86400 seconds', 2);
-      const answer = await runOneShot(env, { input: await readStdin(), cwd: flag(rest, '--cwd') ?? process.cwd(), prefer: flags(rest, '--prefer'), timeout: seconds * 1000 }, { call: env.LOOM_URL && env.LOOM_TOKEN_FILE ? pieceCall(env) : null });
+      const answer = await runOneShot(env, { input: await readStdin(), cwd: flag(rest, '--cwd') ?? process.cwd(), prefer: flags(rest, '--prefer'), modelNeed: flag(rest, '--model-need'), timeout: seconds * 1000 }, { call: env.LOOM_URL && env.LOOM_TOKEN_FILE ? pieceCall(env) : null });
       process.stdout.write(answer + '\n'); return;
     }
     case 'body': return body(rest, env, json);
@@ -595,7 +595,7 @@ async function main(argv, env) {
       if (!agent || agent === 'self') agent = (body || remote) ? undefined : defaultAgent(env);
       const callerAgent = !remote && body ? (await import('./delivery.mjs')).loadConv(env, cv)?.agent : agent;
       const q = { action: action === 'wait' ? 'result' : action, agent, ...(cv ? { conversation: cv, ...bodyProof(env, cv) } : {}),
-        ...(action === 'start' ? { brief: await textOf(rest, '--brief'), prefer: flag(rest, '--prefer'), role: flag(rest, '--role'), ...(rest.includes('--failover') ? { failover: true } : {}), title: flag(rest, '--title') } : { handle: rest[1] }),
+        ...(action === 'start' ? { brief: await textOf(rest, '--brief'), prefer: flag(rest, '--prefer'), modelNeed: flag(rest, '--model-need'), role: flag(rest, '--role'), ...(rest.includes('--failover') ? { failover: true } : {}), title: flag(rest, '--title') } : { handle: rest[1] }),
         ...(action === 'say' ? { text: await textOf(rest, '--text') } : {}) };
       const call = () => remote ? pieceCall(env)('spawn', q) : spawnCall(env, body ? { kind: 'agent', agent: callerAgent } : { kind: 'owner' }, q, { detach: true });
       const timeout = Number(flag(rest, '--timeout') ?? 600);
@@ -941,7 +941,7 @@ async function body(rest, env, json) {
     const slot = slotArg ? { harness: slotArg.split(':')[0], session: slotArg.slice(slotArg.indexOf(':') + 1) } : undefined;
     const o = {
       agent: flag(rest, '--agent') ?? (sub === 'start' ? defaultAgent(env) : undefined), venue: flag(rest, '--venue'), venueKind: flag(rest, '--venue-kind'),
-      prefer: flags(rest, '--prefer'), place: flag(rest, '--place'), cwd: flag(rest, '--cwd'), deny: flags(rest, '--deny'), brief: await textOf(rest, '--brief'),
+      prefer: flags(rest, '--prefer'), modelNeed: flag(rest, '--model-need'), place: flag(rest, '--place'), cwd: flag(rest, '--cwd'), deny: flags(rest, '--deny'), brief: await textOf(rest, '--brief'),
     };
     const r = sub === 'start' ? await startBody(env, o) : await resumeBody(env, { ...o, body: ref, slot });
     return said(r, `${r.body}: ${r.agent} on ${r.model} (${r.harness}, ${r.family})${r.resumed ? `, resuming ${r.resumed}` : ''}`);
@@ -1076,8 +1076,9 @@ async function models(rest, env, json) {
   if (sub === undefined) {
     const m = readModels(env);
     if (json) return out(m);
+    process.stdout.write(`Default: ${m.default} (Codex); Claude requires an explicit stated need\n`);
     for (const x of m.list) process.stdout.write(`${x.id}  ${x.harness}  ${x.family}${x.window ? `  (window ${x.window})` : ''}\n`);
-    for (const [a, v] of Object.entries(m.agents)) process.stdout.write(`${a}: prefers ${(v.prefer ?? []).join(' → ') || '(the list\'s order)'}${v.allow?.length ? `; may use ${v.allow.join(', ')}` : ''}\n`);
+    for (const [a, v] of Object.entries(m.agents)) process.stdout.write(`${a}: default ${v.default ?? m.default}; prefers ${(v.prefer ?? []).join(' → ') || '(the list\'s order)'}${v.allow?.length ? `; may use ${v.allow.join(', ')}` : ''}\n`);
     return;
   }
   if (sub === 'set') return out(setModels(env, JSON.parse(await readStdin())));
@@ -1085,7 +1086,7 @@ async function models(rest, env, json) {
     // --suppose-out <harness>: what it would pick if that harness's accounts were out (nothing is spent or held).
     const gone = flags(rest, '--suppose-out');
     const accounts = gone.length ? supposeOut(accountsFrom(env), gone) : accountsFrom(env);
-    const r = await resolveFor(env, { agent: flag(rest, '--agent') ?? defaultAgent(env), venue: flag(rest, '--venue'), venueKind: flag(rest, '--venue-kind'), prefer: flags(rest, '--prefer'), accounts });
+    const r = await resolveFor(env, { agent: flag(rest, '--agent') ?? defaultAgent(env), venue: flag(rest, '--venue'), venueKind: flag(rest, '--venue-kind'), prefer: flags(rest, '--prefer'), modelNeed: flag(rest, '--model-need'), accounts });
     if (json) return out(r);
     process.stdout.write(`${r.model} (${r.harness}, ${r.family})${r.account ? ` on ${r.account}` : ''}\n${r.why.map((w) => `  ${w}`).join('\n')}\n`);
     return;

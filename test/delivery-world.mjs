@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { staticAccounts } from '../src/accounts.mjs';
 import { CoreError } from '../src/core.mjs';
 import { loadConv, send } from '../src/delivery.mjs';
-import { setModels } from '../src/models.mjs';
+import { setModels, setModelChoice } from '../src/models.mjs';
 import { RunnerError, inbox } from '../src/runners.mjs';
 import { readdirSync, statSync } from 'node:fs';
 import { startBody } from '../src/bodies.mjs';
@@ -157,6 +157,9 @@ export function world(extra = {}, { inboxDir } = {}) {
   const env = { HOME, PATH: '/usr/bin:/bin', LANG: 'C.UTF-8', LOOM_RUNTIME_TOKEN_FILE: join(HOME, 'runtime-token'), LOOM_RUNTIME_LOOM_URL: 'http://127.0.0.1:1/mcp', ANTHROPIC_BASE_URL: 'http://proxy', SOMETHING_ELSE: 'x', LOOM_BOX_LOCAL_NAME: 'one', LOOM_BOX_HOME: join(HOME, 'state'), LOOM_BOX_DATA: join(HOME, 'data'), LOOM_RUNTIME_SCORECARDS: 'off', LOOM_BIN: fakeLoomBin(HOME), ...extra };
   setModels(env, { list: [{ id: 'opus', harness: 'claude', family: 'anthropic' }], agent: 'art', prefer: ['opus'] });
   setModels(env, { agent: 'mark', prefer: ['opus'] });
+  // This fixture intentionally exercises Claude's fake runner, by explicit owner choice.
+  setModelChoice(env, { agent: 'art', harness: 'claude' });
+  setModelChoice(env, { agent: 'mark', harness: 'claude' });
   const log = [];
   const adapterCalls = [];
   const runner = fakeRunner(log, HOME, 'claude', { inboxDir: inboxDir ? join(HOME, 'inbox') : undefined });
@@ -217,6 +220,8 @@ export function houseWorld({ sealer, claimMs = 5000, warmMs = 5000, harness = 'c
   update(env, (s) => { const k = Object.keys(s.boxes).find((x) => s.boxes[x].local); s.boxes[k].harnesses = { [harness]: { loggedIn: true } }; });
   const model = harness === 'claude' ? 'opus' : 'gpt';
   setModels(env, { list: [{ id: model, harness, family: harness === 'claude' ? 'anthropic' : 'openai' }], agent: 'art', prefer: [model] });
+  // This fixture's selected native runner is an explicit owner harness choice.
+  setModelChoice(env, { agent: 'art', harness });
   const fed = [];
   const ended = [];
   const started = [];

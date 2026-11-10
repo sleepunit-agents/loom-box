@@ -25,7 +25,8 @@ test('one-shot uses agent preference, headroom fallback, and only mounted accoun
   const env = setup();
   assert.equal((await chooseOneShot(env, caller)).model, 'codex');
   update(env, s => { s.boxes.box.usage.codex.windows['7d'] = .96; });
-  assert.equal((await chooseOneShot(env, caller)).model, 'opus');
+  await assert.rejects(chooseOneShot(env, caller), /no model|kept for conversations/);
+  assert.equal((await chooseOneShot(env, caller, { modelNeed: 'coordinator: test quota fallback' })).model, 'opus');
   update(env, s => { s.houses.h1.logins = ['codex']; });
   await assert.rejects(chooseOneShot(env, caller), /no model|kept for conversations/);
 });
@@ -36,7 +37,7 @@ test('another house or agent cannot select or hold accounts', async () => {
   assert.throws(() => refuseOneShot(env, { ...caller, house: 'gone' }, { harness: 'claude' }), /no such house/);
   const pick = await chooseOneShot(env, caller); assert.equal(pick.accountKey, undefined);
   refuseOneShot(env, caller, { harness: 'codex' });
-  assert.equal((await chooseOneShot(env, caller)).model, 'opus');
+  assert.equal((await chooseOneShot(env, caller, { modelNeed: 'coordinator: test quota fallback' })).model, 'opus');
 });
 test('runtime reports usage before returning answer, and retries quota refusal only once', async () => {
   const env = { ...setup(), ANTHROPIC_API_KEY: 'private-key' }, calls = [], runs = [];
@@ -87,7 +88,7 @@ test('quota boundary is 97 percent when worker reserve is in shadow',async()=>{
  const env=setup();update(env,s=>{s.allocator.mode='shadow';s.boxes.box.usage.codex.windows['7d']=.969;});
  assert.equal((await chooseOneShot(env,caller)).model,'codex');
  update(env,s=>{s.boxes.box.usage.codex.windows['7d']=.97;});
- assert.equal((await chooseOneShot(env,caller)).model,'opus');
+ assert.equal((await chooseOneShot(env,caller,{modelNeed:'coordinator: test quota fallback'})).model,'opus');
 });
 test('short calls account for pending workers and conversation forecast',()=>{
  const env=setup(),now=Date.now(),account={name:'measured',usage:{'7d':.914,checked:now/1000,reset_7d:now/1000+36000}};
@@ -183,4 +184,16 @@ test('answer extraction cannot reuse an answer from the preceding turn',()=>{
  assert.throws(()=>answerOf('codex',[{type:'item.completed',item:{type:'agent_message',text:'old'}},{type:'turn.completed'},{type:'turn.started'}].map(JSON.stringify).join('\n')),/did not complete/);
  assert.throws(()=>answerOf('claude',[{type:'result',result:'old'},{type:'user',message:{content:'next'}}].map(JSON.stringify).join('\n')),/did not complete/);
  assert.equal(answerOf('codex',[{type:'item.completed',item:{type:'agent_message',text:'old'}},{type:'turn.started'},{type:'item.completed',item:{type:'agent_message',text:'new'}},{type:'turn.completed'}].map(JSON.stringify).join('\n')),'new');
+});
+
+test('a new unspecified one-shot uses runtime default rather than an old body model', async () => {
+ const env = { ...setup(), LOOM_BODY_MODEL: 'old-codex' };
+ update(env,s=>{s.models.list.push({id:'gpt-6.1-sol',harness:'codex',family:'openai'});s.models.agents.art.prefer=['codex','opus'];});
+ mkdirSync(join(env.HOME,'.codex')); writeFileSync(join(env.HOME,'.codex','auth.json'),'{}');
+ let preference;
+ const result = await runOneShot(env,{input:'p',cwd:env.HOME},{warn:()=>{},call:async(path,b)=>{
+  if(path==='oneshot-choice'){preference=b.prefer;return chooseOneShot(env,caller,b);}
+  return {ok:true};
+ },run:async(bin,argv)=>{assert.equal(argv[argv.indexOf('-m')+1],'gpt-6.1-sol');return {status:0,stdout:JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'ok'}})};}});
+ assert.equal(result,'ok'); assert.deepEqual(preference,[]);
 });

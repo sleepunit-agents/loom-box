@@ -55,6 +55,7 @@ export async function spawnCall(env, caller, q = {}, o = {}) {
   }
   if (typeof q.brief !== 'string' || !q.brief.trim() || q.brief.length > 40000) no('brief is 1–40000 characters');
   if (q.prefer !== undefined && (typeof q.prefer !== 'string' || q.prefer.length > 100)) no('prefer is a model name');
+  if (q.modelNeed !== undefined && (typeof q.modelNeed !== 'string' || !/^(authorization|privacy|coordinator):\s*\S/.test(q.modelNeed) || q.modelNeed.length > 400)) no('modelNeed must state an authorization:, privacy: or coordinator: need');
   if (q.title !== undefined && (typeof q.title !== 'string' || !q.title.trim() || q.title.length > 80)) no('title is 1–80 characters');
   if (q.failover !== undefined && typeof q.failover !== 'boolean') no('failover is true or false');
   // A worker role (t-2036): checked against the catalog now, and the version it was admitted under kept with the job,
@@ -75,7 +76,7 @@ export async function spawnCall(env, caller, q = {}, o = {}) {
   delete actsFor.reset; delete actsFor.resetBy; delete actsFor.resetSig;
   const principal = principalOf(env, { agent, actsFor });
   const id = o.taskJob ? `job-${o.taskJob.house}` : `sp-${randomBytes(12).toString('hex')}`;
-  const metadata = { depth, principal, ...(o.taskJob?.interactive ? { interactive: true } : {}), ...(o.taskJob ? { job: { house: o.taskJob.house, ...(o.taskJob.origin ? { origin: o.taskJob.origin } : {}) } } : {}), ...(parent ? { origin: parent.conversation, origin_run: parent.run } : {}), floor: o.taskJob?.floor ?? (parent?.bodyRules ? { guest: parent.bodyRules.guest, deny: parent.bodyRules.deny, readers: parent.bodyRules.readers } : null), parentReset: parent?.actsFor?.reset, ...(role ? { role } : {}), ...((q.failover ?? role?.failover) ? { failover: true } : {}), ruleSource: o.taskJob?.ruleSource ?? parent?.spawn?.ruleSource ?? (parent ? { conversation: parent.conversation, agent, venue: parent.venue, place: parent.place, label: parent.label, kind: parent.kind, persons: [...new Set([...(parent.bodyRules?.persons ?? []), ...(parent.bodyRules?.members ?? []), ...(parent.actsFor?.people ?? []), ...(parent.actsFor?.owners ?? [])])] } : null), prefer: q.prefer, created: d.now().toISOString() };
+  const metadata = { depth, principal, ...(o.taskJob?.interactive ? { interactive: true } : {}), ...(o.taskJob ? { job: { house: o.taskJob.house, ...(o.taskJob.origin ? { origin: o.taskJob.origin } : {}) } } : {}), ...(parent ? { origin: parent.conversation, origin_run: parent.run } : {}), floor: o.taskJob?.floor ?? (parent?.bodyRules ? { guest: parent.bodyRules.guest, deny: parent.bodyRules.deny, readers: parent.bodyRules.readers } : null), parentReset: parent?.actsFor?.reset, ...(role ? { role } : {}), ...((q.failover ?? role?.failover) ? { failover: true } : {}), ruleSource: o.taskJob?.ruleSource ?? parent?.spawn?.ruleSource ?? (parent ? { conversation: parent.conversation, agent, venue: parent.venue, place: parent.place, label: parent.label, kind: parent.kind, persons: [...new Set([...(parent.bodyRules?.persons ?? []), ...(parent.bodyRules?.members ?? []), ...(parent.actsFor?.people ?? []), ...(parent.actsFor?.owners ?? [])])] } : null), prefer: q.prefer, ...(q.modelNeed !== undefined ? { modelNeed: q.modelNeed } : {}), created: d.now().toISOString() };
   const r = await deliver(env, { source: 'runtime', id, agent, venue: 'spawn', place: id, label: q.title ?? 'Spawn', from: { kind: 'agent', id: agent }, kind: 'message', at: d.now().toISOString(), text: q.brief }, { ...o, spawnInit: { metadata, actsFor, parentBody: parent?.body, parentRun: parent?.run } });
   if (r.status) no(r.error);
   return { handle: r.conversation, ...r };
@@ -84,7 +85,7 @@ export async function spawnTool(env, argv, input) {
   const flag = (f) => { const i = argv.indexOf(f); return i < 0 ? undefined : argv[i + 1]; };
   try {
     const raw = JSON.parse(input || '{}');
-    const q = Object.fromEntries(['action', 'brief', 'prefer', 'role', 'failover', 'title', 'conversation', 'handle', 'text'].filter((k) => raw[k] !== undefined).map((k) => [k, raw[k]]));
+    const q = Object.fromEntries(['action', 'brief', 'prefer', 'modelNeed', 'role', 'failover', 'title', 'conversation', 'handle', 'text'].filter((k) => raw[k] !== undefined).map((k) => [k, raw[k]]));
     const r = await spawnCall(env, { kind: 'agent', agent: flag('--agent'), house: flag('--house'), service: flag('--service') }, q, { detach: true });
     return { text: JSON.stringify(r) };
   } catch (e) { return { text: e.message, isError: true }; }

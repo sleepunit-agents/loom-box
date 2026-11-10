@@ -17,7 +17,7 @@ import { readBody } from '../src/bodies.mjs';
 import { deliver, deliveryDir, deliveryNotices, loadConv, readFallbacks, tick } from '../src/delivery.mjs';
 import { claudeRefusal, codexRefusal, lastRefusal, refusedUntil } from '../src/logins.mjs';
 import { judge } from '../src/loops.mjs';
-import { resolveModel, setModels } from '../src/models.mjs';
+import { resolveModel, setModels, setModelChoice } from '../src/models.mjs';
 import { ClaudeRunner, CodexRunner, codexDeny } from '../src/runners.mjs';
 import { load } from '../src/state.mjs';
 import { trace } from '../src/trace.mjs';
@@ -277,7 +277,7 @@ test('an out-of-quota reading during a resume starts a body on the other harness
   const back = w.starts().at(-1);
   assert.equal(back[0], 'resume');
   assert.equal(back[2], c1.slot?.session ?? readBody(w.env, c1.body).slot.session, 'its own Claude session');
-  assert.match(back[4], /it was answered on Codex, because this harness's account was out of quota/);
+  assert.match(back[4], /owner selected Claude/);
   const c4 = w.conv();
   assert.match(c4.body, /^claude:/);
   assert.equal(c4.home, undefined);
@@ -453,20 +453,21 @@ test('a body on loom\'s machine never falls back to Codex (its guards are Claude
   }
 });
 
-test('a Codex that won\'t run a body in its house (only its host can tell, at the start) is passed over in the same delivery (t-1924)', async () => {
+test('a Codex that cannot start does not implicitly spend Claude without a stated exception', async () => {
   const w = twoHarnesses();
   setModels(w.env, { list: [OPUS, GPT], agent: 'art', prefer: ['gpt'] });
+  setModelChoice(w.env, { agent: 'art', harness: 'auto' });
   w.codex.failStart = "codex won't run this body here: Codex would read /home/art/Art/.codex/config.toml too, a config the runtime can't replace";
   const warned = [];
   w.o.warn = (m) => warned.push(m);
   const a = await deliver(w.env, w.msg('dm:U1', 'hi'), w.o);
-  assert.equal(a.body, 'started', 'never a failed start');
-  assert.match(w.conv().body, /^claude:/, 'on Claude, off Codex');
-  assert.equal(w.conv().retryAt, undefined);
+  assert.notEqual(a.body, 'started');
+  assert.equal(w.starts().length, 0, 'no implicit Claude fallback');
   assert.ok(warned.some((m) => /starting it off Codex/.test(m)));
   // Any other failed start is one, as before.
   const w2 = twoHarnesses();
   setModels(w2.env, { list: [OPUS, GPT], agent: 'art', prefer: ['gpt'] });
+  setModelChoice(w2.env, { agent: 'art', harness: 'auto' });
   w2.codex.failStart = 'no box may host art';
   const b = await deliver(w2.env, w2.msg('dm:U1', 'hi'), w2.o);
   assert.notEqual(b.body, 'started');

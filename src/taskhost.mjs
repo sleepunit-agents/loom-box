@@ -76,13 +76,13 @@ export async function bootstrapTask(env, caller, o = {}) {
     current.job ??= { house: h.id, created: h.created || new Date().toISOString() };
   });
   h = load(env).houses[h.id];
-  let brief = h.task, prefer;
+  let brief = h.task, prefer, modelNeed;
   try {
     const task = JSON.parse(h.task);
-    if (typeof task?.prompt === 'string') { brief = task.prompt; if (typeof task.model === 'string') prefer = task.model; }
+    if (typeof task?.prompt === 'string') { brief = task.prompt; if (typeof task.model === 'string') prefer = task.model; modelNeed = task.modelNeed; }
   } catch { /* plain prompt */ }
   if (o.scriptBrief !== undefined) brief = o.scriptBrief;
-  const result = await spawnCall(env, { kind: 'owner' }, { agent: h.agent, brief, prefer, title: `Task ${h.id}` }, {
+  const result = await spawnCall(env, { kind: 'owner' }, { agent: h.agent, brief, prefer, ...(modelNeed !== undefined ? { modelNeed } : {}), title: `Task ${h.id}` }, {
     ...o, now: () => new Date(h.job.created), detach: o.detach ?? true,
     taskJob: { house: h.id, actsFor: h.taskActsFor ?? { owner: false, people: [], unknown: true }, ...h.taskSource },
   });

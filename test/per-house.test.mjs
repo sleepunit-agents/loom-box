@@ -11,7 +11,7 @@ import { startBody } from '../src/bodies.mjs';
 import { runBodyHost } from '../src/bodyhost.mjs';
 import { deliver, loadConv, resetPrincipal, tick } from '../src/delivery.mjs';
 import { HouseRunner, hostOf, seatRoom, sweepSeats } from '../src/houserunner.mjs';
-import { setModels } from '../src/models.mjs';
+import { setModels, setModelChoice } from '../src/models.mjs';
 import { seatOf, otherSeatHouses } from '../src/principal.mjs';
 import { ageSealer } from '../src/sealed.mjs';
 import { load, update } from '../src/state.mjs';
@@ -491,6 +491,7 @@ test('in houses: each seat gets its own house, and a house\'s host is handed onl
   setAgent(env, fx, { agent: 'art', repo: 'https://example.com/art.git' });
   update(env, (s) => { const k = Object.keys(s.boxes).find((x) => s.boxes[x].local); s.boxes[k].harnesses = { claude: { loggedIn: true } }; });
   setModels(env, { list: [{ id: 'opus', harness: 'claude', family: 'anthropic' }], agent: 'art', prefer: ['opus'] });
+  setModelChoice(env, { agent: 'art', harness: 'claude' });
   const accounts = staticAccounts({ accounts: [{ name: 'max', provider: 'anthropic', harness: 'claude', kind: 'login', agents: ['art'], credentials: [{ kind: 'login', status: 'valid' }], usage: {} }] });
   // Core is told which one conversation each house holds, before the house is handed anything (t-2061).
   const bindings = [];
