@@ -243,6 +243,8 @@ const num = (v, d) => { const n = Number(v); return v !== undefined && v !== '' 
  * the owner's work only) but starts such a wake's body in the agent's own (owner-seat) house on a worker box instead of
  * on loom's machine: the step that takes Claude bodies off loom's machine. What it needed the machine for comes back as
  * host verbs (note:runtime/2026-11-10-t2049-phase3-local-bodies-off-loom), not a shell here.
+ * "house": ["lane:letters", …] moves only those wakes' places so, the rest staying where "where" says: the lanes move
+ * into the house one at a time (the design's step 6), each once it no longer needs a shell here.
  */
 export function localBodiesOf(env) {
   let v;
@@ -252,8 +254,11 @@ export function localBodiesOf(env) {
   if (!agents.length || typeof v.cwd !== 'string' || !v.cwd.startsWith('/')) return null;
   const args = Array.isArray(v.args) && v.args.every((a) => typeof a === 'string') ? v.args : [];
   const from = typeof v.from === 'string' && PIECE.test(v.from) ? v.from : 'clock';
-  return { agents, cwd: v.cwd, from, ...(typeof v.claude === 'string' && v.claude ? { claude: v.claude } : {}), args, ...(typeof v.path === 'string' && v.path ? { path: v.path } : {}), ...(v.codex === true ? { codex: true } : {}), where: v.where === 'house' ? 'house' : 'here' };
+  const house = Array.isArray(v.house) ? [...new Set(v.house.filter((p) => typeof p === 'string' && p && p.length <= 200))] : [];
+  return { agents, cwd: v.cwd, from, ...(typeof v.claude === 'string' && v.claude ? { claude: v.claude } : {}), args, ...(typeof v.path === 'string' && v.path ? { path: v.path } : {}), ...(v.codex === true ? { codex: true } : {}), where: v.where === 'house' ? 'house' : 'here', ...(house.length ? { house } : {}) };
 }
+/** Whether a local wake's conversation has its bodies in the owner's house (localBodiesOf's "where" and "house"). */
+export const housedLocal = (lb, c) => !!c?.local && !!lb && (lb.where === 'house' || (c.venue === 'wake' && !!lb.house?.includes(c.place)));
 const mismatch = (place, local) => `forbidden: ${place}'s bodies run ${local ? "on loom's machine" : 'in a house'}, and this wake's would not`;
 
 /** The runner settings a local body's harness takes: the owner's claude and its args. */
@@ -2207,9 +2212,10 @@ async function executeOne(env, op, d, mem) {
       if (asked) err.held = true;
       throw err;
     }
-    // A local conversation whose bodies the owner moved into his house (LOOM_RUNTIME_LOCAL_BODIES "where": "house",
-    // t-2049): past the same owner's-work-only check as a body here (above), in the owner's seat, never anyone else's.
-    const housed = !!c0.local && localBodiesOf(env)?.where === 'house';
+    // A local conversation whose bodies the owner moved into his house (LOOM_RUNTIME_LOCAL_BODIES "where": "house", or
+    // its place in "house", t-2049): past the same owner's-work-only check as a body here (above), in the owner's seat,
+    // never anyone else's.
+    const housed = housedLocal(localBodiesOf(env), c0);
     if (housed) rules = { ...rules, seat: `owner.${c0.conversation}` };
     const was = op.slot?.rules ?? {};
     // ...and a session only follows the conversation into a house no one else's bodies would read it in (principal.mjs,
