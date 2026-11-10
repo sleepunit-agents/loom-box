@@ -28,6 +28,7 @@ import { HouseFileError, NESTED_ARGS, parseHouseFile } from '../src/house.mjs';
 import { scratch } from './scratch.mjs';
 import { load, update } from '../src/state.mjs';
 import { HouseRunner, registerTaskHost } from '../src/houserunner.mjs';
+import { SessionHistoryMissing } from '../src/sessions.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 let env, fx, revoked, repo, client, r, fake;
@@ -836,6 +837,50 @@ for (const fault of ['upload', 'finish']) test(`native history survives a box re
     const files = await hr.pack({ id: `${h.id}-deadbeef`, house: h.id, agent: 'art', harness: 'codex', seat: host.seat }, { deferAck: true });
     assert.equal(Buffer.from(files[0].data, 'base64').toString(), 'the original native context');
     assert.equal(readdirSync(join(fake, 'runs')).filter(n => n.endsWith('.json')).length, 1, 'the box never restarts the native house while collecting');
+  } finally {
+    spawnSync(env.LOOM_BOX_PODMAN, ['stop', `loom-house-${h.id}`], { env: { PATH: env.PATH, HOME: env.HOME }, encoding: 'utf8' });
+  }
+});
+
+test('a stopped house whose native history collection keeps failing finishes incomplete after the limit (t-2079)', async () => {
+  const logs = [];
+  let t = Date.parse('2026-11-10T00:00:00Z');
+  r = runner(env, client, { loomUrl: 'http://loom.test/mcp', log: m => logs.push(m), clock: () => t, collectionGiveUpMs: 10 * 60_000 });
+  agentRepo(repo); setAgent(); podmanCfg({ run: 'sleep' });
+  const h = up('model-free collection give-up fixture');
+  await r.tick(); await until(() => house(h.id).state === 'running');
+  await until(() => existsSync(join(fake, 'runs', `loom-house-${h.id}.pid`)));
+  const history = join(env.LOOM_BOX_DATA, 'houses', h.id, 'native');
+  const session = '12345678-1234-1234-1234-123456789abc';
+  const file = join(history, 'codex-sessions/2026/11/09', `rollout-time-${session}.jsonl`);
+  mkdirSync(dirname(file), { recursive: true, mode: 0o700 }); writeFileSync(file, 'the original native context', { mode: 0o600 });
+  // Something the snapshot can never take (as a history too large to snapshot): every attempt fails the same way.
+  symlinkSync('/etc/hostname', join(history, 'codex-sessions', 'a-link'));
+  const host = registerTaskHost(env, 'art', h.id);
+  update(env, s => { s.houses[h.id].kind = 'body-host'; s.houses[h.id].seat = host.seat; });
+  ok(await api(env, fx, { caller: { kind: 'agent', agent: 'art', house: h.id }, path: 'body-sync', body: { hostKey: host.hostKey,
+    report: { bodies: { deadbeef: { harness: 'codex', status: 'working', session } }, done: {}, caps: ['parts', 'native-admission', 'native-history'], starting: [] } } }));
+  try {
+    assert.equal(spawnSync(env.LOOM_BOX_PODMAN, ['stop', `loom-house-${h.id}`], { env: { PATH: env.PATH, HOME: env.HOME }, encoding: 'utf8' }).status, 0);
+    await until(() => logs.some(m => m.includes(`${h.id}: collection is pending`) && m.includes('refuses links')));
+    // Within the limit: it keeps trying, and the house keeps saving.
+    t += 5 * 60_000; await r.tick();
+    assert.equal(house(h.id).state, 'running');
+    assert.equal(houseBadge(house(h.id)), 'saving conversation history');
+    // Past it: finished incomplete. The house ends; what couldn't be sent is recorded as lost and kept on the box.
+    t += 6 * 60_000; await r.tick();
+    await until(() => ['done', 'failed', 'stopped'].includes(house(h.id).state));
+    const nh = load(env).houses[h.id].nativeHistory;
+    assert.equal(nh.complete, true);
+    assert.equal(nh.incomplete.reason, 'collection-timeout');
+    assert.ok(logs.some(m => m.includes('finishing it incomplete')));
+    const kept = readdirSync(join(env.LOOM_BOX_DATA, 'houses', h.id)).filter(n => n.startsWith('native-unsaved-'));
+    assert.equal(kept.length, 1, 'the unsaved history stays on the box');
+    assert.equal(readFileSync(join(env.LOOM_BOX_DATA, 'houses', h.id, kept[0], 'codex-sessions/2026/11/09', `rollout-time-${session}.jsonl`), 'utf8'), 'the original native context');
+    // Its body retires as a loss (it resumes from its digests), never as a collection still pending.
+    const hr = new HouseRunner(env, 'codex');
+    const b = { id: `${h.id}-deadbeef`, house: h.id, agent: 'art', harness: 'codex', seat: host.seat };
+    await assert.rejects(hr.pack(b, { deferAck: true }), e => e instanceof SessionHistoryMissing);
   } finally {
     spawnSync(env.LOOM_BOX_PODMAN, ['stop', `loom-house-${h.id}`], { env: { PATH: env.PATH, HOME: env.HOME }, encoding: 'utf8' });
   }

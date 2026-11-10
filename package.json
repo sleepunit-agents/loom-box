@@ -47,6 +47,12 @@
         "default": "5"
       },
       {
+        "name": "LOOM_RUNTIME_SPAWN_LIMIT",
+        "label": "Spawned jobs an agent has running before a new one waits",
+        "default": "3",
+        "hint": "1-32; a body whose house is draining, stopping or gone doesn't count"
+      },
+      {
         "name": "LOOM_RUNTIME_SEAT_HOUSES",
         "label": "Houses an agent may have at once for anyone but its owner",
         "default": "4"

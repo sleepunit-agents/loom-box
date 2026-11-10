@@ -830,6 +830,8 @@ export function nativeCollection(env, effects, caller, body) {
     const h = s.houses[body.id];
     if (!h || h.box !== caller.subject || h.nativeHistory?.plan !== context.plan) fail('native collection ownership changed', 409);
     h.nativeHistory.complete = true;
+    // Finished incomplete (t-2079): the box gave up waiting; what it saved is kept, the rest is recorded as lost.
+    if (result.incomplete) h.nativeHistory.incomplete ??= { reason: result.incomplete, at: now(effects) };
   });
   return result;
 }

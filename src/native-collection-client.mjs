@@ -9,8 +9,17 @@ import { SessionHistoryMissing } from './sessions.mjs';
 import { nativePendingInbox } from './native-inbox.mjs';
 import { join } from 'node:path';
 
-export async function collectNativeHistory({ client, id, root, snapshot, physical }) {
+/** The reason a box gives when it stops waiting on a collection that will not finish (t-2079). */
+export const COLLECTION_TIMEOUT = 'collection-timeout';
+
+/**
+ * `incomplete` (t-2079): the box has waited past its limit on a collection that keeps failing. What was already
+ * received stays; every body still owed is recorded as lost (it resumes from its digests) instead of holding its
+ * house, and its spawn slot, forever. Upload failures still throw: a transfer half-sent is retried, never dropped.
+ */
+export async function collectNativeHistory({ client, id, root, snapshot, physical, incomplete }) {
   if (!/^h-[0-9]{1,9}$/.test(id ?? '') || !['gone', 'stopped'].includes(physical)) throw Error('native collection needs physical house termination');
+  if (incomplete !== undefined && incomplete !== COLLECTION_TIMEOUT) throw Error('invalid incomplete native collection reason');
   const call = body => client.call('native-collection', { id, ...body });
   const plan = await call({ phase: 'plan', physical });
   if (!plan || !Array.isArray(plan.entries) || typeof plan.complete !== 'boolean') throw Error('invalid native collection plan');
@@ -25,15 +34,16 @@ export async function collectNativeHistory({ client, id, root, snapshot, physica
     if (entry.bodyId ? entry.key !== `body:${entry.bodyId}` : entry.attempts.length !== 1 || entry.key !== `attempt:${entry.attempts[0]}`) throw Error('native collection entry changed identity');
     entries.add(entry.key);
   }
-  let historyMissing = false;
+  let historyMissing = false, snapshotLost = false;
   if (plan.entries.some(e => !e.received)) {
     try {
       if (!existsSync(snapshot)) snapshotNativeHistory(root, snapshot);
       const st = lstatSync(snapshot);
       if (!st.isDirectory() || st.isSymbolicLink()) throw Error('native collection snapshot is not plain');
     } catch (error) {
-      if (!(error instanceof SessionHistoryMissing)) throw error;
+      if (!(error instanceof SessionHistoryMissing) && !incomplete) throw error;
       historyMissing = true;
+      snapshotLost = !(error instanceof SessionHistoryMissing);
     }
   }
   for (const entry of plan.entries) {
@@ -45,9 +55,11 @@ export async function collectNativeHistory({ client, id, root, snapshot, physica
         ? offlineNativeSession(snapshot, { harness: entry.harness, id: entry.bodyId, ...(entry.session ? { session: entry.session } : {}) })
         : offlineNativeAttempt(snapshot, { house: id, harness: entry.harness, attempt: entry.attempts[0] });
     } catch (error) {
-      if (!(error instanceof SessionHistoryMissing)) throw error;
-      const pending = !historyMissing && entry.bodyId ? nativePendingInbox(join(snapshot, 'inboxes'), entry.bodyId) : null;
-      const receipt = await call({ phase: 'loss', plan: plan.plan, key: entry.key, reason: 'missing-history', pending });
+      if (!(error instanceof SessionHistoryMissing) && !incomplete) throw error;
+      const missing = error instanceof SessionHistoryMissing && !snapshotLost;
+      let pending = null;
+      if (!historyMissing && entry.bodyId) try { pending = nativePendingInbox(join(snapshot, 'inboxes'), entry.bodyId); } catch (e) { if (!incomplete) throw e; }
+      const receipt = await call({ phase: 'loss', plan: plan.plan, key: entry.key, reason: missing ? 'missing-history' : incomplete, pending });
       if (receipt?.plan !== plan.plan || receipt.received !== true) throw Error('native history-loss receipt was not acknowledged');
       continue;
     }

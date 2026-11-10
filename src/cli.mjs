@@ -147,7 +147,7 @@ import { join } from 'node:path';
 import { readModels, resolveFor, setModels } from './models.mjs';
 import { endBody, feedBody, listBodies, resumeBody, startBody } from './bodies.mjs';
 import { PART_RAW, joinParts, partsOf } from './blobs.mjs';
-import { answerLoop, deliver, listConvs, post, staleRuns, send, sendOutcome, sendStatus, tick, workingConversations, workingPrint } from './delivery.mjs';
+import { answerLoop, deliver, listConvs, post, releaseBody, staleRuns, send, sendOutcome, sendStatus, tick, workingConversations, workingPrint } from './delivery.mjs';
 import { coreFrom } from './core.mjs';
 import { watchBridges } from './nowboard.mjs';
 import { reviewStatus, reviewTick, runReview } from './review.mjs';
@@ -796,7 +796,12 @@ async function body(rest, env, json) {
     if (!r.fed) process.exitCode = 3;
     return said(r, r.fed ? `${ref}: fed` : `${ref}: not fed: ${r.reason}`);
   }
-  if (sub === 'end') return said(endBody(env, ref), `${ref}: ended`);
+  if (sub === 'end') {
+    const r = endBody(env, ref);
+    // Its conversation lets it go too (t-2079): no record keeps an ended body as its own.
+    const released = releaseBody(env, ref);
+    return said({ ...r, released }, `${ref}: ended${released.length ? ` (released from ${released.join(', ')})` : ''}`);
+  }
   if (sub === 'list') {
     const l = listBodies(env);
     if (json) return out(l);
