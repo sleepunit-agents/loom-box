@@ -114,3 +114,20 @@ test('the tick posts a loom body\'s new and moved cards to core, and none for a 
   assert.equal(w.core.activityCalls.length, 2);
   assert.deepEqual(w.core.activityCalls[1].cards.map((c) => c.state), ['done']);
 });
+
+test('a spawned job\'s body posts its steps to the job\'s own thread once it has one, so it can be watched (t-2043)', async () => {
+  const w = world();
+  w.core.commsAnswer = (b) => (b.op === 'spawn' ? { ok: true, id: 'th:abcdefghij' } : { ok: true });
+  const cards = [{ id: 't1', at: 'x', tool: 'Bash', summary: 'Ran the tests', state: 'running' }];
+  w.runner.activity = () => cards;
+  const { spawnCall } = await import('../src/spawn.mjs');
+  const r = await spawnCall(w.env, { kind: 'owner' }, { agent: 'art', brief: 'Run the tests' }, w.o);
+  await tick(w.env, w.o);
+  assert.equal(w.core.activityCalls.filter((a) => a.conversation === r.handle).length, 0, 'no thread yet: nothing told, so nothing is lost');
+  assert.equal(loadConv(w.env, r.handle).spawn.thread, 'th:abcdefghij');
+  await tick(w.env, w.o);
+  const sent = w.core.activityCalls.filter((a) => a.conversation === r.handle);
+  assert.equal(sent.length, 1);
+  assert.deepEqual(sent[0].cards.map((c) => [c.summary, c.state]), [['Ran the tests', 'running']]);
+  assert.equal(sent[0].run, loadConv(w.env, r.handle).run);
+});

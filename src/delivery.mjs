@@ -1478,7 +1478,9 @@ async function stopBody(env, c, d, v) {
 
 /**
  * A Comms thread's body's tool steps (activity.mjs), new or moved since last told, to core's POST
- * /api/loom/comms/activity. Only for venue loom. A thread core says is gone (409) is told nothing more of them.
+ * /api/loom/comms/activity. For venue loom, and for a spawned job once core has given it its own thread (spawnComms),
+ * so the job can be watched from the desktop (t-2043); never before, or its first steps would be told to no thread and
+ * lost. A thread core says is gone (409) is told nothing more of them.
  */
 async function activityPass(env, c, d) {
   let rec, r;
@@ -3036,7 +3038,7 @@ export async function tick(env, o = {}, only, mem = new Map()) {
   // an end missed (a runtime that stopped mid-way, a home left by an older one). A house's are its host's.
   try { d.runner('codex', true).sweepHomes?.(); } catch { /* no local Codex runner, or its homes are busy: the next tick */ }
   for (const c of listConvs(env)) if (c.presence) { try { await presencePass(env, c, d, now); } catch (e) { d.warn(`presence for ${c.conversation}: ${e.message}`); } }
-  for (const c of listConvs(env)) if (c.venue === COMMS_VENUE && c.body && !c.starting) { try { await activityPass(env, c, d); } catch (e) { d.warn(`activity for ${c.conversation}: ${e.message}`); } }
+  for (const c of listConvs(env)) if ((c.venue === COMMS_VENUE || c.spawn?.thread) && c.body && !c.starting) { try { await activityPass(env, c, d); } catch (e) { d.warn(`activity for ${c.conversation}: ${e.message}`); } }
   for (const c of listConvs(env)) if (c.queue?.length) await drain(env, c.conversation, d);
   await spawnComms(env, d);
   await returnSpawns(env, d, o);
