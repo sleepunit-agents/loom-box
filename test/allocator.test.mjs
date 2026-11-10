@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { admit, forecastBurn, logShadow, readShadow } from '../src/allocator.mjs';
+import { admit, forecastBurn, logShadow, readReadings, readShadow, recordReadings } from '../src/allocator.mjs';
 
 const NOW = Date.parse('2026-11-10T12:00:00Z'), S = NOW / 1000;
 const account = (used, resetInS, extra = {}) => ({ '7d': used, reset_7d: S + resetInS, checked: S, ...extra });
@@ -68,5 +68,29 @@ test('the shadow log keeps decisions without briefs, and turns over when large',
     assert.deepEqual(readShadow(dir), [{ at: 'x', kind: 'agent', decision: 'allow', why: 'room' }]);
     for (let i = 0; i < 5; i++) logShadow(dir, { at: String(i), why: 'y'.repeat(100) }, { maxBytes: 200 });
     assert.ok(readShadow(dir).length < 6);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('readings history (slice 1b): one line per newer reading, bounded, read back per account, worker time skipped', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'alloc-readings-'));
+  try {
+    const acct = (name, checked, used) => ({ name, usage: { '7d': used, reset_7d: checked + 86400, checked, held: true } });
+    assert.equal(recordReadings(dir, [acct('a', 100, 0.1), acct('b', 100, 0.5), { name: 'c', usage: {} }]), 2);
+    assert.equal(recordReadings(dir, [acct('a', 100, 0.1)]), 0, 'the same reading is not recorded twice');
+    const t0 = S;
+    for (let i = 0; i < 8; i++) recordReadings(dir, [acct('a', t0 + i * 3600, 0.2 + i * 0.01)], { jobs: 0 });
+    const a = readReadings(dir, 'a');
+    assert.equal(a.length, 9);
+    assert.deepEqual(Object.keys(a[1]).sort(), ['account', 'at', 'jobs', 'usage']);
+    assert.deepEqual(a[1].usage, { '7d': 0.2 }, 'fractions only: no reset or other fields');
+    // Forecast from the recorded history (past the first, much older reading): 1% an hour.
+    assert.ok(Math.abs(forecastBurn(a.slice(1))['7d'] - 0.01) < 1e-9);
+    // Hours when worker bodies were held don't count as conversations' burn.
+    const busy = a.slice(1).map((r, i) => (i >= 3 ? { ...r, jobs: 2 } : r));
+    assert.equal(forecastBurn(busy)['7d'], null);
+    // Bounded: it turns over, and both files are read back.
+    for (let i = 0; i < 20; i++) recordReadings(dir, [acct('b', t0 + i * 60, 0.5)], { maxBytes: 300 });
+    assert.equal(readReadings(dir, 'b').length <= 21, true);
+    assert.ok(readReadings(dir, 'b').length >= 2);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

@@ -82,7 +82,7 @@ import { existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync,
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { accountsFrom, accountsOfRecord, stateAccounts } from './accounts.mjs';
+import { AccountsError, accountsFrom, accountsOfRecord, stateAccounts } from './accounts.mjs';
 import { commitPreparedBody, endBody, readBody, resumeBody, startBody } from './bodies.mjs';
 import { CoreError, coreFrom } from './core.mjs';
 import { stoppingHosts, HouseRunner, releaseEmptySeatHouses, seatRoom, sweepSeats, sweepTransfers } from './houserunner.mjs';
@@ -105,7 +105,7 @@ import { changed as changedCards } from './activity.mjs';
 import { keepKey, keepSession } from './bodyhost.mjs';
 import { spawnCap } from './spawn.mjs';
 import { continuationOutbox } from './continuation-outbox.mjs';
-import { admit, logShadow } from './allocator.mjs';
+import { admit, forecastBurn, logShadow, readReadings, recordReadings } from './allocator.mjs';
 import { readRelays } from './relay.mjs';
 import { householdOwners, membersOf, ownersOf } from './owners.mjs';
 import { approvalsFake, approvalsRun, approvalsRunAsync, approvalsWhy } from './approvals-call.mjs';
@@ -1698,7 +1698,7 @@ function shadowAdmission(env, c, r, at) {
     const a = list.find((x) => x.name === r.accountKey);
     if (!a) return;
     const kind = c.spawn ? 'agent' : c.venue === 'wake' ? 'scheduled' : 'live';
-    const v = admit({ usage: a.usage, kind, now: nowMs });
+    const v = admit({ usage: a.usage, kind, burn: forecastBurn(readReadings(deliveryDir(env), a.name)), now: nowMs });
     logShadow(deliveryDir(env), { at: new Date(nowMs).toISOString(), kind, agent: c.agent, account: a.name, model: r.model, decision: v.allow ? 'allow' : 'defer', why: v.why, windows: v.windows, ...(c.spawn ? { job: c.conversation } : {}) });
   } catch { /* a shadow log line, never a reason a start fails */ }
 }
@@ -2915,6 +2915,7 @@ async function stopStuck(env, op, d) {
  * (their transcript sealed, not left in the clear); slots past their window go; and every queue is drained.
  * `only`: one conversation's queue first (the detached worker a delivery starts).
  */
+let readingsAt = 0; // the allocator's readings, at most once a minute (a tick is every few seconds)
 export async function tick(env, o = {}, only, mem = new Map()) {
   const d = depsOf(env, o);
   // A physical warm-house stop holds its conversations before any further delivery or replacement work.
@@ -2927,6 +2928,12 @@ export async function tick(env, o = {}, only, mem = new Map()) {
   });
   // Follow-up reports (t-2004): never a reason the rest of the tick doesn't run.
   try { await drainContinuations(env, o); } catch (e) { d.warn(`continuations: ${e.message}`); }
+  // The allocator's readings history (t-2037, shadow): the service's tick only, never a reason the rest doesn't run.
+  if (o.service === true && d.now().getTime() - readingsAt >= 60_000) try {
+    const nowMs = readingsAt = d.now().getTime();
+    const jobs = listConvs(env).filter((c) => c.body && (c.spawn || c.venue === 'wake')).length;
+    recordReadings(deliveryDir(env), stateAccounts(env, { now: () => nowMs }).list().accounts ?? [], { jobs });
+  } catch (e) { if (!(e instanceof AccountsError)) d.warn(`allocator readings: ${e.message}`); } // none off the control plane
   discardPass(env, d);
   if (only) await drain(env, only, d, mem);
   const now = d.now().getTime();
