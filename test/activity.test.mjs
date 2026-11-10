@@ -325,7 +325,7 @@ test('told marks are kept for every card still read, so a long run\'s steps aren
   assert.equal(again, 0, 'and never again');
   // Ids no longer read go first once it's past 400.
   const later = changed(cards.slice(300), sent);
-  assert.ok(Object.keys(later.next).length <= 400 || Object.keys(later.next).length === 300);
+  assert.equal(Object.keys(later.next).length, 400);
 });
 
 test('a 409\'s hold is kept on the record, so another delivery process keeps it (t-2109)', async () => {

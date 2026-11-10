@@ -486,7 +486,10 @@ export function bodySync(env, caller, body, o = {}) {
     // as a final is: the record keeps only each card's base, its numbers and a sealed blob of the rest.
     for (const b of Object.values(bodies)) if (Array.isArray(b.cards)) {
       b.cards = b.cards.map(({ detail, body: words, items, ...rest }) => {
-        const w = { ...(detail ? { detail } : {}), ...(words ? { body: words } : {}), ...(items ? { items } : {}) };
+        // A text card's label is the body's own first line: sealed too, its fixed label kept in the clear instead.
+        const said = rest.tool === 'text' ? { summary: rest.summary } : {};
+        const w = { ...(detail ? { detail } : {}), ...(words ? { body: words } : {}), ...(items ? { items } : {}), ...said };
+        if (rest.tool === 'text') rest.summary = rest.fixed ?? 'Wrote its words';
         if (!Object.keys(w).length) return rest;
         try { return { ...rest, sealed: sealer.seal(Buffer.from(JSON.stringify(w))).toString('base64') }; } catch { return rest; }
       });

@@ -383,11 +383,14 @@ test('a house\'s card words are sealed on loom\'s disk, and opened again for the
   mkdirSync(hosts, { recursive: true });
   writeFileSync(join(hosts, 'art.json'), JSON.stringify({ agent: 'art', house: 'h-1', hostHash: createHash('sha256').update('the-host-key').digest('hex'), req: {}, stop: {}, inbox: {} }));
   const card = { id: 'c1', at: '2026-11-10T10:00:00.000Z', tool: 'Edit', summary: 'Edited a.ts', fixed: 'Edited a.ts', state: 'done', detail: 'a.ts', body: '+THE-DIFF-WORDS' };
-  bodySync(env, { kind: 'agent', agent: 'art', house: 'h-1' }, { hostKey: 'the-host-key', report: { bodies: { b0000001: { harness: 'claude', status: 'working', cards: [card] } }, done: {} } }, { sealer: testSealer });
+  const said = { id: 'w1', at: '2026-11-10T10:00:01.000Z', tool: 'text', summary: 'THE-OWN-WORDS first line', fixed: 'Wrote its words', state: 'done', body: 'THE-OWN-WORDS first line' };
+  bodySync(env, { kind: 'agent', agent: 'art', house: 'h-1' }, { hostKey: 'the-host-key', report: { bodies: { b0000001: { harness: 'claude', status: 'working', cards: [card, said] } }, done: {} } }, { sealer: testSealer });
   assert.equal(everything(hosts).includes(Buffer.from('THE-DIFF-WORDS')), false, 'never in the clear on disk');
+  assert.equal(everything(hosts).includes(Buffer.from('THE-OWN-WORDS')), false, 'a text card\'s label is its words: sealed too');
   const hr = new HouseRunner(env, 'claude', { sealer: testSealer });
   const got = hr.activity({ id: 'h-1-b0000001', house: 'h-1', agent: 'art' });
   assert.equal(got[0]?.body, '+THE-DIFF-WORDS');
+  assert.deepEqual([got[1]?.summary, got[1]?.body], ['THE-OWN-WORDS first line', 'THE-OWN-WORDS first line'], 'opened again whole');
 });
 
 test('a sign of life read in slices never cuts a character in two', () => {
@@ -403,4 +406,25 @@ test('a sign of life read in slices never cuts a character in two', () => {
   let t;
   for (let k = 0; k < 20; k++) t = r.signOfLife({ id: 'b', slot: { harness: 'claude', session } }).tokens;
   assert.equal(t, 12);
+});
+
+test('two text blocks of one message, each a line of its own, are two cards (t-2109)', () => {
+  const line = (uuid, text) => ({ type: 'assistant', uuid, timestamp: '2026-11-10T10:00:00.000Z', message: { id: 'msg_same', content: [{ type: 'text', text }] } });
+  const cards = claudeCards([line('u-1', 'First thought.'), line('u-2', 'Second thought.')]);
+  assert.deepEqual(cards.map((c) => c.body), ['First thought.', 'Second thought.']);
+});
+
+test('a house\'s report carries at most CARDS_MAX of cards, the newest, so large diffs never push it past core\'s cap (t-2109)', async () => {
+  const { CARDS_MAX, newestWithin } = await import('../src/bodyhost.mjs');
+  const { cleanReport } = await import('../src/houserunner.mjs');
+  const big = (i) => ({ id: `e${i}`, at: '2026-11-10T10:00:00.000Z', tool: 'Edit', summary: `Edited f${i}.ts`, fixed: `Edited f${i}.ts`, state: 'done', detail: `f${i}.ts`, body: `+${'x'.repeat(31_000)}` });
+  const all = Array.from({ length: 40 }, (_, i) => big(i));
+  const kept = newestWithin(all, CARDS_MAX);
+  assert.ok(kept.length > 0 && kept.length < 40);
+  assert.equal(kept.at(-1).id, 'e39', 'the newest kept');
+  assert.deepEqual(kept.map((c) => c.id), all.slice(40 - kept.length).map((c) => c.id), 'none dropped from the middle');
+  const report = cleanReport({ bodies: { b0000001: { harness: 'claude', status: 'working', cards: kept } } });
+  assert.ok(Buffer.byteLength(JSON.stringify(report)) <= CARDS_MAX + 4096);
+  assert.ok(CARDS_MAX + 360 * 1024 + 40_000 * 3 < 1024 * 1024, 'with a packed part and a final beside it, under core\'s 1 MB');
+  assert.deepEqual(newestWithin([], CARDS_MAX), []);
 });

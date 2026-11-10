@@ -32,7 +32,9 @@ for (const harness of ['claude', 'codex']) test(`terminal uses common ${harness}
   assert.equal((await bootstrapSession(w.env, caller, o)).conversation, boot.conversation);
   const native = fakeRunner(w.log, join(w.env.HOME, 'native'), harness);
   native.final = () => 'TERMINAL-REPORT';
-  native.activity = () => [{ id: 'terminal-step', at: w.clock.now().toISOString(), tool: 'read', summary: 'Reading a file', state: 'running' }];
+  native.activity = () => [{ id: 'terminal-step', at: w.clock.now().toISOString(), tool: 'read', summary: 'Reading a file', state: 'running' },
+    { id: 'terminal-words', at: w.clock.now().toISOString(), tool: 'text', summary: 'TERMINAL-WORDS', fixed: 'Wrote its words', state: 'done', body: 'TERMINAL-WORDS' },
+    { id: 'terminal-cmd', at: w.clock.now().toISOString(), tool: 'Bash', summary: 'Ran a command', fixed: 'Ran a command', state: 'done', detail: 'echo TERMINAL-COMMAND' }];
   let leave = false;
   const host = runBodyHost({ client: async (path, body) => {
     const r = await api(w.env, {}, { caller, path, body });
@@ -61,6 +63,9 @@ for (const harness of ['claude', 'codex']) test(`terminal uses common ${harness}
     assert.equal(status.model.harness, harness);
     assert.equal(status.working, true);
     assert.equal(status.cards[0].summary, 'Reading a file', 'live activity reaches the terminal controller');
+    // Shown as core is shown them (t-2109, delivery shownCards): the owner's alone here, so its words and command.
+    assert.ok(JSON.stringify(status.cards).includes('TERMINAL-WORDS') && JSON.stringify(status.cards).includes('TERMINAL-COMMAND'));
+    assert.ok(status.cards.every((k) => !('fixed' in k)), 'through the one gate (delivery shownCards), not the runner\'s cards as they are');
     const choice = await sessionCommand(w.env, owner, { id: 'h-7', action: 'model', harness }, o);
     assert.equal(choice.threadChoice, harness);
     const originalSession = native.slotOf({ id: c.body.replace(`${harness}:h-7-`, '') }).session;

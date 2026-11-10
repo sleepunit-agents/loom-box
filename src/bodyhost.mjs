@@ -22,6 +22,22 @@ import { nativeHistoryRoot } from './native-history.mjs';
 import { nativePendingInbox } from './native-inbox.mjs';
 
 /**
+ * At most how many bytes of cards one report carries (t-2109): a report goes through core's 1 MB cap with its packed
+ * session part (PART_CHARS) and its final beside them, and a card's diff may be ~96 KB.
+ */
+export const CARDS_MAX = 256 * 1024;
+/** The newest of `cards` whose JSON fits in `max` bytes, in their order (none dropped from the middle). */
+export function newestWithin(cards, max) {
+  let size = 0, k = cards.length;
+  while (k > 0) {
+    const n = Buffer.byteLength(JSON.stringify(cards[k - 1])) + 1;
+    if (size + n > max) break;
+    size += n; k--;
+  }
+  return cards.slice(k);
+}
+
+/**
  * Whether this house has its box's login for a harness: the box sets the login's env only for the harnesses the house
  * file declares (house.mjs, "harnesses"). A body on a harness the house didn't declare would run with no login.
  */
@@ -216,7 +232,8 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
       else if ((status === 'idle' || status === 'ended') && b.turn === undefined) { try { b.turn = r.turn?.({ id, ...(b.slot ? { slot: b.slot } : {}) }) ?? null; } catch { b.turn = null; } }
       const turn = status === 'idle' || status === 'ended' ? b.turn : null;
       // A Comms thread's body: its tool steps, the newest 100, read from its harness's own record (activity.mjs).
-      const cards = b.activity ? (() => { try { return (r.activity?.({ id, ...(b.slot ? { slot: b.slot } : {}) }) ?? []).slice(-100); } catch { return []; } })() : null;
+      // At most CARDS_MAX of them in all (t-2109: a diff can be large): the newest kept, so a report always fits core's cap.
+      const cards = b.activity ? (() => { try { return newestWithin((r.activity?.({ id, ...(b.slot ? { slot: b.slot } : {}) }) ?? []).slice(-100), CARDS_MAX); } catch { return []; } })() : null;
       // And its last sign of life (t-2109): when its record last moved, its tokens so far.
       const alive = b.activity ? (() => { try { return r.signOfLife?.({ id, ...(b.slot ? { slot: b.slot } : {}) }) ?? null; } catch { return null; } })() : null;
       let final;

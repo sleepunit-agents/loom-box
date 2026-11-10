@@ -477,7 +477,8 @@ export function claudeCards(lines, prefix = '', parent = null) {
     if (l.type === 'assistant') {
       // The body's own words between steps (t-2109): a `text` card, its first line the label and the whole the body.
       // Thinking never. Delivery keeps them only for a conversation that acts for the owner alone.
-      const mid = typeof l.message?.id === 'string' ? l.message.id : typeof l.uuid === 'string' ? l.uuid : null;
+      // By its line's own uuid: Claude Code writes each block of one message as a line of its own, under one message id.
+      const mid = typeof l.uuid === 'string' ? l.uuid : typeof l.message?.id === 'string' ? l.message.id : null;
       content.forEach((c, n) => {
         if (c?.type !== 'text' || typeof c.text !== 'string' || !c.text.trim() || !mid) return;
         const id = `${prefix}${mid}:${n}`.slice(0, 80);

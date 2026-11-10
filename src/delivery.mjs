@@ -1577,26 +1577,7 @@ async function activityPass(env, c, d) {
   try { rec = readBody(env, c.body); r = d.runner(rec.harness, rec.local); } catch { return; }
   if (typeof r.activity !== 'function') return;
   const body = bodyOf(c.body, rec);
-  // The body's own words between steps only where it works for the owner alone (t-2109): never where someone else is
-  // in the conversation, whose words its own might carry. Read from its principal now (principalOf: a former owner
-  // counts as a person), as localForeign reads it, never from the stored field alone.
-  // Not while a reset is pending (its body was started before it: what it heard then isn't known to be the owner's),
-  // nor for a body whose rules were made for a person.
-  const ownersAlone = !c.resetPending && !c.bodyRules?.grantFor && !(c.bodyRules?.members?.length) && wordsShown(env, c);
-  // Every card through the one gate (activity.mjs stepParts), made here or reported by a house. Where someone else is
-  // in the conversation, a step's words (its command, output, diff, plan items) don't go either: theirs could be in
-  // them. Its label, tool, state, result line and times do (Jonathan, 2026-11-10: other people summarized).
-  // A house's command line and its body's words pass the gate on shape alone, so a house could put anything there: that
-  // is trusted for the owner alone only, where its body could already post the same text in its own thread as a message
-  // (coordinator, 2026-11-10). Where anyone else is, only a fixed label goes, decided here, never by the house.
-  const cards = (r.activity(body) ?? []).filter((x) => x && (x.tool !== 'text' || ownersAlone)).map((x) => {
-    const { fixed, ...parts } = stepParts(x);
-    if (ownersAlone) return { ...baseCard(x), ...parts };
-    // Where someone else is: its fixed label (set where the card was made, never derived from its words), else "Did a
-    // step"; no words of any kind (its label, command, diff, plan items); its state, result phrase, times and nesting.
-    const { detail: _d, body: _b, items: _i, ...plain } = parts;
-    return { ...baseCard(x), summary: fixed ?? 'Did a step', ...plain };
-  });
+  const cards = shownCards(env, c, r.activity(body) ?? []);
   const nowMs = (() => { try { return d.now().getTime(); } catch { return Date.now(); } })();
   const { out, next } = changedCards(cards, c.cardsSent ?? {});
   // A thread core said is gone (409) is told nothing for a while (it may be unarchived): its cards wait, untold.
@@ -1630,6 +1611,34 @@ async function activityPass(env, c, d) {
     return;
   }
   saveSent(env, c, next, sendAlive ? alive : null, nowMs);
+}
+
+/**
+ * A body's cards as anyone outside its house may see them (t-2109): every card through the one gate (stepParts); its
+ * words only where it works for the owner alone. Delivery's activityPass and a session house's terminal status
+ * (sessionhost.mjs) both show cards only through this.
+ */
+export function shownCards(env, c, cards) {
+  // The body's own words between steps only where it works for the owner alone (t-2109): never where someone else is
+  // in the conversation, whose words its own might carry. Read from its principal now (principalOf: a former owner
+  // counts as a person), as localForeign reads it, never from the stored field alone.
+  // Not while a reset is pending (its body was started before it: what it heard then isn't known to be the owner's),
+  // nor for a body whose rules were made for a person.
+  const ownersAlone = !c.resetPending && !c.bodyRules?.grantFor && !(c.bodyRules?.members?.length) && wordsShown(env, c);
+  // Every card through the one gate (activity.mjs stepParts), made here or reported by a house. Where someone else is
+  // in the conversation, a step's words (its command, output, diff, plan items) don't go either: theirs could be in
+  // them. Its label, tool, state, result line and times do (Jonathan, 2026-11-10: other people summarized).
+  // A house's command line and its body's words pass the gate on shape alone, so a house could put anything there: that
+  // is trusted for the owner alone only, where its body could already post the same text in its own thread as a message
+  // (coordinator, 2026-11-10). Where anyone else is, only a fixed label goes, decided here, never by the house.
+  return cards.filter((x) => x && (x.tool !== 'text' || ownersAlone)).map((x) => {
+    const { fixed, ...parts } = stepParts(x);
+    if (ownersAlone) return { ...baseCard(x), ...parts };
+    // Where someone else is: its fixed label (set where the card was made, never derived from its words), else "Did a
+    // step"; no words of any kind (its label, command, diff, plan items); its state, result phrase, times and nesting.
+    const { detail: _d, body: _b, items: _i, ...plain } = parts;
+    return { ...baseCard(x), summary: fixed ?? 'Did a step', ...plain };
+  });
 }
 
 /** At most how much JSON one activity post carries (t-2109): half core's cap, so a full card always fits. */
