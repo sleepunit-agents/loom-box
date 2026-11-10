@@ -8,7 +8,7 @@ import { deriveAccounts, stateAccounts } from './accounts.mjs';
 import { membersOf } from './owners.mjs';
 import { resolveFor } from './models.mjs';
 import { shortCallGate } from './delivery.mjs';
-import { lastRateLimit, lastRefusal, codexUsageOnBox, tailOf, CRED_FILE } from './logins.mjs';
+import { lastRateLimit, terminalOutcome, codexUsageOnBox, tailOf, CRED_FILE } from './logins.mjs';
 import { codexLayers } from './runners.mjs';
 import { runAsync, answerOf } from './grader.mjs';
 
@@ -41,7 +41,7 @@ export async function chooseOneShot(env, caller, { prefer = [], avoid = [] } = {
 export function oneShotArgs(harness, model, cwd) {
   if (harness === 'claude') return ['-p', '--safe-mode', '--permission-prompts', 'none', '--model', model, '--output-format', 'stream-json', '--verbose'];
   if (harness === 'codex') return ['exec', '--json', '--skip-git-repo-check', '--sandbox', 'read-only', '-C', cwd,
-    '--disable', 'hooks', '--disable', 'skill_mcp_dependency_install', '--disable', 'apps', '--disable', 'plugins', '--disable', 'memories', '--disable', 'skill_search', '-c', 'web_search="disabled"', '-m', model, '-'];
+    '--disable', 'multi_agent', '--disable', 'hooks', '--disable', 'skill_mcp_dependency_install', '--disable', 'apps', '--disable', 'plugins', '--disable', 'memories', '--disable', 'skill_search', '-c', 'web_search="disabled"', '-m', model, '-'];
   fail('unsupported one-shot harness');
 }
 
@@ -72,15 +72,22 @@ export async function runOneShot(env, { input, cwd, prefer = [], timeout = 600_0
       warn(`one-shot: ${pick.model} (${pick.harness}) on ${pick.account ?? 'its login'}`);
       r = await run(pick.harness, oneShotArgs(pick.harness, pick.model, cwd), { env: childEnv, input, timeout, cwd, killGroup: true });
       reading = pick.harness === 'codex' ? codexUsageOnBox(childEnv, { root: join(childEnv.CODEX_HOME, 'sessions') }) : lastRateLimit('claude', r.stdout);
-      // A completed successful answer outranks an earlier, recovered refusal.
-      if (r.status === 0 && !r.error && !r.signal) { try { answer = answerOf(pick.harness, r.stdout); } catch { /* failed or incomplete */ } }
-      refusal = answer !== undefined ? null : lastRefusal(pick.harness, r.stdout);
-      // Codex exec stdout omits structured quota errors; the dedicated rollout has them.
-      if (pick.harness === 'codex' && !refusal && answer === undefined) {
+      const stdoutState = terminalOutcome(pick.harness, r.stdout);
+      let rolloutState = null;
+      // A dedicated home and no subagents: only this run's provider trace. The
+      // rollout is authoritative over stdout bookkeeping; conflicting explicit
+      // non-quota failures fail closed instead of spending a second account.
+      if (pick.harness === 'codex') {
         const { readdirSync } = await import('node:fs');
         const walk = p => { try { return readdirSync(p, { withFileTypes: true }).flatMap(e => e.isDirectory() ? walk(join(p, e.name)) : e.isFile() && e.name.endsWith('.jsonl') ? [join(p, e.name)] : []); } catch { return []; } };
-        for (const f of walk(join(childEnv.CODEX_HOME, 'sessions'))) refusal ||= lastRefusal('codex', tailOf(f) ?? '');
+        for (const f of walk(join(childEnv.CODEX_HOME, 'sessions'))) {
+          const next = terminalOutcome('codex', tailOf(f) ?? '');
+          if (next) rolloutState = next;
+        }
       }
+      const state = [stdoutState, rolloutState].some(s => s?.kind === 'error') ? { kind: 'error' } : rolloutState ?? stdoutState;
+      refusal = state?.kind === 'quota';
+      if (state?.kind === 'answer' && r.status === 0 && !r.error && !r.signal) answer = answerOf(pick.harness, r.stdout);
       if (reading) {
         const reported = await call('usage', { harness: pick.harness, reading: { ...reading, checked: reading.checked ?? Math.floor(Date.now() / 1000) } });
         if (reported.error || reported.ok === false) fail('one-shot usage report failed');
@@ -92,7 +99,7 @@ export async function runOneShot(env, { input, cwd, prefer = [], timeout = 600_0
       if (held.error || held.ok === false) fail('could not hold refused account');
     }
     if (refusal && !attempt) { avoid.push(pick.harness); continue; }
-    if (r.error || r.signal || r.status !== 0 || refusal) fail('one-shot failed (no prompt or output logged)');
+    if (r.error || r.signal || r.status !== 0 || refusal || answer === undefined) fail('one-shot failed (no prompt or output logged)');
     return answer ?? answerOf(pick.harness, r.stdout);
   }
 }

@@ -396,6 +396,29 @@ export function codexRefusal(event) {
   return null;
 }
 
+/** Terminal state for one short CLI run. Completion wrappers never erase a failure. */
+export function terminalOutcome(harness, text) {
+  const quota = harness === 'claude' ? claudeRefusal : codexRefusal;
+  let state = null;
+  for (const line of String(text ?? '').split('\n')) {
+    let v; try { v = JSON.parse(line); } catch { continue; }
+    const p = ['event_msg', 'response_item'].includes(v?.type) ? v.payload : v;
+    const q = quota(v);
+    if (q) { state = { kind: 'quota', ...q }; continue; }
+    if (harness === 'claude') {
+      if ((v?.type === 'assistant' && v.isApiErrorMessage === true || v?.type === 'result' && v.is_error === true) && v.error !== undefined) state = { kind: 'error' };
+      else if (v?.type === 'result' && v.is_error === true) { if (!['quota', 'error'].includes(state?.kind)) state = { kind: 'failed' }; }
+      else if (v?.type === 'result' && typeof v.result === 'string' || v?.type === 'assistant' && v.isApiErrorMessage !== true) state = { kind: 'answer' };
+    } else {
+      if (p?.type === 'error' && p.codex_error_info !== undefined) state = { kind: 'error' };
+      else if (p?.type === 'error' || p?.type === 'turn.failed') { if (!['quota', 'error'].includes(state?.kind)) state = { kind: 'failed' }; }
+      else if (v?.type === 'item.completed' && v.item?.type === 'agent_message' || p?.type === 'agent_message' || v?.type === 'response_item' && p?.role === 'assistant') state = { kind: 'answer' };
+      else if (v?.type === 'response_item') state = { kind: 'progress' };
+    }
+  }
+  return state;
+}
+
 /**
  * The refusal that ended a turn, from the end of its harness's own JSONL (a transcript or a rollout): the last
  * refusal, if nothing but more refusals and bookkeeping came after it (a turn that went on to work isn't refused).
@@ -421,7 +444,7 @@ export function lastRefusal(harness, text) {
     // an earlier turn's refusal.
     if (harness === 'claude' && v?.type === 'assistant' && v.isApiErrorMessage !== true) last = null;
     if (harness === 'claude' && v?.type === 'result' && !v.is_error && typeof v.result === 'string') last = null;
-    if (harness === 'codex' && (v?.type === 'turn.completed' || v?.type === 'item.completed' && v.item?.type === 'agent_message')) last = null;
+    if (harness === 'codex' && (v?.type === 'item.completed' && v.item?.type === 'agent_message')) last = null;
     if (harness === 'claude' && v?.type === 'user' && !(Array.isArray(v.message?.content) && v.message.content.some((c) => c?.type === 'tool_result'))) last = null;
     if (harness === 'codex' && (v?.type === 'response_item' || v?.type === 'turn_context' || (v?.type === 'event_msg' && ['user_message', 'task_started'].includes(v.payload?.type)))) last = null;
   }

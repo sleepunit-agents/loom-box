@@ -5,7 +5,8 @@ import { mkdirSync, writeFileSync, existsSync, rmSync } from 'node:fs';
 import { scratch } from './scratch.mjs';
 import { update } from '../src/state.mjs';
 import { deliveryDir, saveConv, shortCallGate } from '../src/delivery.mjs';
-import { runAsync } from '../src/grader.mjs';
+import { terminalOutcome } from '../src/logins.mjs';
+import { runAsync, answerOf } from '../src/grader.mjs';
 import { chooseOneShot, runOneShot, refuseOneShot } from '../src/oneshot.mjs';
 
 const setup = () => {
@@ -134,4 +135,18 @@ test('a later structured non-quota failure supersedes a quota refusal without an
   await assert.rejects(runOneShot(env,{input:'p',cwd:env.HOME},{warn:()=>{},call:async(p)=>{if(p==='oneshot-refused')held=true;return {model:'m',harness};},run:async()=>{runs++;return {status:1,stdout:events.map(JSON.stringify).join('\n')};}}),/failed/);
   assert.equal(runs,1);assert.equal(held,false);
  }
+});
+test('Codex rollout and stdout conflicts with a non-quota failure never retry',async()=>{
+ for(const quotaInStdout of [true,false]){
+  const env=setup();mkdirSync(join(env.HOME,'.codex'));writeFileSync(join(env.HOME,'.codex','auth.json'),'{}');let runs=0,held=false;
+  const quota={type:'error',codex_error_info:'usage_limit_exceeded'},other={type:'error',codex_error_info:'server_error'};
+  const run=async(_b,_a,o)=>{runs++;const d=new Date(),root=join(o.env.CODEX_HOME,'sessions',String(d.getUTCFullYear()),String(d.getUTCMonth()+1).padStart(2,'0'),String(d.getUTCDate()).padStart(2,'0'));mkdirSync(root,{recursive:true});writeFileSync(join(root,'rollout.jsonl'),JSON.stringify({type:'event_msg',payload:quotaInStdout?other:quota}));return {status:1,stdout:JSON.stringify(quotaInStdout?quota:other)};};
+  await assert.rejects(runOneShot(env,{input:'p',cwd:env.HOME},{run,warn:()=>{},call:async(p)=>{if(p==='oneshot-refused')held=true;return {model:'m',harness:'codex'};}}),/failed/);
+  assert.equal(runs,1);assert.equal(held,false);
+ }
+});
+test('turn.completed bookkeeping never clears a quota error after an answer',()=>{
+ const text=[{type:'item.completed',item:{type:'agent_message',text:'earlier answer'}},{type:'error',codex_error_info:'usage_limit_exceeded'},{type:'turn.completed'}].map(JSON.stringify).join('\n');
+ assert.throws(()=>answerOf('codex',text),/failed/);
+ assert.equal(terminalOutcome('codex',text).kind,'quota');
 });

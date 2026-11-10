@@ -222,7 +222,6 @@ export function answerOf(harness, stdout) {
     try { e = JSON.parse(l); } catch { continue; }
     if (e?.type === 'item.completed' && e.item?.type === 'agent_message' && typeof e.item.text === 'string') { last = e.item.text; failed = false; }
     if (e?.type === 'turn.failed' || e?.type === 'error') failed = true;
-    if (e?.type === 'turn.completed') failed = false;
   }
   if (failed) throw new GraderError('codex’s turn failed');
   if (last === null) throw new GraderError('codex said nothing');
