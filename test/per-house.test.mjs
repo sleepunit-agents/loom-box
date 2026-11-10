@@ -697,6 +697,10 @@ test('a body of the owner\'s in the shared house from before moves to its own: n
   assert.equal(sent.accepted, undefined);
   assert.match(sent.reason, /moved to another principal's house/);
   assert.equal((await api(w.env, fx, { caller: shared, path: 'principal', body: proof })).status, 409);
+  // Nor an unproven relay's return address from there: any sibling in the shared house could be the one claiming it.
+  const { originOf } = await import('../src/relay.mjs');
+  assert.equal(originOf(w.env, shared, C, {}), null);
+  assert.equal(originOf(w.env, shared, undefined, {}), null);
   // Its next message ends it there and starts it fresh, from its digests, in a house of its own: its session stays
   // behind, since any sibling in the shared house could have rewritten it.
   const first = loadConv(w.env, C).body;

@@ -26,7 +26,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync, appendFileSync, mkdirSync } from 'node:fs';
 import { delimiter, dirname, join } from 'node:path';
 import { coreFrom } from './core.mjs';
-import { deliver, deliveryDir, heldConv, holdsRun, listConvs, loadConv } from './delivery.mjs';
+import { deliver, deliveryDir, heldConv, holdsRun, listConvs, loadConv, seatMoved } from './delivery.mjs';
 import { readBody } from './bodies.mjs';
 import { principalOf } from './principal.mjs';
 import { GRANTS, KEY, householdOf, paired } from './grants.mjs';
@@ -181,6 +181,9 @@ export function originOf(env, caller, id, proof = {}) {
     // agent there would be recorded under the wrong peer and dodge that pair's ping-pong check.
     if (!held(c)) return null;
     if (proof.key && holdsRun(env, id, proof, { caller })) return c;
+    // Unproven, never one whose house is no longer its conversation's (t-2061): in a shared house from before, any
+    // sibling there could be the one claiming it.
+    if (seatMoved(env, c)) return null;
     // Unproven, it's the asker's only when no other conversation of this agent is at work: any such body could be the
     // one claiming it (a guest venue's into the owner's thread, or the owner's thread's into a guest venue, where the
     // answer would be read by guests; a sibling thread; a DM with someone else).
@@ -188,7 +191,7 @@ export function originOf(env, caller, id, proof = {}) {
   }
   if (!caller.house) return null;
   const candidates = working();
-  return candidates.length === 1 && held(candidates[0]) && eligible(candidates[0]) ? candidates[0] : null;
+  return candidates.length === 1 && held(candidates[0]) && eligible(candidates[0]) && !seatMoved(env, candidates[0]) ? candidates[0] : null;
 }
 
 /**

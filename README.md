@@ -499,7 +499,7 @@ one container, so walling conversations apart inside a house isn't possible; wal
   idles out (`LOOM_RUNTIME_WARM_IDLE_S`); until then it sits in the owner's house. A proof with no caller at all is
   loom's own CLI on loom's machine, which no house reaches: there the house check doesn't apply.
 - **Cost.** Houses for other people are capped per agent: `LOOM_RUNTIME_SEAT_HOUSES` (default 8 since t-2061, one per conversation; a value outside 1-64
-  is taken as 4) live
+  is taken as 8) live
   houses for seats other than the owner's and the asking seat's own (a seat's draining house and its new one count as
   one), counted in the same state write that makes a house (two starts at once can't both pass it). At the cap a
   conversation that needs another house waits (`queued`, saying so), keeping its slot; any other seat's house that
