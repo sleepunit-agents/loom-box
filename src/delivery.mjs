@@ -109,7 +109,7 @@ import { admit, allocatorOf, capacityGate, forecastBurn, logShadow, readReadings
 import { readRelays } from './relay.mjs';
 import { householdOwners, membersOf, ownersOf } from './owners.mjs';
 import { approvalsFake, approvalsRun, approvalsRunAsync, approvalsWhy } from './approvals-call.mjs';
-import { OWNER_SEAT, carriesSession, mint, noteSender, resetSigned, principalOf, putWakeFor, resetActsFor, seatOf, takeWakeContext, verify } from './principal.mjs';
+import { OWNER_SEAT, carriesSession, hostKeyOf, mint, noteSender, resetSigned, principalOf, putWakeFor, resetActsFor, seatOf, takeWakeContext, verify } from './principal.mjs';
 
 const DAY_MS = 86_400_000;
 export const MAX_TEXT = 40_000;
@@ -1861,7 +1861,7 @@ async function recoverPreparedStart(env, op, d) {
         locked(env, () => { const current = loadConv(env, op.cv); if (ours(current, op)) { abandon(current, d.now().getTime()); saveConv(env, current); } });
         return;
       }
-      if (!record || record.harness !== prepared.harness || record.agent !== c.agent || record.seat !== (prepared.snapshot.bodyRules.seat ?? 'owner')) throw Error('the original house reservation cannot be verified');
+      if (!record || record.harness !== prepared.harness || record.agent !== c.agent || record.seat !== hostKeyOf(prepared.snapshot.bodyRules.seat ?? 'owner', c.spawn?.role?.needs)) throw Error('the original house reservation cannot be verified');
       const runner = d.runner(prepared.harness, false), handle = prepared.handle ?? houseLaunchHandle(record);
       if (!prepared.handle && !['reserved', 'refused'].includes(record.state)) throw Error('the published house handle is missing from its prepared conversation');
       if (record.state === 'reserved') runner.cancelPreparedLaunch(handle);
