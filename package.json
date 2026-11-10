@@ -113,7 +113,7 @@
       {
         "name": "LOOM_RUNTIME_LOCAL_BODIES",
         "label": "Agents whose local wakes have their bodies on this machine",
-        "hint": "JSON {\"agents\":[\"art\"],\"cwd\":\"/home/art/Art\",...}; codex:true enables Codex; machineClaudeLogin:true offers the native daemon's separate login; unset: refused"
+        "hint": "JSON {\"agents\":[\"art\"],\"cwd\":\"/home/art/Art\",...}; also codex, machineClaudeLogin; house:[\"local-lane:plan\"] or where:\"house\" runs those in the owner's house; unset: refused"
       },
       {
         "name": "LOOM_RUNTIME_ALERT_COMMAND",

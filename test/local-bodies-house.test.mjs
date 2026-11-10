@@ -27,31 +27,46 @@ test('the setting: "here" by default, "house" only when said', () => {
   assert.equal(localBodiesOf({ LOOM_RUNTIME_LOCAL_BODIES: JSON.stringify(base) }).where, 'here');
   assert.equal(localBodiesOf({ LOOM_RUNTIME_LOCAL_BODIES: JSON.stringify({ ...base, where: 'house' }) }).where, 'house');
   assert.equal(localBodiesOf({ LOOM_RUNTIME_LOCAL_BODIES: JSON.stringify({ ...base, where: 'elsewhere' }) }).where, 'here');
-  assert.deepEqual(localBodiesOf({ LOOM_RUNTIME_LOCAL_BODIES: JSON.stringify({ ...base, house: ['lane:letters', 'lane:letters', 7, '', 'x'.repeat(201)] }) }).house, ['lane:letters']);
+  assert.deepEqual(localBodiesOf({ LOOM_RUNTIME_LOCAL_BODIES: JSON.stringify({ ...base, house: ['lane:letters', 'local-lane:letters', 7, '', 'x'.repeat(201)] }) }).house, ['local-lane:letters']);
   assert.equal(localBodiesOf({ LOOM_RUNTIME_LOCAL_BODIES: JSON.stringify({ ...base, house: 'lane:letters' }) }).house, undefined);
 });
 
 test('"house": [places] moves only those lanes into his house, one at a time; the rest stay on loom\'s machine', async () => {
   const { w, asked, lwake, conv } = setup(undefined, { house: ['lane:letters'] });
-  await deliver(w.env, lwake('lane:boot', 'boot'), w.o);
+  await deliver(w.env, lwake('local-lane:boot', 'boot'), w.o);
   assert.ok(asked.includes(true), 'a lane not named still runs here');
-  assert.equal(readBody(w.env, conv('lane:boot').body).local, true);
-  assert.equal(conv('lane:boot').bodyRules?.seat, undefined);
+  assert.equal(readBody(w.env, conv('local-lane:boot').body).local, true);
+  assert.equal(conv('local-lane:boot').bodyRules?.seat, undefined);
   const starts = w.log.filter((l) => l[0] === 'start').length;
-  const r = await deliver(w.env, lwake('lane:letters', 'letters'), w.o);
+  const r = await deliver(w.env, lwake('local-lane:letters', 'letters'), w.o);
   assert.equal(r.body, 'started');
   assert.equal(w.log.filter((l) => l[0] === 'start').length, starts + 1, 'started by the house runner');
-  const c = conv('lane:letters');
+  const c = conv('local-lane:letters');
   assert.equal(c.local, true);
   assert.equal(c.bodyRules.seat, `owner.${c.conversation}`);
   assert.equal(readBody(w.env, c.body).local, undefined);
 });
 
+test('"house": a lane named as `lane:<lane>` or `local-lane:<lane>` moves its local runs (the clock\'s `local-lane:` place); other places match exactly', async () => {
+  for (const entry of ['lane:plan', 'local-lane:plan']) {
+    const { w, asked, lwake, conv } = setup(undefined, { house: [entry, 'alert:host-watch'] });
+    const r = await deliver(w.env, lwake('local-lane:plan', 'plan'), w.o);
+    assert.equal(r.body, 'started', entry);
+    assert.ok(!asked.includes(true), `${entry}: never the local runner`);
+    assert.equal(conv('local-lane:plan').bodyRules.seat, `owner.${conv('local-lane:plan').conversation}`, entry);
+    await deliver(w.env, lwake('alert:host-watch', 'alert'), w.o);
+    assert.equal(conv('alert:host-watch').bodyRules.seat, `owner.${conv('alert:host-watch').conversation}`, `${entry}: a named place, exactly`);
+    await deliver(w.env, lwake('alert:host', 'alert'), w.o);
+    assert.ok(asked.includes(true), `${entry}: a place not listed stays here`);
+    assert.equal(readBody(w.env, conv('alert:host').body).local, true);
+  }
+});
+
 test('"house": [places] keeps the owner\'s-work-only rule: a named lane\'s wake nobody can say is his gets no body', async () => {
   const { w, asked, lwake, conv } = setup(undefined, { house: ['lane:x'] });
-  const r = await deliver(w.env, lwake('lane:x', 'do it', { handOver: null }), w.o);
+  const r = await deliver(w.env, lwake('local-lane:x', 'do it', { handOver: null }), w.o);
   assert.notEqual(r.body, 'started');
-  assert.equal(conv('lane:x').body, undefined);
+  assert.equal(conv('local-lane:x').body, undefined);
   assert.equal(asked.length, 0);
 });
 
@@ -125,14 +140,14 @@ test('a housed lane\'s saved session expires as its house\'s: loom\'s machine\'s
   const asked = [];
   const runner = w.o.runner;
   w.o.runner = (h, local) => { if (h !== 'codex') asked.push(!!local); return runner(h, local); };
-  await deliver(w.env, lwake('lane:h', 'go'), w.o);
-  w.runner.finish(conv('lane:h').body);
+  await deliver(w.env, lwake('local-lane:h', 'go'), w.o);
+  w.runner.finish(conv('local-lane:h').body);
   await tick(w.env, w.o);
   w.clock.advance(601_000);
   await tick(w.env, w.o);
-  assert.ok(conv('lane:h').slot?.rules?.seat, 'its session saved in his house');
+  assert.ok(conv('local-lane:h').slot?.rules?.seat, 'its session saved in his house');
   w.clock.advance(60 * 86_400_000);
   await tick(w.env, w.o);
-  assert.equal(conv('lane:h')?.slot, undefined, 'expired');
+  assert.equal(conv('local-lane:h')?.slot, undefined, 'expired');
   assert.ok(!asked.includes(true), 'never the local runner');
 });
