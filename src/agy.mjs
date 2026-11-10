@@ -75,9 +75,16 @@ export class AgyRunner {
     writeFileSync(join(dir, 'pid'), String(child.pid), { mode: 0o600 });
     // Host receives private executable/argv and exactly one user event on stdin.
     // Closing stdin cannot lose the final result: the host waits for agy exit.
-    const inputReady = new Promise((done, fail) => {
+    const piped = new Promise((done, fail) => {
       child.stdin.once('error', fail);
       child.stdin.end(JSON.stringify({ executable: this.agy, argv, prompt: { event: 'user', message: { content: brief } } }), error => error ? fail(error) : done());
+    });
+    const inputReady = piped.then(async () => {
+      const deadline = Date.now() + 10000;
+      while (!existsSync(join(dir, 'input-ready'))) {
+        if (existsSync(join(dir, 'exit.json')) || Date.now() >= deadline) throw Error('agy prompt delivery is unconfirmed');
+        await new Promise(done => setTimeout(done, 20));
+      }
     });
     child.unref();
     return { id, harness: 'agy', model, inputReady };

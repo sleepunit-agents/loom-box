@@ -104,3 +104,22 @@ test('native configuration roundtrip selects agy without sharing a login', () =>
   const result = await resolveFor(env, { agent: 'art', venue: 'relay', pin: AGY_MODELS[0].id, accounts: { kind: 'none', list: () => null } });
   assert.equal(result.harness, 'agy');
  });
+
+test('stop escalates surviving tools even after agy itself exits', async () => {
+  const f = fixture(), cli = join(f.dir, 'tool-agy');
+  writeFileSync(cli, `#!${process.execPath}\nimport {spawn} from 'node:child_process';\nimport {writeFileSync} from 'node:fs';\nprocess.stdin.resume();\nprocess.stdin.on('end',()=>{\n const tool=spawn(process.execPath,['-e',"process.on('SIGTERM',()=>{});setInterval(()=>{},1000);"],{stdio:'ignore'});\n setTimeout(()=>writeFileSync(process.env.HOME+'/tool-pid',String(tool.pid)),150);\n process.on('SIGTERM',()=>process.exit(0));\n});\n`, { mode: 0o700 });
+  const runner = new AgyRunner({ ...f, agy: cli }), body = runner.start({ brief: 'hi', cwd: f.cwd });
+  await body.inputReady;
+  const pidFile = join(f.runsDir, body.id, 'home/tool-pid');
+  await wait(() => { try { return !!readFileSync(pidFile); } catch { return false; } });
+  const tool = Number(readFileSync(pidFile, 'utf8'));
+  runner.end(body);
+  await new Promise(r => setTimeout(r, 250));
+  assert.equal(runner.stopped(body), false, 'host retains stop ownership through escalation');
+  const deadline = Date.now() + 7000;
+  while (!runner.stopped(body) && Date.now() < deadline) await new Promise(r => setTimeout(r, 20));
+  assert.equal(runner.stopped(body), true);
+  let state;
+  try { state = readFileSync('/proc/'+tool+'/stat','utf8').split(') ')[1][0]; } catch { state = 'gone'; }
+  assert.ok(['gone', 'Z'].includes(state), 'tool has stopped executing before acknowledgement');
+});
