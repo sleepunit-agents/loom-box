@@ -197,3 +197,47 @@ test('a reused spare whose environment names an ended conversation waits for its
   // Nothing ever comes: the environment's, as before, and the runtime decides.
   assert.equal(bodyConversation({ ...env, CLAUDE_CODE_SESSION_ID: 'sess-never' }, { waitMs: 500, sleep: () => {} }), A);
 });
+
+// t-2054: the clock woke a parked body after the owner allowed its approval (w-788106, h-1486). Its body ran in a reused
+// spare whose environment named another conversation (cv-80d1a580c2b3), so `wake in 1m --approval a-…` was refused:
+// "this body acts for someone loom can't name". End to end: the clock hands over the owner for the wake, the wake
+// lands in a spare that kept the first body's environment, and the body's own `principal` (what piece-call sends to
+// approvals and the clock) is answered by the runtime itself, not a stub.
+test('a wake the clock handed over for the owner, its body in a reused spare with another conversation\'s environment, proves itself the owner\'s', async () => {
+  const { putWakeFor } = await import('../src/principal.mjs');
+  const { deliveryDir } = await import('../src/delivery.mjs');
+  const w = world();
+  mkdirSync(join(w.env.HOME, '.config', 'loom'), { recursive: true });
+  writeFileSync(join(w.env.HOME, '.config', 'loom', 'household.json'), JSON.stringify({ members: [{ person: 'jonathan', agents: '*' }] }));
+  const venues = { ...w.o.venues(), wake: { kind: 'scheduled', piece: 'loom' } };
+  const o = { ...w.o, venues: () => venues };
+  await deliver(w.env, w.msg('dm:A', 'one'), o);                 // the first body: the spare keeps its environment
+  const first = loadConv(w.env, cvOf('art', 'slack', 'dm:A'));
+  // The clock unparks w-788106 on the owner's Allow: whom it's for, then the delivery (loom-clock fire, t-1943).
+  putWakeFor(deliveryDir(w.env), { agent: 'art', place: 'wake:w-788106', id: 'w-788106', for: 'owner' });
+  await deliver(w.env, { source: 'clock', id: 'w-788106', agent: 'art', venue: 'wake', place: 'wake:w-788106', label: 'Resumed after your OK',
+    from: { kind: 'schedule' }, kind: 'wake', at: w.clock.now().toISOString(), text: 'The owner allowed a-13c0d49b.' }, o);
+  const woke = loadConv(w.env, cvOf('art', 'wake', 'wake:w-788106'));
+  assert.ok(woke.body, 'the wake has a body');
+  const stale = w.runner.envs[first.body.split(':')[1]];
+  const session = w.sessionFor(woke.conversation);
+  // Its house keeps which conversation its session holds, and that conversation's key (bodyhost.mjs).
+  const HOME = home();
+  keepKey({ HOME }, woke.conversation, w.runner.envs[woke.body.split(':')[1]].LOOM_BODY_KEY);
+  keepSession({ HOME }, session, woke.conversation);
+  writeFileSync(join(HOME, 'tok'), 'housetoken\n');
+  const caller = { kind: 'agent', agent: 'art' };
+  const server = createServer((req, res) => { let b = ''; req.on('data', (x) => { b += x; }); req.on('end', () => {
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify(bodyPrincipal(w.env, JSON.parse(b), { ...o, caller })));
+  }); });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  try {
+    const r = await principalFromBody({ HOME, LOOM_TOKEN_FILE: join(HOME, 'tok'), LOOM_BODY_CONVERSATION: stale.LOOM_BODY_CONVERSATION,
+      LOOM_BODY_KEY: stale.LOOM_BODY_KEY, CLAUDE_CODE_SESSION_ID: session }, server.address().port);
+    const p = JSON.parse(r.stdout || '{}');
+    assert.equal(p.ok, true, `${p.reason ?? ''} ${r.stderr}`);
+    assert.equal(p.conversation, woke.conversation, 'the wake\'s conversation, not the spare\'s first one');
+    assert.equal(p.owner, true, 'approvals reads the owner, so the allowed approval can be spent');
+  } finally { server.close(); }
+});
