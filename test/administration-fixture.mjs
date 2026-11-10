@@ -11,9 +11,12 @@ export function cleanupAdministrationFixture() {
   fixtures.clear();
   if (process.env.LOOM_ADMIN_TEST_SUPERVISOR !== 'systemd') return;
   const manager = process.getuid() === 0 ? [] : ['--user'];
+  const failures = [];
   for (const unit of new Set(units)) {
+    try {
     const options = { encoding: 'utf8', timeout: 5000 };
-    spawnSync('systemctl', [...manager, 'stop', unit], options);
+    const stopped = spawnSync('systemctl', [...manager, 'stop', unit], options);
+    if (stopped.error) throw stopped.error;
     // A successful transient unit may already have been collected.
     const reset = spawnSync('systemctl', [...manager, 'reset-failed', unit], options);
     if (reset.error) throw reset.error;
@@ -22,5 +25,7 @@ export function cleanupAdministrationFixture() {
     if (['active', 'activating', 'deactivating', 'failed'].includes(state.stdout.trim())) {
       throw Error('Fixture unit was not cleaned up: ' + unit);
     }
+    } catch (error) { failures.push(error); }
   }
+  if (failures.length) throw new AggregateError(failures, 'Administration fixture cleanup failed');
 }
