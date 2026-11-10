@@ -16,7 +16,7 @@ alone, like the local command).
 The one copy every house runs (loom-box house/). sleepunit-agents/art keeps
 bin/piece-call, the same program, for loom's own machine.
 
-For approvals and clock, a body in a conversation (LOOM_BODY_CONVERSATION) also
+For approvals and clock (and tasks, when it names a --source, t-2117), a body in a conversation (LOOM_BODY_CONVERSATION) also
 sends `--principal <statement>` (any it typed is taken off first): on whose behalf it acts, signed by the runtime
 (`loom-runtime principal`, t-1943; PIECE_CALL_RUNTIME names another program,
 for tests). Without one the piece treats the body as acting for someone it
@@ -55,8 +55,17 @@ def inline_file(piece, argv):
 
 
 # The pieces that decide by on whose behalf a body acts (t-1943): approvals (whose standing rules and grants apply)
-# and the clock (whose a wake is). They get a signed statement of this body's principal, from the runtime.
-PRINCIPAL_PIECES = {"approvals", "clock"}
+# and the clock (whose a wake is). They get a signed statement of this body's principal, from the runtime. The tasks
+# piece gets one only with a --source: it lists a task as made in a conversation's thread only for a body the
+# statement proves is in it (t-2117).
+PRINCIPAL_PIECES = {"approvals", "clock", "tasks"}
+
+
+def wants_principal(piece, argv):
+    """Whether this call carries the runtime's statement: always for approvals and the clock; for tasks, a --source."""
+    if piece not in PRINCIPAL_PIECES:
+        return False
+    return piece != "tasks" or "--source" in argv
 
 
 def in_body():
@@ -98,7 +107,7 @@ def principal_statement():
 def with_principal(piece, argv):
     """argv with the runtime's `--principal <statement>` appended, for a piece that decides by it. Any the caller typed
     (`--principal X`, `--principal=X`) is taken off first: the piece sees the runtime's, or none (someone it can't name)."""
-    if piece not in PRINCIPAL_PIECES:
+    if not wants_principal(piece, argv):
         return argv
     clean, i = [], 0
     while i < len(argv):
