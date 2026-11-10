@@ -164,7 +164,7 @@ test('the executor parses a spooled request again, drops one that isn\'t a priva
   const q = join(dir, 'queue');
   await hostRequest(w.env, caller, ['unit-status', 'loom-http', '--conversation', CV], proof, w.d);
   // A tampered request: a verb the table doesn't have.
-  writeFileSync(join(q, 'hx-00000000000000aa.json'), JSON.stringify({ id: 'hx-00000000000000aa', verb: 'sh', args: ['-c', 'id'] }), { mode: 0o600 });
+  writeFileSync(join(q, 'hx-00000000000000aa.json'), JSON.stringify({ id: 'hx-00000000000000aa', verb: 'sh', args: ['-c', 'id'], at: new Date().toISOString() }), { mode: 0o600 });
   // One anyone could have written.
   writeFileSync(join(q, 'hx-00000000000000bb.json'), JSON.stringify({ id: 'hx-00000000000000bb', verb: 'unit-status', args: ['loom-http'] }));
   chmodSync(join(q, 'hx-00000000000000bb.json'), 0o666);
@@ -204,7 +204,7 @@ test('read: only the runtime\'s named logs and hosts/ files, never a link or a p
   assert.ok(readAllowed(w.env, 'hosts/mark.json', 'art').error, 'another agent\'s record');
   assert.ok(readAllowed(w.env, 'hosts/art.p-loren.json', 'art').error, 'a person\'s seat');
   for (const p of ['allocator-readings.jsonl', '../secret', '/etc/passwd', 'conversations/cv-0123456789ab.json', 'hosts/../../secret', 'keys/x.key']) assert.ok(readAllowed(w.env, p).error, p);
-  const r = await runOne(w.env, { id: 'hx-00000000000000dd', verb: 'read', agent: 'art', at: new Date().toISOString(), args: ['allocator-shadow.jsonl'] });
+  const r = await runOne(w.env, { id: 'hx-00000000000000dd', verb: 'read', agent: 'art', args: ['allocator-shadow.jsonl'] });
   assert.ok(readAllowed(w.env, 'relays.jsonl', 'art').error, 'every agent\'s relayed words: never');
   assert.equal(r.state, 'done');
   assert.equal(r.output, '{"a":1}\n');
@@ -329,4 +329,15 @@ test('a tail cut from longer output starts at a whole line, so half a token neve
   const r = boundOutput('x'.repeat(5000) + '\n' + body);
   assert.doesNotMatch(r.output, /[a-z0-9]{6}0123456789/);
   assert.match(r.output, /^ok line/);
+});
+
+test('a change waiting its turn behind a long one keeps its place (its age is judged at pickup)', async () => {
+  const w = world();
+  for (const p of ['runtime', 'clock']) await hostRequest(w.env, caller, ['pieces-update', p, '--approval', 'a-1234abcd', '--conversation', CV], proof, w.d);
+  const { MAX_WAIT_MS } = await import('../src/hostverbs.mjs');
+  const real = Date.now;
+  let ran = 0;
+  const exec = async () => { ran++; if (ran === 1) { const t0 = real(); Date.now = () => t0 + MAX_WAIT_MS + 60_000; } return { exit: 0, out: '' }; };
+  try { await execPass(w.env, { exec }); } finally { Date.now = real; }
+  assert.equal(ran, 2);
 });

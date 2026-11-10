@@ -353,10 +353,6 @@ export async function runOne(env, req, exec = runCommand) {
   const parsed = parseVerb(req?.verb, req?.args);
   const started = new Date().toISOString();
   if (parsed.error) return { id: req?.id, state: 'refused', reason: parsed.error, startedAt: started, endedAt: started };
-  // The owner's yes, and a body's ask, are for now: a request that waited past its time (no executor yet, or one
-  // that was down) never runs late.
-  const age = Date.now() - Date.parse(req.at ?? '');
-  if (!(age >= -60_000 && age <= MAX_WAIT_MS)) return { id: req.id, verb: req.verb, target: parsed.target, state: 'expired', reason: `it waited ${Number.isFinite(age) ? `${Math.round(age / 60_000)} minutes` : 'an unknown time'} for the executor (at most ${MAX_WAIT_MS / 60_000}); ask again`, startedAt: started, endedAt: started };
   const v = VERBS[parsed.verb];
   if (parsed.verb === 'read') {
     const ok = readAllowed(env, parsed.p.path, req.agent);
@@ -431,6 +427,15 @@ export async function execPass(env, { exec = runCommand, state = { busy: new Set
     try { renameSync(from, to); } catch { continue; } // another pass took it
     const req = readJson(to);
     if (!req || req.id !== id) { rmSync(to, { force: true }); log(env, { id, event: 'dropped', why: 'unreadable' }); continue; }
+    // The owner's yes, and a body's ask, are for now: one that waited past its time to be picked up (no executor yet,
+    // or one that was down) never runs late. Judged here, at pickup, so a change waiting its turn behind a deploy keeps its place.
+    const age = Date.now() - Date.parse(req.at ?? '');
+    if (!(age >= -60_000 && age <= MAX_WAIT_MS)) {
+      writeJson(join(done, `${id}.json`), { id, verb: req.verb, target: req.target, agent: req.agent, conversation: req.conversation, state: 'expired', reason: `it waited ${Number.isFinite(age) ? `${Math.round(age / 60_000)} minutes` : 'an unknown time'} for the executor (at most ${MAX_WAIT_MS / 60_000}); ask again`, endedAt: new Date().toISOString() });
+      rmSync(to, { force: true });
+      log(env, { id, event: 'expired' });
+      continue;
+    }
     busy.add(id);
     const go = async () => {
       // Stopping: a change that hasn't begun goes back on the queue for the next executor, never begun now.
