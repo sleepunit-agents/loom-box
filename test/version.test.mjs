@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { applyUpgrade, carriedSettings, lastUpgrade, loadCarried, maybeUpgrade, ownCommit, ownPiece, packagePiece, recoverUpgrade, recoveryTrusted, swapCommand, vetCommit, INSTALL_STALE_MS, RECOVER_TRUST_MS, UPGRADE_RETRY_MS } from '../src/version.mjs';
+import { applyUpgrade, carriedSettings, coreDir, updateCore, lastUpgrade, loadCarried, maybeUpgrade, ownCommit, ownPiece, packagePiece, recoverUpgrade, recoveryTrusted, swapCommand, vetCommit, INSTALL_STALE_MS, RECOVER_TRUST_MS, UPGRADE_RETRY_MS } from '../src/version.mjs';
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { scratch } from './scratch.mjs';
@@ -346,4 +346,89 @@ test('one step at a time: a recovery while the upgrade unit holds the lock does 
   writeFileSync(join(stateDir, 'upgrade.lock'), '999999999');
   const home = scratch('h-');
   assert.equal(recoverUpgrade({ env: { LOOM_HOME: home, HOME: home }, stateDir, run: fakeLoom(home).run }).state, 'done');
+});
+
+// Core/piece skew (t-2086): loom core on a box is a checkout built in place, and nothing updated it. loom#707 raised a
+// piece's loom.settings cap from 20 to 32; the runtime declared 21, and boxes on an older core refused it on every try.
+const git = (dir, ...a) => { const r = spawnSync('git', ['-C', dir, ...a], { encoding: 'utf-8', env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } }); assert.equal(r.status, 0, r.stderr); return r.stdout.trim(); };
+/** A canonical loom repo whose main has an old core (cap 20) then a new one (cap 32), and a box's checkout of the old. */
+function coreRepos() {
+  const up = scratch('loom-core-up-');
+  git(up, 'init', '-q', '-b', 'main');
+  const commitCap = (cap) => { writeFileSync(join(up, 'package.json'), JSON.stringify({ name: '@jbarket/loomai', cap })); git(up, 'add', '.'); git(up, 'commit', '-q', '-m', `cap ${cap}`); return git(up, 'rev-parse', 'HEAD'); };
+  const old = commitCap(20);
+  const box = join(scratch('loom-core-box-'), 'loom');
+  spawnSync('git', ['clone', '-q', up, box]);
+  mkdirSync(join(box, 'dist'), { recursive: true });
+  writeFileSync(join(box, 'dist', 'index.js'), '#!/usr/bin/env node\n');
+  const neu = commitCap(32);
+  return { up, box, old, neu };
+}
+/** git for real; npm and loom faked: `loom pieces install` checks a 21-setting runtime against the checkout's own cap. */
+function skewedBox(box, { buildFails = false } = {}) {
+  const calls = [];
+  const run = (bin, args, opts) => {
+    if (bin === 'git') return spawnSync(bin, args, opts);
+    calls.push(`${bin} ${args.join(' ')}`);
+    // buildFails: the new core doesn't build here; the old one still does.
+    const capNow = () => JSON.parse(readFileSync(join(box, 'package.json'), 'utf-8')).cap;
+    if (bin === 'npm') return buildFails && args[1] === 'build' && capNow() === 32 ? { status: 2, stdout: '', stderr: 'tsc: error' } : { status: 0, stdout: '', stderr: '' };
+    if (bin === 'loom' && args[1] === 'install') {
+      const cap = JSON.parse(readFileSync(join(box, 'package.json'), 'utf-8')).cap;
+      return 21 > cap ? { status: 1, stdout: '', stderr: `loom pieces: loom-runtime: loom.settings is not a list of at most ${cap}` } : { status: 0, stdout: 'ok', stderr: '' };
+    }
+    return { status: 0, stdout: '', stderr: '' };
+  };
+  return { run, calls };
+}
+
+test('a box finds its loom core from the bin it runs, through the link to the checkout\'s dist', () => {
+  const { box } = coreRepos();
+  const bin = scratch('loom-bin-');
+  spawnSync('ln', ['-s', join(box, 'dist', 'index.js'), join(bin, 'loom')]);
+  assert.equal(coreDir({ PATH: `/nowhere:${bin}` }), box);
+  assert.equal(coreDir({ LOOM_CORE_DIR: box }), box);
+  assert.equal(coreDir({ PATH: '/nowhere' }), null);
+  assert.equal(coreDir({ LOOM_CORE_DIR: bin }), null);
+});
+
+test('a box whose loom core is older than the runtime it installs brings core forward and installs it, instead of failing every retry', () => {
+  const { up, box, old, neu } = coreRepos();
+  const stateDir = scratch('loom-box-v-');
+  const { run, calls } = skewedBox(box);
+  const env = { LOOM_CORE_DIR: box, LOOM_CORE_URL: up };
+  const r = applyUpgrade({ commit: B, from: A, piece: 'runtime', target: 'runtime', env, stateDir, run });
+  assert.equal(r.state, 'done', r.error);
+  assert.deepEqual(r.core, { from: old, to: neu });
+  assert.equal(git(box, 'rev-parse', 'HEAD'), neu);
+  assert.deepEqual(calls, [`loom pieces install --from github:sleepunit-agents/loom-box#${B} --yes`, 'npm ci --no-audit --no-fund', 'npm run build', `loom pieces install --from github:sleepunit-agents/loom-box#${B} --yes`]);
+  // Without the core update (the box's old upgrade), the same install fails as it did on one and wunder.
+  const { box: box2 } = coreRepos();
+  const stuck = applyUpgrade({ commit: B, from: A, piece: 'runtime', target: 'runtime', env: { LOOM_CORE_DIR: box2 }, stateDir: scratch('loom-box-v-'), run: skewedBox(box2).run, core: () => ({ error: 'no core update' }) });
+  assert.equal(stuck.state, 'failed');
+  assert.match(stuck.detail, /loom\.settings is not a list of at most 20/);
+});
+
+test('a core build that fails puts the old core back, and the upgrade says why it still failed', () => {
+  const { up, box, old } = coreRepos();
+  const { run } = skewedBox(box, { buildFails: true });
+  const r = applyUpgrade({ commit: B, from: A, piece: 'runtime', target: 'runtime', env: { LOOM_CORE_DIR: box, LOOM_CORE_URL: up }, stateDir: scratch('loom-box-v-'), run });
+  assert.equal(r.state, 'failed');
+  assert.match(r.core.error, /building loom core at .* failed \(exit 2\); it's back at/);
+  assert.equal(git(box, 'rev-parse', 'HEAD'), old);
+});
+
+test('core is only ever fast-forwarded on canonical main: a checkout ahead of it or beside it is left alone; one already current isn\'t rebuilt', () => {
+  const { up, box } = coreRepos();
+  git(box, 'commit', '-q', '--allow-empty', '-m', 'local');
+  const mine = git(box, 'rev-parse', 'HEAD');
+  const { run, calls } = skewedBox(box);
+  assert.match(updateCore({ LOOM_CORE_DIR: box }, { run, url: up }).error, /isn't behind sleepunit-agents\/loom's main; left as it is/);
+  assert.equal(git(box, 'rev-parse', 'HEAD'), mine);
+  assert.equal(calls.length, 0);
+  const { up: up2, box: box2, neu } = coreRepos();
+  git(box2, 'fetch', '-q', up2, 'main'); git(box2, 'merge', '-q', '--ff-only', 'FETCH_HEAD');
+  assert.deepEqual(updateCore({ LOOM_CORE_DIR: box2 }, { run, url: up2 }), { from: neu, to: neu });
+  assert.equal(calls.length, 0);
+  assert.match(updateCore({ PATH: '/nowhere' }, { run }).error, /isn't a checkout of loom this box can update/);
 });
