@@ -23,6 +23,8 @@ function world(t) {
   const out = continuationOutbox(options), { handle } = out.issue(source);
   return { options, setTime: (value) => { clock = value; }, dir, source, child, current, binding, out, handle, reload: () => continuationOutbox(options), advance: () => { clock += 3600001; } };
 }
+// Every sealed file, finished reports (done/) included.
+const files = (w, keep = () => true) => [w.dir, join(w.dir, 'done')].flatMap((d) => readdirSync(d).filter((n) => n.endsWith('.sealed') && keep(n)).map((n) => join(d, n)));
 const bind = (w) => w.out.bind(w.handle, w.binding, w.source, w.child);
 const queue = (w, text = 'private result') => w.out.enqueue(w.handle, w.child, w.source, { id: 'final', text });
 
@@ -53,7 +55,7 @@ test('sealed durable queue retries identical id and rejects differing payload, w
   const first = queue(w);
   assert.deepEqual(queue(w), first);
   assert.throws(() => queue(w, 'different'), /different text/);
-  for (const n of readdirSync(w.dir)) assert.equal(readFileSync(join(w.dir, n)).includes(Buffer.from('private result')), false);
+  for (const f of files(w)) assert.equal(readFileSync(f).includes(Buffer.from('private result')), false);
   let posted;
   await w.reload().drain({ current: w.current, post: async (p) => { posted = p; return { ok: true, posted: true }; } });
   assert.deepEqual(posted.target, w.source.target);
@@ -188,8 +190,8 @@ test('legacy unbound, bound, pending and delivered records do not gain a deadlin
     if (state === 'delivered') await w.out.drain({ current: w.current, post: async () => ({ ok: true, posted: true }) });
     // Recreate an old sealed fixture, without modifying its commitment or identity.
     const { writeFileSync } = await import('node:fs');
-    for (const file of readdirSync(w.dir).filter(n => n.endsWith('.sealed') && n !== 'clock.sealed')) {
-      const path = join(w.dir, file), record = JSON.parse(w.options.sealer.open(readFileSync(path)));
+    for (const path of files(w, (n) => n !== 'clock.sealed')) {
+      const record = JSON.parse(w.options.sealer.open(readFileSync(path)));
       delete record.version; delete record.expiresAt;
       writeFileSync(path, w.options.sealer.seal(Buffer.from(JSON.stringify(record))));
     }
@@ -219,8 +221,8 @@ test('legacy attempted report remains indeterminate, never expired or renewed', 
   const w = world(t); bind(w); queue(w);
   await w.out.drain({ current: w.current, post: async () => { throw new Error('unknown acceptance'); } });
   const { writeFileSync } = await import('node:fs');
-  for (const file of readdirSync(w.dir).filter(n => /^(grant|report)-/.test(n))) {
-    const path = join(w.dir, file), record = JSON.parse(w.options.sealer.open(readFileSync(path)));
+  for (const path of files(w, (n) => /^(grant|report)-/.test(n))) {
+    const record = JSON.parse(w.options.sealer.open(readFileSync(path)));
     delete record.version; delete record.expiresAt;
     writeFileSync(path, w.options.sealer.seal(Buffer.from(JSON.stringify(record))));
   }
@@ -297,7 +299,7 @@ test('collection waits for the deadline plus retention and a final outcome, then
   assert.deepEqual(w.reload().collect(), { reports: 0, grants: 0 });
   w.setTime(deadline + keep);
   assert.deepEqual(w.reload().collect(), { reports: 1, grants: 2 });
-  assert.deepEqual(readdirSync(w.dir).filter(n => /^(grant|report)-/.test(n)), []);
+  assert.deepEqual(files(w, (n) => /^(grant|report)-/.test(n)), []);
   // A collected capability grants nothing: not a status, a new report, a bind or a firing.
   for (const f of [() => w.out.status(w.handle, w.child, 'final'), () => queue(w, 'again'), () => bind(w),
     () => w.out.bind(other, { ...w.binding }, w.source, w.child), () => w.out.checkFiring(other, w.binding, w.source, w.child)])
@@ -334,8 +336,8 @@ test('a deleted destination ends reconciliation; legacy and uncertain-clock reco
   assert.deepEqual(w.reload().collect(), { reports: 0, grants: 0 });
   // Legacy (no version) records are held whatever their age.
   const { writeFileSync } = await import('node:fs');
-  for (const file of readdirSync(w.dir).filter(n => /^(grant|report)-/.test(n))) {
-    const path = join(w.dir, file), record = JSON.parse(w.options.sealer.open(readFileSync(path)));
+  for (const path of files(w, (n) => /^(grant|report)-/.test(n))) {
+    const record = JSON.parse(w.options.sealer.open(readFileSync(path)));
     delete record.version;
     writeFileSync(path, w.options.sealer.seal(Buffer.from(JSON.stringify(record))));
   }
@@ -412,7 +414,11 @@ test('one record that will not open is skipped and said; the rest still drain an
   assert.equal(posted, 1);
   assert.ok(said.some((m) => m.includes(`report-${'0'.repeat(64)}`)));
   w.setTime(1000 + w.options.lifetimeMs + 7 * 86400000);
-  assert.deepEqual(out.collect(), { reports: 1, grants: 1 });
+  // While a report won't open, no grant is collected (it might be that report's).
+  assert.deepEqual(out.collect(), { reports: 1, grants: 0 });
+  const { unlinkSync } = await import('node:fs');
+  unlinkSync(join(w.dir, `report-${'0'.repeat(64)}.sealed`));
+  assert.deepEqual(out.collect(), { reports: 0, grants: 1 });
 });
 
 test('collection asked hourly runs at most once an hour', (t) => {
@@ -443,4 +449,20 @@ test('an uncertain report is still reconciled after its source was reset', async
   await w.reload().drain({ current: w.current, post: () => assert.fail('post after reset'), reconcile: async () => { asked += 1; return { ok: true, state: 'delivered', id: '9' }; } });
   assert.equal(asked, 1);
   assert.equal(w.out.status(w.handle, w.child, 'final').state, 'delivered');
+});
+
+test('a finished report is never opened by drain again, and a continuation sends a bounded number of reports', async (t) => {
+  const w = world(t); bind(w);
+  const counting = { ...w.options.sealer, opened: 0, open(b) { this.opened += 1; return w.options.sealer.open(b); } };
+  const out = continuationOutbox({ ...w.options, sealer: counting, maxReports: 3 });
+  for (const id of ['a', 'b', 'c']) out.enqueue(w.handle, w.child, w.source, { id, text: `report ${id}` });
+  assert.throws(() => out.enqueue(w.handle, w.child, w.source, { id: 'd', text: 'one too many' }), /its 3 reports/);
+  assert.equal(out.enqueue(w.handle, w.child, w.source, { id: 'a', text: 'report a' }).state, 'pending', 'an exact retry is not a new report');
+  await out.drain({ current: w.current, post: async () => ({ ok: true, posted: true }) });
+  assert.equal(files(w, (n) => n.startsWith('report-')).filter((f) => f.includes('/done/')).length, 3);
+  counting.opened = 0;
+  w.advance();
+  await out.drain({ current: w.current, post: () => assert.fail('no post') });
+  assert.equal(counting.opened, 0, 'nothing opened for finished reports');
+  assert.equal(out.status(w.handle, w.child, 'b').state, 'delivered', 'still readable');
 });

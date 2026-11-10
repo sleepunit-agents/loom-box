@@ -31,21 +31,33 @@ const unchanged = (saved, current) => current && !current.resetPending && same(s
  * a receipt; rename alone isn't a power-loss durability guarantee. Locks never span I/O.
  * post must implement stable-ref idempotency, including identical-payload checking.
  */
-export function continuationOutbox({ dir, sealer, now = Date.now, lifetimeMs = null, retainMs = 7 * 86400000, maxLive = 20, warn = () => {} }) {
+export function continuationOutbox({ dir, sealer, now = Date.now, lifetimeMs = null, retainMs = 7 * 86400000, maxLive = 20, maxReports = 20, warn = () => {} }) {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const path = (id) => join(dir, `${id}.sealed`);
-  const read = (id) => {
-    try { return JSON.parse(sealer.open(readFileSync(path(id))).toString('utf8')); }
-    catch (e) { if (e.code === 'ENOENT') return null; throw e; }
+  // Reports with a final outcome live in done/: drain lists only the top level, so finished reports cost a tick
+  // nothing (never opened again there), and only collection, hourly, reads done/.
+  const doneDir = join(dir, 'done');
+  mkdirSync(doneDir, { recursive: true, mode: 0o700 });
+  const FINAL = ['delivered', 'expired', 'failed', 'withdrawn'];
+  const isFinal = (v) => FINAL.includes(v?.state);
+  const path = (id, done = false) => join(done ? doneDir : dir, `${id}.sealed`);
+  const open1 = (file) => {
+    try { return JSON.parse(sealer.open(readFileSync(file)).toString('utf8')); }
+    catch (e) { if (e.code === 'ENOENT') return undefined; throw e; }
   };
+  const read = (id) => open1(path(id)) ?? (id.startsWith('report-') ? open1(path(id, true)) : undefined) ?? null;
+  const syncDir = (d) => { const dd = openSync(d, 'r'); try { fsyncSync(dd); } finally { closeSync(dd); } };
   const save = (id, value) => {
-    const temp = join(dir, `.${id}.${randomBytes(8).toString('hex')}.tmp`);
+    const done = id.startsWith('report-') && isFinal(value);
+    const where = done ? doneDir : dir;
+    const temp = join(where, `.${id}.${randomBytes(8).toString('hex')}.tmp`);
     try {
       writeFileSync(temp, sealer.seal(Buffer.from(JSON.stringify(value))), { flag: 'wx', mode: 0o600 });
       const fd = openSync(temp, 'r'); try { fsyncSync(fd); } finally { closeSync(fd); }
-      renameSync(temp, path(id));
-      const dd = openSync(dir, 'r'); try { fsyncSync(dd); } finally { closeSync(dd); }
+      renameSync(temp, path(id, done));
+      syncDir(where);
     } finally { rmSync(temp, { force: true }); }
+    // Then the other copy goes: a crash between leaves two, and read prefers the top level (re-saved next drain).
+    if (id.startsWith('report-')) { rmSync(path(id, !done), { force: true }); syncDir(done ? dir : doneDir); }
   };
   const locked = (fn) => withLock(dir, 'outbox.lock', fn, 'continuation outbox');
   const grantId = (handle) => {
@@ -169,6 +181,9 @@ export function continuationOutbox({ dir, sealer, now = Date.now, lifetimeMs = n
           return receipt(prior);
         }
         const time = observe(); active(gid, g, time);
+        // A bounded number of reports per continuation: a looping child can't grow the outbox without limit.
+        if ((g.reports ?? 0) >= maxReports) throw new StateError(`this continuation has sent its ${maxReports} reports`, 429);
+        g.reports = (g.reports ?? 0) + 1; save(gid, g);
         const row = { version: 2, expiresAt: g.expiresAt, ref, grant: gid, child, on, text, hash: digest(text), state: 'pending', attempts: 0, next: now() };
         save(rid, row);
         return receipt(row);
@@ -190,6 +205,7 @@ export function continuationOutbox({ dir, sealer, now = Date.now, lifetimeMs = n
         // One record that won't open (a damaged file, a replaced key) is skipped and said, never a stop for the rest.
         try { row = locked(() => {
           const r = read(id);
+          if (r && isFinal(r)) { save(id, r); return null; } // an older layout's finished row: moved to done/
           if (!r || !['pending', 'indeterminate'].includes(r.state)) return null;
           const recovering = r.state === 'indeterminate';
           const g = read(r.grant);
@@ -261,21 +277,24 @@ export function continuationOutbox({ dir, sealer, now = Date.now, lifetimeMs = n
         const names = readdirSync(dir);
         const old = (x) => x?.version === 2 && Number.isSafeInteger(x.expiresAt) && x.expiresAt + retainMs <= time;
         const held = new Set();
-        let reports = 0, grants = 0;
-        for (const n of names.filter((n) => /^report-[0-9a-f]{64}\.sealed$/.test(n))) {
+        let reports = 0, grants = 0, unreadable = false;
+        const isReport = (n) => /^report-[0-9a-f]{64}\.sealed$/.test(n);
+        for (const [n, done] of [...names.filter(isReport).map((n) => [n, false]), ...readdirSync(doneDir).filter(isReport).map((n) => [n, true])]) {
           const id = n.slice(0, -7);
-          let r; try { r = read(id); } catch (e) { warn(`continuation ${id}: ${e.message}`); continue; }
+          let r; try { r = open1(path(id, done)); } catch (e) { unreadable = true; warn(`continuation ${id}: ${e.message}`); continue; }
           if (!r) continue;
-          if (old(r) && ['delivered', 'expired', 'failed', 'withdrawn'].includes(r.state)) { rmSync(path(id), { force: true }); reports += 1; }
+          if (old(r) && isFinal(r)) { rmSync(path(id, done), { force: true }); reports += 1; }
           else held.add(r.grant);
         }
+        // A report that won't open might name any grant: keep them all until it does (or is removed).
+        if (unreadable) return { reports, grants: 0 };
         for (const n of names.filter((n) => /^grant-[0-9a-f]{64}\.sealed$/.test(n))) {
           const id = n.slice(0, -7);
           if (held.has(id)) continue;
           let g; try { g = read(id); } catch (e) { warn(`continuation ${id}: ${e.message}`); continue; }
           if (old(g)) { rmSync(path(id), { force: true }); grants += 1; }
         }
-        if (reports || grants) { const dd = openSync(dir, 'r'); try { fsyncSync(dd); } finally { closeSync(dd); } }
+        if (reports || grants) { syncDir(dir); syncDir(doneDir); }
         return { reports, grants };
       });
     },

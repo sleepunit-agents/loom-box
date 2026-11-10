@@ -3306,7 +3306,13 @@ export function continuationCall(env, { action, conversation, key, session, hand
   if (problem) throw new StateError(problem, 403);
   const outbox = continuationsOf(env, d, o);
   const child = continuationSnapshot(env, conversation);
-  if (action === 'issue') return outbox.issue(child);
+  if (action === 'issue') {
+    const grant = outbox.issue(child);
+    // Issuing is activity: the record outlives the grant's deadline (13 days at most, under the 14-day idle window),
+    // so a reset made while it's live is never forgotten and the grant matched again.
+    locked(env, () => { const x = loadConv(env, conversation); if (x) { x.last = d.now().toISOString(); saveConv(env, x); } });
+    return grant;
+  }
   if (action !== 'enqueue' && action !== 'status') throw new StateError('unknown continuation action', 400);
   const source = continuationSnapshot(env, outbox.sourceConversation(handle));
   // Recover admission-to-binding after a runtime crash. These sealed records came
@@ -3507,6 +3513,8 @@ export function resetPrincipal(env, conversation, { agent, approval } = {}) {
     delete c.slot; delete c.home; delete c.fallback;
     // The run that heard what came before speaks no more: its key is gone now, not when its body is ended.
     if (c.body) { c.resetPending = true; delete c.sendKey; }
+    // A reset is activity: the record (and the reset it holds) outlives any continuation issued before it (t-2004).
+    c.last = new Date().toISOString();
     saveConv(env, c);
     // Still no one's on loom's machine (something unplaced arrived after he was asked): said, so his Allow isn't "done".
     return { ok: true, conversation, ...(c.local && localForeign(env, c) ? { stillForeign: true } : {}) };

@@ -194,3 +194,15 @@ every tick: nothing can land in a deleted thread.
 Core needs no collector of its own: a continuation receipt is its reply row (ref + payload hash), kept and removed with
 its thread (the words are swept on the household's comms schedule; the hash stays for conflict checks), and thread
 deletion goes through the tombstone-first journal. The clock drops a firing past its deadline (`fire-refused`).
+
+Limits (2026-11-10, after the fresh read):
+
+- At most 20 live continuations per source conversation (`issue` answers 429). A grant frees its slot only at its
+  deadline, used or not: a thread that issues one per follow-up can be refused for up to the lifetime. The count is a
+  plaintext ledger (`issued.json`: conversation ids and deadlines only), a guard against load, not authority.
+- At most 20 reports per continuation (`enqueue` answers 429; an exact retry of an id isn't a new report).
+- Reports with a final outcome move to `done/`: drain never opens them again; only collection, at most hourly, does.
+- A record that won't open (damaged, or a replaced key) is skipped and logged; while any report won't open, no grant
+  is collected. A failure in the outbox never stops the rest of the tick.
+- Issuing and resetting update the conversation's `last`, so its record (and any reset it holds) outlives every grant
+  issued from it (lifetime 13 days at most, under the 14-day idle window).

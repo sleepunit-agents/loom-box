@@ -151,7 +151,10 @@ test('issuance lifetime comes from the runtime policy: 7 days by default, refuse
   const args = { action: 'issue', conversation: c.conversation, key: w.runner.envs[c.body.split(':')[1]].LOOM_BODY_KEY, session: w.sessionFor(c.conversation) };
   const { continuationLifetimeMs: _, ...o } = w.o;
   const now = w.o.now().getTime();
+  const stale = loadConv(w.env, c.conversation); stale.last = '2000-01-01T00:00:00.000Z';
+  writeFileSync(join(deliveryDir(w.env), 'conversations', `${c.conversation}.json`), JSON.stringify(stale));
   assert.equal(continuationCall(w.env, args, o).expiresAt, now + 7 * 86400000);
+  assert.equal(Date.parse(loadConv(w.env, c.conversation).last), now, 'issuing keeps the record (and its reset) past the deadline');
   w.env.LOOM_RUNTIME_CONTINUATION_DAYS = '2';
   assert.equal(continuationCall(w.env, args, o).expiresAt, now + 2 * 86400000);
   for (const bad of ['0', '14', '31', '1.5', 'week']) {
