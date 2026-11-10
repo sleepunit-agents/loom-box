@@ -155,6 +155,10 @@ export const PACK_MS = 120_000;
  */
 export async function runBodyHost({ client, runner, env = process.env, hostKey, cwd = process.cwd(), now = () => Date.now(), sleep = (ms) => new Promise((r) => setTimeout(r, ms)), idleS = IDLE_S, beats = Infinity, packMs = PACK_MS, log = () => {} }) {
   const history = nativeHistoryRoot(env);
+  // Every harness's history linked now, before any body runs (t-2072): a body that runs the other harness's CLI itself
+  // (a Claude body's `codex exec`, a Codex body's `claude -p`) would otherwise make that CLI's history a plain folder
+  // with files in it, and native history refuses to replace those, so no body on that harness could start here again.
+  if (history) for (const h of ['claude', 'codex']) { try { runner(h); } catch (e) { log(`couldn't link ${h}'s native history: ${String(e.message).split('\n')[0].slice(0, 200)}`); } }
   // Its own key, in memory only: the boot key from its task, traded on its first sync for the host's key.
   let key = hostKey;
   // A body's environment is the house's, less what's the host's alone: its task (which carried the boot key).
