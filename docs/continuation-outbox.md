@@ -174,7 +174,7 @@ issuance remains refused and no retention collector is enabled.
 
 ### Lifetime policy and collection (2026-11-10)
 
-Production issuance is on. The runtime service's `LOOM_RUNTIME_CONTINUATION_DAYS` (an integer 1-30, default 7) is the lifetime from issue; the
+Production issuance is on. The runtime service's `LOOM_RUNTIME_CONTINUATION_DAYS` (an integer 1-13, default 7: under the 14-day idle window that keeps a conversation record, and so its reset, while a grant names it) is the lifetime from issue; the
 absolute deadline it gives is sealed (the service's tick writes its settings to `continuation-policy.json`, which a body's local CLI reads, so a body's own environment never chooses its deadline) in the grant, handed to the clock at scheduling, and committed in core's payload
 hash. Nothing renews it. An out-of-range or non-integer value refuses issuance (fail closed), as no policy did before.
 

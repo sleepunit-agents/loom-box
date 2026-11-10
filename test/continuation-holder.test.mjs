@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { continuationCall, deliver, deliveryDir, drainContinuations, loadConv } from '../src/delivery.mjs';
+import { continuationCall, deliver, deliveryDir, drainContinuations, loadConv, tick } from '../src/delivery.mjs';
 import { world } from './delivery-world.mjs';
 
 test('continuation holder boundary refuses borrowed keys, sessions, houses and unknown principals', async () => {
@@ -154,7 +154,7 @@ test('issuance lifetime comes from the runtime policy: 7 days by default, refuse
   assert.equal(continuationCall(w.env, args, o).expiresAt, now + 7 * 86400000);
   w.env.LOOM_RUNTIME_CONTINUATION_DAYS = '2';
   assert.equal(continuationCall(w.env, args, o).expiresAt, now + 2 * 86400000);
-  for (const bad of ['0', '31', '1.5', 'week']) {
+  for (const bad of ['0', '14', '31', '1.5', 'week']) {
     w.env.LOOM_RUNTIME_CONTINUATION_DAYS = bad;
     assert.throws(() => continuationCall(w.env, args, o), /policy is not configured/);
   }
@@ -175,4 +175,16 @@ test("once the runtime's tick has run, its policy is the one used: a body's own 
   assert.equal(continuationCall({ ...w.env, LOOM_RUNTIME_CONTINUATION_DAYS: '30' }, args, o).expiresAt, now + 3 * 86400000);
   await drainContinuations({ ...w.env, LOOM_RUNTIME_CONTINUATION_DAYS: 'week' }, { ...o, service: true }); // misconfigured service: fails closed
   assert.throws(() => continuationCall({ ...w.env, LOOM_RUNTIME_CONTINUATION_DAYS: '7' }, args, o), /policy is not configured/);
+});
+
+test("a broken continuation outbox never stops the rest of the tick", async () => {
+  const w = world();
+  const r = await deliver(w.env, w.msg('outbox-broken', 'hello'), w.o);
+  const { rmSync } = await import('node:fs');
+  rmSync(join(deliveryDir(w.env), 'continuations'), { recursive: true, force: true });
+  writeFileSync(join(deliveryDir(w.env), 'continuations'), 'a file where the outbox should be');
+  const said = [];
+  await tick(w.env, { ...w.o, warn: (m) => said.push(m) });
+  assert.ok(said.some((m) => m.startsWith('continuations:')), said.join('\n'));
+  assert.ok(loadConv(w.env, r.conversation));
 });

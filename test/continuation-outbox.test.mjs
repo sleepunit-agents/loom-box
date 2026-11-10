@@ -399,3 +399,48 @@ test('a report whose authority was reset is rechecked after a backoff, not resea
   await w.reload().drain({ current: w.current, post: () => assert.fail('reset post') });
   assert.deepEqual(readFileSync(join(w.dir, file)), before);
 });
+
+test('one record that will not open is skipped and said; the rest still drain and collect', async (t) => {
+  const w = world(t); bind(w); queue(w, 'good one');
+  const { writeFileSync } = await import('node:fs');
+  writeFileSync(join(w.dir, `report-${'0'.repeat(64)}.sealed`), Buffer.from('not sealed'));
+  writeFileSync(join(w.dir, `grant-${'0'.repeat(64)}.sealed`), Buffer.from('not sealed'));
+  const said = [];
+  const out = continuationOutbox({ ...w.options, warn: (m) => said.push(m) });
+  let posted = 0;
+  await out.drain({ current: w.current, post: async () => { posted += 1; return { ok: true, posted: true }; } });
+  assert.equal(posted, 1);
+  assert.ok(said.some((m) => m.includes(`report-${'0'.repeat(64)}`)));
+  w.setTime(1000 + w.options.lifetimeMs + 7 * 86400000);
+  assert.deepEqual(out.collect(), { reports: 1, grants: 1 });
+});
+
+test('collection asked hourly runs at most once an hour', (t) => {
+  const w = world(t);
+  assert.equal(w.out.collect({ every: 3600000 }).skipped, undefined);
+  assert.equal(w.out.collect({ every: 3600000 }).skipped, true);
+  w.setTime(1000 + 3600000);
+  assert.equal(w.out.collect({ every: 3600000 }).skipped, undefined);
+});
+
+test('a source conversation has at most a bounded number of live continuations', (t) => {
+  const w = world(t);
+  const out = continuationOutbox({ ...w.options, maxLive: 3 });
+  out.issue(w.source); out.issue(w.source); // the world issued one already
+  assert.throws(() => out.issue(w.source), /3 live continuations/);
+  assert.ok(out.issue({ ...w.source, conversation: 'cv-cccccccccccc' }).handle, 'another conversation is its own count');
+  w.setTime(1000 + w.options.lifetimeMs);
+  assert.ok(out.issue(w.source).handle, 'room again once they reach their deadline');
+});
+
+test('an uncertain report is still reconciled after its source was reset', async (t) => {
+  const w = world(t); bind(w); queue(w);
+  await w.out.drain({ current: w.current, post: async () => { throw new Error('receipt lost'); } });
+  w.setTime(w.binding.expiresAt);
+  await w.reload().drain({ current: w.current, post: () => assert.fail('late post'), reconcile: async () => ({ ok: true, state: 'unresolved' }) });
+  w.source.reset = 1; w.setTime(w.binding.expiresAt + 3600000);
+  let asked = 0;
+  await w.reload().drain({ current: w.current, post: () => assert.fail('post after reset'), reconcile: async () => { asked += 1; return { ok: true, state: 'delivered', id: '9' }; } });
+  assert.equal(asked, 1);
+  assert.equal(w.out.status(w.handle, w.child, 'final').state, 'delivered');
+});

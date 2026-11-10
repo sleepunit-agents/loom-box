@@ -2915,7 +2915,8 @@ export async function tick(env, o = {}, only, mem = new Map()) {
       if (h && !c.control) { c.control = { id: randomBytes(12).toString('hex'), at: d.now().toISOString(), state: c.body || c.starting ? 'pending' : 'held', house: h.house }; saveConv(env, c); }
     }
   });
-  await drainContinuations(env, o);
+  // Follow-up reports (t-2004): never a reason the rest of the tick doesn't run.
+  try { await drainContinuations(env, o); } catch (e) { d.warn(`continuations: ${e.message}`); }
   discardPass(env, d);
   if (only) await drain(env, only, d, mem);
   const now = d.now().getTime();
@@ -3225,7 +3226,7 @@ function holderProblem(env, d, c, { key, session }, does = 'speaks in it', calle
 }
 
 /**
- * How long a continuation may report, from its issue (t-2004): LOOM_RUNTIME_CONTINUATION_DAYS, 1-30, default 7. One
+ * How long a continuation may report, from its issue (t-2004): LOOM_RUNTIME_CONTINUATION_DAYS, 1-13, default 7 (under the 14-day idle window a conversation record is kept, so a reset it records can't be forgotten while a grant still names it). One
  * absolute deadline is sealed at issue and carried to the clock and core; nothing renews it. Its records are collected
  * LOOM_RUNTIME_CONTINUATION_KEEP_DAYS (1-90, default 7) after that deadline, once their outcome is final.
  */
@@ -3234,16 +3235,16 @@ function holderProblem(env, d, c, { key, session }, does = 'speaks in it', calle
 const policyFile = (env) => join(deliveryDir(env), 'continuation-policy.json');
 function envPolicy(env) {
   const days = (name, dflt, lo, hi) => { const n = env[name] === undefined || env[name] === '' ? dflt : Number(env[name]); return Number.isInteger(n) && n >= lo && n <= hi ? n : null; };
-  return { days: days('LOOM_RUNTIME_CONTINUATION_DAYS', 7, 1, 30), keepDays: days('LOOM_RUNTIME_CONTINUATION_KEEP_DAYS', 7, 1, 90) ?? 7 };
+  return { days: days('LOOM_RUNTIME_CONTINUATION_DAYS', 7, 1, 13), keepDays: days('LOOM_RUNTIME_CONTINUATION_KEEP_DAYS', 7, 1, 90) ?? 7 };
 }
 function continuationPolicy(env, o = {}, own = false) {
   let p = own ? envPolicy(env) : null;
   if (!p) { try { p = JSON.parse(readFileSync(policyFile(env), 'utf8')); } catch { p = envPolicy(env); } }
-  const life = Number.isInteger(p?.days) && p.days >= 1 && p.days <= 30 ? p.days : null;
+  const life = Number.isInteger(p?.days) && p.days >= 1 && p.days <= 13 ? p.days : null;
   const keep = Number.isInteger(p?.keepDays) && p.keepDays >= 1 && p.keepDays <= 90 ? p.keepDays : 7;
   return { lifetimeMs: o.continuationLifetimeMs ?? (life === null ? null : life * DAY_MS), retainMs: o.continuationRetainMs ?? keep * DAY_MS };
 }
-const continuationsOf = (env, d, o, own = false) => continuationOutbox({ dir: join(deliveryDir(env), 'continuations'), sealer: d.sealer, now: () => d.now().getTime(), ...continuationPolicy(env, o, own) });
+const continuationsOf = (env, d, o, own = false) => continuationOutbox({ dir: join(deliveryDir(env), 'continuations'), sealer: d.sealer, now: () => d.now().getTime(), warn: d.warn ?? (() => {}), ...continuationPolicy(env, o, own) });
 
 // Runtime-owned snapshots only. Neither a body nor the clock supplies these fields.
 export function continuationSnapshot(env, conversation) {
@@ -3280,7 +3281,7 @@ export async function drainContinuations(env, o = {}) {
       text: p.text, run: p.run, expiresAt: p.expiresAt, ...(p.on ? { on: p.on } : {}) });
     return answer?.ok === true && typeof answer.id === 'string' && answer.id.length > 0 ? { ok: true, posted: true } : answer;
   } });
-  outbox.collect();
+  outbox.collect({ every: 3600000 });
 }
 
 // Local clock bridge only; there is no body/API operation for inspecting grants.

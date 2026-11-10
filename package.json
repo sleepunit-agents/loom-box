@@ -135,7 +135,7 @@
         "name": "LOOM_RUNTIME_CONTINUATION_DAYS",
         "label": "Days a follow-up report capability lasts",
         "default": "7",
-        "hint": "1-30; a wake can carry it until then, and nothing renews it. Anything else stops new ones"
+        "hint": "1-13; a wake can carry it until then, and nothing renews it. Anything else stops new ones"
       },
       {
         "name": "LOOM_RUNTIME_CONTINUATION_KEEP_DAYS",
