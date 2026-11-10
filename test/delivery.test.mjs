@@ -28,6 +28,7 @@ import { setModels } from '../src/models.mjs';
 import { RunnerError, inbox } from '../src/runners.mjs';
 import { ageSealer } from '../src/sealed.mjs';
 import { scratch } from './scratch.mjs';
+import { StoreError } from '../src/store.mjs';
 
 import { here, pkg, cvOf, hasAge, fakeRunner, fakeCore, testSealer, world, plain } from './delivery-world.mjs';
 
@@ -633,6 +634,48 @@ test('a body that fails to start is the runtime\'s to retry, on its tick, with b
   assert.ok(w.log.find((l) => l[0] === 'start')[2].endsWith('Your lane is routines/knowledge.md.'));
   assert.deepEqual([Object.values(c.outcomes)[0].body, c.startFails, c.retryAt, c.queue.length], ['started', undefined, undefined, 0]);
   assert.equal(w.core.turns.filter((t) => t.conversation === cv).length, 1, 'one wake turn: retrying wrote nothing more');
+});
+
+test('a start that fails only while loom is restarting is retried quietly each minute, never counted toward the alert (t-2106)', async () => {
+  const w = world({ LOOM_RUNTIME_RETRY_S: '[60, 120]' });
+  const venues = { ...w.o.venues(), wake: { kind: 'scheduled', piece: 'loom' } };
+  const alerts = [];
+  // A deploy: loom store answers nothing (core 28b7f56, 2026-11-10 02:27: "Unexpected end of JSON input").
+  let deploying = true;
+  const policy = () => { if (deploying) throw new StoreError('loom store: its answer can\'t be read (Unexpected end of JSON input) (loom may be restarting)', 503, true); return null; };
+  const o = { ...w.o, venues: () => venues, policy, alert: (_env, a) => alerts.push(a) };
+  const wake = { source: 'clock', id: 'w-e7b1f4', agent: 'art', venue: 'wake', place: 'wake:w-e7b1f4', label: 'wake', from: { kind: 'schedule' }, kind: 'wake', at: w.clock.now().toISOString(), text: 'Check on t-1971.' };
+  assert.equal((await deliver(w.env, wake, o)).body, 'queued');
+  const cv = cvOf('art', 'wake', 'wake:w-e7b1f4');
+  // Five failed minutes: more than its two tries, and still no try counted, no give-up, no alert.
+  for (let i = 0; i < 5; i++) { w.clock.advance(60_000); await tick(w.env, o); }
+  let c = loadConv(w.env, cv);
+  assert.deepEqual([c.startFails, c.queue.length, alerts.length], [undefined, 1, 0]);
+  assert.equal(c.retryAt - w.clock.now().getTime(), 60_000);
+  assert.match(Object.values(c.outcomes)[0].reason, /loom couldn't be read .*trying again in 60 s/);
+  // The deploy ends: the next minute's try starts the body.
+  deploying = false;
+  w.clock.advance(60_000);
+  await tick(w.env, o);
+  c = loadConv(w.env, cv);
+  assert.deepEqual([Object.values(c.outcomes)[0].body, c.transientSince, alerts.length], ['started', undefined, 0]);
+});
+
+test('loom unreadable for longer than a deploy: past half an hour the tries count again, and the owner is told (t-2106)', async () => {
+  const w = world({ LOOM_RUNTIME_RETRY_S: '[60, 120]' });
+  const venues = { ...w.o.venues(), wake: { kind: 'scheduled', piece: 'loom' } };
+  const alerts = [];
+  const policy = () => { throw new StoreError('loom store: can\'t run loom: spawnSync loom ETIMEDOUT (loom may be restarting)', 503, true); };
+  const o = { ...w.o, venues: () => venues, policy, alert: (_env, a) => alerts.push(a) };
+  const wake = { source: 'clock', id: 'w-ccc333', agent: 'art', venue: 'wake', place: 'lane:knowledge', label: 'knowledge', from: { kind: 'schedule' }, kind: 'wake', at: w.clock.now().toISOString(), text: 'the lane' };
+  await deliver(w.env, wake, o);
+  const cv = cvOf('art', 'wake', 'lane:knowledge');
+  for (let i = 0; i < 40 && loadConv(w.env, cv).queue.length; i++) { w.clock.advance(120_000); await tick(w.env, o); }
+  const c = loadConv(w.env, cv);
+  assert.deepEqual([Object.values(c.outcomes)[0].body, c.queue.length], ['failed', 0]);
+  assert.equal(alerts.length, 1);
+  assert.equal(alerts[0].source, 'runtime-start');
+  assert.match(alerts[0].facts.reason, /policy can't be read/);
 });
 
 test('a dead registrar cannot replay an admitted native attempt (t-1853)', async () => {

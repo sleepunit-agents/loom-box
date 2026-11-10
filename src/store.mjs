@@ -7,8 +7,12 @@ import { spawnSync } from 'node:child_process';
 import { pieceName } from './piece.mjs';
 
 export class StoreError extends Error {
-  constructor(message, status = 503) { super(message); this.status = status; }
+  constructor(message, status = 503, transient = false) { super(message); this.status = status; this.transient = transient; }
 }
+
+/** A read loom couldn't answer at all (no process, a timeout, an empty or torn answer): loom restarting, as in a deploy. */
+const unreadable = (what) => new StoreError(`loom store: ${what} (loom may be restarting)`, 503, true);
+const parsed = (stdout) => { try { return JSON.parse(stdout); } catch (e) { throw unreadable(`its answer can't be read (${e.message})`); } };
 
 /** A store over `loom store <piece>`: get → {doc, rev} | null; put → rev; del; list → [{key, doc, rev}]. */
 export function loomStore(env = process.env, { run = spawnSync, piece = pieceName(env) } = {}) {
@@ -16,7 +20,7 @@ export function loomStore(env = process.env, { run = spawnSync, piece = pieceNam
   const call = (args, input) => {
     if (env.HOUSE_ID) throw new StoreError('the runtime store lives on loom, not in a house; use the runtime API');
     const r = run(loom, ['store', piece, ...args], { env, encoding: 'utf-8', input, timeout: 20_000, stdio: ['pipe', 'pipe', 'pipe'] });
-    if (r.error) throw new StoreError(`loom store: can't run ${loom}: ${r.error.message}`);
+    if (r.error) throw unreadable(`can't run ${loom}: ${r.error.message}`);
     return r;
   };
   const why = (r) => (r.stderr || '').trim().split('\n').find((line) => line.trim() && !/^[{}\[\]]$/.test(line.trim()))?.replace(/^loom store: /, '').slice(0, 300) || `exit ${r.status}`;
@@ -30,7 +34,7 @@ export function loomStore(env = process.env, { run = spawnSync, piece = pieceNam
       if (r.status === 3 && /no managed piece/.test(r.stderr || '')) throw new StoreError(`loom store: ${why(r)}`);
       if (r.status === 3) return null;
       if (r.status !== 0) throw new StoreError(`loom store: ${why(r)}`);
-      const d = JSON.parse(r.stdout);
+      const d = parsed(r.stdout);
       return { doc: d.doc, rev: d.rev };
     },
     put(collection, key, doc, ifRev) {
@@ -46,7 +50,7 @@ export function loomStore(env = process.env, { run = spawnSync, piece = pieceNam
     list(collection, prefix) {
       const r = call(['list', collection, ...(prefix ? ['--prefix', prefix] : []), '--limit', '1000']);
       if (r.status !== 0) throw new StoreError(`loom store: ${why(r)}`);
-      return JSON.parse(r.stdout || '[]').map((d) => ({ key: d.key, doc: d.doc, rev: d.rev }));
+      return parsed(r.stdout || '[]').map((d) => ({ key: d.key, doc: d.doc, rev: d.rev }));
     },
   };
 }

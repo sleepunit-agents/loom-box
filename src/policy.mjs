@@ -51,7 +51,10 @@ const TOOLS_MAX = 64, READERS_MAX = 12, MEMBERS_MAX = 12, PLACES_MAX = 64;
 const KEYS = ['deny', 'guest_deny', 'briefs', 'guest_places'];
 const BRIEF_KEYS = ['venues', 'guest', 'peer', 'notes', 'tiers'];
 
-export class RulesError extends Error {}
+export class RulesError extends Error {
+  /** `transient`: a read loom couldn't answer at all (store.mjs), so the same start may well work in a minute. */
+  constructor(message, { transient = false } = {}) { super(message); this.transient = transient; }
+}
 
 const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 const uniq = (a) => [...new Set(a)];
@@ -225,7 +228,7 @@ function rosterProblem(m) {
  */
 export async function rulesFor(c, msgs, d, { platform, core = false, principal = null, ownerSpoke = false, narrowing = null }) {
   let pol;
-  try { pol = d.policy(c.agent); } catch (e) { throw new RulesError(`${c.agent}'s policy can't be read (${e.message})`); }
+  try { pol = d.policy(c.agent); } catch (e) { throw new RulesError(`${c.agent}'s policy can't be read (${e.message})`, { transient: e?.transient === true }); }
   if (pol && policyProblem(pol)) throw new RulesError(`${c.agent}'s policy isn't one: ${policyProblem(pol)}`);
   pol ??= {};
   let gates = null;
@@ -234,7 +237,7 @@ export async function rulesFor(c, msgs, d, { platform, core = false, principal =
     // couldn't be read when it came, gets no body (only the schedule's and an agent's relays go on without them).
     // A Comms thread (a venue core adapts) whose messages are all its owner's needs no gates: its sender is tier 3.
     const ownersOnly = core && msgs.every((x) => x.owner === true || x.from?.kind !== 'person');
-    if (!ownersOnly && (platform || msgs.some((x) => x.from?.kind === 'person' || x.tierUnread))) throw new RulesError(`${c.agent}'s gates can't be read (${e.message}): no body for a person's message without them`);
+    if (!ownersOnly && (platform || msgs.some((x) => x.from?.kind === 'person' || x.tierUnread))) throw new RulesError(`${c.agent}'s gates can't be read (${e.message}): no body for a person's message without them`, { transient: e?.transient === true });
   }
   let about = cleanAbout({});
   if (platform) {
