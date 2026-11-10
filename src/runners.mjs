@@ -377,11 +377,11 @@ export class ClaudeRunner {
     const f = this.transcriptOf(body);
     if (!f) return null;
     let st;
-    try { st = statSync(f); } catch { return null; }
+    try { st = lstatSync(f); if (!st.isFile()) return null; } catch { return null; }
     // Kept for the process, by file: a body host makes a runner each beat, so a memo of its own would start over.
     const memos = SIGN_MEMO;
     let m = memos.get(f);
-    if (!m || st.size < m.offset) m = { offset: 0, seen: new Map(), rest: '' };
+    if (!m || st.ino !== m.ino || st.dev !== m.dev || st.size < (m.size ?? m.offset)) m = { ino: st.ino, dev: st.dev, offset: 0, seen: new Map(), rest: '' };
     if (st.size > m.offset) {
       const { text, next } = readFrom(f, m.offset, this.readMax.sign);
       const parts = (m.rest + text).split('\n');
@@ -391,6 +391,7 @@ export class ClaudeRunner {
       for (const l of parts) { try { claudeTokens([JSON.parse(l)], m.seen); } catch { /* not a line of JSON */ } }
       m.offset = next;
     }
+    m.size = st.size;
     memos.delete(f); memos.set(f, m);
     if (memos.size > 64) memos.delete(memos.keys().next().value);
     let tokens = 0;

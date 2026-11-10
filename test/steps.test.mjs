@@ -1,10 +1,10 @@
 // Work shown in full for the owner's Watching view (t-2109; Jonathan, 2026-11-10): a step's whole command, its whole
-// output or diff (each line redacted, ANSI colours kept, at most MAX_BODY), a result line in fixed phrases, the plan as
-// a checklist, the body's own words between steps, and a helper's steps under it. A read never shows what it read.
+// diff (each line redacted, controls stripped, at most MAX_BODY), a fixed result phrase, the plan as
+// a checklist, the body's own words between steps, and a helper's steps under it. Reads and shell output never show.
 // Built to the shapes Claude Code writes (`toolUseResult`, subagents/) and codex exec --json writes.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { appendFileSync, renameSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { claudeCards, claudeTokens, codexCards, commandLine, shownText, testsLine, changed, stepParts, MAX_BODY } from '../src/activity.mjs';
 import { cleanCards } from '../src/houserunner.mjs';
@@ -128,6 +128,12 @@ test('a sign of life: when its transcript last moved, and its tokens, each messa
   // A body host makes a runner each beat: a new one carries on from where the last read stopped.
   appendFileSync(f, `${a('m4', 4)}\n`);
   assert.equal(new ClaudeRunner({ projectsDir: join(root, 'projects'), jobsDir: join(root, 'jobs') }).signOfLife(body).tokens, 60);
+  const replacement = f + '.new';
+  writeFileSync(replacement, a('replacement', 2) + '\n' + ' '.repeat(2000));
+  renameSync(replacement, f);
+  assert.equal(r.signOfLife(body).tokens, 2, 'replacement larger than previous transcript starts its own total');
+  writeFileSync(f,a('short',3)+'\n');
+  assert.equal(r.signOfLife(body).tokens,3,'same file shortened starts at zero');
   assert.equal(claudeTokens([]), null);
 });
 
@@ -713,4 +719,30 @@ test('report card budgets count empty-array separators exactly', async () => {
     const result = fitCards(structuredClone(original), max);
     assert.ok(Buffer.byteLength(JSON.stringify(result)) <= max, String(max));
   }
+});
+
+test('the actual body-host sync applies count, per-body and shared card budgets', async () => {
+  const {runBodyHost,CARDS_MAX,REPORT_MAX} = await import('../src/bodyhost.mjs');
+  let started=0, syncs=0, transmitted;
+  const runner={
+    start:()=>({id:`b${++started}`}),status:()=> 'working',
+    activity:({id})=>Array.from({length:200},(_,i)=>({id:`${id}-${i}`,at:`2026-11-10T${id==='b5'?'12':'10'}:00:00Z`,tool:'Edit',state:'done',summary:'Edited a.ts',detail:'a.ts',body:id==='b5'?'+small':'+'.repeat(31_000)})),
+  };
+  await runBodyHost({runner:()=>runner,hostKey:'test-key',beats:2,sleep:async()=>{},idleS:0,
+    env:{HOME:scratch('sync-budget'),CLAUDE_SECURESTORAGE_CONFIG_DIR:'/login'},
+    client:async(path,{report})=>{
+      assert.equal(path,'body-sync');
+      if(++syncs===1)return {req:Object.fromEntries(Array.from({length:5},(_,i)=>[`r${i}`,{harness:'claude',brief:'test',activity:true}]))};
+      transmitted=structuredClone(report);return {exit:true};
+    },
+  });
+  assert.equal(started,5);
+  assert.equal(Object.keys(transmitted.bodies).length,5);
+  assert.ok(Buffer.byteLength(JSON.stringify(transmitted))<=REPORT_MAX);
+  for(const body of Object.values(transmitted.bodies)) {
+    assert.ok(body.cards.length<=100);
+    assert.ok(Buffer.byteLength(JSON.stringify(body.cards))<=CARDS_MAX+2);
+  }
+  assert.deepEqual(transmitted.bodies.b5.cards.map(c=>c.id),Array.from({length:100},(_,i)=>`b5-${100+i}`));
+  assert.ok(Object.values(transmitted.bodies).slice(0,4).reduce((n,b)=>n+b.cards.length,0)<32,'shared budget trimmed the four full per-body snapshots');
 });
