@@ -22,7 +22,7 @@ import { StateError, load, update } from './state.mjs';
 import { setting } from './piece.mjs';
 
 export const FAMILY = /^(anthropic|openai|google|mistral|local:[a-z0-9][a-z0-9._-]{0,39})$/;
-export const HARNESSES = ['claude', 'codex'];
+export const HARNESSES = ['claude', 'codex', 'agy'];
 const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:/\[\]-]{0,79}$/;
 const AGENT = /^[a-z][a-z0-9-]{0,39}$/;
 export const VENUE_KINDS = ['live', 'scheduled', 'agent'];
@@ -35,6 +35,11 @@ export const SCORE_DAYS = 14;
 export const MIN_GRADED = 5;
 
 /** Until the owner sets a list: the models the clock and the bridges ran on before the runtime chose. */
+// Examples only: adding these to a household's list requires an explicit preference.
+export const AGY_MODELS = [
+  { id: 'gemini-4-argon-high', harness: 'agy', family: 'google' },
+  { id: 'gemini-3.8-flash', harness: 'agy', family: 'google' },
+];
 export const DEFAULT_MODELS = [
   { id: 'claude-opus-5-5', harness: 'claude', family: 'anthropic', window: '7d_opus' },
   { id: 'claude-opus-5', harness: 'claude', family: 'anthropic', window: '7d_opus' },
@@ -97,7 +102,7 @@ export const readModelChoice = (env, agent, conversation) => modelChoiceOf(load(
 /** Low-level owner mutation; API/page callers verify the actual conversation and owner first. */
 export function setModelChoice(env, { agent, conversation, harness }) {
   if (!AGENT.test(agent ?? '')) fail('which agent');
-  if (!['auto', ...HARNESSES].includes(harness)) fail('model choice is auto, claude or codex');
+  if (!['auto', ...HARNESSES].includes(harness)) fail('model choice is auto, claude, codex or agy');
   if (conversation !== undefined && !/^cv-[0-9a-f]{12}$/.test(conversation)) fail('which conversation');
   return update(env, (s) => {
     const available = modelsOf(s);
@@ -354,6 +359,8 @@ function resolveRoom({ agent, m, accounts, now, gate }) {
  */
 export function resolveModel({ agent, kind, models, all = models, settings = {}, accounts, scorecards = [], prefer = [], since, avoid = [], harnessChoice = 'auto', now = Date.now(), gate }) {
   const why = [];
+  const opted = m => m.harness !== 'agy' || harnessChoice === 'agy' || [...prefer, ...(settings.prefer ?? [])].includes(m.id);
+  models = models.filter(opted); all = all.filter(opted);
   const allowed = settings.allow?.length ? models.filter((m) => settings.allow.includes(m.id)) : models;
   if (!allowed.length) fail(`${agent} may use none of the runtime's models`, 409);
   // 1. Hard limits: allowed, and an account with quota left (a local model needs none).
@@ -477,6 +484,8 @@ export async function resolveFor(env, { agent, venue, venueKind: told, prefer = 
     prefer = [...prefer, ...r.eligible];
     head.push(`role ${r.id} (catalog v${r.version}): eligible ${r.eligible.join(', ')}`);
   }
+  // A previously assigned opt-in job keeps that model on continuation.
+  if (pin) prefer = [...prefer, pin];
   // A resume keeps its harness: its slot is that harness's session.
   const list = harness ? all.filter((m) => m.harness === harness) : all;
   if (!list.length) fail(`the runtime has no ${harness} model${pin || role ? ` for ${pin ? `assigned model ${pin}` : `role ${role.id ?? role}`}` : ''}`, 409);

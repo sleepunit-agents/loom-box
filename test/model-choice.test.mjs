@@ -79,7 +79,7 @@ test('the agent-window form renders a choice and applies it for that owner only'
   const view = page(env, { path: '', caller: { kind: 'owner', agents: ['art'] } });
   const form = view.sections.find((s) => s.id === 'model').blocks[0];
   assert.equal(form.action, 'model-choice');
-  assert.deepEqual(form.fields[0].options.map((o) => o.value), ['auto', 'claude', 'codex']);
+  assert.deepEqual(form.fields[0].options.map((o) => o.value), ['auto', 'claude', 'codex', 'agy']);
   assert.equal(act(env, {}, { action: 'model-choice', fields: { agent: 'art', harness: 'codex' }, caller: { kind: 'owner', agents: ['art'] } }).ok, true);
   assert.equal(act(env, {}, { action: 'model-choice', fields: { agent: 'mark', harness: 'claude' }, caller: { kind: 'owner', agents: ['art'] } }).ok, false);
 });

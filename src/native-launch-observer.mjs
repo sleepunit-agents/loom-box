@@ -9,7 +9,7 @@ try {
     if (Buffer.byteLength(input) > 4 * 1024 * 1024) throw Error('observation input exceeds its bound');
   }
   const { harness, configuration, token, model, bodyEnv } = JSON.parse(input);
-  if (!['claude', 'codex'].includes(harness) || !/^[0-9a-f]{24}$/.test(token ?? '')) throw Error('invalid native observation');
+  if (!['claude', 'codex', 'agy'].includes(harness) || !/^[0-9a-f]{24}$/.test(token ?? '')) throw Error('invalid native observation');
   const runner = configuredNativeRunner(harness, configuration, process.env);
   const observed = runner.recoverLaunch(token, { model, env: bodyEnv });
   const body = observed?.body;

@@ -50,6 +50,9 @@ import { lastToolUse } from './stuck.mjs';
 import { withLock } from './state.mjs';
 import { parse as parseToml, stringify as stringifyToml } from './vendor/smol-toml/index.js';
 
+import { AgyRunner } from './agy.mjs';
+export { AgyRunner };
+
 export class RunnerError extends Error {}
 const neverStarted = message => Object.assign(new RunnerError(message), { nativeNotStarted: true });
 
@@ -710,6 +713,7 @@ export const usageDirOf = (env = process.env) => env.LOOM_RUNTIME_USAGE_DIR || j
 
 /** Exact private constructor configuration for the selected launch worker. */
 export function nativeRunnerConfiguration(runner) {
+  if (runner instanceof AgyRunner && runner.spawn === nodeSpawn) return { agy: runner.agy, runsDir: runner.runsDir, mcpFile: runner.mcpFile };
   if (runner instanceof ClaudeRunner && runner.run === spawnSync) return {
     claude: runner.claude, jobsDir: runner.jobsDir, projectsDir: runner.roots.projects,
     args: runner.args, usageDir: runner.usageDir, node: runner.node, claimPolls: runner.claimPolls,
@@ -726,6 +730,7 @@ export function nativeRunnerConfiguration(runner) {
 /** Only the selectors needed to observe an existing native identity. Native
  * arguments and profile contents do not belong in conversation metadata. */
 export function nativeRecoveryConfiguration(runner) {
+  if (runner instanceof AgyRunner) return { agy: runner.agy, runsDir: runner.runsDir, mcpFile: runner.mcpFile };
   if (runner instanceof ClaudeRunner) return {
     claude: runner.claude, jobsDir: runner.jobsDir, projectsDir: runner.roots.projects,
     ...(runner.inbox ? { inboxDir: runner.inbox.dir } : {}),
@@ -743,6 +748,7 @@ export function configuredNativeRunner(harness, configuration, env = process.env
   if (!configuration) return runnerFor(harness, env);
   if (harness === 'claude') return new ClaudeRunner(configuration);
   if (harness === 'codex') return new CodexRunner(configuration);
+  if (harness === 'agy') return new AgyRunner(configuration);
   throw new RunnerError('unsupported native launch configuration');
 }
 
@@ -758,5 +764,6 @@ export function runnerFor(harness, env = process.env, opts = {}) {
   if (harness === 'codex') {
     return new CodexRunner({ codex: env.LOOM_RUNTIME_CODEX || 'codex', profile: env.LOOM_RUNTIME_CODEX_PROFILE || undefined, ...(env.CODEX_HOME ? { codexHome: env.CODEX_HOME } : {}), ...(env.LOOM_RUNTIME_CODEX_RUNS ? { runsDir: env.LOOM_RUNTIME_CODEX_RUNS } : {}), ...(env.LOOM_RUNTIME_CODEX_SESSIONS ? { sessionsDir: env.LOOM_RUNTIME_CODEX_SESSIONS } : {}), ...(env.LOOM_RUNTIME_CODEX_HOMES ? { homesDir: env.LOOM_RUNTIME_CODEX_HOMES } : {}), inboxDir, ...opts });
   }
+  if (harness === 'agy') return new AgyRunner({ agy: env.LOOM_RUNTIME_AGY || 'agy', ...(env.LOOM_RUNTIME_AGY_RUNS ? { runsDir: env.LOOM_RUNTIME_AGY_RUNS } : {}), mcpFile: env.LOOM_RUNTIME_AGY_MCP_FILE || join(env.HOME || homedir(), '.gemini/config/mcp_config.json'), ...opts });
   throw new RunnerError(`no runner for harness ${JSON.stringify(harness)}`);
 }

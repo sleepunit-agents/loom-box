@@ -14,7 +14,7 @@ const file = (env, id) => {
   return join(root(env), id + '.json');
 };
 function validate(r, id) {
-  if (r?.v !== 1 || r.id !== id || !ID.test(r.intentHash ?? '') || !['claude', 'codex'].includes(r.harness)
+  if (r?.v !== 1 || r.id !== id || !ID.test(r.intentHash ?? '') || !['claude', 'codex', 'agy'].includes(r.harness)
       || !/^[a-z][a-z0-9-]{0,39}$/.test(r.agent ?? '') || !/^h-[0-9]{1,9}$/.test(r.house ?? '')
       || !/^[0-9a-f]{16}$/.test(r.rid ?? '') || !['reserved', 'publishing', 'published', 'ready', 'refused', 'terminated'].includes(r.state)
       || !HOST_KEY.test(r.seat ?? '') || (['reserved', 'publishing', 'published'].includes(r.state) && typeof r.sealed !== 'string')) {

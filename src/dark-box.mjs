@@ -42,7 +42,7 @@ const heard = (env, s, agent, house, nowMs) => {
 export function heldOnDarkBoxes(env, s, convs, nowMs) {
   const out = {};
   for (const c of convs) {
-    const m = /^(?:claude|codex):(h-[0-9]+)-/.exec(c.body ?? '');
+    const m = /^(?:claude|codex|agy):(h-[0-9]+)-/.exec(c.body ?? '');
     const h = m && s.houses?.[m[1]];
     if (!h || h.service || !LIVE.has(h.state) || h.agent !== c.agent || !dark(s.boxes?.[h.box], nowMs, h.agent)) continue;
     if (heard(env, s, h.agent, h.id, nowMs)) continue;
