@@ -33,7 +33,7 @@ import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import net from 'node:net';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { lastRateLimit } from './logins.mjs';
+import { lastRateLimit, terminalOutcome } from './logins.mjs';
 import { CRED_FILE, LOGIN_MOUNT, loginDir, podmanBin } from './logins.mjs';
 
 export class GraderError extends Error {}
@@ -181,7 +181,7 @@ export function graderScript(harness, model, kind) {
       + `--no-session-persistence --exclude-dynamic-system-prompt-sections --output-format stream-json --verbose --system-prompt ${q(graderPrompt(kind))}`;
   }
   if (harness === 'codex') {
-    const off = ['shell_tool', 'unified_exec', 'apps', 'plugins', 'browser_use', 'computer_use', 'sleep_tool', 'tool_suggest', 'skill_search', 'memories'];
+    const off = ['multi_agent', 'hooks', 'skill_mcp_dependency_install', 'shell_tool', 'unified_exec', 'apps', 'plugins', 'browser_use', 'computer_use', 'sleep_tool', 'tool_suggest', 'skill_search', 'memories'];
     return `command -v codex >/dev/null 2>&1 || exit 99; mkdir -p "$CODEX_HOME" /tmp/cli/w; ln -s ${AT('codex')}/${CRED_FILE.codex} "$CODEX_HOME/${CRED_FILE.codex}"; ${FORWARD}cd /tmp/cli/w; `
       + `codex exec --json --skip-git-repo-check --sandbox read-only ${off.map((f) => `--disable ${f}`).join(' ')} `
       + `-c 'web_search="disabled"' -m ${q(model)} -; code=$?; node /opt/loom-grader/quota.mjs "$CODEX_HOME/sessions" || exit 98; exit $code`;
@@ -210,20 +210,23 @@ export function graderRunArgs(env, { harness, model, kind, image, name, egress }
 /** The model's own words, from the CLI's output: Claude's `result`, or Codex's last agent message. */
 export function answerOf(harness, stdout) {
   const s = String(stdout ?? '');
+  const terminal = terminalOutcome(harness, s);
+  if (terminal && terminal.kind !== 'answer') throw new GraderError('the model’s turn failed or did not complete');
   if (harness === 'claude') {
     let d;
-    try { d = JSON.parse(s.trim().split('\n').pop()); } catch { throw new GraderError('claude answered something that isn\'t its JSON result'); }
-    if (d?.is_error || typeof d?.result !== 'string') throw new GraderError('claude’s run failed');
+    for (const line of s.split('\n')) {
+      let e; try { e = JSON.parse(line); } catch { continue; }
+      if (e?.type === 'result' || !e?.type && e && ('result' in e || 'is_error' in e)) d = e;
+    }
+    if (!d || d.is_error || typeof d.result !== 'string') throw new GraderError('claude’s run failed');
     return d.result;
   }
-  let last = null, failed = false;
+  let last = null;
   for (const l of s.split('\n')) {
     let e;
     try { e = JSON.parse(l); } catch { continue; }
-    if (e?.type === 'item.completed' && e.item?.type === 'agent_message' && typeof e.item.text === 'string') { last = e.item.text; failed = false; }
-    if (e?.type === 'turn.failed' || e?.type === 'error') failed = true;
+    if (e?.type === 'item.completed' && e.item?.type === 'agent_message' && typeof e.item.text === 'string') last = e.item.text;
   }
-  if (failed) throw new GraderError('codex’s turn failed');
   if (last === null) throw new GraderError('codex said nothing');
   return last;
 }
@@ -268,7 +271,7 @@ export function runAsync(bin, argv, { env, input, timeout, cwd, killGroup = fals
     if (killGroup) { process.once('SIGTERM', kill); process.once('SIGINT', kill); }
     child.stdout.setEncoding('utf-8');
     child.stdout.on('data', (d) => { if (out.length < 8 * 1024 * 1024) out += d; });
-    const end = (r) => { if (done) return; done = true; clearTimeout(t); if (killGroup) { process.removeListener('SIGTERM', kill); process.removeListener('SIGINT', kill); } resolve(r); };
+    const end = (r) => { if (done) return; done = true; clearTimeout(t); if (killGroup) kill(); if (killGroup) { process.removeListener('SIGTERM', kill); process.removeListener('SIGINT', kill); } resolve(r); };
     child.on('error', (error) => end({ status: null, stdout: out, error }));
     child.on('close', (status, signal) => end({ status, stdout: out, signal }));
     child.stdin.on('error', () => {});

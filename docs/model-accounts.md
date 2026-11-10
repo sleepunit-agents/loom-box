@@ -331,7 +331,11 @@ quota failures.
 A structured usage-limit refusal holds only the house's own account through
 `oneshot-refused` and retries once with that harness avoided. No prose classifier,
 no unbounded retries, and no retry on timeout or an ordinary process error. A
-second refusal fails. Near-cap choice happens before execution. Choice and launch
+second refusal fails. Codex’s provider rollout determines terminal state; an
+explicit non-quota failure in either stream fails closed when streams conflict.
+Completion bookkeeping never erases a failure, and answer extraction follows
+quota reporting so a missing or truncated answer cannot discard a reading.
+Near-cap choice happens before execution. Choice and launch
 are not an atomic capacity reservation: concurrent calls may consume headroom
 between readings; cold review retains its existing concurrency gate.
 

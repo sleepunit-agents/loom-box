@@ -54,7 +54,7 @@ export async function runOneShot(env, { input, cwd, prefer = [], timeout = 600_0
     if (pick.error || pick.ok === false) fail(pick.error || pick.reason);
     if (!['claude', 'codex'].includes(pick.harness) || !/^[A-Za-z0-9][A-Za-z0-9._:/\[\]-]{0,79}$/.test(pick.model ?? '')) fail('invalid runtime choice');
     const dir = mkdtempSync(join(tmpdir(), 'loom-oneshot-'));
-    let r, reading, refusal, answer;
+    let r, reading, refusal, validAnswer;
     try {
       const childEnv = Object.fromEntries(['PATH', 'HOME', 'LANG', 'LC_ALL', 'TMPDIR', 'SSL_CERT_FILE', 'SSL_CERT_DIR', 'NODE_EXTRA_CA_CERTS'].filter(k => typeof env[k] === 'string').map(k => [k, env[k]]));
       if (pick.harness === 'claude') {
@@ -87,7 +87,7 @@ export async function runOneShot(env, { input, cwd, prefer = [], timeout = 600_0
       }
       const state = [stdoutState, rolloutState].some(s => s?.kind === 'error') ? { kind: 'error' } : rolloutState ?? stdoutState;
       refusal = state?.kind === 'quota';
-      if (state?.kind === 'answer' && r.status === 0 && !r.error && !r.signal) answer = answerOf(pick.harness, r.stdout);
+      validAnswer = state?.kind === 'answer';
       if (reading) {
         const reported = await call('usage', { harness: pick.harness, reading: { ...reading, checked: reading.checked ?? Math.floor(Date.now() / 1000) } });
         if (reported.error || reported.ok === false) fail('one-shot usage report failed');
@@ -99,7 +99,7 @@ export async function runOneShot(env, { input, cwd, prefer = [], timeout = 600_0
       if (held.error || held.ok === false) fail('could not hold refused account');
     }
     if (refusal && !attempt) { avoid.push(pick.harness); continue; }
-    if (r.error || r.signal || r.status !== 0 || refusal || answer === undefined) fail('one-shot failed (no prompt or output logged)');
-    return answer ?? answerOf(pick.harness, r.stdout);
+    if (r.error || r.signal || r.status !== 0 || refusal || !validAnswer) fail('one-shot failed (no prompt or output logged)');
+    return answerOf(pick.harness, r.stdout);
   }
 }

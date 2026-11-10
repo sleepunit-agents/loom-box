@@ -403,6 +403,7 @@ export function terminalOutcome(harness, text) {
   for (const line of String(text ?? '').split('\n')) {
     let v; try { v = JSON.parse(line); } catch { continue; }
     const p = ['event_msg', 'response_item'].includes(v?.type) ? v.payload : v;
+    if (harness === 'codex' && (v?.type === 'turn_context' || ['task_started', 'user_message'].includes(p?.type))) { state = null; continue; }
     const q = quota(v);
     if (q) { state = { kind: 'quota', ...q }; continue; }
     if (harness === 'claude') {

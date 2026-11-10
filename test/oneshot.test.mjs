@@ -55,7 +55,7 @@ test('Codex uses a clean home and captures rollout quota before removing it', as
   const env=setup(); mkdirSync(join(env.HOME,'.codex')); writeFileSync(join(env.HOME,'.codex','auth.json'),'{}');
   let childHome, reported;
   const call=async(p,b)=>p==='oneshot-choice'?{model:'codex',harness:'codex'}:(assert.ok(existsSync(childHome)),reported=b,{ok:true});
-  const run=async(bin,argv,o)=>{ assert.ok(argv.some((v,i)=>v==='--disable'&&argv[i+1]==='hooks')); assert.deepEqual(argv.slice(argv.indexOf('--sandbox'),argv.indexOf('--sandbox')+2),['--sandbox','read-only']); childHome=o.env.CODEX_HOME; const d=new Date(); const root=join(childHome,'sessions',String(d.getUTCFullYear()),String(d.getUTCMonth()+1).padStart(2,'0'),String(d.getUTCDate()).padStart(2,'0')); mkdirSync(root,{recursive:true});writeFileSync(join(root,'rollout.jsonl'),JSON.stringify({type:'event_msg',payload:{type:'token_count',rate_limits:{primary:{used_percent:25,window_minutes:10080,resets_at:2000000000}}}}));return {status:0,stdout:JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'ok'}})};};
+  const run=async(bin,argv,o)=>{ assert.ok(argv.some((v,i)=>v==='--disable'&&argv[i+1]==='hooks')); assert.ok(argv.some((v,i)=>v==='--disable'&&argv[i+1]==='multi_agent')); assert.deepEqual(argv.slice(argv.indexOf('--sandbox'),argv.indexOf('--sandbox')+2),['--sandbox','read-only']); childHome=o.env.CODEX_HOME; const d=new Date(); const root=join(childHome,'sessions',String(d.getUTCFullYear()),String(d.getUTCMonth()+1).padStart(2,'0'),String(d.getUTCDate()).padStart(2,'0')); mkdirSync(root,{recursive:true});writeFileSync(join(root,'rollout.jsonl'),JSON.stringify({type:'event_msg',payload:{type:'token_count',rate_limits:{primary:{used_percent:25,window_minutes:10080,resets_at:2000000000}}}}));return {status:0,stdout:JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'ok'}})};};
   assert.equal(await runOneShot(env,{input:'p',cwd:env.HOME},{call,run,warn:()=>{}}),'ok');
   assert.equal(existsSync(childHome),false); assert.equal(reported.reading.windows['7d'],.25); assert.notEqual(childHome,join(env.HOME,'.codex'));
 });
@@ -149,4 +149,18 @@ test('turn.completed bookkeeping never clears a quota error after an answer',()=
  const text=[{type:'item.completed',item:{type:'agent_message',text:'earlier answer'}},{type:'error',codex_error_info:'usage_limit_exceeded'},{type:'turn.completed'}].map(JSON.stringify).join('\n');
  assert.throws(()=>answerOf('codex',text),/failed/);
  assert.equal(terminalOutcome('codex',text).kind,'quota');
+});
+test('trailing quota metadata preserves a Claude result and still reports usage',async()=>{
+ const env=setup(),calls=[];
+ const output=[{type:'result',result:'done'},{type:'rate_limit_event',rate_limit_info:{status:'allowed',unifiedWindows:{seven_day:{utilization:.3}}}}].map(JSON.stringify).join('\n');
+ assert.equal(await runOneShot(env,{input:'p',cwd:env.HOME},{warn:()=>{},call:async p=>{calls.push(p);return p==='oneshot-choice'?{model:'m',harness:'claude'}:{ok:true};},run:async()=>({status:0,stdout:output})}),'done');assert.deepEqual(calls,['oneshot-choice','usage']);
+});
+test('a truncated stdout answer cannot discard available Codex rollout usage',async()=>{
+ const env=setup();mkdirSync(join(env.HOME,'.codex'));writeFileSync(join(env.HOME,'.codex','auth.json'),'{}');let reported=false,home;
+ const run=async(_b,_a,o)=>{home=o.env.CODEX_HOME;const d=new Date(),root=join(home,'sessions',String(d.getUTCFullYear()),String(d.getUTCMonth()+1).padStart(2,'0'),String(d.getUTCDate()).padStart(2,'0'));mkdirSync(root,{recursive:true});writeFileSync(join(root,'rollout.jsonl'),[{type:'response_item',payload:{role:'assistant',type:'message',content:[{text:'done'}]}},{type:'event_msg',payload:{type:'token_count',rate_limits:{primary:{used_percent:20,window_minutes:10080,resets_at:2000000000}}}}].map(JSON.stringify).join('\n'));return {status:0,stdout:JSON.stringify({type:'thread.started',thread_id:'parent'})};};
+ await assert.rejects(runOneShot(env,{input:'p',cwd:env.HOME},{run,warn:()=>{},call:async p=>{if(p==='usage'){reported=true;assert.ok(existsSync(home));return {ok:true};}return {model:'m',harness:'codex'};}}),/said nothing/);
+ assert.equal(reported,true);assert.equal(existsSync(home),false);
+});
+test('a new Codex turn clears the preceding turn’s refusal',()=>{
+ const text=[{type:'event_msg',payload:{type:'error',codex_error_info:'usage_limit_exceeded'}},{type:'turn_context'},{type:'turn.failed',error:{message:'ordinary failure'}}].map(JSON.stringify).join('\n');assert.equal(terminalOutcome('codex',text).kind,'failed');
 });

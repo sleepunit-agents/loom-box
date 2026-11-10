@@ -324,7 +324,7 @@ test('a bare grader: the CLI with no tools, MCP, settings or session, no network
   for (const f of ["--tools ''", '--strict-mcp-config', "--setting-sources ''", '--disable-slash-commands', '--no-session-persistence', '--system-prompt', "--model 'claude-sonnet-5'", 'listen(3128,"127.0.0.1"', '$i -ge 50']) assert.ok(script.includes(f), f);
   assert.match(script, /Did the agent answer what was actually asked/);
   const cx = graderRunArgs(env, { harness: 'codex', model: 'gpt-5', kind: 'agent', image: PIN, name: 'n', egress: '/e' }).at(-1);
-  for (const f of ['/opt/loom-grader/quota.mjs', '--sandbox read-only', '--disable shell_tool', '--disable unified_exec', "web_search=\"disabled\""]) assert.ok(cx.includes(f), f);
+  for (const f of ['/opt/loom-grader/quota.mjs', '--disable multi_agent', '--disable hooks', '--sandbox read-only', '--disable shell_tool', '--disable unified_exec', "web_search=\"disabled\""]) assert.ok(cx.includes(f), f);
   // Never an image that isn't pinned, and never without its proxy.
   assert.throws(() => graderRunArgs(env, { harness: 'claude', model: 'm', kind: 'live', image: 'localhost/loom-house-art:de52', name: 'n', egress: '/e' }), /pinned grader image/);
   assert.throws(() => graderRunArgs(env, { harness: 'claude', model: 'm', kind: 'live', image: PIN, name: 'n' }), /egress proxy/);
