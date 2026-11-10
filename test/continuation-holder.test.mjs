@@ -307,4 +307,51 @@ test("a spawn's report goes only to that spawn: a record no longer the sealed sp
   assert.equal(calls.filter((p) => p.ref?.startsWith('continuation-')).length, 0);
   // The runtime's snapshot check fences it first: the source isn't the conversation the grant was sealed for.
   assert.throws(() => continuationCall(w.env, { ...q, action: 'status' }, w.o), /reset or changed/);
+  // And spawnPlace on its own: only the sealed spawn's record, with a well-formed thread, names a place.
+  const { spawnPlace } = await import('../src/delivery.mjs');
+  const sealed = { conversation: source.conversation, agent: 'art', target: { venue: 'spawn', place: 'sp-111111111111111111111111' } };
+  assert.equal(spawnPlace(w.env, sealed), null, 'the record now names another place');
+  write({ ...loadConv(w.env, source.conversation), place: 'sp-111111111111111111111111' });
+  assert.equal(spawnPlace(w.env, sealed), 'th:zzzzzzzzzz');
+  assert.equal(spawnPlace(w.env, { ...sealed, agent: 'mark' }), null, 'another agent');
+  write({ ...loadConv(w.env, source.conversation), venue: 'loom' });
+  assert.equal(spawnPlace(w.env, sealed), null, 'no longer a spawn');
+  assert.equal(spawnPlace(w.env, { ...sealed, conversation: 'cv-000000000000' }), null, 'no record');
+});
+
+test("a spawn report that may have reached core reconciles at its kept thread, even once the spawn's record is gone (t-2004)", async () => {
+  const { handOverWake, tick } = await import('../src/delivery.mjs');
+  const { rmSync } = await import('node:fs');
+  const w = world();
+  w.env.LOOM_HOME = join(w.env.HOME, 'loom');
+  mkdirSync(w.env.LOOM_HOME, { recursive: true });
+  writeFileSync(join(w.env.LOOM_HOME, 'household.json'), JSON.stringify({ members: [{ person: 'jonathan', agents: '*' }] }));
+  const source = await deliver(w.env, w.msg('spawn-gone', 'owner', { source: 'loom', venue: 'loom', from: { kind: 'person', slug: 'jonathan' } }), w.o);
+  const file = join(deliveryDir(w.env), 'conversations', `${source.conversation}.json`);
+  writeFileSync(file, JSON.stringify({ ...loadConv(w.env, source.conversation), venue: 'spawn', place: 'sp-333333333333333333333333', spawn: { depth: 1, principal: { owner: true }, thread: 'th:qqqqqqqqqq' } }));
+  const args = (cv) => { const c = loadConv(w.env, cv); return { conversation: cv, key: w.runner.envs[c.body.split(':')[1]].LOOM_BODY_KEY, session: w.sessionFor(cv) }; };
+  const grant = continuationCall(w.env, { ...args(source.conversation), action: 'issue' }, w.o);
+  const firing = w.msg('wake:w-abcdef', 'follow up', { source: 'clock', venue: 'wake', id: 'w-abcdef', kind: 'wake', from: { kind: 'schedule' }, continuation: { handle: grant.handle, expiresAt: grant.expiresAt, wake: 'w-abcdef' } });
+  handOverWake(w.env, { agent: 'art', place: firing.place, id: firing.id, for: 'owner' });
+  const child = await deliver(w.env, firing, w.o);
+  const q = { ...args(child.conversation), handle: grant.handle, id: 'final' };
+  continuationCall(w.env, { ...q, action: 'enqueue', text: 'maybe landed' }, w.o);
+  const calls = [];
+  // The post's answer is lost (core may have taken it): a 503, so it's retried, not refused.
+  const lost = { ...w.o, venues: async () => ({}), core: { ...w.o.core, comms: async (p) => { calls.push(p); throw Object.assign(new Error('unavailable'), { status: 503 }); } } };
+  await tick(w.env, lost);
+  const mine = () => calls.filter((p) => p.ref?.startsWith('continuation-'));
+  assert.equal(mine().length, 1);
+  assert.equal(mine()[0].place, 'th:qqqqqqqqqq');
+  // The spawn's record goes (pruned); the deadline passes: the row is uncertain, and reconciles at the kept thread.
+  rmSync(file);
+  w.clock.advance(w.o.continuationLifetimeMs + 1);
+  const ok = { ...lost, core: { ...w.o.core, comms: async (p) => { calls.push(p); return p.op === 'reconcile' ? { ok: true, state: 'delivered', id: '9' } : { ok: false }; } } };
+  await tick(w.env, ok);
+  w.clock.advance(3600001);
+  await tick(w.env, ok);
+  const rec = mine().filter((p) => p.op === 'reconcile');
+  assert.ok(rec.length >= 1, 'reconciled');
+  assert.equal(rec[0].place, 'th:qqqqqqqqqq');
+  assert.equal(mine().filter((p) => p.op === 'post').length, 1, 'never posted again');
 });
