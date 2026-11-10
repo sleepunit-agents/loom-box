@@ -416,8 +416,13 @@ test('one record that will not open is skipped and said; the rest still drain an
   w.setTime(1000 + w.options.lifetimeMs + 7 * 86400000);
   // While a report won't open, no grant is collected (it might be that report's).
   assert.deepEqual(out.collect(), { reports: 1, grants: 0 });
+  // Said once: set aside, not reopened every tick.
+  const n = said.length;
+  await out.drain({ current: w.current, post: () => assert.fail('no post') });
+  assert.equal(said.length, n);
+  assert.deepEqual(readdirSync(join(w.dir, 'unreadable')), [`report-${'0'.repeat(64)}.sealed`]);
   const { unlinkSync } = await import('node:fs');
-  unlinkSync(join(w.dir, `report-${'0'.repeat(64)}.sealed`));
+  unlinkSync(join(w.dir, 'unreadable', `report-${'0'.repeat(64)}.sealed`));
   assert.deepEqual(out.collect(), { reports: 0, grants: 1 });
 });
 

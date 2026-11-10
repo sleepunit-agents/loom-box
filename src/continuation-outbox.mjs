@@ -35,7 +35,7 @@ export function continuationOutbox({ dir, sealer, now = Date.now, lifetimeMs = n
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   // Reports with a final outcome live in done/: drain lists only the top level, so finished reports cost a tick
   // nothing (never opened again there), and only collection, hourly, reads done/.
-  const doneDir = join(dir, 'done');
+  const doneDir = join(dir, 'done'), badDir = join(dir, 'unreadable');
   mkdirSync(doneDir, { recursive: true, mode: 0o700 });
   const FINAL = ['delivered', 'expired', 'failed', 'withdrawn'];
   const isFinal = (v) => FINAL.includes(v?.state);
@@ -236,7 +236,14 @@ export function continuationOutbox({ dir, sealer, now = Date.now, lifetimeMs = n
           r.next = now() + Math.min(3600000, (reconciliation ? 5000 : 1000) * 2 ** Math.min(reconciliation ? r.reconciles : r.attempts, 12));
           save(id, r);
           return { ...r, reconciliation, target: g.source.target, agent: g.source.agent, conversation: g.source.conversation };
-        }); } catch (e) { if (e instanceof StateError) throw e; warn(`continuation ${id}: ${e.message}`); continue; }
+        }); } catch (e) {
+          if (e instanceof StateError) throw e;
+          // Said once, then set aside in unreadable/ (kept, never deleted: a restored key may open it). While anything
+          // is there, no grant is collected.
+          try { mkdirSync(badDir, { recursive: true, mode: 0o700 }); renameSync(path(id), join(badDir, `${id}.sealed`)); } catch { /* said again next tick */ }
+          warn(`continuation ${id} won't open (${e.message}): set aside in unreadable/; grants are kept until it's gone`);
+          continue;
+        }
         if (!row) continue;
         let result;
         try { result = await (row.reconciliation ? reconcile : post)({ ref: row.ref, text: row.text, target: row.target, agent: row.agent, conversation: row.conversation, run: row.child.run, on: row.on ?? null, expiresAt: row.expiresAt }); }
@@ -287,7 +294,8 @@ export function continuationOutbox({ dir, sealer, now = Date.now, lifetimeMs = n
           else held.add(r.grant);
         }
         // A report that won't open might name any grant: keep them all until it does (or is removed).
-        if (unreadable) return { reports, grants: 0 };
+        let setAside = false; try { setAside = readdirSync(badDir).length > 0; } catch { /* none */ }
+        if (unreadable || setAside) { if (reports) { syncDir(dir); syncDir(doneDir); } return { reports, grants: 0 }; }
         for (const n of names.filter((n) => /^grant-[0-9a-f]{64}\.sealed$/.test(n))) {
           const id = n.slice(0, -7);
           if (held.has(id)) continue;
