@@ -3550,11 +3550,13 @@ export async function drainContinuations(env, o = {}) {
 }
 
 // Local clock bridge only; there is no body/API operation for inspecting grants.
-export function inspectClockContinuation(env, { handle, statement, agent, scheduledAt }, o = {}) {
+export function inspectClockContinuation(env, { handle, statement, agent, scheduledAt, house }, o = {}) {
   if (env.LOOM_PIECE_NAME !== 'clock' || env.HOUSE_ID)
     throw new StateError('continuation inspection belongs to the local clock', 403);
   const d = depsOf(env, o);
-  const issuer = verifyStatement(env, statement, d.now().getTime());
+  // `house` (t-2137): the house the clock's API caller is in (null: none), so a statement shown to another house's body
+  // never schedules its continuation; undefined only for the clock's own call on loom's machine.
+  const issuer = verifyStatement(env, statement, d.now().getTime(), house === undefined ? {} : { house });
   if (!issuer.ok || issuer.agent !== agent) throw new StateError('no authenticated continuation issuer', 403);
   const outbox = continuationsOf(env, d, o);
   const source = continuationSnapshot(env, outbox.sourceConversation(handle));

@@ -611,9 +611,13 @@ async function main(argv, env) {
       const { AGENT_NAME } = await import('./state.mjs');
       if (rest.includes('--inspect-continuation')) {
         const { inspectClockContinuation } = await import('./delivery.mjs');
+        // --house, as for --verify (t-2137): the clock's caller's house, so the issuer's statement holds only from its
+        // body's house; absent, the call is the clock's own on loom's machine (a local body's), as before.
+        const house = rest.includes('--house') ? flag(rest, '--house') : undefined;
+        if (rest.includes('--house') && house !== '-' && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(house ?? '')) throw new Fail('principal --inspect-continuation … --house <the caller\'s house id, or - for none>');
         out(inspectClockContinuation(env, { handle: flag(rest, '--inspect-continuation'),
           statement: (await readStdin()).trim(), agent: flag(rest, '--agent'),
-          scheduledAt: Number(flag(rest, '--scheduled-at')) }));
+          scheduledAt: Number(flag(rest, '--scheduled-at')), ...(house === undefined ? {} : { house: house === '-' ? null : house }) }));
         return;
       }
       if (rest.includes('--verify')) {
