@@ -43,9 +43,10 @@ test('OPT-IN actual Codex: SIGKILL clock receipt replay admits one native child 
   let stopping=false;
   const wait=async(fn,label)=>{const end=Date.now()+150000;while(!fn()){if(stopping)throw Error('bench shutting down');if(Date.now()>end)throw Error('provider bench deadline: '+label);await new Promise(r=>setTimeout(r,25));}};
   const dir=join(w.env.HOME,'provider-house');mkdirSync(join(dir,'work'),{recursive:true});
+  mkdirSync(join(dir,'native'),{mode:0o700}); // production mounts a pre-created per-house native history dir (src/house.mjs)
   mkdirSync(join(dir,'codex'));copyFileSync(process.env.CONTINUATION_PROVIDER_AUTH,join(dir,'codex','auth.json'));chmodSync(join(dir,'codex','auth.json'),0o600);
   writeFileSync(join(dir,'token'),'isolated-house-token',{mode:0o600});
-  let bridgeUrl;
+  let bridgeUrl, hostExit=null;
   const hostTask=(async()=>{
     await wait(()=>load(h.env).houses['h-1'],'house allocation');
     const box={kind:'piece',subject:Object.keys(load(h.env).boxes).find(k=>load(h.env).boxes[k].local)};
@@ -55,7 +56,9 @@ test('OPT-IN actual Codex: SIGKILL clock receipt replay admits one native child 
     const name='loom-continuation-provider-'+process.pid;hosts.push(name);
     const env={HOME:'/fixture/house',PATH:imageNode.slice(0,imageNode.lastIndexOf('/'))+':/usr/local/bin:/usr/bin:/bin',HOUSE_ID:'h-1',HOUSE_AGENT:'art',LOOM_URL:bridgeUrl,LOOM_TOKEN_FILE:'/fixture/house/token',CODEX_HOME:'/fixture/house/codex',LOOM_LOGIN_CODEX:'/fixture/house/codex',LOOM_RUNTIME_CODEX:codex,LOOM_RUNTIME_CODEX_RUNS:'/fixture/house/runs',LOOM_RUNTIME_NATIVE_HISTORY:'/fixture/house/native',LOOM_RUNTIME_INBOX_DIR:'/fixture/house/inbox'};
     const host=spawn('podman',['run','--rm','--pull=never','--name',name,'--network=host','-v',dir+':/fixture/house','-v',join(import.meta.dirname,'../..')+':/runtime:ro','-w','/fixture/house/work',...Object.entries(env).flatMap(([k,v])=>['-e',k+'='+v]),'--entrypoint',imageNode,image,'/runtime/src/cli.mjs','body-host','--piece','runtime','--host-key',boot,'--beats','600'],{stdio:['ignore','ignore','pipe']});
-    host.stderr.resume(); // Never copy provider output or credentials to test diagnostics.
+    if(process.env.CONTINUATION_DIAG_HOST_LOG){const {createWriteStream}=await import('node:fs');host.stderr.pipe(createWriteStream(process.env.CONTINUATION_DIAG_HOST_LOG,{mode:0o600}));}
+    else host.stderr.resume(); // Never copy provider output or credentials to test diagnostics.
+    host.once('exit',(c,sg)=>{hostExit={c,sg};});
     host.once('error',()=>{});return host;
   })();
   hostTask.catch(()=>{}); // Cleanup observes failures; suppress unhandled rejection during earlier assertions.
@@ -136,8 +139,17 @@ test('OPT-IN actual Codex: SIGKILL clock receipt replay admits one native child 
   assert.deepEqual(clockBodies[1],clockBodies[0],'fresh clock uses identical sealed firing');
   assert.equal(deliveries.length,1,readFileSync(join(clockDir,'wake.log'),'utf8'));
   assert.equal(deliveries[0].source,'clock');assert.deepEqual(deliveries[0].continuation,entry.continuation);
-  const child=children[0];assert.equal(child.body,'started');
-  await wait(()=>existsSync(join(dir,'ready.json')),'provider shell proof');
+  // deliver's 2 s reach can end before a cold Podman body-host starts: it then answers
+  // exactly its documented 'queued'/'still starting'. The recorded outcome must still
+  // become 'started' for that one message; nothing else is accepted.
+  const child=children[0];
+  if(child.body==='queued') assert.equal(child.reason,'its body is still starting',JSON.stringify(child)); else assert.equal(child.body,'started',JSON.stringify(child));
+  const outcomes=()=>Object.values(loadConv(h.env,child.conversation)?.outcomes??{});
+  try { await wait(()=>outcomes().some(o=>o.body==='started'),'queued child body start'); }
+  catch(e){ if(process.env.CONTINUATION_DIAG_HOST_LOG){const hs=load(h.env).houses;console.error('DIAG',JSON.stringify({outcomes:outcomes(),hostExit,houses:Object.fromEntries(Object.entries(hs).map(([k,v])=>[k,{...v,task:undefined}]))}));} throw e; }
+  assert.equal(outcomes().length,1,JSON.stringify(outcomes()));
+  try { await wait(()=>existsSync(join(dir,'ready.json')),'provider shell proof'); }
+  catch(e){ if(process.env.CONTINUATION_DIAG_DIR){const {cpSync}=await import('node:fs');for(const d of ['runs','native','inbox','work'])try{cpSync(join(dir,d),join(process.env.CONTINUATION_DIAG_DIR,d),{recursive:true});}catch{} try{cpSync(join(dir,'codex','sessions'),join(process.env.CONTINUATION_DIAG_DIR,'codex-sessions'),{recursive:true});}catch{} console.error('DIAG',JSON.stringify({hostExit,outcomes:outcomes()}));} throw e; }
   const provider=JSON.parse(readFileSync(join(dir,'ready.json'),'utf8'));
   const c=loadConv(h.env,child.conversation);assert.equal(h.hr.slotOf({id:c.body.split(':')[1],agent:'art',house:'h-1'}).session,provider.session);
   assert.equal(c.continuationAdmissions.length,1);

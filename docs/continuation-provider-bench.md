@@ -1,9 +1,19 @@
 # Actual provider continuation bench (held, opt-in)
 
-Status: authored and syntax checked, **not host executed**. This adds no provider
-proof until the opt-in test passes on its exact commit. Default invocation skips;
-a skip is not a pass. No production policy, collector, piece installation or PR
-merge is part of this bench.
+Status: **host executed and green** on 2026-11-09 (t-2004) with Codex
+`gpt-5.6-terra`, codex-cli 0.162.1, image
+`localhost/loom-house-art@sha256:2de6f7dc…bfe5bf`, core `cd0713d`, clock `3ec64ba`:
+2 clock requests (identical sealed replay), 1 runtime admission, 1 native UUID,
+1 core report row. Three bench defects were fixed to get there, none weakening an
+assertion: the native-history mount dir is pre-created as production does; a cold
+body-host may answer deliver's documented `queued`/`its body is still starting`,
+after which the recorded outcome must reach `started` (exactly one outcome); and
+the run needs `umask 077` (core refuses group-writable homes). A model the
+ChatGPT account doesn't offer (`gpt-5.5`) fails at the provider; that is a
+blocker, not a pass. Optional `CONTINUATION_DIAG_HOST_LOG`/`CONTINUATION_DIAG_DIR`
+copy host stderr and native run records to private local paths on failure only;
+never put them in notes. Default invocation still skips; a skip is not a pass. No
+production policy, collector, piece installation or PR merge is part of this bench.
 
 ## Supported claim
 
