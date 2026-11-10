@@ -231,3 +231,26 @@ test('the installed approvals wrapper carries conversation provenance even for a
     assert.deepEqual(server.seen.at(-1).argv, ['check', 'a-12345678', '--principal', 'ACTUAL.sig']);
   } finally { server.server.close(); }
 });
+
+test('a tasks call with a --source carries the runtime statement; one without asks the runtime nothing (t-2117)', async () => {
+  const h = house();
+  assert.equal(install(h).status, 0);
+  const token = join(h.home, 'token'), runtime = join(h.home, 'fake-runtime'), asked = join(h.home, 'asked');
+  writeFileSync(token, 'diagnostic-token\n');
+  writeFileSync(runtime, `#!/bin/sh\necho x >> ${asked}\necho '{"ok":true,"owner":true,"conversation":"cv-0123456789ab","statement":"ACTUAL.sig"}'\n`, { mode: 0o755 });
+  const server = await fakeLoom({ exit: 0, stdout: '{}\n', stderr: '' });
+  const invoke = (args) => new Promise(resolve => {
+    const child = execFile(join(h.home, '.local/bin/taskstore'), args, {
+      env: { HOME: h.home, PATH: h.path, LOOM_URL: server.url, LOOM_TOKEN_FILE: token, LOOM_BODY_CONVERSATION: 'cv-0123456789ab', PIECE_CALL_RUNTIME: runtime },
+    }, (error, stdout, stderr) => resolve({ code: error?.code ?? 0, stdout, stderr }));
+    child.stdin.end();
+  });
+  try {
+    await invoke(['ready']);
+    assert.deepEqual(server.seen.at(-1).argv, ['ready']);
+    assert.equal(existsSync(asked), false, 'no --source: the runtime is not asked');
+    const made = ['create', 'x', '--source', 'conversation:cv-0123456789ab'];
+    await invoke([...made, '--principal', 'FORGED']);
+    assert.deepEqual(server.seen.at(-1).argv, [...made, '--principal', 'ACTUAL.sig']);
+  } finally { server.server.close(); }
+});
