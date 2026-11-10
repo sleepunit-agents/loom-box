@@ -451,3 +451,24 @@ test('where someone else is, a parent is only one of the cards\' own ids (t-2109
   const shown = shownCards(w.env, { agent: 'art' }, cards);
   assert.deepEqual(shown.map((x) => x.parent), [undefined, 'a', undefined]);
 });
+
+
+test('a token total discovered on catch-up goes with the same sign-of-life timestamp', async () => {
+  const { spawnCall } = await import('../src/spawn.mjs');
+  const o = world();
+  o.core.commsAnswer = x => x.op === 'spawn' ? {ok:true,id:'th:abcdefghij'} : {ok:true};
+  let tokens;
+  const at = '2026-11-10T10:00:00.000Z';
+  o.runner.activity = () => [{id:'t1',at,tool:'Bash',summary:'Step',state:'running'}];
+  o.runner.signOfLife = () => ({at, ...(tokens === undefined ? {} : {tokens})});
+  const r = await spawnCall(o.env, {kind:'owner'}, {agent:'art',brief:'x'}, o.o);
+  await tick(o.env,o.o); await tick(o.env,o.o);
+  const calls = () => o.core.activityCalls.filter(x => x.conversation === r.handle && x.alive);
+  assert.equal(calls().length,1);
+  assert.equal(calls()[0].alive.tokens,undefined);
+  tokens = 1234; o.clock.advance(20_000); await tick(o.env,o.o);
+  assert.equal(calls().length,2);
+  assert.deepEqual(calls()[1].alive,{at,tokens:1234});
+  o.clock.advance(20_000); await tick(o.env,o.o);
+  assert.equal(calls().length,2,'unchanged totals are not repeated');
+});

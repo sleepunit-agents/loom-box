@@ -1588,7 +1588,7 @@ async function activityPass(env, c, d) {
   const old = held(c, 'oldCore', nowMs);
   // Its last sign of life goes when it moved, at most every ALIVE_MS when alone (core's working line); never to a core
   // that refused it.
-  const sendAlive = !!alive && !old && alive.at !== c.aliveSent?.at && (out.length > 0 || nowMs - (c.aliveSent?.told ?? 0) >= ALIVE_MS);
+  const sendAlive = !!alive && !old && (alive.at !== c.aliveSent?.at || alive.tokens !== c.aliveSent?.tokens) && (out.length > 0 || nowMs - (c.aliveSent?.told ?? 0) >= ALIVE_MS);
   // A core from before t-2109 is told plain cards only, without words between steps.
   const told = old ? out.filter((x) => x.tool !== 'text').map(baseCard) : out;
   if (!told.length && !sendAlive) { if (out.length) saveSent(env, c, next, null); return; }
@@ -1673,7 +1673,7 @@ function saveSent(env, c, next, alive, nowMs = Date.now(), hold = {}) {
     const x = loadConv(env, c.conversation);
     if (!x || x.body !== c.body) return;
     x.cardsSent = next;
-    if (alive) x.aliveSent = { at: alive.at, told: nowMs };
+    if (alive) x.aliveSent = { at: alive.at, ...(alive.tokens === undefined ? {} : { tokens: alive.tokens }), told: nowMs };
     // A hold is kept on the record, so a delivery worker in another process keeps it too (t-2109).
     if (Object.keys(hold).length) x.activityHeld = { ...(x.activityHeld ?? {}), ...hold };
     saveConv(env, x);

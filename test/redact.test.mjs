@@ -270,8 +270,8 @@ test('a failure says why from fixed phrases, never from its output\'s words', ()
     { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'u1', is_error: true, content: [{ type: 'text', text: `Exit code 1\nSECRET-OUTPUT\n# fail 3` }] }] } },
   ]);
   assert.equal(claude[0].summary, 'Run the approvals tests — exit 1: 3 tests failed');
-  // The label never holds output; the owner's body of it may (t-2109), but never the secret in it.
-  for (const c of [...codex, ...claude]) assert.ok(!c.summary.includes('SECRET-OUTPUT'), c.summary);
+  // Shell output never appears in any card field, including lazy bodies.
+  assert.ok(!JSON.stringify([codex, claude]).includes('SECRET-OUTPUT'));
   assert.deepEqual(leaks(JSON.stringify([codex, claude])), []);
 });
 

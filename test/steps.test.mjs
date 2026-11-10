@@ -683,3 +683,25 @@ test('a colour code inside a key\'s BEGIN line can\'t hide the block (t-2109)', 
   assert.deepEqual(report.bodies.one.cards.map(c => c.id), ['newer']);
   assert.deepEqual(report.bodies.two.cards, []);
 });
+
+
+test('a key delimiter hidden in the omitted window still hides retained key lines', async () => {
+  const { diffText, shownText } = await import('../src/activity.mjs');
+  const hidden = '--\x1b[0m---BEGIN RSA PRIVATE KEY--\x1b[0m---';
+  for (const mark of ['', '+']) {
+    const lines = [...Array(15000).fill(mark + 'ordinary padding'), mark + hidden,
+      ...Array(15000).fill(mark + 'key padding'), mark + 'SHORTKEYMATERIAL', mark + '-----END RSA PRIVATE KEY-----'];
+    const out = mark ? diffText(lines.join('\n')) : shownText(lines.join('\n'));
+    assert.ok(!out.includes('SHORTKEYMATERIAL'), out.slice(-100));
+  }
+});
+
+test('report card budgets count empty-array separators exactly', async () => {
+  const { fitCards } = await import('../src/bodyhost.mjs');
+  const original = { bodies: { a: {cards: [{at: '2026-11-10T10:00:00Z', id:'a'}]}, b: {cards: [{at:'2026-11-10T11:00:00Z', id:'b'}]} } };
+  const baseline = Buffer.byteLength(JSON.stringify({bodies:{a:{cards:[]},b:{cards:[]}}}));
+  for (let max = baseline; max <= Buffer.byteLength(JSON.stringify(original)); max++) {
+    const result = fitCards(structuredClone(original), max);
+    assert.ok(Buffer.byteLength(JSON.stringify(result)) <= max, String(max));
+  }
+});

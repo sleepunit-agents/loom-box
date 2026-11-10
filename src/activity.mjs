@@ -376,7 +376,7 @@ export function diffText(text) {
   const show = (raw) => { const l = normLine(raw); return key(l) ? GONE : /^[-+ ]/.test(l) ? `${l[0]}${shownTextLine(l.slice(1))}` : shownTextLine(l); };
   const { head, middle, tail } = window(String(text ?? '').slice(0, 2_000_000).split('\n'), MAX_BODY);
   const shown = head.map(show);
-  for (const raw of middle) if (raw.includes('-----')) key(normLine(raw));
+  for (const raw of middle) key(normLine(raw));
   return capLines([...shown, ...tail.map(show)], MAX_BODY, middle.length);
 }
 
@@ -396,7 +396,7 @@ export function shownText(text, max = MAX_BODY) {
   const show = (raw) => { const line = normLine(raw); return key(line) ? GONE : shownTextLine(line); };
   const { head, middle, tail } = window(String(text ?? '').slice(0, 2_000_000).split('\n'), max);
   const shown = head.map(show);
-  for (const raw of middle) if (raw.includes('-----')) key(normLine(raw));
+  for (const raw of middle) key(normLine(raw));
   return capLines([...shown, ...tail.map(show)], max, middle.length);
 }
 

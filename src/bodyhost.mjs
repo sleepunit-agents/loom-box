@@ -41,11 +41,13 @@ export function fitCards(report, max) {
   for (const [id, b] of Object.entries(report.bodies ?? {})) if (Array.isArray(b.cards)) b.cards.forEach((c, i) => all.push({ id, i, at: Date.parse(c?.at ?? '') || 0, n: Buffer.byteLength(JSON.stringify(c)) + 1 }));
   const total = Buffer.byteLength(JSON.stringify(report));
   if (total <= max) return report;
-  let room = max - (total - all.reduce((k, x) => k + x.n, 0));
-  const keep = new Set();
+  // Each nonempty array has one fewer separator than cards. Start from exact empty arrays.
+  const populated = Object.values(report.bodies ?? {}).filter((b) => Array.isArray(b.cards) && b.cards.length).length;
+  let room = max - (total - all.reduce((k, x) => k + x.n, 0) + populated);
+  const keep = new Set(), keptBodies = new Set();
   // A card that doesn't fit stops its own body's older ones only (each keeps its newest), not the other bodies'.
   const stopped = new Set();
-  for (const x of all.sort((p, q) => (p.at < q.at ? 1 : p.at > q.at ? -1 : q.i - p.i))) { if (stopped.has(x.id)) continue; if (x.n > room) { stopped.add(x.id); continue; } room -= x.n; keep.add(`${x.id}\0${x.i}`); }
+  for (const x of all.sort((p, q) => (p.at < q.at ? 1 : p.at > q.at ? -1 : q.i - p.i))) { if (stopped.has(x.id)) continue; const cost = x.n - (keptBodies.has(x.id) ? 0 : 1); if (cost > room) { stopped.add(x.id); continue; } room -= cost; keptBodies.add(x.id); keep.add(`${x.id}\0${x.i}`); }
   for (const [id, b] of Object.entries(report.bodies)) if (Array.isArray(b.cards)) b.cards = b.cards.filter((_, i) => keep.has(`${id}\0${i}`));
   return report;
 }
