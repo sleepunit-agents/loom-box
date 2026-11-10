@@ -326,6 +326,12 @@ export const hostTask = (env, bootKey) => `loom-runtime body-host --piece ${piec
 
 // ─── The host's sync (the piece API's `body-sync`) ─────────────────────────
 
+/**
+ * A renamed card id's prefix (cleanCards). 16 hex of sha256: an accidental clash is negligible, and a house that forges
+ * one only reuses an id in its own thread, which it already writes whole.
+ */
+const RENAMED = 'h:';
+
 /** A host's activity cards, as core takes them (loom src/comms.ts postActivity): anything else is left out. */
 export function cleanCards(cards) {
   return cards.slice(-100).flatMap((c) => {
@@ -342,7 +348,7 @@ export function cleanCards(cards) {
     // 24-hex body id), and redact() would take it for a secret: so one it would change is renamed to `h:` (hashed) and
     // the first 16 hex of the id's sha256, the same step every time, never the id itself (t-2109: dropping them dropped
     // every house body's steps). An id that already starts `h:` is renamed too, so a house can't name a renamed one.
-    const id = redact(c.id) === c.id && !c.id.startsWith('h:') ? c.id : `h:${createHash('sha256').update(c.id).digest('hex').slice(0, 16)}`;
+    const id = redact(c.id) === c.id && !c.id.startsWith(RENAMED) ? c.id : `${RENAMED}${createHash('sha256').update(c.id).digest('hex').slice(0, 16)}`;
     const summary = part('text', c.summary, 120);
     if (summary === GONE || summary.length > 120 || UNPRINTABLE_ONE.test(summary)) return [];
     return [{ id, at: cardTime(c.at), tool: c.tool, summary, state: c.state }];

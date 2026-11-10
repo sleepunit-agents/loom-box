@@ -537,6 +537,9 @@ test('cleanCards keeps a house body\'s real steps: Claude tool ids and Codex bod
     assert.match(c.id, /^[A-Za-z0-9_.:\-]{1,80}$/, 'an id core takes');
     for (const v of Object.values(c)) if (typeof v === 'string') assert.equal(redact(v), v, `nothing secret-shaped in any field: ${v}`);
   }
+  // Pinned, so it's the same in every process and every release: a per-process salt or a changed recipe would move
+  // every step already shown onto a new card.
+  assert.equal(out[0].id, 'h:80a76a8431eb9e26');
   // Stable by id alone: the step reported later, done and with another label, in another sync, is the same card.
   const [later] = cleanCards([{ ...claude, state: 'done', summary: 'Ran git status', at: '2026-11-10T00:00:00.000Z' }]);
   assert.equal(later.id, out[0].id);
@@ -553,6 +556,7 @@ test('cleanCards keeps a house body\'s real steps: Claude tool ids and Codex bod
   for (const [name, x] of Object.entries(SECRETS)) {
     if (name === 'password') continue; // a plain word: redact takes it out only by its context (a flag, a URL), as above
     const got = cleanCards([{ ...claude, id: x.slice(0, 80) }]);
+    if (/^[A-Za-z0-9_.:\-]{1,80}$/.test(x.slice(0, 80))) assert.equal(got.length, 1, `${name}: kept, renamed`);
     assert.deepEqual(leaks(JSON.stringify(got)), [], x.slice(0, 4));
   }
 });
