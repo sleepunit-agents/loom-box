@@ -190,22 +190,26 @@ export function boards(env, nowS = Date.now() / 1000, adapters = adapterStatuses
 export const ADAPTER_STATUS_MS = 15_000;
 const adapterFile = (env) => join(dataDir(env), 'adapter-status.json');
 
+const adapterShape = (out) => out && typeof out === 'object' && !Array.isArray(out)
+  && Object.values(out).every((d) => d && d.mode === 'live' && Array.isArray(d.agents) && d.agents.every((a) => typeof a === 'string'));
+
 export function adapterStatuses(env, nowMs = Date.now()) {
   const home = env.LOOM_HOME || join(env.XDG_CONFIG_HOME || join(env.HOME || homedir(), '.config'), 'loom');
   const venues = ['discord', 'slack'].filter((v) => existsSync(join(home, 'pieces', v, 'piece.json')));
   if (!venues.length) return {};
-  const key = venues.join(',');
+  const key = JSON.stringify([home, venues]);
   const had = readJson(adapterFile(env));
-  if (had && had.key === key && typeof had.at === 'number' && nowMs - had.at >= 0 && nowMs - had.at < ADAPTER_STATUS_MS
-    && had.out && typeof had.out === 'object' && !Array.isArray(had.out)) return had.out;
+  if (had && had.key === key && typeof had.at === 'number' && nowMs - had.at >= 0 && nowMs - had.at < ADAPTER_STATUS_MS && adapterShape(had.out)) return had.out;
   const out = {};
+  let failed = false;
   for (const venue of venues) {
     try {
       const d = JSON.parse(execFileSync(env.LOOM_BIN || 'loom', [venue, 'status', '--json'], { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] }));
       if (d.mode === 'live' && Array.isArray(d.agents)) out[venue] = d;
-    } catch { /* Missing or unavailable: the old board remains authoritative. */ }
+    } catch { failed = true; /* Missing or unavailable: the old board remains authoritative. */ }
   }
-  try { ensureDir(dataDir(env)); writePrivate(adapterFile(env), JSON.stringify({ at: nowMs, key, out })); } catch { /* asked again next time */ }
+  // A read that failed isn't kept: the next caller asks again rather than showing the bridge down for the window.
+  if (!failed) try { ensureDir(dataDir(env)); writePrivate(adapterFile(env), JSON.stringify({ at: nowMs, key, out })); } catch { /* asked again next time */ }
   return out;
 }
 

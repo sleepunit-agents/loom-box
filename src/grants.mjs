@@ -21,6 +21,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { StoreError } from './store.mjs';
 
 export const GRANTS = 'grants';
@@ -88,12 +89,19 @@ export function decide(doc, ask) {
   return { allow: true };
 }
 
-/** `loom-runtime grants ask`: the offer core runs. Reads the document once; any failure is core's 503 (exit 1). */
+/**
+ * `loom-runtime grants ask`: the offer core runs. Reads the document once; any failure is core's 503 (exit 1).
+ * Asked with `basis: true` (core, for package.json's `grants_store`: loom src/grants.ts), it also says what it decided
+ * on: this document and the sha256 of its text, as the store holds it (null: there's none). Core keeps the answer only
+ * for exactly that state of the collection, so the answer must rest on this document and the ask alone.
+ */
 export function ask(store, input) {
   let q;
   try { q = JSON.parse(input); } catch { return { allow: false, reason: 'the ask isn\'t JSON' }; }
   const got = store.get(GRANTS, KEY);
-  return decide(got?.doc ?? null, q);
+  const answer = decide(got?.doc ?? null, q);
+  if (q?.basis !== true) return answer;
+  return { ...answer, basis: { key: KEY, sha256: got ? createHash('sha256').update(JSON.stringify(got.doc)).digest('hex') : null } };
 }
 
 /**

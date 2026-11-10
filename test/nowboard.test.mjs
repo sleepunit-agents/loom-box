@@ -261,5 +261,11 @@ echo "$1" >> '${calls}'; echo '{"mode":"live","agents":["art"]}'
   assert.equal(n(), 5);
   // A clock that went backwards isn't a fresh read.
   adapterStatuses(env, t0);
-  assert.equal(n(), 6);
+  assert.equal(n(), 6);  // A read that failed isn't kept: the next caller asks again.
+  writeFileSync(cli, `#!/bin/sh
+echo "$1" >> '${calls}'; exit 1
+`);
+  assert.deepEqual(adapterStatuses(env, t0 + 10 * ADAPTER_STATUS_MS), {});
+  assert.deepEqual(adapterStatuses(env, t0 + 10 * ADAPTER_STATUS_MS + 1), {});
+  assert.equal(n(), 8);
 });

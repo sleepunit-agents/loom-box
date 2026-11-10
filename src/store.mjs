@@ -23,6 +23,9 @@ export function loomStore(env = process.env, { run = spawnSync, piece = pieceNam
   return {
     get(collection, key) {
       const r = call(['get', collection, key]);
+      // Exit 3 is also `loom store`'s "no managed piece named …": that's no store read, never "nothing written" (an
+      // empty grants document allows everyone).
+      if (r.status === 3 && /no managed piece/.test(r.stderr || '')) throw new StoreError(`loom store: ${why(r)}`);
       if (r.status === 3) return null;
       if (r.status !== 0) throw new StoreError(`loom store: ${why(r)}`);
       const d = JSON.parse(r.stdout);
