@@ -82,7 +82,7 @@ import { existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync,
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { accountsFrom, accountsOfRecord } from './accounts.mjs';
+import { accountsFrom, accountsOfRecord, stateAccounts } from './accounts.mjs';
 import { commitPreparedBody, endBody, readBody, resumeBody, startBody } from './bodies.mjs';
 import { CoreError, coreFrom } from './core.mjs';
 import { stoppingHosts, HouseRunner, releaseEmptySeatHouses, seatRoom, sweepSeats, sweepTransfers } from './houserunner.mjs';
@@ -105,6 +105,7 @@ import { changed as changedCards } from './activity.mjs';
 import { keepKey, keepSession } from './bodyhost.mjs';
 import { spawnCap } from './spawn.mjs';
 import { continuationOutbox } from './continuation-outbox.mjs';
+import { admit, logShadow } from './allocator.mjs';
 import { readRelays } from './relay.mjs';
 import { householdOwners, membersOf, ownersOf } from './owners.mjs';
 import { approvalsFake, approvalsRun, approvalsRunAsync, approvalsWhy } from './approvals-call.mjs';
@@ -1680,6 +1681,18 @@ const savedBodyRules = (rules, at) => ({ guest: rules.guest, key: rules.key, den
 
 /** The one conversation commit for a native start or its recovered receipt.
  * The snapshot contains no prompt or raw sender key. */
+function shadowAdmission(env, c, r, at) {
+  try {
+    const nowMs = typeof at === 'number' ? at : Date.parse(at);
+    const list = r.accountKey ? stateAccounts(env, { now: () => nowMs }).list().accounts ?? [] : [];
+    const a = list.find((x) => x.name === r.accountKey);
+    if (!a) return;
+    const kind = c.spawn ? 'agent' : c.venue === 'wake' ? 'scheduled' : 'live';
+    const v = admit({ usage: a.usage, kind, now: nowMs });
+    logShadow(deliveryDir(env), { at: new Date(nowMs).toISOString(), kind, agent: c.agent, account: a.name, model: r.model, decision: v.allow ? 'allow' : 'defer', why: v.why, windows: v.windows, ...(c.spawn ? { job: c.conversation } : {}) });
+  } catch { /* a shadow log line, never a reason a start fails */ }
+}
+
 export function commitStartedConversation(env, op, { run, senderHash, bodyRules, way, houseLaunch, nativeRecovery }, r, pending, at, localKey) {
   const keys = op.msgs.map(x => x.key);
   return locked(env, () => {
@@ -1716,6 +1729,8 @@ export function commitStartedConversation(env, op, { run, senderHash, bodyRules,
       if (c.spawn.assignment) c.spawn.lineage = [...(c.spawn.lineage ?? []), { ...c.spawn.assignment, until: new Date(at).toISOString(), why: way.failover === 'rules' ? 'its rules can\'t be kept on that harness' : 'out of quota; failover allowed' }].slice(-8);
       c.spawn.assignment = a;
     }
+    // What capacity admission would have said (allocator.mjs, t-2037): shadow only, a log line, never a decision.
+    if (way.how === 'start') shadowAdmission(env, c, r, at);
     if (!r.inputUncertain) ack(c, op.msgs);
     delete c.retryAt; delete c.startFails; delete c.retryReason; delete c.startStatus;
     c.sendKey = senderHash;
