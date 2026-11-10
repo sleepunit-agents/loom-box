@@ -538,3 +538,32 @@ test('terminal vouch reads the real approvals CLI as the filing agent, without a
   assert.deepEqual(JSON.parse(readFileSync(log, 'utf8')), { argv: ['approvals', 'check', 'a-00000001', '--as', runtimeAs('art')], grant: null });
   assert.equal(loadConv(env, cv).queue.length, 0);
 });
+
+test('a leftover runtime note does not retain the expired card', async () => {
+  const { w, ap, lwake } = setup();
+  await deliver(w.env, lwake('wake:w-note', 'first', '-'), w.o);
+  const cv = cvOf('art', 'wake', 'wake:w-note');
+  const c = loadConv(w.env, cv);
+  c.queue.push({ key: 'note-000000000001', note: true });
+  writeFileSync(join(deliveryDir(w.env), 'conversations', `${cv}.json`), JSON.stringify(c));
+  ap.check = async () => 'expired';
+  await drain(w.env, cv, depsOf(w.env, w.o));
+  assert.equal(loadConv(w.env, cv).resetAsk, undefined);
+  assert.equal(loadConv(w.env, cv).queue.length, 0);
+  assert.deepEqual(conversationJobs(w.env, depsOf(w.env, w.o)), []);
+  assert.deepEqual(deliveryNotices(w.env, w.clock.now().getTime()), []);
+});
+
+for (const gate of ['control', 'retiring', 'paused']) test(`vouch cleanup respects ${gate} set while the card is read`, async () => {
+  const { w, ap, lwake } = setup();
+  await deliver(w.env, lwake('wake:w-held', 'bench', '-'), w.o);
+  const cv = cvOf('art', 'wake', 'wake:w-held');
+  ap.check = async () => {
+    const c = loadConv(w.env, cv);
+    c[gate] = { state: 'held', reason: 'held' };
+    writeFileSync(join(deliveryDir(w.env), 'conversations', `${cv}.json`), JSON.stringify(c));
+    return 'expired';
+  };
+  await drain(w.env, cv, depsOf(w.env, w.o));
+  assert.equal(loadConv(w.env, cv).queue.length, 1);
+});

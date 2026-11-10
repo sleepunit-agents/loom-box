@@ -1318,7 +1318,7 @@ function plan(env, cv, d, mem) {
  */
 async function finishUnvouchedWake(env, cv, d) {
   const c = loadConv(env, cv);
-  if (!c?.local || c.venue !== 'wake' || c.body || c.starting || !c.resetAsk?.approval || !c.queue?.length) return;
+  if (!c?.local || c.venue !== 'wake' || c.body || c.starting || c.retiring || c.control || c.paused || !c.resetAsk?.approval || !c.queue?.length) return;
   const aid = c.resetAsk.approval;
   if (!/^a-[0-9a-f]{8,40}$/.test(aid)) return;
   const listedWake = x => c.resetAsk.queued?.includes(x.key) && x.kind === 'wake' && x.local && x.from?.kind === 'schedule';
@@ -1335,14 +1335,14 @@ async function finishUnvouchedWake(env, cv, d) {
   if (!['denied', 'expired'].includes(state)) return;
   locked(env, () => {
     const cur = loadConv(env, cv);
-    if (!cur?.local || cur.venue !== 'wake' || cur.body || cur.starting || cur.resetAsk?.approval !== aid) return;
+    if (!cur?.local || cur.venue !== 'wake' || cur.body || cur.starting || cur.retiring || cur.control || cur.paused || cur.resetAsk?.approval !== aid) return;
     const shown = new Set(cur.resetAsk.queued ?? []);
     const drop = (cur.queue ?? []).filter(x => shown.has(x.key) && x.kind === 'wake' && x.local && x.from?.kind === 'schedule');
     if (!drop.length) return;
     outcome(cur, drop.map(x => x.key), { body: 'failed', reason: `not run: nobody vouched for it (vouch ${state})` }, d.now().getTime());
     const keys = new Set(drop.map(x => x.key));
     cur.queue = cur.queue.filter(x => !keys.has(x.key));
-    if (!cur.queue.length) {
+    if (cur.queue.every(isNote)) {
       delete cur.waiting;
       delete cur.resetAsk;
       delete cur.retryAt; delete cur.startFails; delete cur.retryReason; delete cur.startStatus;
