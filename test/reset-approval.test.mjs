@@ -611,16 +611,16 @@ for (const state of ['expired', 'denied']) test(`${state} vouch finishes all loc
   assert.deepEqual(deliveryNotices(w.env, w.clock.now().getTime()), []);
 });
 
-test('redelivery of the denied original returns its recorded not-run outcome', async () => {
+test('redelivery of the denied original retains its accepted idempotent answer', async () => {
   const { w, ap, lwake } = setup();
   const m = lwake('wake:w-replay', 'bench', '-');
-  await deliver(w.env, m, w.o);
+  const first = await deliver(w.env, m, w.o);
   const cv = cvOf('art', 'wake', 'wake:w-replay');
   ap.check = async () => 'denied';
   await drain(w.env, cv, depsOf(w.env, w.o));
   const again = await deliver(w.env, m, w.o);
-  assert.equal(again.body, 'failed');
-  assert.match(again.reason, /not run: nobody vouched/);
+  assert.deepEqual(again, first);
+  assert.equal(loadConv(w.env, cv).outcomes[loadConv(w.env, cv).resetAsk.queued[0]].body, 'failed');
   assert.equal(loadConv(w.env, cv).queue.length, 0);
   assert.equal(ap.filed.length, 1);
 });
