@@ -1719,7 +1719,7 @@ function workerGate(env, c, d) {
 
 /** The one conversation commit for a native start or its recovered receipt.
  * The snapshot contains no prompt or raw sender key. */
-function shadowAdmission(env, c, r, at) {
+function shadowAdmission(env, c, r, at, enforced = false) {
   try {
     const nowMs = typeof at === 'number' ? at : Date.parse(at);
     const list = r.accountKey ? stateAccounts(env, { now: () => nowMs }).list().accounts ?? [] : [];
@@ -1727,8 +1727,6 @@ function shadowAdmission(env, c, r, at) {
     if (!a) return;
     const kind = startKind(c);
     const v = admit({ usage: a.usage, kind, burn: forecastBurn(readReadings(deliveryDir(env), a.name)), now: nowMs });
-    let enforced = false;
-    try { enforced = kind !== 'live' && !c.spawn?.assignment && allocatorOf(load(env)).mode === 'enforce'; } catch { /* shadow */ }
     logShadow(deliveryDir(env), { at: new Date(nowMs).toISOString(), kind, agent: c.agent, account: a.name, model: r.model, decision: v.allow ? 'allow' : 'defer', why: v.why, windows: v.windows, ...(enforced ? { enforced: true } : {}), ...(c.spawn ? { job: c.conversation } : {}) });
   } catch { /* a shadow log line, never a reason a start fails */ }
 }
@@ -1770,7 +1768,7 @@ export function commitStartedConversation(env, op, { run, senderHash, bodyRules,
       c.spawn.assignment = a;
     }
     // What capacity admission would have said (allocator.mjs, t-2037): shadow only, a log line, never a decision.
-    if (way.how === 'start') shadowAdmission(env, c, r, at);
+    if (way.how === 'start') shadowAdmission(env, c, r, at, !!way.gated);
     if (!r.inputUncertain) ack(c, op.msgs);
     delete c.retryAt; delete c.startFails; delete c.retryReason; delete c.startStatus;
     c.sendKey = senderHash;
@@ -2148,7 +2146,7 @@ async function executeOne(env, op, d, mem) {
     bodyDeps.launch = preparedLaunch(env, op, d, { local, runKey, snapshot: () => launchSnapshot ??= {
       run, senderHash: keyHash(runKey).toString('hex'), bodyRules: savedBodyRules(rules, now()),
       ...(c0.nativeRecovery ? { nativeRecovery: c0.nativeRecovery.id } : {}),
-      way: { how: way.how, home: !!way.home, ...(way.file ? { file: way.file } : {}), ...(way.failover ? { failover: way.failover } : {}) },
+      way: { how: way.how, home: !!way.home, ...(way.file ? { file: way.file } : {}), ...(way.failover ? { failover: way.failover } : {}), ...(base.gate ? { gated: true } : {}) },
     } });
     const base = { activity: c0.spawn?.interactive === true, agent: c0.agent, venue: c0.venue, venueKind: c0.kind, prefer: c0.spawn?.prefer ? [c0.spawn.prefer] : [], cwd: local ? lb.cwd : d.cwd, deny: rules.deny, guest: rules.guest, ...(local ? { local: true } : {}), ...(rules.seat ? { seat: rules.seat } : {}), ...jobModel(c0) };
     // Out of quota (t-1907): which session this run continues, on which harness. Its home slot, when the harness it
@@ -2180,8 +2178,9 @@ async function executeOne(env, op, d, mem) {
     }
     if (way.how === 'start') {
       // A new worker job, with the owner's allocator on (t-2037, slice 3): only an account that leaves conversations
-      // their reserve until its reset. A pinned job continuing (a failover or a home) is slice 4's, never gated here.
-      const gate = !base.pin && workerGate(env, c0, d);
+      // their reserve until its reset. A job with an assignment (it ran before: a failover, a home) is slice 4's, never
+      // gated here, whatever its pin says now.
+      const gate = !c0.spawn?.assignment && workerGate(env, c0, d);
       if (gate) base.gate = gate;
       const go = (avoid) => startBody(env, { ...base, place: c0.place, avoid, brief: startBrief(briefContext, [...notes, ...msgs], run, sends, rules) }, bodyDeps);
       try { r = await go(way.avoid); } catch (e) {
@@ -2211,7 +2210,7 @@ async function executeOne(env, op, d, mem) {
         if (way.home) rmSync(slotFile(env, op.cv), { force: true });
       });
     }
-    const snapshot = launchSnapshot ?? { run, senderHash: keyHash(runKey).toString('hex'), bodyRules: savedBodyRules(rules, now()), way: { how: way.how, home: !!way.home, ...(way.failover ? { failover: way.failover } : {}) }, ...(c0.nativeRecovery ? { nativeRecovery: c0.nativeRecovery.id } : {}) };
+    const snapshot = launchSnapshot ?? { run, senderHash: keyHash(runKey).toString('hex'), bodyRules: savedBodyRules(rules, now()), way: { how: way.how, home: !!way.home, ...(way.failover ? { failover: way.failover } : {}), ...(base.gate ? { gated: true } : {}) }, ...(c0.nativeRecovery ? { nativeRecovery: c0.nativeRecovery.id } : {}) };
     const keep = commitStartedConversation(env, op, snapshot, r, pending, now(), local ? runKey : undefined);
     if (!keep) endAndForget(env, r, d);
     else {

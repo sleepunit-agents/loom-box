@@ -178,6 +178,9 @@ export function capacityGate({ kind, jobsOn = {}, burnOf = () => ({}), now = Dat
     }));
     account = { ...account, usage };
     const ws = windowsOf(usage);
+    // No window read at all (an API key; a login before its first reading): not gated, as its quota isn't (hasRoom).
+    // Held back on "unknown is not room", it would wait forever and say nothing.
+    if (!ws.length) return { allow: true, kind, windows: [], why: 'no usage reading for this account: not gated, as its quota isn\'t' };
     const estimate = Object.fromEntries(ws.map((w) => [w, estimateFor(w)]));
     const n = jobsOn[account.name] ?? 0;
     const inFlight = Object.fromEntries(ws.map((w) => [w, n * estimateFor(w)]));
