@@ -13,7 +13,7 @@ import { world } from './delivery-world.mjs';
 const DATA = Buffer.alloc(FILE_PART * 2 + 17, 7);
 const sha = (b) => createHash('sha256').update(b).digest('hex');
 
-async function setup(adapterFile = { name: 'photo.jpg', data: DATA }) {
+async function setup(adapterFile = { name: 'photo.jpg', data: DATA }, messages = ['art:D1:1.0']) {
   const w = world();
   const asked = [];
   Object.assign(w.o, {
@@ -23,10 +23,12 @@ async function setup(adapterFile = { name: 'photo.jpg', data: DATA }) {
       asked.push({ argv, place: c.place, agent: c.agent, id: args[1] });
       if (!adapterFile) throw new Error('no file F0ABC was sent in this conversation');
       writeFileSync(args[3], adapterFile.data);
-      return { ok: true, name: adapterFile.name, size: adapterFile.size ?? adapterFile.data.length, sha256: adapterFile.sha ?? sha(adapterFile.data) };
+      return { ok: true, name: adapterFile.name, size: adapterFile.size ?? adapterFile.data.length, sha256: adapterFile.sha ?? sha(adapterFile.data), messages };
     },
   });
-  const cv = (await deliver(w.env, w.msg('dm:U1', 'look [file: photo.jpg; to read it: loom runtime file F0ABC]', { venue: 'slack', from: { kind: 'person', slug: 'phil' } }), w.o)).conversation;
+  const cv = (await deliver(w.env, w.msg('dm:U1', 'look [file: photo.jpg; to read it: loom runtime file F0ABC]', { source: 'slack', id: 'art:D1:1.0', venue: 'slack', from: { kind: 'person', slug: 'phil' } }), w.o)).conversation;
+  // Another conversation in the same place, earlier (another seat's, say): its message carried a file too.
+  await deliver(w.env, w.msg('dm:U2', 'elsewhere', { source: 'slack', id: 'art:D2:1.0', venue: 'slack', from: { kind: 'person', slug: 'sam' } }), w.o);
   const c = loadConv(w.env, cv);
   const proof = { key: w.runner.envs[c.body.split(':')[1]].LOOM_BODY_KEY, session: w.sessionFor(cv) };
   const d = depsOf(w.env, w.o);
@@ -53,6 +55,7 @@ test('no other body, agent or proof gets it, and nothing is asked of the adapter
   assert.equal((await get(0, { key: 'f'.repeat(64), session: proof.session })).ok, false, 'another key');
   assert.equal((await get(0, proof, { kind: 'agent', agent: 'mark' })).ok, false, 'another agent');
   assert.equal((await get(0, proof, undefined, '../x')).ok, false, 'not an id');
+  assert.equal((await get(0, proof, undefined, '--describe')).ok, false, 'never a flag to the adapter');
   assert.equal(asked.length, 0);
 });
 
@@ -61,6 +64,14 @@ test('a part before the file was fetched, or an adapter that hands over somethin
   assert.match((await (await setup(null)).get(0)).reason, /no file F0ABC/);
   assert.match((await (await setup({ name: 'photo.jpg', data: DATA, sha: 'f'.repeat(64) })).get(0)).reason, /something other/);
   assert.match((await (await setup({ name: '../x', data: DATA })).get(0)).reason, /something other/);
+});
+
+test('a file sent in its place but not in this conversation gets nothing', async () => {
+  for (const messages of [[], ['art:D2:1.0'], ['art:D9:9.0'], null]) {
+    const r = await (await setup(undefined, messages)).get(0);
+    assert.match(r.reason, /no message delivered to this conversation/, JSON.stringify(messages));
+  }
+  assert.equal((await (await setup(undefined, ['art:D2:1.0', 'art:D1:1.0'])).get(0)).ok, true, 'one of its deliveries came here');
 });
 
 test('through the runtime\'s run path, the call names its conversation, id and part', async () => {
