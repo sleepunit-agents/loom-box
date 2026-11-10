@@ -227,6 +227,8 @@ export const handOverWake = (env, w) => locked(env, () => putWakeFor(deliveryDir
 // ─── Settings and what it's made of ─────────────────────────────────────────
 
 const num = (v, d) => { const n = Number(v); return v !== undefined && v !== '' && Number.isFinite(n) && n >= 0 ? n : d; };
+/** A "house" entry as the place the clock gives a local wake: a lane's local runs are `local-lane:<lane>`. */
+const localPlace = (p) => (p.startsWith('lane:') ? `local-${p}`.slice(0, 200) : p);
 
 /**
  * Local bodies (t-1830): a wake that needs loom's machine has its body here, not in a house, when the owner says so
@@ -242,8 +244,11 @@ const num = (v, d) => { const n = Number(v); return v !== undefined && v !== '' 
  * the owner's work only) but starts such a wake's body in the agent's own (owner-seat) house on a worker box instead of
  * on loom's machine: the step that takes Claude bodies off loom's machine. What it needed the machine for comes back as
  * host verbs (note:runtime/2026-11-10-t2049-phase3-local-bodies-off-loom), not a shell here.
- * "house": ["lane:letters", …] moves only those wakes' places so, the rest staying where "where" says: the lanes move
- * into the house one at a time (the design's step 6), each once it no longer needs a shell here.
+ * "house": ["local-lane:plan", …] moves only those wakes' places so, the rest staying where "where" says: the lanes move
+ * into the house one at a time (the design's step 6), each once it no longer needs a shell here. A local wake's place is
+ * the clock's `local-lane:<lane>` (`lane:<lane>` is a lane's house runs, never local), else the place it names
+ * (`alert:<source>`), else `wake:<id>`; an entry `lane:<lane>` means that lane's local runs, so it can't silently match
+ * nothing.
  */
 export function localBodiesOf(env) {
   let v;
@@ -253,7 +258,7 @@ export function localBodiesOf(env) {
   if (!agents.length || typeof v.cwd !== 'string' || !v.cwd.startsWith('/')) return null;
   const args = Array.isArray(v.args) && v.args.every((a) => typeof a === 'string') ? v.args : [];
   const from = typeof v.from === 'string' && PIECE.test(v.from) ? v.from : 'clock';
-  const house = Array.isArray(v.house) ? [...new Set(v.house.filter((p) => typeof p === 'string' && p && p.length <= 200))] : [];
+  const house = Array.isArray(v.house) ? [...new Set(v.house.filter((p) => typeof p === 'string' && p && p.length <= 200).map(localPlace))] : [];
   return { agents, cwd: v.cwd, from, ...(typeof v.claude === 'string' && v.claude ? { claude: v.claude } : {}), args, ...(typeof v.path === 'string' && v.path ? { path: v.path } : {}), ...(v.codex === true ? { codex: true } : {}), where: v.where === 'house' ? 'house' : 'here', ...(house.length ? { house } : {}) };
 }
 /** Whether a local wake's conversation has its bodies in the owner's house (localBodiesOf's "where" and "house"). */
