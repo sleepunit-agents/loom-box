@@ -21,7 +21,8 @@ import { accountsFrom } from './accounts.mjs';
 import { checkParts, composeBrief, isParts } from './briefs.mjs';
 import { resolveFor } from './models.mjs';
 import { runnerFor } from './runners.mjs';
-import { StateError } from './state.mjs';
+import { StateError, load } from './state.mjs';
+import { factsOf, meets } from './control.mjs';
 /** Core's Comms venue (loom docs/specs/comms.md): its bodies' tool steps are read as activity cards; no other's are. */
 const COMMS_VENUE = 'loom';
 
@@ -84,12 +85,26 @@ export function commitPreparedBody(env, prepared, body, at = new Date().toISOStr
   return { ...rec, why: prepared.why, preferred: prepared.preferred };
 }
 
-export async function startBody(env, { agent, brief: b, venue, venueKind, prefer = [], avoid = [], cwd, deny = [], place, guest, local, seat, activity = false, role, pin, gate }, o = {}) {
+/**
+ * A body whose work needs something of its box (a worker role's needs, t-2092): a house's runner places it on a box
+ * that has them (placement.mjs, bodyBox); a body here, on this runtime's own machine, only if this box has them all.
+ * Never placed blind: refused, with what's missing.
+ */
+function needsMet(env, runner, needs) {
+  if (!needs?.length || runner.remote) return;
+  let here;
+  try { here = Object.values(load(env).boxes ?? {}).find((b) => b.local); } catch { here = null; }
+  const missing = needs.filter((n) => !meets(factsOf(here ?? {}), n));
+  if (missing.length) fail(`this job's role needs a box with ${missing.join(', ')}, and this machine doesn't have ${missing.length === 1 ? 'it' : 'them'}`, 409);
+}
+
+export async function startBody(env, { agent, brief: b, venue, venueKind, prefer = [], avoid = [], cwd, deny = [], place, guest, local, seat, activity = false, role, pin, gate, needs = [] }, o = {}) {
   const d = deps(env, o);
   const text = brief(b);
   if (typeof venue !== 'string' || !/^[a-z][a-z0-9-]{0,39}$/.test(venue)) fail('which venue (wake, relay, session, discord, slack, …)');
   const pick = await resolveFor(env, { agent, venue, venueKind, prefer, avoid, role, pin, gate, conversation: o.bodyEnv?.LOOM_BODY_CONVERSATION, accounts: d.accounts, now: d.now(), fetchImpl: d.fetchImpl });
   const runner = d.runner(pick.harness, !!local);
+  needsMet(env, runner, needs);
   // Comms and interactive terminal bodies expose their native tool steps as activity cards (activity.mjs).
   // Whose house (t-1952): a house's runner seats it there; a local one has no houses.
   const metadata = {
@@ -98,7 +113,7 @@ export async function startBody(env, { agent, brief: b, venue, venueKind, prefer
     ...(deny.length ? { deny: [...deny] } : {}), ...(guest ? { guest: true } : {}), ...(local ? { local: true } : {}),
     harness: pick.harness, model: pick.model, family: pick.family, ...(pick.account ? { account: pick.account } : {}), ...(pick.accountKey ? { accountKey: pick.accountKey } : {}), ...switchedOf(pick), instance: randomBytes(12).toString('hex'),
   };
-  const options = { agent, brief: forRunner(runner, text, cwd), model: pick.model, cwd, env: o.bodyEnv, deny, ...(seat ? { seat } : {}), ...((venue === COMMS_VENUE || activity) ? { activity: true } : {}) };
+  const options = { agent, brief: forRunner(runner, text, cwd), model: pick.model, cwd, env: o.bodyEnv, deny, ...(seat ? { seat } : {}), ...(needs.length ? { needs } : {}), ...((venue === COMMS_VENUE || activity) ? { activity: true } : {}) };
   const prepared = { metadata, why: pick.why, preferred: pick.preferred };
   const body = o.launch ? await o.launch({ runner, harness: pick.harness, options, prepared }) : await runner.start(options);
   const at = d.now().toISOString();
@@ -112,7 +127,7 @@ export function feedBody(env, ref, message, o = {}) {
 }
 
 /** A body continued: by its id (its slot, from the harness), or by a slot ({harness, session}) another machine kept. */
-export async function resumeBody(env, { body: ref, slot, agent, venue, venueKind, brief: b, prefer = [], cwd, deny = [], files, guest, local, seat, activity = false, role, pin }, o = {}) {
+export async function resumeBody(env, { body: ref, slot, agent, venue, venueKind, brief: b, prefer = [], cwd, deny = [], files, guest, local, seat, activity = false, role, pin, needs = [] }, o = {}) {
   const d = deps(env, o);
   let rec = null;
   if (ref) {
@@ -127,13 +142,14 @@ export async function resumeBody(env, { body: ref, slot, agent, venue, venueKind
   const pick = await resolveFor(env, { agent: who, venue: where, venueKind: rec?.kind ?? venueKind, prefer: [...prefer, ...(rec ? [rec.model] : [])], harness: slot.harness, role, pin, conversation: o.bodyEnv?.LOOM_BODY_CONVERSATION, accounts: d.accounts, now: d.now(), fetchImpl: d.fetchImpl });
   const here = !!(local ?? rec?.local);
   const runner = d.runner(slot.harness, here);
+  needsMet(env, runner, needs);
   const metadata = {
     agent: who, venue: where, kind: pick.kind, ...(rec?.place ? { place: rec.place } : {}),
     ...(deny.length ? { deny: [...deny] } : {}), ...(guest ? { guest: true } : {}), ...(here ? { local: true } : {}),
     harness: pick.harness, model: pick.model, family: pick.family, ...(pick.account ? { account: pick.account } : {}), ...(pick.accountKey ? { accountKey: pick.accountKey } : {}), ...switchedOf(pick),
     instance: randomBytes(12).toString('hex'), slot, ...(ref ? { resumed: ref } : {}),
   };
-  const options = { agent: who, brief: forRunner(runner, brief(b), cwd), model: pick.model, cwd, env: o.bodyEnv, deny, ...(seat ? { seat } : {}), ...(files ? { files } : {}), ...((where === COMMS_VENUE || activity) ? { activity: true } : {}) };
+  const options = { agent: who, brief: forRunner(runner, brief(b), cwd), model: pick.model, cwd, env: o.bodyEnv, deny, ...(seat ? { seat } : {}), ...(needs.length ? { needs } : {}), ...(files ? { files } : {}), ...((where === COMMS_VENUE || activity) ? { activity: true } : {}) };
   const prepared = { metadata, why: pick.why, preferred: pick.preferred };
   const body = o.launch ? await o.launch({ runner, harness: pick.harness, options, resume: slot, prepared }) : await runner.resume(slot, options);
   const at = d.now().toISOString();

@@ -153,8 +153,10 @@ export function setModels(env, { list, agent, allow, prefer }) {
 export const ROLE_ID = /^[a-z][a-z0-9-]{0,39}$/;
 const ROLE_TEXT = 400;
 const ROLE_LOG = 20;
+/** A box fact a role needs: control.mjs's FACT (a name, and an optional value to match). */
+const NEED = /^[a-z][a-z0-9-]{0,31}(:[A-Za-z0-9._ +-]{1,64})?$/;
 
-/** A role, checked against the model list: {id, description, models?: [id], families?: [family], needs?, input?, output?, dossier?}. */
+/** A role, checked against the model list: {id, description, models?: [id], families?: [family], needs?: [fact], note?, input?, output?, dossier?}. */
 export function checkRole(list, r) {
   if (!r || typeof r !== 'object') fail('a role is {id, description, models}');
   if (!ROLE_ID.test(r.id ?? '')) fail(`a role's id is like coding or light-task: ${JSON.stringify(r.id)}`);
@@ -174,10 +176,23 @@ export function checkRole(list, r) {
     out.families = [...new Set(r.families)];
   }
   if (!out.models?.length && !out.families?.length) fail(`${r.id}: name the models (or families) eligible for it`);
-  for (const k of ['input', 'output', 'needs']) {
+  for (const k of ['input', 'output', 'note']) {
     if (r[k] === undefined) continue;
     if (typeof r[k] !== 'string' || !r[k].trim() || r[k].length > ROLE_TEXT) fail(`${r.id}: ${k} is 1 to ${ROLE_TEXT} characters`);
     out[k] = r[k].trim();
+  }
+  // What a job of this role needs of its box (t-2092): box facts, as `loom runtime up --needs` takes them (gpu:5090,
+  // a label). A role from before, whose needs was words, keeps them as its note: words place nothing.
+  if (r.needs !== undefined) {
+    if (typeof r.needs === 'string') {
+      if (!r.needs.trim() || r.needs.length > ROLE_TEXT) fail(`${r.id}: needs is a list of box facts, like gpu:5090`);
+      if (out.note === undefined) out.note = r.needs.trim();
+    } else {
+      if (!Array.isArray(r.needs) || r.needs.length > 8) fail(`${r.id}: needs is a list of at most 8 box facts, like gpu:5090`);
+      const bad = r.needs.find((n) => typeof n !== 'string' || !NEED.test(n));
+      if (bad !== undefined) fail(`${r.id}: ${JSON.stringify(bad)} isn't a box fact (like gpu:5090, or a box's label)`);
+      if (r.needs.length) out.needs = [...new Set(r.needs)];
+    }
   }
   if (r.dossier !== undefined) {
     if (!ROLE_ID.test(r.dossier)) fail(`${r.id}: dossier is a dossier's name, like code or review`);

@@ -23,7 +23,7 @@
 // the owner's work in the agent's one owner house, a person's in that person's own, an unknown principal's in a house
 // of that conversation alone. So a body can't read the run key or session of a conversation steered by someone else:
 // they're files in another container. A principal that changes moves the body (delivery.mjs, plan: reseat).
-import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { membersOf, ownersOf } from './owners.mjs';
@@ -141,6 +141,19 @@ export function principalOf(env, c) {
 /** A house's seat: `owner`, `p-<person>` (one non-owner person's) or `u-<conversation>` (an unknown principal's). */
 export const SEAT = /^(owner|p-[a-z0-9]+(-[a-z0-9]+)*|u-cv-[0-9a-f]{12}|j-h-[0-9]{1,9})$/;
 export const OWNER_SEAT = 'owner';
+/**
+ * A body host record's key (t-2092): its seat, and when its bodies need something of their box (a worker role's
+ * `needs`, box facts like gpu:5090) a short hash of those needs, `<seat>~<hash>`. One seat's needs house is still that
+ * seat's alone: the key only ever narrows the seat, never joins two. The seat cap counts seats, so a seat's needs
+ * house and its plain one are one seat's.
+ */
+export const HOST_KEY = /^(owner|p-[a-z0-9]+(-[a-z0-9]+)*|u-cv-[0-9a-f]{12}|j-h-[0-9]{1,9})(~[0-9a-f]{10})?$/;
+export const needsKey = (needs) => {
+  const n = [...new Set((needs ?? []).map(String))].sort();
+  return n.length ? createHash('sha256').update(n.join('\n')).digest('hex').slice(0, 10) : '';
+};
+export const hostKeyOf = (seat, needs) => { const k = needsKey(needs); return k ? `${seat}~${k}` : seat; };
+export const seatOfKey = (key) => String(key ?? '').split('~')[0];
 
 /**
  * Whose house a conversation's body runs in, by its principal (principalOf): the owner's only when every voice was the

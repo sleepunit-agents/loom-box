@@ -30,7 +30,7 @@ export async function spawnCall(env, caller, q = {}, o = {}) {
   // The work roles this body can ask for (t-2036, t-2039): read, never edited, here. Only what a body needs to choose.
   if (q.action === 'roles' && (caller.kind === 'owner' || caller.kind === 'agent')) {
     const cat = readRoles(env);
-    return { version: cat.version, roles: cat.roles.map((r) => ({ id: r.id, description: r.description, eligible: r.eligible, ...Object.fromEntries(['needs', 'input', 'output', 'dossier', 'failover'].filter((k) => r[k] !== undefined).map((k) => [k, r[k]])) })) };
+    return { version: cat.version, roles: cat.roles.map((r) => ({ id: r.id, description: r.description, eligible: r.eligible, ...Object.fromEntries(['needs', 'note', 'input', 'output', 'dossier', 'failover'].filter((k) => r[k] !== undefined).map((k) => [k, r[k]])) })) };
   }
   const parent = asking(env, caller, q, o);
   const agent = parent?.agent ?? q.agent;
@@ -57,7 +57,7 @@ export async function spawnCall(env, caller, q = {}, o = {}) {
   let role;
   if (q.role !== undefined) {
     if (typeof q.role !== 'string') no('role is a role\'s id (loom runtime roles)');
-    try { const r = roleOf(load(env), q.role); role = { id: r.id, version: r.version, eligible: r.eligible, ...(r.failover ? { failover: true } : {}) }; } catch (e) { no(e.message); }
+    try { const r = roleOf(load(env), q.role); role = { id: r.id, version: r.version, eligible: r.eligible, ...(r.needs?.length ? { needs: r.needs } : {}), ...(r.failover ? { failover: true } : {}) }; } catch (e) { no(e.message); }
     if (!role.eligible.length) no(`role ${role.id} has no eligible model`);
     // Refused now, not left to fail at its start: a role whose models are all outside what this agent may use.
     const allow = readModels(env).agents[agent]?.allow;

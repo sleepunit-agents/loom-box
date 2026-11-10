@@ -5,7 +5,7 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { StateError } from './state.mjs';
-import { SEAT } from './principal.mjs';
+import { HOST_KEY } from './principal.mjs';
 
 const ID = /^[0-9a-f]{64}$/;
 const root = env => join(env.LOOM_BOX_DATA || join(env.HOME || homedir(), '.local/share/loom-box'), 'delivery/house-launches');
@@ -17,7 +17,7 @@ function validate(r, id) {
   if (r?.v !== 1 || r.id !== id || !ID.test(r.intentHash ?? '') || !['claude', 'codex'].includes(r.harness)
       || !/^[a-z][a-z0-9-]{0,39}$/.test(r.agent ?? '') || !/^h-[0-9]{1,9}$/.test(r.house ?? '')
       || !/^[0-9a-f]{16}$/.test(r.rid ?? '') || !['reserved', 'publishing', 'published', 'ready', 'refused', 'terminated'].includes(r.state)
-      || !SEAT.test(r.seat ?? '') || (['reserved', 'publishing', 'published'].includes(r.state) && typeof r.sealed !== 'string')) {
+      || !HOST_KEY.test(r.seat ?? '') || (['reserved', 'publishing', 'published'].includes(r.state) && typeof r.sealed !== 'string')) {
     throw new StateError('invalid house launch journal; its admission remains held', 409);
   }
   if (r.state === 'ready' && (!/^[A-Za-z0-9-]{4,64}$/.test(r.body?.id ?? '') || r.body.harness !== r.harness || r.body.house !== r.house || r.body.seat !== r.seat)) {

@@ -1147,7 +1147,8 @@ function roleFields(list, r = null) {
     { name: 'description', label: 'What it\'s for', kind: 'textarea', required: true, ...(r ? { value: r.description } : {}), hint: 'One or two sentences an agent reads to choose it' },
     { name: 'models', label: 'Models', kind: 'checks', options: list.map((m) => ({ value: m.id, label: m.id, detail: `${m.family}, on ${HARNESS_WORDS[m.harness] ?? m.harness}` })), ...(r?.models?.length ? { value: csv(r.models) } : {}) },
     { name: 'families', label: 'Or any model of', kind: 'text', ...(r?.families?.length ? { value: r.families.join(', ') } : {}), hint: 'Optional: anthropic, openai, google, mistral or local:<name>' },
-    { name: 'needs', label: 'Needs', kind: 'text', ...(r?.needs ? { value: r.needs } : {}), hint: 'Optional, e.g. a GPU, or a long context' },
+    { name: 'needs', label: 'Needs of its box', kind: 'text', ...(r?.needs?.length ? { value: [].concat(r.needs).join(', ') } : {}), hint: 'Optional: what the box must have, like gpu:5090 or a box label. Its jobs run only on a box that has it' },
+    { name: 'note', label: 'Note', kind: 'text', ...(r?.note ? { value: r.note } : {}), hint: 'Optional, e.g. a long context' },
     { name: 'failover', label: 'If its model runs out', kind: 'choice', value: r?.failover ? 'yes' : 'no', options: [
       { value: 'no', label: 'Wait for it', detail: 'The job keeps its model and waits for quota' },
       { value: 'yes', label: 'Move once', detail: 'The job moves once to another eligible model with room' }] },
@@ -1161,7 +1162,7 @@ function rolesSection(env) {
   const { list } = modelsOf(st);
   const hidden = { version: String(cat.version) };
   const rows = cat.roles.map((r) => ({ label: r.id, value: r.eligible.length ? r.eligible.join(', ') : 'No model in the list fits it',
-    detail: r.description, tone: r.eligible.length ? 'ok' : 'warn',
+    detail: r.needs?.length ? `${r.description} Runs on a box with ${r.needs.join(', ')}.` : r.description, tone: r.eligible.length ? 'ok' : 'warn',
     edit: { title: `Change ${r.id}`, action: 'role-set', submit: 'Save', hidden: { ...hidden, id: r.id }, fields: roleFields(list, r) },
     act: { action: 'role-remove', label: 'Remove', fields: { ...hidden, id: r.id }, confirm: `Remove the ${r.id} role? A job already running keeps it; new jobs can't ask for it.` } }));
   rows.push({ label: 'A role', value: 'Add a kind of work agents can hand off', tone: 'muted',
@@ -1198,7 +1199,9 @@ function roleFromFields(f) {
   const models = list(f.models), families = list(f.families);
   if (models.length) out.models = models;
   if (families.length) out.families = families;
-  if (String(f.needs ?? '').trim()) out.needs = String(f.needs);
+  const needs = list(f.needs);
+  if (needs.length) out.needs = needs;
+  if (String(f.note ?? '').trim()) out.note = String(f.note);
   out.failover = f.failover === 'yes';
   return out;
 }

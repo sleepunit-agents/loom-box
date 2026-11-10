@@ -1048,7 +1048,7 @@ async function roles(rest, env, json) {
   process.stdout.write(`catalog v${r.version}\n`);
   for (const x of r.roles) {
     process.stdout.write(`${x.id}: ${x.description}\n  eligible: ${x.eligible.join(', ') || '(none: its models left the list)'}${x.failover ? '; may move to another eligible model when out of quota' : ''}\n`);
-    for (const k of ['needs', 'input', 'output', 'dossier']) if (x[k]) process.stdout.write(`  ${k}: ${x[k]}\n`);
+    for (const k of ['needs', 'note', 'input', 'output', 'dossier']) if (x[k]) process.stdout.write(`  ${k}: ${[].concat(x[k]).join(', ')}\n`);
   }
 }
 
