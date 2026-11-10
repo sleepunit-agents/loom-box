@@ -355,8 +355,8 @@ function window(lines, max) {
   return { head: lines.slice(0, i), middle: lines.slice(i, j), tail: lines.slice(j) };
 }
 
-const KEY_BEGIN = /-----BEGIN [A-Z ]{0,40}PRIVATE KEY-----/;
-const KEY_END = /-----END [A-Z ]{0,40}PRIVATE KEY-----/;
+const KEY_BEGIN = /-----BEGIN [A-Z ]{0,40}PRIVATE KEY(?: BLOCK)?-----/;
+const KEY_END = /-----END [A-Z ]{0,40}PRIVATE KEY(?: BLOCK)?-----/;
 
 /**
  * A diff as shown: each line's content redacted apart from its mark (+, -, space), so `+NAME=value` is an assignment to
@@ -385,7 +385,7 @@ export function diffText(text) {
  * most `max`, its head and tail kept around a line saying how many weren't. '' for none.
  */
 export function shownText(text, max = MAX_BODY) {
-  const t = String(text ?? '').slice(0, 2_000_000).replace(/-----BEGIN [A-Z ]{0,40}PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]{0,40}PRIVATE KEY-----|$)/g, GONE);
+  const t = String(text ?? '').slice(0, 2_000_000).replace(/-----BEGIN [A-Z ]{0,40}PRIVATE KEY(?: BLOCK)?-----[\s\S]*?(?:-----END [A-Z ]{0,40}PRIVATE KEY(?: BLOCK)?-----|$)/g, GONE);
   const { head, middle, tail } = window(t.split('\n'), max);
   return capLines([...head, ...tail].map(shownTextLine), max, middle.length);
 }

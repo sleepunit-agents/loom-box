@@ -72,15 +72,20 @@ const HELPER_READ_MAX = 2 * 1024 * 1024;
 const SIGN_MEMO = new Map();
 /** The longest unfinished line a sign of life carries between reads; past it, the line's dropped. */
 const REST_MAX = 16 * 1024 * 1024;
+/** At most how much of a helper's meta file is read (a few hundred bytes, as Claude Code writes it). */
+const META_MAX = 64 * 1024;
 const ACTIVITY_READ_MAX = 16 * 1024 * 1024;
 const jsonLines = (t) => t.split('\n').flatMap((l) => { try { const v = JSON.parse(l); return v && typeof v === 'object' ? [v] : []; } catch { return []; } });
 /** `max` bytes of `p` from `offset` (as text), and the offset after them. */
 function readFrom(p, offset, max) {
   let fd;
   try {
-    // Never through a link, as tailOf reads; a buffer only as large as what's there to read.
-    fd = openSync(p, constants.O_RDONLY | constants.O_NOFOLLOW);
-    const size = Math.max(0, Math.min(max, fstatSync(fd).size - offset));
+    // As tailOf reads; a buffer only as large as what's there to read.
+    // Never through a link, nor a FIFO or device a body put there (no wait to open it, only a plain file read).
+    fd = openSync(p, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    const st = fstatSync(fd);
+    if (!st.isFile()) return { text: '', next: offset };
+    const size = Math.max(0, Math.min(max, st.size - offset));
     const buf = Buffer.alloc(size);
     const n = size ? readSync(fd, buf, 0, size, offset) : 0;
     // Up to the last whole UTF-8 character: a character cut by the slice is read whole next time, never as U+FFFD.
@@ -345,12 +350,13 @@ export class ClaudeRunner {
     // spawnDepth, requestShape, …, finished}). A layout it doesn't find leaves the session's own steps, never fewer.
     const dir = join(f.slice(0, -'.jsonl'.length), 'subagents');
     let metas = [];
-    try { metas = readdirSync(dir).filter((n) => /^agent-[A-Za-z0-9_-]{1,64}\.meta\.json$/.test(n)); } catch { return cards; }
-    const helpers = metas.map((n) => { try { return { n, t: statSync(join(dir, n)).mtimeMs }; } catch { return null; } }).filter(Boolean).sort((a, b) => b.t - a.t).slice(0, 20);
+    // The body writes there: a meta is only ever a plain file, never followed through a link, read to META_MAX.
+    try { metas = readdirSync(dir).filter((n) => /^agent-[A-Za-z0-9_-]{1,64}\.meta\.json$/.test(n)).slice(0, 500); } catch { return cards; }
+    const helpers = metas.map((n) => { try { const st = lstatSync(join(dir, n)); return st.isFile() ? { n, t: st.mtimeMs } : null; } catch { return null; } }).filter(Boolean).sort((a, b) => b.t - a.t).slice(0, 20);
     for (const { n } of helpers) {
       const agent = n.slice('agent-'.length, -'.meta.json'.length);
       let meta;
-      try { meta = JSON.parse(readFileSync(join(dir, n), 'utf-8')); } catch { continue; }
+      try { meta = JSON.parse(readFrom(join(dir, n), 0, META_MAX).text); } catch { continue; }
       // Its step, when the session's window still holds it; else its steps stand on their own (never dropped).
       const parent = typeof meta?.toolUseId === 'string' && cards.some((c) => c.id === meta.toolUseId) ? meta.toolUseId : null;
       // A helper's transcript is read from its end, at most HELPER_READ_MAX: its newest steps.

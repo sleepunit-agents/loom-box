@@ -36,6 +36,7 @@ export const PACKED_MAX = 400 * 1024;
  * bodies, are kept; each body's keep their order. Anything else in the report is never trimmed.
  */
 export function fitCards(report, max) {
+  fitFinals(report);
   const all = [];
   for (const [id, b] of Object.entries(report.bodies ?? {})) if (Array.isArray(b.cards)) b.cards.forEach((c, i) => all.push({ id, i, at: String(c?.at ?? ''), n: Buffer.byteLength(JSON.stringify(c)) + 1 }));
   const total = Buffer.byteLength(JSON.stringify(report));
@@ -62,6 +63,23 @@ export function packedParts(packing, history) {
     packed[id] = { part: p.next, parts: p.parts.length, data: p.parts[p.next], ...(history ? { pending: p.pending } : {}), ...(p.omitted ? { omitted: p.omitted } : {}) };
   }
   return packed;
+}
+/** At most how many bytes of finals a report carries in all (each is at most 40000 characters): FINALS_MAX. */
+export const FINALS_MAX = 300 * 1024;
+/**
+ * A report's finals, cut evenly when together they'd pass FINALS_MAX (t-2109): every idle body sends its final each
+ * beat, so many in one house could crowd out a packed part. A cut one says so. Below the cap, untouched.
+ */
+export function fitFinals(report) {
+  const finals = Object.values(report.bodies ?? {}).filter((b) => typeof b.final === 'string');
+  if (finals.reduce((k, b) => k + Buffer.byteLength(b.final), 0) <= FINALS_MAX) return report;
+  const keep = Math.floor((FINALS_MAX / finals.length - 64) / 3); // UTF-16 units: at most 3 bytes each in UTF-8
+  for (const b of finals) if (Buffer.byteLength(b.final) > keep) {
+    let t = b.final.slice(0, Math.max(0, keep));
+    if (/[\ud800-\udbff]$/.test(t)) t = t.slice(0, -1);
+    b.final = `${t}\n… (cut to fit: ${finals.length} finals in one report)`;
+  }
+  return report;
 }
 /** The newest of `cards` whose JSON fits in `max` bytes, in their order (none dropped from the middle). */
 export function newestWithin(cards, max) {

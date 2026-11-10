@@ -50,7 +50,7 @@ const SHAPES = [
   /\bpypi-[A-Za-z0-9_-]{16,}/g,
   /\b(?:SK|AC)[0-9a-f]{32}\b/g, // Twilio
   /\bhf_[A-Za-z0-9]{20,}/g, // Hugging Face
-  /-----BEGIN [A-Z ]{0,40}PRIVATE KEY-----[\s\S]{0,4000}?(?:-----END [A-Z ]{0,40}PRIVATE KEY-----|$)/g,
+  /-----BEGIN [A-Z ]{0,40}PRIVATE KEY(?: BLOCK)?-----[\s\S]{0,4000}?(?:-----END [A-Z ]{0,40}PRIVATE KEY(?: BLOCK)?-----|$)/g,
 ];
 
 /** Words that name a secret: a NAME=value's, a flag's, a query parameter's, a `key: value`'s. */

@@ -505,3 +505,41 @@ test('a report carries at most PACKED_MAX of session parts, the longest waiting 
   assert.ok(Object.values(one).reduce((k, p) => k + p.data.length, 0) <= PACKED_MAX);
   assert.deepEqual(Object.keys(packedParts(new Map([['b9', { parts: ['x'.repeat(PACKED_MAX + 1)], next: 0, since: 0 }]]), false)), ['b9'], 'at least one');
 });
+
+test('finals beside a packed part keep a report under core\'s cap: cut evenly past FINALS_MAX, and say so (t-2109)', async () => {
+  const { REPORT_MAX, FINALS_MAX, fitCards, packedParts } = await import('../src/bodyhost.mjs');
+  const packing = new Map([['b9', { parts: ['p'.repeat(360 * 1024)], next: 0, since: 0 }]]);
+  const bodies = Object.fromEntries(Array.from({ length: 6 }, (_, i) => [`b000000${i}`, { status: 'idle', final: '界'.repeat(40_000), cards: [] }]));
+  const report = { bodies, done: {}, packed: packedParts(packing, false) };
+  assert.ok(Buffer.byteLength(JSON.stringify(report)) > 1024 * 1024);
+  fitCards(report, REPORT_MAX);
+  assert.ok(Buffer.byteLength(JSON.stringify(report)) <= REPORT_MAX);
+  assert.ok(Object.values(report.bodies).reduce((k, b) => k + Buffer.byteLength(b.final), 0) <= FINALS_MAX);
+  assert.ok(Object.values(report.bodies).every((b) => b.final.startsWith('界') && b.final.endsWith('(cut to fit: 6 finals in one report)')));
+  const one = { bodies: { b1: { final: 'short' } } };
+  assert.equal(fitCards(one, REPORT_MAX).bodies.b1.final, 'short', 'under the cap, untouched');
+});
+
+test('a helper\'s meta that isn\'t a plain file (a FIFO, a link) is never waited on or followed (t-2109)', async () => {
+  const { symlinkSync } = await import('node:fs');
+  const { spawnSync } = await import('node:child_process');
+  const root = scratch('steps-fifo');
+  const session = '11111111-2222-3333-4444-555555555555';
+  const proj = join(root, 'projects', '-x');
+  const sub = join(proj, session, 'subagents');
+  mkdirSync(sub, { recursive: true });
+  writeFileSync(join(proj, `${session}.jsonl`), `${JSON.stringify(use('t1', 'Bash', { command: 'ls' }))}\n`);
+  assert.equal(spawnSync('mkfifo', [join(sub, 'agent-fifo.meta.json')]).status, 0);
+  symlinkSync('/dev/zero', join(sub, 'agent-zero.meta.json'));
+  const r = new ClaudeRunner({ projectsDir: join(root, 'projects'), jobsDir: join(root, 'jobs') });
+  const t0 = Date.now();
+  const cards = r.activity({ id: 'b', slot: { harness: 'claude', session } });
+  assert.ok(Date.now() - t0 < 2000);
+  assert.deepEqual(cards.map((c) => c.id), ['t1']);
+});
+
+test('a PGP private key block goes whole too (t-2109)', async () => {
+  const { diffText } = await import('../src/activity.mjs');
+  const key = ['-----BEGIN PGP PRIVATE KEY BLOCK-----', '', 'lQOYBF0abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUV', 'ZieSrY/uAZd804E8', '=Ab3x', '-----END PGP PRIVATE KEY BLOCK-----'];
+  for (const out of [diffText(key.map((l) => `+${l}`).join('\n')), shownText(key.join('\n'))]) for (const bit of ['ZieSrY', '=Ab3x', 'lQOYBF0']) assert.ok(!out.includes(bit), bit);
+});
