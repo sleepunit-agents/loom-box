@@ -147,6 +147,13 @@ const GATES_MS = 30_000;
  * LOOM_RUNTIME_RETRY_S (a JSON list of seconds, 1-5 of them, each 1-3600) changes them.
  */
 export const RETRY_DELAYS_MS = [60_000, 240_000, 600_000];
+/**
+ * A start that failed only because loom couldn't be read at all (store.mjs: no answer, a timeout, a torn one; a deploy
+ * restarting it, t-2106) isn't one of those tries: it's tried again each minute, quietly, for this long, and only a
+ * failure past it counts toward the alert.
+ */
+export const TRANSIENT_MS = 1_800_000;
+const TRANSIENT_RETRY_MS = 60_000;
 /** Given-up deliveries, as the owner's notices: this many, for this long. */
 const NOTICE_MS = 86_400_000;
 const NOTICES_MAX = 20;
@@ -1660,7 +1667,7 @@ export async function answerLoop(env, cv, answer, o = {}) {
     if (answer === 'dismiss') {
       outcome(c, (c.queue ?? []).map((x) => x.key), { body: 'failed', reason: 'dropped: the owner dismissed a loop here' }, now);
       c.queue = [];
-      delete c.retryAt; delete c.startFails; delete c.retryReason; delete c.startStatus;
+      delete c.retryAt; delete c.startFails; delete c.retryReason; delete c.startStatus; delete c.transientSince;
     }
     delete c.paused;
     delete c.waiting;
@@ -1819,7 +1826,7 @@ export function commitStartedConversation(env, op, { run, senderHash, bodyRules,
     // What capacity admission would have said (allocator.mjs, t-2037): shadow only, a log line, never a decision.
     if (way.how === 'start') shadowAdmission(env, c, r, at, !!way.gated);
     if (!r.inputUncertain) ack(c, op.msgs);
-    delete c.retryAt; delete c.startFails; delete c.retryReason; delete c.startStatus;
+    delete c.retryAt; delete c.startFails; delete c.retryReason; delete c.startStatus; delete c.transientSince;
     c.sendKey = senderHash;
     c.runs = (c.runs ?? 0) + 1;
     openRun(c, run, op.msgs, at, { ref: r.body, how: way.how === 'start' ? 'started' : 'resumed', ...(r.switched ? { switched: { from: r.switched.from, why: r.switched.why } } : {}), ...(way.home ? { home: true } : {}), ...(c.quota ? { retryOf: c.quota.run } : {}) });
@@ -2393,11 +2400,19 @@ async function executeOne(env, op, d, mem) {
         if (last?.fail && last.batch === batch) Object.assign(last, { end: now(), fail: `it couldn't start: ${reason}`, tries: (last.tries ?? 1) + 1 });
         else logRun(c, { run: `start-${randomBytes(4).toString('hex')}`, at: now(), end: now(), ...causeOf(op.msgs), batch, fail: `it couldn't start: ${reason}` });
         const delays = retryDelaysOf(env);
-        const tries = (c.startFails ?? 0) + 1;
+        // Loom unreadable (a deploy, t-2106): a quiet minute's wait that isn't a try, until it's lasted TRANSIENT_MS.
+        if (e?.transient === true) c.transientSince ??= now(); else delete c.transientSince;
+        const quiet = e?.transient === true && now() - c.transientSince < TRANSIENT_MS;
+        const tries = (c.startFails ?? 0) + (quiet ? 0 : 1);
         const keep = msgs.filter((x) => x.sealed);
         const lost = msgs.filter((x) => !x.sealed).map((x) => x.key);
         if (lost.length) outcome(c, lost, { body: 'failed', reason: `${reason}, and the runtime can't keep its text to try again (no age)` }, now());
-        if (keep.length && tries <= delays.length) {
+        if (keep.length && quiet) {
+          c.retryAt = now() + TRANSIENT_RETRY_MS;
+          c.retryReason = reason;
+          requeue(c, keep);
+          outcome(c, keep.map((x) => x.key), { body: 'queued', reason: `loom couldn't be read (${reason}): trying again in ${TRANSIENT_RETRY_MS / 1000} s` }, now());
+        } else if (keep.length && tries <= delays.length) {
           c.startFails = tries;
           c.retryAt = now() + delays[tries - 1];
           c.retryReason = reason;
@@ -2405,7 +2420,7 @@ async function executeOne(env, op, d, mem) {
           outcome(c, keep.map((x) => x.key), { body: 'queued', reason: `no body could start (${reason}): trying again in ${Math.round(delays[tries - 1] / 1000)} s` }, now());
         } else if (keep.length) {
           outcome(c, keep.map((x) => x.key), { body: 'failed', reason }, now());
-          delete c.retryAt; delete c.startFails; delete c.retryReason; delete c.startStatus;
+          delete c.retryAt; delete c.startFails; delete c.retryReason; delete c.startStatus; delete c.transientSince;
           gaveUp = { c: { ...c }, reason, tries };
         }
         if (c.venue === COMMS_VENUE) {
@@ -2415,7 +2430,7 @@ async function executeOne(env, op, d, mem) {
             // Within core's contract (loom comms.md, t-1946): at most 50 ids, and a reason of 1-200 printable characters
             // on one line. A longer one is a 400 that the runtime takes for an older core and drops (asData's quoting
             // can double a 120-character reason's backslashes and quotes).
-            messages: msgs.filter((m) => m.kind === 'message').map((m) => m.id).slice(0, 50), attempt: tries,
+            messages: msgs.filter((m) => m.kind === 'message').map((m) => m.id).slice(0, 50), attempt: Math.max(1, tries),
             reason: asData(reason).replace(/[\p{C}\p{Z}]/gu, ' ').slice(0, 200),
             ...(retry ? { retry_at: new Date(c.retryAt).toISOString() } : {}),
           };

@@ -489,3 +489,13 @@ describe('a house reads its effective grants from the runtime', () => {
     assert.equal(ask(st, q()).basis, undefined);
   });
 });
+
+test('a store read loom answers with nothing readable is transient (loom restarting); a refusal is not (t-2106)', () => {
+  const answer = (r) => loomStore({}, { run: () => r, piece: 'runtime' });
+  for (const r of [{ status: 0, stdout: '' }, { status: 0, stdout: '{"doc":' }, { error: new Error('spawnSync loom ETIMEDOUT') }]) {
+    assert.throws(() => answer(r).get('policy', 'art'), (e) => e.transient === true && /loom may be restarting/.test(e.message));
+  }
+  assert.throws(() => answer({ status: 0, stdout: '[{"key":' }).list('policy'), (e) => e.transient === true);
+  assert.throws(() => answer({ status: 1, stdout: '', stderr: 'loom store: no such collection' }).get('policy', 'art'), (e) => e.transient === false);
+  assert.deepEqual(answer({ status: 0, stdout: '{"doc":{"a":1},"rev":2}' }).get('policy', 'art'), { doc: { a: 1 }, rev: 2 });
+});
