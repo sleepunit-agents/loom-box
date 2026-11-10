@@ -121,6 +121,9 @@ export function bodyConversation(env, { waitMs = SESSION_WAIT_MS, sleep = sleepS
   let cv = mine();
   if (cv) return cv;
   if (!fromEnv) return undefined;
+  // Only a Claude Code session can be a reused spare: a Codex body is its own process, started with its own
+  // environment, so that stands (its thread id is known only after its first event, so its map can lag).
+  if (!env.CLAUDE_CODE_SESSION_ID) return fromEnv;
   const holder = readTrim(byConversation(env, fromEnv));
   // No word on that conversation, or it's this session's: the environment stands (a house that writes no map yet).
   if (!holder || holder === sessionHash(session)) return fromEnv;
@@ -343,7 +346,7 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
       }
       delete b.stopPending;
       if (b.cv) dropKey(env, b.cv, b.key);
-      if (b.cv && b.mapped) forgetSession(env, b.mapped, b.cv);
+      if (b.cv && b.mapped) { forgetSession(env, b.mapped, b.cv); delete b.mapped; }
       heard.delete(id);
       b.ended = true;
     }

@@ -504,7 +504,7 @@ async function main(argv, env) {
       const msg = { conversation, text: await textOf(rest, '--text'), key: bodyKeyFor(env, conversation), ...(session ? { session } : {}), ...(person !== undefined ? { person } : {}), ...(via !== undefined ? { via } : {}) };
       const remote = env.LOOM_URL && env.LOOM_TOKEN_FILE;
       const call = remote ? pieceCall(env, flag(rest, '--piece')) : null;
-      const r = remote ? await call('send', msg) : await send(env, msg, { detach: true });
+      const r = await untilSessionKnown(() => (remote ? call('send', msg) : send(env, msg, { detach: true })));
       // Accepted isn't posted (t-1920): wait for what the venue said, so a body never reports a message it didn't send.
       const answer = r.accepted ? await sendOutcome({
         status: (q) => (remote ? call('send-status', q) : sendStatus(env, q)),
@@ -590,7 +590,7 @@ async function main(argv, env) {
       const session = bodySession(env);
       const q = { conversation, key: bodyKeyFor(env, conversation), ...(session ? { session } : {}) };
       const remote = env.LOOM_URL && env.LOOM_TOKEN_FILE;
-      const r = remote ? await pieceCall(env, flag(rest, '--piece'))('principal', q) : bodyPrincipal(env, q);
+      const r = await untilSessionKnown(async () => (remote ? pieceCall(env, flag(rest, '--piece'))('principal', q) : bodyPrincipal(env, q)));
       out(r);
       if (!r.ok) process.exitCode = 1;
       return;
@@ -649,7 +649,7 @@ async function main(argv, env) {
       // Where this body is (gates-api.mjs, placeOf): its own conversation, proved as a relay or `send` proves it. In a
       // house, through the piece API; on loom's machine (a local body), here.
       const mine = ownConversation(env);
-      if (!mine) throw new Fail('loom runtime place: this isn\'t a body holding a conversation (no LOOM_BODY_CONVERSATION)', 2);
+      if (!mine) throw new Fail('loom runtime place: this body can\'t tell its own conversation (its house says none for its session, and its LOOM_BODY_CONVERSATION isn\'t its own)', 2);
       if (env.LOOM_URL && env.LOOM_TOKEN_FILE) return runAnswer(await pieceCall(env, flag(rest, '--piece'))('run', { argv: ['place', '--conversation', mine], ...bodyProof(env, mine) }));
       const { placeOf } = await import('./gates-api.mjs');
       const r = await placeOf(env, mine, bodyProof(env, mine));
@@ -1046,6 +1046,20 @@ function bodyProof(env, cv) {
   const key = bodyKeyFor(env, cv);
   const session = bodySession(env);
   return { ...(key ? { key } : {}), ...(key && session ? { session } : {}) };
+}
+
+/**
+ * A proof the runtime refused only because it can't name this body's session yet (a house body's host reports it
+ * within a beat of the start, t-2053): asked again a few times, never with anything else changed.
+ */
+async function untilSessionKnown(ask, { tries = 6, ms = 2000 } = {}) {
+  let r;
+  for (let i = 0; i < tries; i++) {
+    r = await ask();
+    if (r?.ok !== false || !/session can't be told yet/.test(String(r.reason ?? r.error ?? ''))) return r;
+    if (i < tries - 1) await sleep(ms);
+  }
+  return r;
 }
 
 /** A piece API `run` answer, as this command's own output and exit. */

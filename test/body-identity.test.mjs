@@ -125,7 +125,7 @@ test('a reused spare can\'t act as the previous conversation: the runtime takes 
   const noSession = await send(w.env, { conversation: ca.conversation, text: 'as A', key: keyA, session: 'sess-anything' }, blind);
   assert.equal(noSession.ok, false);
   assert.match(noSession.reason, /session can't be told yet/);
-  assert.equal(bodyPrincipal(w.env, { conversation: ca.conversation, key: keyA, session: 'sess-anything' }, blind).ok, false);
+  assert.match(bodyPrincipal(w.env, { conversation: ca.conversation, key: keyA, session: 'sess-anything' }, blind).reason, /session can't be told yet/);
   rec.slot = { harness: 'claude', session: w.sessionFor(ca.conversation) };
   writeFileSync(recFile, JSON.stringify(rec));
   // A's own body, its own session: proved, and for the owner its conversation was the owner's.
@@ -153,4 +153,37 @@ test('an owner\'s spawn, its body in a reused session with another conversation\
   const p = bodyPrincipal(w.env, { conversation: cv, key: bodyKeyFor(keepsA, cv), session: keepsA.CLAUDE_CODE_SESSION_ID }, w.o);
   assert.equal(p.ok, true, p.reason);
   assert.equal(p.owner, true, 'approvals reads owner: true, so a sleepunit-agents merge is "do"');
+});
+
+test('a host maps a session it learns only on a later beat, and forgets it when the body is stopped', async () => {
+  const HOME = home();
+  let known = false, ended = false;
+  const runner = {
+    start() { return { id: 'cccc3333', harness: 'claude' }; },               // the start names no session
+    status: () => (ended ? 'ended' : 'working'), end() { ended = true; }, stopped: () => true,
+    slotOf: () => (known ? { harness: 'claude', session: 'sess-cccc3333' } : null),
+  };
+  const env = { HOME, CLAUDE_SECURESTORAGE_CONFIG_DIR: '/run/loom/login/claude' };
+  const body = { HOME, LOOM_BODY_CONVERSATION: A, CLAUDE_CODE_SESSION_ID: 'sess-cccc3333' };
+  keepSession({ HOME }, 'sess-aaaa1111', A);                                 // its spare's environment's conversation is another session's
+  const seen = [];
+  let i = 0;
+  const client = async () => {
+    i++;
+    if (i === 1) return { req: { r1: { harness: 'claude', key: 'key-b', conversation: B, brief: 'for B' } } };
+    if (i === 2) { seen.push(bodyConversation(body, { waitMs: 0 })); known = true; return {}; }
+    if (i === 3) return {};
+    if (i === 4) { seen.push(bodyConversation(body, { waitMs: 0 })); return { stop: { cccc3333: { at: 'stop-1' } } }; }
+    if (i === 5) { seen.push(bodyConversation(body, { waitMs: 0 })); return { exit: true }; }
+    return { exit: true };
+  };
+  await runBodyHost({ client, runner: () => runner, env, hostKey: 'boot', sleep: async () => {}, beats: 10, idleS: 0 });
+  // Unmapped and its environment another session's: none (never A). Mapped on a beat: B. Stopped: none again.
+  assert.deepEqual(seen, [undefined, B, undefined]);
+});
+
+test('a Codex body\'s own environment stands while its thread is unmapped: it is never a reused spare', () => {
+  const HOME = home();
+  keepSession({ HOME }, 'sess-old-claude', A);
+  assert.equal(bodyConversation({ HOME, LOOM_BODY_CONVERSATION: A, CODEX_THREAD_ID: 'thread-1234' }, { sleep: () => assert.fail('no wait') }), A);
 });
