@@ -217,21 +217,34 @@ test('a house\'s body passes only where one is made here: never on a read, a pri
   assert.equal(keep({ tool: 'Bash', detail: 'npm test', body: 'ok' }), 'ok');
 });
 
-test('output never shows for a command that prints secrets or the environment, or names a private file in any form', async () => {
-  const { namesPrivate } = await import('../src/activity.mjs');
-  const hides = ['env', 'FOO=1 env', 'sudo -E env', 'printenv', 'printenv GH_TOKEN', 'set', 'export', 'export -p', 'declare -px',
-    'cat .env', 'cat secrets*', 'ls *.pem', 'cat ~/.ssh/id_[re]*', 'cd ~/.config/loom && cat token', 'cat token', 'grep -r api_key .',
-    'head -c 100 creds', 'tail deploy.key', 'x=$(cat /home/art/.config/gh/hosts.yml)', 'echo ok; ' + 'x '.repeat(110_000)];
-  for (const c of hides) assert.equal(namesPrivate(c), true, c.slice(0, 60));
-  const shows = ['npm test', 'git status', 'ls -la src', 'env FOO=1 node x.js', 'set -euo pipefail; npm test', 'export FOO=1 && npm test', 'gh pr checks 603', 'cat README.md'];
-  for (const c of shows) assert.equal(namesPrivate(c), false, c);
-  // A command too long to show whole (its detail cut) shows no output either.
+test('output shows only for a command that reads as plain words and names nothing private: fail closed otherwise', async () => {
+  const { outputShows, plainWords } = await import('../src/activity.mjs');
+  const hides = [
+    // prints the environment, aliases or variables, wherever it sits
+    'env', 'FOO=1 env', 'sudo -E env', 'sudo -u root env', 'timeout 5 printenv', 'nice -n 19 printenv GH_TOKEN', 'xargs env < list', 'npm test | env',
+    'set', 'export', 'export -p', 'declare -px', 'compgen -v', 'alias',
+    // private files in any word, a value after =, a glob, a directory
+    'cat .env', 'cat secrets*', 'ls *.pem', 'cat ~/.ssh/id_[re]*', 'cd ~/.config/loom && cat token', 'tail deploy.key',
+    'cp --from=/home/art/.config/gh/hosts.yml x', 'cat /proc/self/environ', 'cat /proc/1234/environ', 'tr "\\0" "\\n" < /proc/self/environ',
+    // can't be read as plain words
+    'x=$(cat .env)', 'echo $(cat .env)', 'echo `cat .env`', 'cat $F', 'cat ${HOME}/x', "cat .e''nv", 'cat .e"nv"', 'cat .e\\nv', 'cat "unclosed',
+    "bash -c 'cat .env'", "sh -lc 'printenv'", "python3 -c 'print(open(\"/home/art/.ssh/id_ed25519\").read())'", 'node -e "require(1)"', 'perl -e 1', 'ruby -e 1',
+    'eval x', 'source ./x.sh', '. ./x.sh', "cat <<'EOF' > f\nbody\nEOF", 'cat <<< hi', 'x '.repeat(11_000),
+  ];
+  for (const c of hides) assert.equal(outputShows(c), false, c.slice(0, 70));
+  const shows = ['npm test', 'git status', 'git log --oneline -5', 'ls -la src', 'gh pr checks 603', 'cat README.md', 'nice -n 19 node --test test/x.test.mjs',
+    'set -euo pipefail; npm test', 'export FOO=1 && npm test', "grep -n 'activityPass' src/delivery.mjs", 'cd ~/Code/loom && git status'];
+  for (const c of shows) assert.equal(outputShows(c), true, c);
+  assert.deepEqual(plainWords("git commit -m 'a b' && npm test"), [['git', 'commit', '-m', 'a b'], ['npm', 'test']]);
+  // Fails closed in the cards too: no body, its result line still.
+  const [e] = claudeCards([use('v', 'Bash', { command: 'env' }), res('v', `GH_TOKEN=${GH}\nHOME=/home/art`, { stdout: `GH_TOKEN=${GH}\nHOME=/home/art`, stderr: '' })]);
+  assert.deepEqual([e.body, e.result], [undefined, '2 lines of output']);
+  const [k] = codexCards([{ type: 'item.completed', item: { id: 'i', type: 'command_execution', command: "/usr/bin/bash -lc 'cat .env'", aggregated_output: 'A=PRIVATEVALUE', exit_code: 0, status: 'completed' } }], 'b:');
+  assert.equal(k.body, undefined);
   const long = `echo start\n${'echo line\n'.repeat(600)}`;
   const [c] = claudeCards([use('l', 'Bash', { command: long }), res('l', 'OUTPUT', { stdout: 'OUTPUT', stderr: '' })]);
   assert.equal(c.body, undefined);
-  const [e] = claudeCards([use('v', 'Bash', { command: 'env' }), res('v', `GH_TOKEN=${GH}\nHOME=/home/art`, { stdout: `GH_TOKEN=${GH}\nHOME=/home/art`, stderr: '' })]);
-  assert.equal(e.body, undefined);
-  assert.equal(e.result, '2 lines of output');
-  // A house's card whose detail was cut carries no body.
+  // A house's card whose detail was cut, or redacted, carries no body.
   assert.equal(cleanCards([{ id: 'c', at: 'x', tool: 'Bash', summary: 's', state: 'done', detail: 'echo a\n… 40 lines not kept …\necho b', body: 'x' }])[0].body, undefined);
+  assert.equal(cleanCards([{ id: 'c', at: 'x', tool: 'Bash', summary: 's', state: 'done', detail: `echo ${GH}`, body: 'x' }])[0].body, undefined);
 });
