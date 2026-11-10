@@ -260,7 +260,17 @@ export function verdictOf(text) {
 /** A process run to its end, its stdout kept (8 MB at most) and its stderr dropped unread: {status, stdout, signal, error}. */
 export function runAsync(bin, argv, { env, input, timeout, cwd, killGroup = false }) {
   return new Promise((resolve) => {
-    let out = '';
+    let out = '', lineBuffer = '', skippingLine = false, truncated = false;
+    const readings = {};
+    const capture = line => {
+      for (const h of ['claude', 'codex']) {
+        const r = lastRateLimit(h, line); if (!r) continue;
+        const { limited: _oldLimited, ...old } = readings[h] ?? {};
+        const resets = { ...old.resets, ...r.resets };
+        for (const w of Object.keys(r.windows ?? {})) if (r.resets?.[w] === undefined) delete resets[w];
+        readings[h] = { ...old, ...r, windows: { ...old.windows, ...r.windows }, resets };
+      }
+    };
     let done = false;
     const child = spawn(bin, argv, { env, cwd, detached: killGroup && process.platform !== 'win32', stdio: ['pipe', 'pipe', 'ignore'] });
     const kill = () => {
@@ -270,8 +280,22 @@ export function runAsync(bin, argv, { env, input, timeout, cwd, killGroup = fals
     // A caller's outer timeout must not orphan a detached short-call process.
     if (killGroup) { process.once('SIGTERM', kill); process.once('SIGINT', kill); }
     child.stdout.setEncoding('utf-8');
-    child.stdout.on('data', (d) => { if (out.length < 8 * 1024 * 1024) out += d; });
-    const end = (r) => { if (done) return; done = true; clearTimeout(t); if (killGroup) kill(); if (killGroup) { process.removeListener('SIGTERM', kill); process.removeListener('SIGINT', kill); } resolve(r); };
+    child.stdout.on('data', d => {
+      const room = 8 * 1024 * 1024 - out.length;
+      out += d.slice(0, Math.max(0, room));
+      truncated ||= d.length > room;
+      // Parse small quota events even after the output cap. Skip oversized
+      // answer/tool lines without keeping them, then resume at the next line.
+      lineBuffer += d;
+      let nl;
+      while ((nl = lineBuffer.indexOf('\n')) >= 0) {
+        const line = lineBuffer.slice(0, nl); lineBuffer = lineBuffer.slice(nl + 1);
+        if (!skippingLine && line.length <= 256 * 1024) capture(line);
+        skippingLine = false;
+      }
+      if (lineBuffer.length > 256 * 1024) { lineBuffer = ''; skippingLine = true; }
+    });
+    const end = (r) => { if (done) return; done = true; clearTimeout(t); if (killGroup) kill(); if (killGroup) { process.removeListener('SIGTERM', kill); process.removeListener('SIGINT', kill); } if (!skippingLine && lineBuffer) capture(lineBuffer); resolve({ ...r, readings, truncated }); };
     child.on('error', (error) => end({ status: null, stdout: out, error }));
     child.on('close', (status, signal) => end({ status, stdout: out, signal }));
     child.stdin.on('error', () => {});
@@ -295,7 +319,7 @@ export async function grade(env, grader, { venueKind, entry }, { run = runAsync,
     const argv = graderRunArgs(env, { harness: grader.harness, model: grader.model, kind: venueKind, image: grader.image, name, egress: px.dir });
     r = await run(podmanBin(env), argv, { env: podEnv, input, timeout: timeoutMs });
     timed = !!(r.signal || r.error?.code === 'ETIMEDOUT');
-    reading = lastRateLimit(grader.harness, r.stdout);
+    reading = r.readings?.[grader.harness] ?? lastRateLimit(grader.harness, r.stdout);
     // Capture a timed-out Codex run's numeric quota before removing its tmpfs.
     if (timed && grader.harness === 'codex' && !reading) {
       const snapshot = rm(podmanBin(env), ['exec', name, 'node', '/opt/loom-grader/quota.mjs', '/tmp/cli/.codex/sessions'], { env: podEnv, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 });
@@ -308,6 +332,7 @@ export async function grade(env, grader, { venueKind, entry }, { run = runAsync,
   }
   const refused = px.denied.size ? ` (egress refused ${[...px.denied].slice(0, 3).join(', ')})` : '';
   if (timed) throw new GraderError(`the grader took longer than ${Math.round(timeoutMs / 1000)}s${refused}`);
+  if (r.truncated) throw new GraderError('grader output limit exceeded');
   if (!reading && reportUsage) throw new GraderError('grader returned no quota reading (check the pinned image)');
   if (r.error) throw new GraderError(`can't run a container: ${r.error.code ?? 'error'}`);
   if (r.status === 99) throw new GraderError(`the image has no ${grader.harness}`);

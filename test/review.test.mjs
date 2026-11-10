@@ -491,3 +491,7 @@ test('timeout quota is reported before container cleanup for both harnesses',asy
   assert.deepEqual(events,harness==='claude'?['report','rm']:['exec','report','rm']);
  }
 });
+test('a truncated grader output cannot accept a stale success and still reports quota',async()=>{
+ let reported=false;
+ await assert.rejects(grade(envOf(),{harness:'claude',model:'m',image:PIN},{venueKind:'live',entry:{text:'sample'}},{proxy:noProxy,run:async()=>({status:0,truncated:true,readings:{claude:{windows:{'7d':.8}}},stdout:JSON.stringify({result:'{"score":5}'})}),reportUsage:(_h,r)=>{reported=true;assert.equal(r.windows['7d'],.8);}}),/output limit/);assert.equal(reported,true);
+});

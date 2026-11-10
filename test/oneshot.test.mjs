@@ -164,3 +164,18 @@ test('a truncated stdout answer cannot discard available Codex rollout usage',as
 test('a new Codex turn clears the preceding turn’s refusal',()=>{
  const text=[{type:'event_msg',payload:{type:'error',codex_error_info:'usage_limit_exceeded'}},{type:'turn_context'},{type:'turn.failed',error:{message:'ordinary failure'}}].map(JSON.stringify).join('\n');assert.equal(terminalOutcome('codex',text).kind,'failed');
 });
+test('all supported new-turn boundaries clear refusal; Claude tool results do not',()=>{
+ const quota={type:'assistant',isApiErrorMessage:true,error:'rate_limit'};
+ assert.equal(terminalOutcome('claude',[quota,{type:'user',message:{content:'new question'}},{type:'result',is_error:true}].map(JSON.stringify).join('\n')).kind,'failed');
+ assert.equal(terminalOutcome('claude',[quota,{type:'user',message:{content:[{type:'tool_result',content:'bookkeeping'}]}}].map(JSON.stringify).join('\n')).kind,'quota');
+ assert.equal(terminalOutcome('codex',[{type:'error',codex_error_info:'usage_limit_exceeded'},{type:'turn.started'},{type:'turn.failed'}].map(JSON.stringify).join('\n')).kind,'failed');
+});
+test('oversized process output fails closed but preserves later quota events',async()=>{
+ const event={type:'rate_limit_event',rate_limit_info:{status:'allowed',unifiedWindows:{seven_day:{utilization:.7}}}};
+ const script=`process.stdout.write(JSON.stringify({type:'result',result:'stale success'})+'\\n');process.stdout.write(JSON.stringify({type:'rate_limit_event',rate_limit_info:{status:'allowed',unifiedWindows:{five_hour:{utilization:.9}}}})+'\\n');process.stdout.write('x'.repeat(9*1024*1024)+'\\n');process.stdout.write(${JSON.stringify(JSON.stringify(event))}+'\\n');process.stdout.write(JSON.stringify({type:'assistant',isApiErrorMessage:true,error:'authentication_failed'})+'\\n');`;
+ const captured=await runAsync(process.execPath,['-e',script],{env:process.env,input:'',timeout:5000,killGroup:true});
+ assert.equal(captured.truncated,true);assert.equal(captured.readings.claude.windows['7d'],.7); assert.equal(captured.readings.claude.windows['5h'],.9);
+ const env=setup();let reported=false,held=false,runs=0;
+ await assert.rejects(runOneShot(env,{input:'p',cwd:env.HOME},{warn:()=>{},run:async()=>{runs++;return captured;},call:async(p,b)=>{if(p==='usage'){reported=true;assert.equal(b.reading.windows['7d'],.7);return {ok:true};}if(p==='oneshot-refused')held=true;return {model:'m',harness:'claude'};}}),/output limit/);
+ assert.equal(reported,true);assert.equal(held,false);assert.equal(runs,1);
+});

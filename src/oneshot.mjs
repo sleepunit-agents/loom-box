@@ -71,7 +71,7 @@ export async function runOneShot(env, { input, cwd, prefer = [], timeout = 600_0
       }
       warn(`one-shot: ${pick.model} (${pick.harness}) on ${pick.account ?? 'its login'}`);
       r = await run(pick.harness, oneShotArgs(pick.harness, pick.model, cwd), { env: childEnv, input, timeout, cwd, killGroup: true });
-      reading = pick.harness === 'codex' ? codexUsageOnBox(childEnv, { root: join(childEnv.CODEX_HOME, 'sessions') }) : lastRateLimit('claude', r.stdout);
+      reading = pick.harness === 'codex' ? codexUsageOnBox(childEnv, { root: join(childEnv.CODEX_HOME, 'sessions') }) : r.readings?.claude ?? lastRateLimit('claude', r.stdout);
       const stdoutState = terminalOutcome(pick.harness, r.stdout);
       let rolloutState = null;
       // A dedicated home and no subagents: only this run's provider trace. The
@@ -93,7 +93,7 @@ export async function runOneShot(env, { input, cwd, prefer = [], timeout = 600_0
         if (reported.error || reported.ok === false) fail('one-shot usage report failed');
       } else warn('one-shot: harness returned no quota reading; account total remains last measured');
     } finally { rmSync(dir, { recursive: true, force: true }); }
-    if (r.error || r.signal) fail('one-shot process failed or timed out (not retried)');
+    if (r.error || r.signal || r.truncated) fail('one-shot process failed, timed out or exceeded its output limit (not retried)');
     if (refusal) {
       const held = await call('oneshot-refused', { harness: pick.harness });
       if (held.error || held.ok === false) fail('could not hold refused account');
