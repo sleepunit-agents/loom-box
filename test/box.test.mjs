@@ -333,8 +333,47 @@ test('a box that restarts while a house is still running watches it again, not b
   // Only the box goes away; the container keeps running.
   r.houses.get(s.house).child.removeAllListeners('exit');
   const logs = [];
-  const fresh = runner(env, client, { loomUrl: 'http://loom.test/mcp', log: (m) => logs.push(m) });
+  let fresh = runner(env, client, { loomUrl: 'http://loom.test/mcp', log: (m) => logs.push(m),
+    reapWaits: names => { assert.deepEqual([...names],[`loom-house-${s.house}`]); logs.push('swept waits'); } });
   await fresh.tick();
+  assert.ok(logs.indexOf('swept waits') >= 0);
+  assert.ok(logs.findIndex(m => m.startsWith('adopted ')) > logs.indexOf('swept waits'));
+  for (let n = 0; n < 5; n++) {
+    const previous = fresh.houses.get(s.house).child;
+    fresh = runner(env, client, { loomUrl: 'http://loom.test/mcp', log: (m) => logs.push(m) });
+    await fresh.tick();
+    await until(() => previous.signalCode === 'SIGKILL');
+    assert.equal(fresh.houses.get(s.house).child.signalCode, null);
+  }
+  // A separate runtime process adopts two physical houses, then exits keeping both.
+  const { spawn } = await import('node:child_process');
+  const { once } = await import('node:events');
+  const secondContainer = spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});
+  await once(secondContainer,'spawn');
+  writeFileSync(join(fake,'runs','loom-house-h-99999.pid'),String(secondContainer.pid));
+  try {
+    const childRuntime = spawn(process.execPath, ['--input-type=module', '-e', `
+      import {runner} from ${JSON.stringify(new URL('../src/box.mjs', import.meta.url).href)};
+      const r=runner(${JSON.stringify(env)}, {call:async p=>p==='poll'?{active:[${JSON.stringify(s.house)},'h-99999']}:{}},
+        {loomUrl:'http://loom.test/mcp',log:()=>{},sweep:()=>[],status:()=>null,sampleHealth:()=>null,bootInfo:()=>null,sampleUnits:()=>null});
+      await r.tick();
+      console.log(JSON.stringify([...r.houses.values()].map(e=>e.child.pid)));
+      await r.endStarts(); process.exit(0);
+    `], {stdio:['ignore','pipe','inherit']});
+    let watcherPids=''; childRuntime.stdout.on('data',d=>watcherPids+=d);
+    await once(childRuntime,'exit');
+    const pids=JSON.parse(watcherPids.trim()); assert.equal(pids.length,2);
+    for(const pid of pids) {
+      assert.ok(pid>0);
+      await until(()=>{try {return /^State:\s+Z/m.test(readFileSync(`/proc/${pid}/status`,'utf8'));}catch(e){if(e.code==='ENOENT')return true;throw e;}});
+    }
+    const containerPid=Number(readFileSync(join(fake,'runs',`loom-house-${s.house}.pid`),'utf8'));
+    for(const pid of [containerPid,secondContainer.pid]) {
+      assert.doesNotThrow(()=>process.kill(pid,0),'house survives runtime exit');
+      assert.doesNotMatch(readFileSync(`/proc/${pid}/status`,'utf8'),/^State:\s+[ZX]/m,'house is alive, not a zombie');
+    }
+    assert.equal(existsSync(join(fake,'runs','loom-house-h-99999.stop')),false);
+  } finally { secondContainer.kill('SIGKILL'); }
   assert.ok(fresh.houses.get(s.house)?.adopted, 'adopted');
   assert.equal(house(s.house).state, 'running');
   assert.equal(existsSync(join(fake, 'runs', `loom-house-${s.house}.stop`)), false, 'not bounced');
@@ -897,4 +936,13 @@ test('an agent mount cannot hide the box-owned native history directory', async 
 test('native history provisioning cannot be overridden by house environment or secret targets', () => {
   assert.throws(() => parseHouseFile(JSON.stringify({ ...HOUSE, env: { LOOM_RUNTIME_NATIVE_HISTORY: '/unmounted-history' } })), /isn't allowed/);
   assert.throws(() => parseHouseFile(JSON.stringify({ ...HOUSE, secrets: { history: { env: 'LOOM_RUNTIME_NATIVE_HISTORY' } } })), /can't be its variable/);
+});
+
+test('startup sweeps only assigned house waits once per runtime', async () => {
+  const calls=[];
+  const box=runner(env,{async call(p){if(p==='poll')return {active:['h-811','h-812']};return {};}},
+    {loomUrl:'http://loom.test/mcp',log:()=>{},sweep:()=>[],status:()=>null,
+      reapWaits:names=>calls.push([...names]),sampleHealth:()=>null,bootInfo:()=>null,sampleUnits:()=>null});
+  await box.tick(); await box.tick();
+  assert.deepEqual(calls,[['loom-house-h-811','loom-house-h-812']]);
 });
