@@ -25,6 +25,7 @@ test('one-shot uses agent preference, headroom fallback, and only mounted accoun
   const env = setup();
   assert.equal((await chooseOneShot(env, caller)).model, 'codex');
   update(env, s => { s.boxes.box.usage.codex.windows['7d'] = .96; });
+  await assert.rejects(chooseOneShot(env, caller), /no model|kept for conversations/);
   assert.equal((await chooseOneShot(env, caller, { modelNeed: 'coordinator: test quota fallback' })).model, 'opus');
   update(env, s => { s.houses.h1.logins = ['codex']; });
   await assert.rejects(chooseOneShot(env, caller), /no model|kept for conversations/);
@@ -187,11 +188,12 @@ test('answer extraction cannot reuse an answer from the preceding turn',()=>{
 
 test('a new unspecified one-shot uses runtime default rather than an old body model', async () => {
  const env = { ...setup(), LOOM_BODY_MODEL: 'old-codex' };
+ update(env,s=>{s.models.list.push({id:'gpt-6.1-sol',harness:'codex',family:'openai'});s.models.agents.art.prefer=['codex','opus'];});
  mkdirSync(join(env.HOME,'.codex')); writeFileSync(join(env.HOME,'.codex','auth.json'),'{}');
  let preference;
  const result = await runOneShot(env,{input:'p',cwd:env.HOME},{warn:()=>{},call:async(path,b)=>{
-  if(path==='oneshot-choice'){preference=b.prefer;return {model:'gpt-6.1-sol',harness:'codex'};}
+  if(path==='oneshot-choice'){preference=b.prefer;return chooseOneShot(env,caller,b);}
   return {ok:true};
- },run:async()=>({status:0,stdout:JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'ok'}})})});
+ },run:async(bin,argv)=>{assert.equal(argv[argv.indexOf('-m')+1],'gpt-6.1-sol');return {status:0,stdout:JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'ok'}})};}});
  assert.equal(result,'ok'); assert.deepEqual(preference,[]);
 });

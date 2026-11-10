@@ -87,3 +87,11 @@ test('a rejected ownership commit cannot overwrite the body generation after nat
   }), /ownership changed/);
   assert.deepEqual(readBody(w.env, first.body), before, 'the stale receipt leaves the prior generation intact');
 });
+
+test('a stated model need is retained when a body resumes', async () => {
+  const w = world(), modelNeed = 'privacy: review private data boundaries';
+  const first = await startBody(w.env, { agent:'art',venue:'slack',brief:'first',modelNeed },w.o);
+  endBody(w.env,first.body,w.o);
+  const next = await resumeBody(w.env,{body:first.body,brief:'continue'},w.o);
+  assert.equal(readBody(w.env,next.body).modelNeed,modelNeed);
+});

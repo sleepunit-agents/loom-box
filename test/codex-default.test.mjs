@@ -53,3 +53,13 @@ test('a catalog edit cannot turn any saved default into a Claude model', () => {
   setModels(env, { agent: 'art', default: 'other' });
   assert.throws(() => setModels(env, { list: [opus, gpt, { ...other, harness: 'claude', family: 'anthropic' }] }), /remain a Codex/);
 });
+test('strong scorecards cannot replace the default with another Codex model or Claude', async () => {
+  const { writeFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const { env, pick } = setup();
+  const file = join(env.HOME, 'cards.json');
+  const day = new Date().toISOString().slice(0,10);
+  writeFileSync(file, JSON.stringify([gpt, other, opus].map((m,i) => ({ day, model:m.id, kind:'scheduled', measure:'graded', value:i ? 5:1, n:10 }))));
+  env.LOOM_RUNTIME_SCORECARDS = file;
+  assert.equal((await pick()).model, gpt.id);
+});

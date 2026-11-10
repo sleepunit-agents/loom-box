@@ -379,5 +379,8 @@ spawn metadata and body records and included in resolver explanations. An
 explicit owner harness choice on the agent/conversation is also honored as
 coordinator direction. With an exception, normal measured account fallback is
 available. A bare `--prefer` naming Claude does not grant an exception.
-Assigned jobs and saved native sessions retain their existing model; the default
-applies when assigning new work. A running job is never silently migrated.
+Assigned jobs retain their existing model; the default applies when assigning new
+work. Native saved sessions keep the existing resume policy: the same harness,
+with model preferences/quota/scorecards reevaluated within it. This change does
+not introduce an exact-model pin for ordinary saved sessions. A running job is
+never silently migrated.

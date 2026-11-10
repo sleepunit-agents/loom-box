@@ -127,7 +127,7 @@ export function feedBody(env, ref, message, o = {}) {
 }
 
 /** A body continued: by its id (its slot, from the harness), or by a slot ({harness, session}) another machine kept. */
-export async function resumeBody(env, { body: ref, slot, agent, venue, venueKind, brief: b, prefer = [], cwd, deny = [], files, guest, local, seat, activity = false, role, pin, needs = [] }, o = {}) {
+export async function resumeBody(env, { body: ref, slot, agent, venue, venueKind, brief: b, prefer = [], modelNeed, cwd, deny = [], files, guest, local, seat, activity = false, role, pin, needs = [] }, o = {}) {
   const d = deps(env, o);
   let rec = null;
   if (ref) {
@@ -136,17 +136,18 @@ export async function resumeBody(env, { body: ref, slot, agent, venue, venueKind
     if (!slot) fail(`${ref} has no slot yet: its harness hasn't said which session it is`, 409);
   }
   if (!slot || !['claude', 'codex'].includes(slot.harness) || typeof slot.session !== 'string' || !slot.session) fail('resume takes a body, or a slot {harness, session}');
+  modelNeed ??= rec?.modelNeed;
   const who = rec?.agent ?? agent;
   const where = rec?.venue ?? venue;
   // A resume keeps the slot's harness; its model is chosen again, among that harness's (quota may have moved).
-  const pick = await resolveFor(env, { agent: who, venue: where, venueKind: rec?.kind ?? venueKind, prefer: [...prefer, ...(rec ? [rec.model] : [])], harness: slot.harness, role, pin, conversation: o.bodyEnv?.LOOM_BODY_CONVERSATION, accounts: d.accounts, now: d.now(), fetchImpl: d.fetchImpl });
+  const pick = await resolveFor(env, { agent: who, venue: where, venueKind: rec?.kind ?? venueKind, modelNeed, prefer: [...prefer, ...(rec ? [rec.model] : [])], harness: slot.harness, role, pin, conversation: o.bodyEnv?.LOOM_BODY_CONVERSATION, accounts: d.accounts, now: d.now(), fetchImpl: d.fetchImpl });
   const here = !!(local ?? rec?.local);
   const runner = d.runner(slot.harness, here);
   needsMet(env, runner, needs);
   const metadata = {
     agent: who, venue: where, kind: pick.kind, ...(rec?.place ? { place: rec.place } : {}),
     ...(deny.length ? { deny: [...deny] } : {}), ...(guest ? { guest: true } : {}), ...(here ? { local: true } : {}),
-    harness: pick.harness, model: pick.model, family: pick.family, ...(pick.account ? { account: pick.account } : {}), ...(pick.accountKey ? { accountKey: pick.accountKey } : {}), ...switchedOf(pick),
+    ...(modelNeed ? { modelNeed } : {}), harness: pick.harness, model: pick.model, family: pick.family, ...(pick.account ? { account: pick.account } : {}), ...(pick.accountKey ? { accountKey: pick.accountKey } : {}), ...switchedOf(pick),
     instance: randomBytes(12).toString('hex'), slot, ...(ref ? { resumed: ref } : {}),
   };
   const options = { agent: who, brief: forRunner(runner, brief(b), cwd), model: pick.model, cwd, env: o.bodyEnv, deny, ...(seat ? { seat } : {}), ...(needs.length ? { needs } : {}), ...(files ? { files } : {}), ...((where === COMMS_VENUE || activity) ? { activity: true } : {}) };

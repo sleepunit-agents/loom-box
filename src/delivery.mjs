@@ -2346,7 +2346,7 @@ async function executeOne(env, op, d, mem) {
       const slot = { harness: pack.harness, session: pack.session };
       // A house's body gets its files with the resume (its host puts them back); a local one, here.
       if (!runner.remote) restored = restoreFiles(runner, pack.files);
-      r = await resumeBody(env, { ...base, slot, ...(pack.model ? { pin: pack.model } : {}), brief: resumeBrief(briefContext, [...notes, ...msgs], run, sends), ...(runner.remote ? { files: pack.files } : {}) }, bodyDeps);
+      r = await resumeBody(env, { ...base, slot, brief: resumeBrief(briefContext, [...notes, ...msgs], run, sends), ...(runner.remote ? { files: pack.files } : {}) }, bodyDeps);
       locked(env, () => {
         if (!ours(loadConv(env, op.cv), op)) return;
         rmSync(way.file, { force: true });
@@ -3004,7 +3004,7 @@ async function retire(env, cv, ref, d, stop) {
       kept = { harness: slot.harness, session: slot.session, saved: new Date(at).toISOString(), until: new Date(at + windowMs(env, c.venue, c.kind)).toISOString() };
       const tmp = `${file}.${randomBytes(8).toString('hex')}.tmp`;
       try {
-        const blob = d.sealer.seal(Buffer.from(JSON.stringify({ v: 1, harness: slot.harness, session: slot.session, ...(rec.model ? { model: rec.model } : {}), files })));
+        const blob = d.sealer.seal(Buffer.from(JSON.stringify({ v: 1, harness: slot.harness, session: slot.session, files })));
         mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
         writeFileSync(tmp, blob, { mode: 0o600 }); prepared = tmp;
       } catch (e) {
