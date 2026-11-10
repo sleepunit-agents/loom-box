@@ -7,12 +7,13 @@
 // The resolver's use of scorecards (test 4) is pinned in models.test.mjs.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { CoreError } from '../src/core.mjs';
 import { parseDelivery } from '../src/delivery.mjs';
 import { EGRESS, GraderError, MAX_FINDING, cleanFinding, egressProxy, grade, graderImage, graderInput, graderRunArgs, verdictOf } from '../src/grader.mjs';
 import { dueDay, graderPool, introspectionMessage, localTime, pickGraders, producersOf, resetTick, reviewDir, reviewRuns, reviewTick, runReview } from '../src/review.mjs';
+import { quotaEvents } from '../grader/quota.mjs';
 import { scratch } from './scratch.mjs';
 
 const envOf = () => { const HOME = scratch('loom-review-'); return { HOME, LOOM_BOX_DATA: join(HOME, 'data'), LOOM_BOX_HOME: join(HOME, 'state'), LOOM_RUNTIME_PIECE: 'runtime' }; };
@@ -323,7 +324,7 @@ test('a bare grader: the CLI with no tools, MCP, settings or session, no network
   for (const f of ["--tools ''", '--strict-mcp-config', "--setting-sources ''", '--disable-slash-commands', '--no-session-persistence', '--system-prompt', "--model 'claude-sonnet-5'", 'listen(3128,"127.0.0.1"', '$i -ge 50']) assert.ok(script.includes(f), f);
   assert.match(script, /Did the agent answer what was actually asked/);
   const cx = graderRunArgs(env, { harness: 'codex', model: 'gpt-5', kind: 'agent', image: PIN, name: 'n', egress: '/e' }).at(-1);
-  for (const f of ['--ephemeral', '--sandbox read-only', '--disable shell_tool', '--disable unified_exec', "web_search=\"disabled\""]) assert.ok(cx.includes(f), f);
+  for (const f of ['/opt/loom-grader/quota.mjs', '--sandbox read-only', '--disable shell_tool', '--disable unified_exec', "web_search=\"disabled\""]) assert.ok(cx.includes(f), f);
   // Never an image that isn't pinned, and never without its proxy.
   assert.throws(() => graderRunArgs(env, { harness: 'claude', model: 'm', kind: 'live', image: 'localhost/loom-house-art:de52', name: 'n', egress: '/e' }), /pinned grader image/);
   assert.throws(() => graderRunArgs(env, { harness: 'claude', model: 'm', kind: 'live', image: PIN, name: 'n' }), /egress proxy/);
@@ -465,4 +466,21 @@ test('a grading phase that fails still runs introspection; a token nearly out of
   const late = fakeCore({ entries: [entry(1)] });
   const r2 = await runReview(env, { ...late, models: anthropicOnly, introspect: 'none', state: { agents: {} }, scorecards: async () => [], gradeForMs: 0, pool: () => ({ pool: [G('claude-sonnet-5', 'anthropic')], why: [] }), grade: async () => assert.fail('no grading past the token\'s time') });
   assert.deepEqual({ failed: r2.failed, done: r2.done }, { failed: 1, done: 0 });
+});
+
+test('grading reports quota even when verdict is invalid and rejects absent accounting', async () => {
+  const env=envOf(), readings=[];
+  const run=async()=>({status:0,stdout:JSON.stringify({type:'rate_limit_event',rate_limit_info:{status:'allowed',unifiedWindows:{seven_day:{utilization:.95,resetsAt:2000000000}}}})+'\n'+JSON.stringify({result:'not a verdict'})});
+  await assert.rejects(grade(env,{harness:'claude',model:'m',image:PIN},{venueKind:'live',entry:{text:'sample'}},{run,proxy:noProxy,reportUsage:(h,r)=>readings.push([h,r])}),/JSON object/);
+  assert.equal(readings[0][1].windows['7d'],.95);
+  await assert.rejects(grade(env,{harness:'claude',model:'m',image:PIN},{venueKind:'live',entry:{text:'sample'}},{run:async()=>({status:0,stdout:JSON.stringify({result:'{"score":5}'})}),proxy:noProxy,reportUsage:()=>{}}),/no quota reading/);
+});
+
+test('Codex grader quota extractor emits only numeric metadata and is used by accounting', async()=>{
+ const env=envOf(),root=join(env.HOME,'rollouts');mkdirSync(root,{recursive:true});
+ writeFileSync(join(root,'session.jsonl'),JSON.stringify({type:'event_msg',payload:{type:'token_count',text:'SECRET-PROMPT',rate_limits:{primary:{used_percent:42,window_minutes:10080,resets_at:2000000000},secret:'SECRET-PROMPT'}}}));
+ const event=quotaEvents(root);assert.ok(event);assert.doesNotMatch(JSON.stringify(event),/SECRET/);
+ const readings=[];
+ const result=await grade(env,{harness:'codex',model:'m',image:PIN},{venueKind:'live',entry:{text:'sample'}},{proxy:noProxy,run:async()=>({status:0,stdout:JSON.stringify(event)+'\n'+JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'{"score":4}'}})}),reportUsage:(h,r)=>readings.push([h,r])});
+ assert.equal(result.score,4);assert.equal(readings[0][0],'codex');assert.equal(readings[0][1].windows['7d'],.42);
 });

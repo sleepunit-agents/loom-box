@@ -11,6 +11,7 @@ export const commandFlags = {
   session: 'agent=', attach: 'shell', down: '', list: 'json',
   join: 'name= labels= report-only credential',
   'upgrade-apply': 'recover commit= from= repo= piece= target=', 'carry-settings': 'from= to=', run: 'local once',
+  oneshot: 'cwd= prefer= timeout=',
   body: 'agent= venue= venue-kind= prefer= place= cwd= deny= brief= slot= text= id= json',
   deliver: 'conversation= stdin ref= every= once json', review: 'limit= introspect= scheduled day= json',
   continuation: 'conversation= handle= id= text= piece=', send: 'conversation= person= via= text= piece=',

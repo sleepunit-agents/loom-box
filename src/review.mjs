@@ -38,6 +38,7 @@
 //
 // The run's record (<data>/review/runs.jsonl) holds counts, grader families, and short reasons. It never holds a
 // sample, a grader's words, a finding's text or a token. The same goes for its log.
+import { randomUUID } from 'node:crypto';
 import { spawn as nodeSpawn } from 'node:child_process';
 import { mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -45,13 +46,13 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { deriveAccounts, hasRoom } from './accounts.mjs';
 import { CoreError, coreFrom, reviewFrom } from './core.mjs';
-import { deliver } from './delivery.mjs';
+import { deliver, shortCallGate } from './delivery.mjs';
 import { GraderError, grade as gradeOnce, graderImage } from './grader.mjs';
 import { credentialState } from './logins.mjs';
 import { fetchScorecards, providerOf, readModels, sinceDay, VENUE_KIND, VENUE_KINDS } from './models.mjs';
 import { boxOwner, householdOwners, membersOf } from './owners.mjs';
 import { pieceName, setting } from './piece.mjs';
-import { AGENT_NAME, StateError, alive, load } from './state.mjs';
+import { AGENT_NAME, StateError, alive, load, update } from './state.mjs';
 
 /** The review's hour, in the household's time zone (conversations.md, "Review"). */
 export const REVIEW_HOUR = 4;
@@ -154,6 +155,8 @@ export function graderPool(env, { s = load(env), members = membersOf(env), model
     const acct = accounts.find((a) => a.harness === m.harness && a.provider === providerOf(m.family));
     if (!acct) { why.push(`${m.id}: ${id} isn't logged in to ${m.harness}`); continue; }
     if (!hasRoom(acct, m.window)) { why.push(`${m.id}: ${acct.label} has no room`); continue; }
+    const gate = shortCallGate(env, 'grading', nowMs);
+    if (gate && !gate(acct, m.window).allow) { why.push(`${m.id}: kept for conversations`); continue; }
     const bad = cred(m.harness);
     if (bad) { why.push(`${m.id}: ${id}'s ${m.harness} login can't be used (${bad})`); continue; }
     pool.push({ model: m.id, harness: m.harness, family: m.family, ...(m.window ? { window: m.window } : {}), image: img.image });
@@ -194,8 +197,8 @@ export function pickGraders(entry, pool, { families, producers = {}, fallback = 
     if (out.length >= 2) break;
     const mine = pool.filter((g) => g.family === f);
     if (!mine.length) continue;
-    // Never the model that produced it, as far as the runtime can tell (the entry names only its family): the
-    // family's models that produced the least come first.
+    // Entries name only the family: exact-model independence cannot be proved here.
+    // Within the sole-family fallback, prefer the models that produced the least.
     const n = (g) => producers[f]?.[g.model] ?? 0;
     const g = f === producer ? [...mine].sort((a, b) => n(a) - n(b))[0] : mine[0];
     out.push({ ...g, sameFamily: f === producer || Array.isArray(entry.only_families) });
@@ -211,8 +214,12 @@ function takeLock(env) {
   mkdirSync(reviewDir(env), { recursive: true, mode: 0o700 });
   const held = readJson(lockFile(env));
   if (held && alive(held.pid) && held.pid !== process.pid) throw new StateError(`a review is already running (pid ${held.pid})`, 409);
-  writeJson(lockFile(env), { pid: process.pid, at: new Date().toISOString() });
-  return () => { if (readJson(lockFile(env))?.pid === process.pid) rmSync(lockFile(env), { force: true }); };
+  const token = randomUUID();
+  update(env, s => {
+    if (s.reviewLock && alive(s.reviewLock.pid)) throw new StateError('a review is already running', 409);
+    s.reviewLock = { pid: process.pid, token };
+  });
+  return () => update(env, s => { if (s.reviewLock?.token === token) delete s.reviewLock; });
 }
 
 /** The runs on record, newest last. */
@@ -318,7 +325,14 @@ export async function runReview(env, o = {}) {
     try { producers = producersOf(await (o.scorecards ?? (async () => (await fetchScorecards(env, { since: sinceDay(now()) })).rows))()); } catch { producers = {}; }
     const { token } = await core.reviewToken();
     const rv = (o.reviewer ?? ((t) => reviewFrom(env, t)))(token);
-    const grade = o.grade ?? ((g, x) => gradeOnce(env, g, x));
+    const grade = o.grade ?? ((g, x) => {
+      if (!graderPool(env).pool.some(p => p.model === g.model)) throw new GraderError('grader account no longer has room');
+      return gradeOnce(env, g, x, { reportUsage: (harness, reading) => update(env, s => {
+      const box = Object.values(s.boxes).find(b => b.local && !b.revoked);
+      if (!box) return;
+      const old = (box.usage ??= {})[harness];
+      box.usage[harness] = { ...(old?.box || old?.house ? old : old?.windows ? { box: old } : {}), box: { ...reading, source: 'box' } };
+    }) }); });
     // A venue's kind: core's registry (an adapter's venues), else the ones the runtime knows by name.
     let registry = {};
     try { registry = (await core.venues?.()) ?? {}; } catch { registry = {}; }
@@ -347,6 +361,7 @@ export async function runReview(env, o = {}) {
     }
 
     async function gradeEntry(entry) {
+      if (!o.pool) ({ pool, why } = poolOf());
       const told = registry[entry.venue]?.kind;
       const venueKind = VENUE_KINDS.includes(told) ? told : VENUE_KIND[entry.venue] ?? null;
       // The token's time running out: left for the sweep, never scored on a token core would refuse.

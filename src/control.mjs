@@ -1868,6 +1868,12 @@ export function api(env, effects, { caller, path, body }) {
     // checks on loom's machine. Never the owner by default.
     // The worker roles a body may ask for (models.mjs, t-2036): any agent or owner reads the catalog; only the
     // household's owner edits it (a scoped owner token can't: the catalog is the household's).
+    if (path === 'oneshot-refused') {
+      return import('./oneshot.mjs').then(m => ({ status: 200, body: m.refuseOneShot(env, caller, b) })).catch(apiError);
+    }
+    if (path === 'oneshot-choice') {
+      return import('./oneshot.mjs').then(async m => ({ status: 200, body: await m.chooseOneShot(env, caller, b) })).catch(apiError);
+    }
     if (path === 'roles') {
       return import('./models.mjs').then((m) => {
         if (b.role === undefined && b.remove === undefined) return { status: 200, body: m.readRoles(env) };

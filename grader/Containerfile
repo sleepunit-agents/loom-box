@@ -14,3 +14,5 @@ RUN apt-get -o APT::Sandbox::User=root update -qq \
 RUN npm install -g --no-fund --no-audit --no-update-notifier @anthropic-ai/claude-code@2.1.309 @openai/codex@0.162.1 \
  && npm cache clean --force && claude --version && codex --version
 LABEL org.opencontainers.image.title="loom-grader" org.opencontainers.image.source="https://github.com/sleepunit-agents/loom-box"
+
+COPY quota.mjs /opt/loom-grader/quota.mjs
