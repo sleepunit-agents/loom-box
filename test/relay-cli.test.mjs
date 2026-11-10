@@ -20,8 +20,9 @@ test('relay and relays CLI forward through the authenticated piece API and prese
   t.after(() => server.close());
   const dir = scratch('relay-cli-');
   const token = join(dir, 'token'); writeFileSync(token, 'test-house-token');
-  const run = (args) => new Promise((resolve) => {
-    const child = spawn(process.execPath, [join(import.meta.dirname, '..', 'src', 'cli.mjs'), ...args], { env: { ...process.env, LOOM_BODY_CONVERSATION: '', LOOM_RUNTIME_PIECE: 'runtime', LOOM_URL: `http://127.0.0.1:${server.address().port}/mcp`, LOOM_TOKEN_FILE: token } });
+  // No session of the test's own (a house running the suite has one): only what each call sets.
+  const run = (args, more = {}) => new Promise((resolve) => {
+    const child = spawn(process.execPath, [join(import.meta.dirname, '..', 'src', 'cli.mjs'), ...args], { env: { ...process.env, CLAUDE_CODE_SESSION_ID: '', CODEX_THREAD_ID: '', LOOM_BODY_CONVERSATION: '', LOOM_RUNTIME_PIECE: 'runtime', LOOM_URL: `http://127.0.0.1:${server.address().port}/mcp`, LOOM_TOKEN_FILE: token, ...more } });
     let stdout = '', stderr = '';
     child.stdout.on('data', (d) => { stdout += d; }); child.stderr.on('data', (d) => { stderr += d; });
     child.on('close', (exit) => resolve({ exit, stdout, stderr }));
@@ -35,6 +36,10 @@ test('relay and relays CLI forward through the authenticated piece API and prese
   assert.equal(failed.exit, 1);
   assert.match(failed.stderr, /relay: denied/);
   assert.deepEqual(calls[1].body.argv, ['relay', '--to', 'art', '--say', 'review please']);
+  // A body's relays name its own conversation (t-2134): from a house, only its conversation's are listed.
+  answer = { exit: 0, stdout: '', stderr: '' };
+  await run(['relays'], { LOOM_BODY_CONVERSATION: 'cv-0123456789ab' });
+  assert.deepEqual(calls[2].body.argv, ['relays', '--conversation', 'cv-0123456789ab']);
 });
 
 test('place CLI forwards its own conversation and proof in the call\'s body, and needs a conversation (t-1745)', async (t) => {
