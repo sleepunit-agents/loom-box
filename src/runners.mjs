@@ -343,17 +343,19 @@ export class ClaudeRunner {
         if (parts.length) { parts.shift(); m.skipping = false; }
         else { m.rest = ''; m.offset = next; continue; }
       }
-      m.rest = tail.length > REST_MAX ? '' : tail;
+      m.rest = Buffer.byteLength(tail) > REST_MAX ? '' : tail;
       for (const l of parts) {
-        if (l.length > REST_MAX) { m.omitted = true; continue; }
+        if (Buffer.byteLength(l) > REST_MAX) { m.omitted = true; continue; }
         const w = lastWordsOf(l);
         if (w !== null) { m.last = w; m.omitted = false; }
       }
-      if (tail.length > REST_MAX) { m.skipping = true; m.omitted = true; }
+      if (Buffer.byteLength(tail) > REST_MAX) { m.skipping = true; m.omitted = true; }
       m.offset = next;
     }
     // A last line not yet ended (no newline after it) counts once it's whole JSON, as reading the file whole did.
-    const last = (m.rest ? lastWordsOf(m.rest) : null) ?? m.last;
+    const completeTail = m.rest ? lastWordsOf(m.rest) : null;
+    if (completeTail !== null) m.omitted = false;
+    const last = completeTail ?? m.last;
     FINAL_MEMO.delete(f); FINAL_MEMO.set(f, m);
     if (FINAL_MEMO.size > 64) FINAL_MEMO.delete(FINAL_MEMO.keys().next().value);
     return m.omitted ? `… (transcript line exceeded 16 MiB; last readable words follow)\n${last ?? ''}` : last;

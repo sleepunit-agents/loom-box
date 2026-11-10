@@ -610,7 +610,29 @@ test('a Claude job\'s last words are read as its transcript grows, never whole e
   const big = join(h.D, 'big.jsonl');
   writeFileSync(big, event('last') + event('x'.repeat(17 * 1024 * 1024)));
   runner.transcriptOf = () => big;
-  assert.match(runner.final({}), /transcript line exceeded 16 MiB/);
+  assert.match(runner.final({}), /transcript line exceeded 16 MiB; last readable words follow\)\nlast$/);
+  const {appendFileSync} = await import('node:fs');
+  appendFileSync(big, event('after').trimEnd());
+  assert.equal(runner.final({}), 'after');
   writeFileSync(big, event('new'));
   assert.equal(runner.final({}), 'new');
+});
+
+ test('final reads allocate bounded slices and measure the oversized-line bound in UTF-8 bytes', async () => {
+  const fs = (await import('node:fs')).default;
+  const {syncBuiltinESMExports} = await import('node:module');
+  const h = harness(), file = join(h.D, 'sliced.jsonl');
+  const event = text => JSON.stringify({type: 'assistant', message: {content: [{type: 'text', text}]}}) + '\n';
+  writeFileSync(file, event('hello 界'));
+  const runner = new ClaudeRunner({readMax: {final: 7}}); runner.transcriptOf = () => file;
+  const read = fs.readSync, sizes = [];
+  fs.readSync = (fd, buffer, ...args) => { sizes.push(buffer.length); return read(fd, buffer, ...args); };
+  syncBuiltinESMExports();
+  try { assert.equal(runner.final({}), 'hello 界'); }
+  finally { fs.readSync = read; syncBuiltinESMExports(); }
+  assert.ok(sizes.length > 1);
+  assert.ok(sizes.every(n => n <= 7));
+  writeFileSync(file, event('old') + event('界'.repeat(6_000_000)));
+  const wide = new ClaudeRunner(); wide.transcriptOf = () => file;
+  assert.match(wide.final({}), /transcript line exceeded 16 MiB/);
 });
