@@ -238,6 +238,9 @@ test('the CLI: --verify checks a statement on this machine; --wake takes the clo
   const ok = cli(env, ['principal', '--verify'], s);
   assert.equal(ok.status, 0, ok.stderr);
   assert.deepEqual([JSON.parse(ok.stdout).for, JSON.parse(ok.stdout).owner], ['owner', true]);
+  // --house: an id, or - for a caller in no house; a bare one, or one that isn't an id, is refused, never unbound.
+  for (const h of [[], ['-x'], ['.']]) assert.notEqual(cli(env, ['principal', '--verify', '--house', ...h], s).status, 0, `--house ${h}`);
+  assert.equal(JSON.parse(cli(env, ['principal', '--verify', '--house', 'h-1'], s).stdout).ok, false, 'its conversation has no body in h-1');
   const gone = cli(env, ['principal', '--verify'], mint(dir, { agent: 'art', conversation: 'cv-000000000002', principal: { for: 'owner', owner: true, people: [] } }));
   assert.equal(gone.status, 1, 'a conversation this runtime has no record of');
   assert.equal(JSON.parse(gone.stdout).reason, 'this runtime has no record of its conversation');
