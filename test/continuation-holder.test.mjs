@@ -191,3 +191,26 @@ test("a broken continuation outbox never stops the rest of the tick", async () =
   assert.ok(said.some((m) => m.startsWith('continuations:')), said.join('\n'));
   assert.ok(loadConv(w.env, r.conversation));
 });
+
+// t-2004 live proof: a reused `claude --bg` spare keeps the environment of the body it was first started for, so a
+// body can hold its sibling conversation's LOOM_BODY_CONVERSATION and LOOM_BODY_KEY while running in its own session.
+// Neither that key nor the env-claimed conversation is proof: the grant needs the holder's own session too.
+test("a sibling conversation's key with this body's own session issues nothing for the sibling", async () => {
+  const w = world();
+  const a = loadConv(w.env, (await deliver(w.env, w.msg('sibling-a', 'hello'), w.o)).conversation);
+  const b = loadConv(w.env, (await deliver(w.env, w.msg('sibling-b', 'hello'), w.o)).conversation);
+  assert.notEqual(a.conversation, b.conversation);
+  const keyOf = (c) => w.runner.envs[c.body.split(':')[1]].LOOM_BODY_KEY;
+  const ownSession = w.sessionFor(b.conversation);
+  assert.ok(ownSession && ownSession !== w.sessionFor(a.conversation));
+  for (const action of ['issue', 'status', 'enqueue']) {
+    assert.throws(() => continuationCall(w.env, { action, conversation: a.conversation, key: keyOf(a), session: ownSession, handle: 'cont-' + '0'.repeat(64), id: 'final', text: 'x' }, { ...w.o, caller: { kind: 'agent', agent: 'art' } }),
+      /only the body holding .*another session is/);
+  }
+  // Its own conversation, proven with its own key and session, is the one it gets.
+  b.actsFor = { owner: true, people: [], unknown: false };
+  b.bodyRules = { ...b.bodyRules, seat: 'owner' };
+  writeFileSync(join(deliveryDir(w.env), 'conversations', `${b.conversation}.json`), JSON.stringify(b));
+  const grant = continuationCall(w.env, { action: 'issue', conversation: b.conversation, key: keyOf(b), session: ownSession }, w.o);
+  assert.match(grant.handle, /^cont-/);
+});
