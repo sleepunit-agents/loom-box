@@ -233,7 +233,7 @@ test('through the body API, a caller that proves nothing is refused before anyth
   assert.equal(w.calls.length, 0);
 });
 
-test('a long line is redacted in pieces, never emptied, and never cut inside a token or after a secret\'s name', async () => {
+test('a long line is redacted whole: never emptied, and a secret anywhere in it is found', async () => {
   const { boundOutput } = await import('../src/hostverbs.mjs');
   const words = 'loom http started on port 8787 ok '.repeat(80);
   const r = boundOutput(words + 'end');
@@ -247,10 +247,9 @@ test('a long line is redacted in pieces, never emptied, and never cut inside a t
   // A secret's name just before a cut: its value stays with it.
   const pw = 'y '.repeat(745) + 'password: S3cretValue99 ' + ' more'.repeat(400);
   assert.doesNotMatch(boundOutput(pw).output, /S3cretValue99/);
-  // One token-like run longer than a piece: out whole.
-  const long = 'k'.repeat(1700) + ' after';
-  assert.doesNotMatch(boundOutput(long).output, /kkkk/);
-  assert.match(boundOutput(long).output, /after$/);
+  // A secret far past 2000 characters into one line: still found (the line is redacted whole).
+  const far = 'x '.repeat(20000) + 'Authorization: Bearer abcdefghijklmnop1234';
+  assert.doesNotMatch(boundOutput(far).output, /abcdefghijklmnop1234/);
 });
 
 test('art-chain-check runs a script a push can change, so it asks', async () => {

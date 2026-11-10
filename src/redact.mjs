@@ -28,9 +28,9 @@ export const GONE = '…';
 export const INPUT_MAX = 2000;
 
 /** `s` cut to INPUT_MAX, and then back to the last whole word, so a cut never leaves half a token. */
-export function cutInput(s) {
+export function cutInput(s, max = INPUT_MAX) {
   const t = String(s ?? '');
-  return t.length <= INPUT_MAX ? t : t.slice(0, INPUT_MAX).replace(/\S*$/, '');
+  return t.length <= max ? t : t.slice(0, max).replace(/\S*$/, '');
 }
 
 // Known secret shapes: GitHub, Anthropic/OpenAI, Slack, AWS, Google, GitLab, npm, age, JWTs, PEM blocks.
@@ -105,8 +105,8 @@ function base64Like(run) {
  * headers, values of `NAME=value` assignments, values of secret-named flags and query parameters, and long token-like
  * runs. A label is made from words a body chose, so this runs on every one of them, last.
  */
-export function redact(s) {
-  let t = cutInput(s).replace(INVISIBLE, '');
+export function redact(s, { max = INPUT_MAX } = {}) {
+  let t = cutInput(s, max).replace(INVISIBLE, '');
   for (const re of SHAPES) t = t.replace(re, GONE);
   // A URL's user and password: scheme://user:pass@host → scheme://…@host.
   t = t.replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@'"]+@/gi, `$1${GONE}@`);

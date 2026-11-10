@@ -326,37 +326,12 @@ export function boundOutput(s) {
   return { output: tail.split('\n').map(redactLine).join('\n'), ...(cut ? { cut: true } : {}) };
 }
 
-const PIECE_MAX = 1500;
-const TOKENISH = /[A-Za-z0-9_\-+/=.~%]/;
-const SECRETISH = /(?:pass|token|secret|key|auth|bearer|cookie|cred|pw|pin)[a-z_-]*\W{0,8}$/i;
 /**
- * redact() reads at most 2000 characters (cutting back to a word), so a longer line is redacted in pieces, never
- * lost. A piece ends only between tokens, never inside one (a token cut in two could pass as two harmless halves),
- * and never just after a secret-named word (its value would start the next piece without it). A token-like run
- * longer than a piece with nothing to cut at is taken out whole: fail closed.
+ * One line of a verb's output, redacted whole: redact() reads up to the output's own bound here (a label's 2000
+ * characters is for labels), so nothing is ever cut apart before it's redacted and a secret can't straddle a cut.
  */
 export function redactLine(l) {
-  if (l.length <= PIECE_MAX) return redact(l);
-  const out = [];
-  let i = 0;
-  while (i < l.length) {
-    if (l.length - i <= PIECE_MAX) { out.push(redact(l.slice(i))); break; }
-    let cut = i + PIECE_MAX;
-    while (cut > i && TOKENISH.test(l[cut - 1]) && TOKENISH.test(l[cut])) cut--;
-    if (cut === i) {
-      // One run of token characters longer than a piece: out whole, as a secret would be.
-      let end = i;
-      while (end < l.length && TOKENISH.test(l[end])) end++;
-      out.push('…');
-      i = end;
-      continue;
-    }
-    const m = SECRETISH.exec(l.slice(Math.max(i, cut - 120), cut));
-    if (m) { const back = cut - (m[0].length); if (back > i) cut = back; }
-    out.push(redact(l.slice(i, cut)));
-    i = cut;
-  }
-  return out.join('');
+  return redact(l, { max: OUTPUT_MAX });
 }
 
 const childEnv = (env) => ({
