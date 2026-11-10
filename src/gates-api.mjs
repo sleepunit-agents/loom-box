@@ -46,6 +46,14 @@ export async function runFor(env, caller, argv, store = loomStore(env), core = c
     const r = await placeOf(env, args[1], proof, caller.agent, caller);
     return r.ok ? ok(`${JSON.stringify(r.place)}\n`) : no(r.reason);
   }
+  // A file someone sent the body's own conversation (files.mjs, t-1961): proved as `place` is, one part at a time.
+  if (a === 'file') {
+    const args = argv.slice(1);
+    const f = (n) => { const i = args.indexOf(n); return i >= 0 ? args[i + 1] : undefined; };
+    if (args.length !== 6 || !/^cv-[0-9a-f]{12}$/.test(f('--conversation') ?? '') || f('--id') === undefined || !/^[0-9]{1,4}$/.test(f('--part') ?? '')) return no('file --conversation cv-… (this body\'s own) --id ID --part N', 2);
+    const r = await (await import('./files.mjs')).fileOf(env, f('--conversation'), f('--id'), Number(f('--part')), proof, caller);
+    return r.ok ? ok(`${JSON.stringify(r)}\n`) : no(r.reason);
+  }
   const tail = a === 'propose-person' ? [b, ...rest].filter((x) => x !== undefined) : a === 'gates' && b === 'propose' ? rest : null;
   if (tail) {
     const flags = proposeFlags(tail);
@@ -55,7 +63,7 @@ export async function runFor(env, caller, argv, store = loomStore(env), core = c
     if (r.ok) await annotate(store, core, caller.agent, r.pid);
     return r.ok ? ok(`${r.message}\n`) : no(`propose-person: ${r.message}`);
   }
-  return no('the runtime answers a body: place --conversation cv-… | relay --to A --say T [--why W] [--reply-to r-…] [--from discord:#x] [--approval a-…] [--conversation cv-…] | relays [--thread r-…] | grants list [--json] | gates people | gates propose --slug S --entry JSON [--why W] [--then-relay-say T --then-relay-via slack]', 2);
+  return no('the runtime answers a body: place --conversation cv-… | file --conversation cv-… --id ID --part N | relay --to A --say T [--why W] [--reply-to r-…] [--from discord:#x] [--approval a-…] [--conversation cv-…] | relays [--thread r-…] | grants list [--json] | gates people | gates propose --slug S --entry JSON [--why W] [--then-relay-say T --then-relay-via slack]', 2);
 }
 
 /**
