@@ -1,6 +1,8 @@
 // Harmless physical commands with a fixture admission callback, never a live
 // owner approval or production box capability.
-import test from 'node:test';
+import test, { afterEach } from 'node:test';
+import { cleanupAdministrationFixture, trackAdministrationFixture } from './administration-fixture.mjs';
+afterEach(cleanupAdministrationFixture);
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
@@ -9,7 +11,7 @@ import { scratch } from './scratch.mjs';
 import { administrativeHost, runAdministrationCommand, observeAdministrationExecution } from '../src/administration-worker.mjs';
 import { readExecution } from '../src/administration-execution-journal.mjs';
 import { launchWorkerAlive } from '../src/launch-journal.mjs';
-import { administrationSupervisorAvailable, administrationUnitState, signalAdministrationUnit } from '../src/administration-supervisor.mjs';
+import { administrationUnit, administrationSupervisorAvailable, administrationUnitState, signalAdministrationUnit } from '../src/administration-supervisor.mjs';
 import { world } from './delivery-world.mjs';
 import { deliver, loadConv } from '../src/delivery.mjs';
 import { update } from '../src/state.mjs';
@@ -29,7 +31,8 @@ function fixture() {
     serverAt: Date.now(), until: Date.now() + 10_000, remainingMs: 10_000 } });
   // Freeze both wall timestamps together; this is a protocol fixture, not a grant.
   const admission = async q => { const r = await admit(q); r.receipt.until = r.receipt.serverAt + r.receipt.remainingMs; return r; };
-  return { root, id, env, execution, payload, admit: admission, supervisor: process.env.LOOM_ADMIN_TEST_SUPERVISOR === 'systemd' ? 'systemd' : 'process-fixture' };
+  trackAdministrationFixture(root, () => id);
+  return { root, id, env, execution, payload, admit: admission, supervisor: process.env.LOOM_ADMIN_TEST_SUPERVISOR === 'systemd' ? 'systemd-fixture' : 'process-fixture' };
 }
 
 test('a physical command runs once, receives stdin, and seals input and output without box credentials', async () => {
@@ -39,6 +42,7 @@ test('a physical command runs once, receives stdin, and seals input and output w
   const result = await runAdministrationCommand(q);
   assert.equal(result.result.outcome, 'exited', result.result.stderr); assert.equal(result.result.exitCode, 0);
   assert.equal(result.result.stdout, 'private-command-stdin:undefined');
+  if (q.supervisor === 'systemd-fixture') assert.equal(readExecution(q.root, q.id).supervisor.unit, administrationUnit(q.root, q.id, true));
   const again = await runAdministrationCommand(q);
   assert.deepEqual(again, result); assert.equal(readFileSync(marker, 'utf8'), 'one\n');
   const journal = readFileSync(join(q.root, q.id + '.json'), 'utf8');
@@ -119,6 +123,7 @@ test('a physical command uses the actual controller claim, admission and sealed 
     state: used ? 'used' : 'allowed', decidedBy: 'owner', expires: new Date(w.clock.now().getTime() + 60_000).toISOString() }), use: async () => { used = true; } }, w.o);
   const op = queueAdministration(w.env, caller, { ...proof, scope: scope.id, requestKey: 'physical-command', intent: 'Print the isolated fixture', ...q.payload }, w.o);
   q.id = op.id;
+  trackAdministrationFixture(q.root, () => q.id);
   q.payload = { argv: q.payload.argv, stdin: q.payload.stdin, cwd: q.payload.cwd, identity: q.payload.identity, timeoutMs: q.payload.timeoutMs };
   let ticket, worker;
   q.admit = async request => {
@@ -146,7 +151,7 @@ test('loss of the executing gate records unknown and never replays a possibly ef
   const running = runAdministrationCommand(q);
   await until(() => existsSync(marker));
   const gate = readExecution(q.root, q.id).child;
-  if (q.supervisor === 'systemd') {
+  if (q.supervisor === 'systemd-fixture') {
     const unit = administrationUnitState(q.env, readExecution(q.root, q.id).supervisor.unit);
     assert.equal(unit.killMode, 'control-group');
     assert.equal(unit.stopTimeout, '2s');
@@ -158,7 +163,7 @@ test('loss of the executing gate records unknown and never replays a possibly ef
   assert.equal(result.result.outcome, 'unknown');
   assert.deepEqual(await runAdministrationCommand(q), result);
   assert.equal(readFileSync(effect, 'utf8'), 'one\n');
-  if (q.supervisor === 'systemd') {
+  if (q.supervisor === 'systemd-fixture') {
     const command = JSON.parse(readFileSync(marker, 'utf8'));
     await until(() => launchWorkerAlive(command) === false);
   }

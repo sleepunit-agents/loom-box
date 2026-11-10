@@ -1,4 +1,6 @@
-import test from 'node:test';
+import test, { afterEach } from 'node:test';
+import { cleanupAdministrationFixture, trackAdministrationFixture } from './administration-fixture.mjs';
+afterEach(cleanupAdministrationFixture);
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
@@ -9,6 +11,8 @@ import { deliver, loadConv } from '../src/delivery.mjs';
 import { api } from '../src/control.mjs';
 import { update } from '../src/state.mjs';
 import { remoteClient } from '../src/box.mjs';
+import { readExecution } from '../src/administration-execution-journal.mjs';
+import { administrationUnit } from '../src/administration-supervisor.mjs';
 import { administrativeHost } from '../src/administration-worker.mjs';
 import { reconcileAdministration, readAdministrationRequest } from '../src/administration-client.mjs';
 import { requestAdministration, administrationApproval, advanceAdministration, queueAdministration, administrationResult } from '../src/administration.mjs';
@@ -50,8 +54,9 @@ async function fixture(t, lose, from = { kind: 'person', slug: 'owner' }, princi
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); });
   const url = 'http://127.0.0.1:' + server.address().port, client = remoteClient(url, 'fixture-box-client');
+  trackAdministrationFixture(join(root, 'executions'), () => op.id);
   const config = { root, id: op.id, env: { PATH: process.env.PATH, HOME: w.env.HOME },
-    supervisor: process.env.LOOM_ADMIN_TEST_SUPERVISOR === 'systemd' ? 'systemd' : 'process-fixture' };
+    supervisor: process.env.LOOM_ADMIN_TEST_SUPERVISOR === 'systemd' ? 'systemd-fixture' : 'process-fixture' };
   return { ...w, root, op, marker, journal, proof, caller, calls, client, config, url };
 }
 
@@ -75,6 +80,7 @@ test('lost claim reply reconciles the same worker ticket before one physical eff
   assert.equal(existsSync(w.marker), false);
   const answer = await reconcileAdministration({ ...w.config, client: w.client });
   assert.equal(answer.state, 'uploaded'); assert.equal(readFileSync(w.marker, 'utf8'), 'one\n');
+  if (w.config.supervisor === 'systemd-fixture') assert.equal(readExecution(join(w.root, 'executions'), w.op.id).supervisor.unit, administrationUnit(join(w.root, 'executions'), w.op.id, true));
   assert.equal(w.calls['administration-claim'], 2); assert.equal(w.calls['administration-admit'], 1);
   assert.equal(administrationResult(w.env, w.caller, { ...w.proof, operation: w.op.id }, w.o).result.stdout, 'private-client-output');
   assert.deepEqual(await reconcileAdministration({ ...w.config, client: w.client }), answer);

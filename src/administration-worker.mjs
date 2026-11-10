@@ -46,7 +46,7 @@ export function observeAdministrationExecution({ root, id, env = process.env }) 
 }
 
 export async function runAdministrationCommand({ root, id, payload, execution, env = process.env, admit, isStopped = async () => false, supervisor = 'systemd' }) {
-  if (!['systemd', 'process-fixture'].includes(supervisor)) throw Error('unsupported administrative supervisor');
+  if (!['systemd', 'systemd-fixture', 'process-fixture'].includes(supervisor)) throw Error('unsupported administrative supervisor');
   if (execution.host !== administrativeHost() || execution.uid !== process.getuid() || execution.gid !== process.getgid()) throw Error('administrative worker is not the approved host and OS identity');
   if (!Array.isArray(payload?.argv) || !payload.argv.length || payload.argv.length > 128 || payload.argv.some(a => typeof a !== 'string' || a.includes('\0')) || !payload.argv[0] ||
       typeof payload.cwd !== 'string' || !payload.cwd.startsWith('/') || typeof payload.stdin !== 'string' ||
@@ -56,7 +56,7 @@ export async function runAdministrationCommand({ root, id, payload, execution, e
     if (existing.payloadHash !== executionHash(payload) || executionHash(existing.execution) !== executionHash(execution)) throw Error('administrative execution id has another immutable command');
     return observeAdministrationExecution({ root, id, env });
   }
-  if (supervisor === 'systemd' && !administrationSupervisorAvailable(env)) throw Error('administrative commands require an available systemd user manager');
+  if (supervisor !== 'process-fixture' && !administrationSupervisorAvailable(env)) throw Error('administrative commands require an available systemd user manager');
   const payloadHash = executionHash(payload), worker = { ...launchWorkerIdentity(), host: execution.host, uid: process.getuid(), gid: process.getgid() };
   const sealer = ageSealer(env, join(root, 'secrets'));
   let owned = false;
@@ -94,8 +94,8 @@ export async function runAdministrationCommand({ root, id, payload, execution, e
     const gateEnv = { PATH: env.PATH, HOME: env.HOME, LOOM_ADMIN_EXEC_DATA: root,
       ...(env.LOOM_AGE ? { LOOM_AGE: env.LOOM_AGE } : {}), ...(env.LOOM_AGE_KEYGEN ? { LOOM_AGE_KEYGEN: env.LOOM_AGE_KEYGEN } : {}) };
     let identity;
-    if (supervisor === 'systemd') {
-      const unit = await startAdministrationUnit({ root, id, env, gateEnv, boot: worker.boot, maxMs: Math.max(1, deadlineMono - monotonicMs()) });
+    if (supervisor !== 'process-fixture') {
+      const unit = await startAdministrationUnit({ root, id, env, gateEnv, boot: worker.boot, maxMs: Math.max(1, deadlineMono - monotonicMs()), fixture: supervisor === 'systemd-fixture' });
       child = unit.child; closed = unit.closed; identity = unit.identity;
     } else {
       // Explicit fixture adapter, never an automatic production fallback.
