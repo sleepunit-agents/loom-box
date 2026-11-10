@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { continuationCall, deliver, deliveryDir, loadConv } from '../src/delivery.mjs';
+import { continuationCall, deliver, deliveryDir, drainContinuations, loadConv, tick } from '../src/delivery.mjs';
 import { world } from './delivery-world.mjs';
 
 test('continuation holder boundary refuses borrowed keys, sessions, houses and unknown principals', async () => {
@@ -139,4 +139,78 @@ for (const change of ['cutoff', 'deadline']) test(`queued continuation rechecks 
   assert.equal(w.kinds().filter((x) => x === 'start' || x === 'resume').length, starts);
   assert.equal(loadConv(w.env, queued.conversation).body, undefined);
   assert.equal(loadConv(w.env, queued.conversation).continuationAdmissions, undefined);
+});
+
+test('issuance lifetime comes from the runtime policy: 7 days by default, refused when out of range', async () => {
+  const w = world();
+  const r = await deliver(w.env, w.msg('policy', 'hello'), w.o);
+  const c = loadConv(w.env, r.conversation);
+  c.actsFor = { owner: true, people: [], unknown: false };
+  c.bodyRules = { ...c.bodyRules, seat: 'owner' };
+  writeFileSync(join(deliveryDir(w.env), 'conversations', `${c.conversation}.json`), JSON.stringify(c));
+  const args = { action: 'issue', conversation: c.conversation, key: w.runner.envs[c.body.split(':')[1]].LOOM_BODY_KEY, session: w.sessionFor(c.conversation) };
+  const { continuationLifetimeMs: _, ...o } = w.o;
+  const now = w.o.now().getTime();
+  const stale = loadConv(w.env, c.conversation); stale.last = '2000-01-01T00:00:00.000Z';
+  writeFileSync(join(deliveryDir(w.env), 'conversations', `${c.conversation}.json`), JSON.stringify(stale));
+  assert.equal(continuationCall(w.env, args, o).expiresAt, now + 7 * 86400000);
+  assert.equal(Date.parse(loadConv(w.env, c.conversation).last), now, 'issuing keeps the record (and its reset) past the deadline');
+  w.env.LOOM_RUNTIME_CONTINUATION_DAYS = '2';
+  assert.equal(continuationCall(w.env, args, o).expiresAt, now + 2 * 86400000);
+  for (const bad of ['0', '14', '31', '1.5', 'week']) {
+    w.env.LOOM_RUNTIME_CONTINUATION_DAYS = bad;
+    assert.throws(() => continuationCall(w.env, args, o), /policy is not configured/);
+  }
+});
+
+test("once the runtime's tick has run, its policy is the one used: a body's own environment can't choose its deadline", async () => {
+  const w = world();
+  const r = await deliver(w.env, w.msg('policy2', 'hello'), w.o);
+  const c = loadConv(w.env, r.conversation);
+  c.actsFor = { owner: true, people: [], unknown: false };
+  c.bodyRules = { ...c.bodyRules, seat: 'owner' };
+  writeFileSync(join(deliveryDir(w.env), 'conversations', `${c.conversation}.json`), JSON.stringify(c));
+  const args = { action: 'issue', conversation: c.conversation, key: w.runner.envs[c.body.split(':')[1]].LOOM_BODY_KEY, session: w.sessionFor(c.conversation) };
+  const { continuationLifetimeMs: _, ...o } = w.o;
+  const now = w.o.now().getTime();
+  await drainContinuations({ ...w.env, LOOM_RUNTIME_CONTINUATION_DAYS: '3' }, { ...o, service: true }); // the service's settings
+  await drainContinuations({ ...w.env, LOOM_RUNTIME_CONTINUATION_DAYS: '30' }, o); // a body's own tick writes nothing
+  assert.equal(continuationCall({ ...w.env, LOOM_RUNTIME_CONTINUATION_DAYS: '30' }, args, o).expiresAt, now + 3 * 86400000);
+  await drainContinuations({ ...w.env, LOOM_RUNTIME_CONTINUATION_DAYS: 'week' }, { ...o, service: true }); // misconfigured service: fails closed
+  assert.throws(() => continuationCall({ ...w.env, LOOM_RUNTIME_CONTINUATION_DAYS: '7' }, args, o), /policy is not configured/);
+});
+
+test("a broken continuation outbox never stops the rest of the tick", async () => {
+  const w = world();
+  const r = await deliver(w.env, w.msg('outbox-broken', 'hello'), w.o);
+  const { rmSync } = await import('node:fs');
+  rmSync(join(deliveryDir(w.env), 'continuations'), { recursive: true, force: true });
+  writeFileSync(join(deliveryDir(w.env), 'continuations'), 'a file where the outbox should be');
+  const said = [];
+  await tick(w.env, { ...w.o, warn: (m) => said.push(m) });
+  assert.ok(said.some((m) => m.startsWith('continuations:')), said.join('\n'));
+  assert.ok(loadConv(w.env, r.conversation));
+});
+
+// t-2004 live proof: a reused `claude --bg` spare keeps the environment of the body it was first started for, so a
+// body can hold its sibling conversation's LOOM_BODY_CONVERSATION and LOOM_BODY_KEY while running in its own session.
+// Neither that key nor the env-claimed conversation is proof: the grant needs the holder's own session too.
+test("a sibling conversation's key with this body's own session issues nothing for the sibling", async () => {
+  const w = world();
+  const a = loadConv(w.env, (await deliver(w.env, w.msg('sibling-a', 'hello'), w.o)).conversation);
+  const b = loadConv(w.env, (await deliver(w.env, w.msg('sibling-b', 'hello'), w.o)).conversation);
+  assert.notEqual(a.conversation, b.conversation);
+  const keyOf = (c) => w.runner.envs[c.body.split(':')[1]].LOOM_BODY_KEY;
+  const ownSession = w.sessionFor(b.conversation);
+  assert.ok(ownSession && ownSession !== w.sessionFor(a.conversation));
+  for (const action of ['issue', 'status', 'enqueue']) {
+    assert.throws(() => continuationCall(w.env, { action, conversation: a.conversation, key: keyOf(a), session: ownSession, handle: 'cont-' + '0'.repeat(64), id: 'final', text: 'x' }, { ...w.o, caller: { kind: 'agent', agent: 'art' } }),
+      /only the body holding .*another session is/);
+  }
+  // Its own conversation, proven with its own key and session, is the one it gets.
+  b.actsFor = { owner: true, people: [], unknown: false };
+  b.bodyRules = { ...b.bodyRules, seat: 'owner' };
+  writeFileSync(join(deliveryDir(w.env), 'conversations', `${b.conversation}.json`), JSON.stringify(b));
+  const grant = continuationCall(w.env, { action: 'issue', conversation: b.conversation, key: keyOf(b), session: ownSession }, w.o);
+  assert.match(grant.handle, /^cont-/);
 });

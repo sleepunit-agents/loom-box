@@ -1,9 +1,7 @@
-> Staged cutoff work: production issuance currently fails closed until a trusted
-> lifetime policy is wired after review. Version2 expiry/highwater states are tested
-> internally; core deadline enforcement and fenced reconciliation, clock inspection,
-> and queued/native admission checks remain shipping gates. No collection is enabled.
+> Shipped 2026-11-10 (t-2004): issuance on with a 7-day default lifetime, finished records collected 7 days after
+> their deadline. See "Lifetime policy and collection" at the end. Sections between are the build's dated checkpoints.
 
-# Continuation report delivery (draft integration)
+# Continuation report delivery
 
 The runtime issues an opaque capability only after the current holder proves its
 agent, key, session and house through the existing holderProblem boundary. The
@@ -137,7 +135,7 @@ This review makes no destructive change. Keep expiry/collection open for the
 coordinated shipping review; native admission and history owners still own their
 respective gates.
 
-### Bounded retention acceptance plan (still held)
+### Bounded retention acceptance plan (implemented 2026-11-10; see below)
 
 A collector cannot be added independently. The review must settle one persisted
 absolute authority deadline for issue, clock admission, enqueue and retry; expose
@@ -172,3 +170,39 @@ proofs and claimed-but-unbound crash/refusal acceptance. Earlier "next" and
 [Held acceptance review](continuation-deadline.md#held-acceptance-review-claimed-but-unbound-recovery-2026-11-09)
 for the current verdict and remaining actual-provider/policy gates. Production
 issuance remains refused and no retention collector is enabled.
+
+
+### Lifetime policy and collection (2026-11-10)
+
+Production issuance is on. The runtime service's `LOOM_RUNTIME_CONTINUATION_DAYS` (an integer 1-13, default 7: under the 14-day idle window that keeps a conversation record, and so its reset, while a grant names it) is the lifetime from issue; the
+absolute deadline it gives is sealed (the service's tick writes its settings to `continuation-policy.json`, which a body's local CLI reads, so a body's own environment never chooses its deadline) in the grant, handed to the clock at scheduling, and committed in core's payload
+hash. Nothing renews it. An out-of-range or non-integer value refuses issuance (fail closed), as no policy did before.
+
+The tick collects after the shared deadline plus `LOOM_RUNTIME_CONTINUATION_KEEP_DAYS` (1-90, default 7):
+
+- a report whose outcome is final (`delivered`, `expired`, `failed`, `withdrawn`) is removed;
+- a grant is removed once no report row names it;
+- `pending` and `indeterminate` rows are never collected: drain resolves them first (after the deadline, core's fenced
+  reconciliation answers delivered or not-accepted), and their grant stays with them;
+- legacy (unversioned) records and anything during clock uncertainty (rollback below the persisted highwater) are held.
+
+Removal is safe because every authority path (inspect, checkFiring, bind, enqueue) refuses at or after the deadline
+against the persisted highwater, and an unknown handle refuses as well; a collected capability grants nothing.
+A reconciliation answering `deleted` (core's thread tombstone) is now final as `withdrawn` rather than reconciled on
+every tick: nothing can land in a deleted thread.
+
+Core needs no collector of its own: a continuation receipt is its reply row (ref + payload hash), kept and removed with
+its thread (the words are swept on the household's comms schedule; the hash stays for conflict checks), and thread
+deletion goes through the tombstone-first journal. The clock drops a firing past its deadline (`fire-refused`).
+
+Limits (2026-11-10, after the fresh read):
+
+- At most 20 live continuations per source conversation (`issue` answers 429). A grant frees its slot only at its
+  deadline, used or not: a thread that issues one per follow-up can be refused for up to the lifetime. The count is a
+  plaintext ledger (`issued.json`: conversation ids and deadlines only), a guard against load, not authority.
+- At most 20 reports per continuation (`enqueue` answers 429; an exact retry of an id isn't a new report).
+- Reports with a final outcome move to `done/`: drain never opens them again; only collection, at most hourly, does.
+- A record that won't open (damaged, or a replaced key) is skipped and logged; while any report won't open, no grant
+  is collected. A failure in the outbox never stops the rest of the tick.
+- Issuing and resetting update the conversation's `last`, so its record (and any reset it holds) outlives every grant
+  issued from it (lifetime 13 days at most, under the 14-day idle window).

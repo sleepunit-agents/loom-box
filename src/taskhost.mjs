@@ -3,7 +3,7 @@
 import { createHash } from 'node:crypto';
 import { StateError, load, update } from './state.mjs';
 import { down, isHostHouse, up } from './control.mjs';
-import { bodyPrincipal, loadConv, ownerConversationControl } from './delivery.mjs';
+import { bodyPrincipal, jobSeated, loadConv, ownerConversationControl } from './delivery.mjs';
 import { registerTaskHost } from './houserunner.mjs';
 import { spawnCall } from './spawn.mjs';
 import { principalOf } from './principal.mjs';
@@ -103,6 +103,13 @@ export async function taskStatus(env, caller, o = {}) {
   if (!h.job?.conversation) return { done: false };
   const c = loadConv(env, h.job.conversation);
   if (!c?.spawn?.job || c.spawn.job.house !== h.id) fail('the task conversation changed', 409);
+  // Someone else joined its conversation (t-2081): it goes on in its principal's house, and this one, holding what was
+  // issued for the job's own principal, is let go once its body here is gone (it's fed nothing more here: delivery moves
+  // it at its turn's end), rather than kept up until that conversation ends.
+  if (!jobSeated(env, c)) {
+    if (c.starting || (typeof c.body === 'string' && c.body.startsWith(`${c.body.split(':')[0]}:${h.id}-`))) return { done: false };
+    return { done: true, ok: false, reason: 'someone other than whom the task was for joined its conversation; it goes on in its own house' };
+  }
   if (c.control?.state === 'held' && !c.body && !c.starting) return { done: true, ok: false, cancelled: true, reason: 'the task was cancelled after its session was collected' };
   // Delivery retires the idle task body and collects its session before the house exits and saves its state.
   if (c.body || c.starting || c.queue?.length) return { done: false };

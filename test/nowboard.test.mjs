@@ -3,12 +3,12 @@
 // the manifest's part of it (a dark bridge's alert, each agent's doing), checked against loom's own validator.
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { api } from '../src/control.mjs';
 import { runFor } from '../src/gates-api.mjs';
-import { boardDir, bridgesOf, nowAgentPage, nowManifest, nowPage, talking } from '../src/nowboard.mjs';
+import { ADAPTER_STATUS_MS, adapterStatuses, boardDir, bridgesOf, nowAgentPage, nowManifest, nowPage, talking } from '../src/nowboard.mjs';
 import { manifest, page } from '../src/ui.mjs';
 import { memStore } from '../src/store.mjs';
 import { scratch } from './scratch.mjs';
@@ -181,7 +181,7 @@ describe('the board on the runtime\'s page and in its manifest', () => {
     writeFileSync(join(env.LOOM_RUNTIME_NOW_DIR, 'art-now', 'convs.json'), '{"at": 1}');
     assert.deepEqual(bridgesOf(join(env.LOOM_RUNTIME_NOW_DIR, 'art-now')), []);
     assert.deepEqual(talking(join(env.LOOM_RUNTIME_NOW_DIR, 'art-now')), {});
-    assert.deepEqual(nowManifest(env), { asks: [], agents: {}, jobs: {}, notices: [] });
+    assert.deepEqual(nowManifest(env), { asks: [], agents: {}, jobs: {}, notices: [], activityUnknown: [] });
     assert.equal(manifest(env).tile.label, 'Boxes');
   });
 });
@@ -206,4 +206,66 @@ test('complete legacy jobs are private, stable, uncapped, fresh and subordinate 
   assert.deepEqual(read(), [], 'completed rows disappear');
   await write(rows, [{ chan: 'pending' }]);
   assert.equal(manifest(env, now * 1000).agents.art.jobs.length, 13, 'full manifest carries every legacy job');
+});
+
+
+test('one manifest reads each installed venue once for both board and delivery ownership', () => {
+  const env = world();
+  for (const venue of ['discord', 'slack']) {
+    const dir = join(env.LOOM_HOME, 'pieces', venue);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'piece.json'), '{}');
+  }
+  const calls = join(env.HOME, 'status-calls');
+  const cli = join(env.HOME, 'fake-loom');
+  writeFileSync(cli, `#!/bin/sh
+case "$1" in
+  discord|slack) echo "$1" >> '${calls}'; echo '{"mode":"live","agents":["art"]}' ;;
+  *) echo '[]' ;;
+esac
+`);
+  chmodSync(cli, 0o700);
+  env.LOOM_BIN = cli;
+  const report = manifest(env);
+  assert.deepEqual(readFileSync(calls, 'utf8').trim().split('\n').sort(), ['discord', 'slack']);
+  assert.ok(report.agents.art, 'the same live adapter snapshot still supplies the agent board');
+});
+
+test('one read of the adapters\' status serves every manifest, page and watch for ADAPTER_STATUS_MS (t-2065)', () => {
+  const env = world();
+  for (const venue of ['discord', 'slack']) {
+    const dir = join(env.LOOM_HOME, 'pieces', venue);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'piece.json'), '{}');
+  }
+  const calls = join(env.HOME, 'status-calls');
+  const cli = join(env.HOME, 'fake-loom');
+  writeFileSync(cli, `#!/bin/sh
+echo "$1" >> '${calls}'; echo '{"mode":"live","agents":["art"]}'
+`);
+  chmodSync(cli, 0o700);
+  env.LOOM_BIN = cli;
+  const n = () => readFileSync(calls, 'utf8').trim().split('\n').length;
+  const t0 = 1_000_000_000_000;
+  assert.deepEqual(adapterStatuses(env, t0), { discord: { mode: 'live', agents: ['art'] }, slack: { mode: 'live', agents: ['art'] } });
+  assert.equal(n(), 2);
+  // Within the window, every caller (a manifest, a page, the delivery loop's watch: separate processes) reuses it.
+  assert.deepEqual(adapterStatuses(env, t0 + ADAPTER_STATUS_MS - 1), { discord: { mode: 'live', agents: ['art'] }, slack: { mode: 'live', agents: ['art'] } });
+  assert.equal(n(), 2);
+  // Past it, read again.
+  adapterStatuses(env, t0 + ADAPTER_STATUS_MS);
+  assert.equal(n(), 4);
+  // An adapter removed is a new set: read again at once, and the removed one is gone.
+  rmSync(join(env.LOOM_HOME, 'pieces', 'slack'), { recursive: true });
+  assert.deepEqual(adapterStatuses(env, t0 + ADAPTER_STATUS_MS + 1), { discord: { mode: 'live', agents: ['art'] } });
+  assert.equal(n(), 5);
+  // A clock that went backwards isn't a fresh read.
+  adapterStatuses(env, t0);
+  assert.equal(n(), 6);  // A read that failed isn't kept: the next caller asks again.
+  writeFileSync(cli, `#!/bin/sh
+echo "$1" >> '${calls}'; exit 1
+`);
+  assert.deepEqual(adapterStatuses(env, t0 + 10 * ADAPTER_STATUS_MS), {});
+  assert.deepEqual(adapterStatuses(env, t0 + 10 * ADAPTER_STATUS_MS + 1), {});
+  assert.equal(n(), 8);
 });

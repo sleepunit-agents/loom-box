@@ -41,8 +41,11 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { keptReading } from './statusline.mjs';
+import { claudeActionNow, codexActionNow } from './ticker.mjs';
 import { claudeCards, codexCards } from './activity.mjs';
 import { CRED_FILE, lastRateLimit, lastRefusal, refusedUntil, tailOf } from './logins.mjs';
+// A ticker observation never scans an unbounded conversation history. Missing starts mean generic Working.
+const tickerLines = p => (tailOf(p, 1024 * 1024) ?? '').split('\n').flatMap(l => { try { return [JSON.parse(l)]; } catch { return []; } });
 import { lastToolUse } from './stuck.mjs';
 import { withLock } from './state.mjs';
 import { parse as parseToml, stringify as stringifyToml } from './vendor/smol-toml/index.js';
@@ -295,6 +298,16 @@ export class ClaudeRunner {
    * Its tool steps as activity cards (activity.mjs), from its session's transcript: only ever asked for a body in a
    * Comms thread. Tool-use ids are unique across sessions, so they need no prefix.
    */
+  tickerAction(body) {
+    const session = this.slotOf(body)?.session;
+    if (typeof session !== 'string' || !SESSION.test(session)) return 'Working';
+    for (const p of dirs(this.roots.projects)) {
+      const f = join(this.roots.projects, p, `${session}.jsonl`);
+      if (existsSync(f)) return claudeActionNow(tickerLines(f));
+    }
+    return 'Working';
+  }
+
   activity(body) {
     const session = this.slotOf(body)?.session;
     if (typeof session !== 'string' || !SESSION.test(session)) return [];
@@ -624,6 +637,8 @@ export class CodexRunner {
   }
 
   /** Its tool steps as activity cards (activity.mjs), from its events: item ids repeat per run, so they carry its id. */
+  tickerAction(body) { return codexActionNow(tickerLines(join(this.runsDir, body.id, 'events.jsonl'))); }
+
   activity(body) { return codexCards(this.events(body.id), `${body.id}:`); }
 
   events(id) {

@@ -59,25 +59,40 @@ def inline_file(piece, argv):
 PRINCIPAL_PIECES = {"approvals", "clock"}
 
 
+def in_body():
+    """Whether this runs in a body holding a conversation: its run's key, or a conversation its environment names."""
+    return bool(os.environ.get("LOOM_BODY_KEY")) or bool(
+        re.fullmatch(r"cv-[0-9a-f]{12}", os.environ.get("LOOM_BODY_CONVERSATION", "")))
+
+
 def principal_statement():
     """This body's principal, as the runtime signs it (`loom-runtime principal`: its conversation, proven with its run's
-    key and session): the statement, or None. The run's key stays with the runtime; the piece checks the statement on
-    loom's machine. Anything that fails gives None, and the piece then treats the body as acting for someone it can't
-    name (never the owner)."""
-    cv = os.environ.get("LOOM_BODY_CONVERSATION", "")
-    if not re.fullmatch(r"cv-[0-9a-f]{12}", cv):
-        return None
+    key and session), and the conversation it names: (statement, conversation), or (None, None). The runtime's CLI
+    tells the body's own conversation (its house says which one its session holds, t-2053): never this process's
+    LOOM_BODY_CONVERSATION alone, which a reused `claude --bg` session keeps from the body it was first started for.
+    The run's key stays with the runtime; the piece checks the statement on loom's machine. Anything that fails gives
+    (None, None), and the piece then treats the body as acting for someone it can't name (never the owner)."""
+    if not in_body():
+        return None, None
     exe = os.environ.get("PIECE_CALL_RUNTIME") or shutil.which("loom-runtime")
     if not exe:
-        return None
+        return None, None
     try:
-        r = subprocess.run([exe, "principal", "--conversation", cv], capture_output=True, text=True, timeout=30,
-                           stdin=subprocess.DEVNULL)
+        r = subprocess.run([exe, "principal"], capture_output=True, text=True, timeout=45, stdin=subprocess.DEVNULL)
         out = json.loads(r.stdout or "{}")
     except (OSError, ValueError, subprocess.SubprocessError):
-        return None
-    st = out.get("statement") if isinstance(out, dict) and out.get("ok") is True else None
-    return st if isinstance(st, str) and 0 < len(st) <= 8000 and not re.search(r"\s", st) else None
+        return None, None
+    if not isinstance(out, dict) or out.get("ok") is not True:
+        return None, None
+    st = out.get("statement")
+    st = st if isinstance(st, str) and 0 < len(st) <= 8000 and not re.search(r"\s", st) else None
+    cv = out.get("conversation")
+    cv = cv if isinstance(cv, str) and re.fullmatch(r"cv-[0-9a-f]{12}", cv) else None
+    if not cv:
+        # An answer that names none (an older runtime): its environment's, which it answered for.
+        env_cv = os.environ.get("LOOM_BODY_CONVERSATION", "")
+        cv = env_cv if re.fullmatch(r"cv-[0-9a-f]{12}", env_cv) else None
+    return st, cv
 
 
 def with_principal(piece, argv):
@@ -95,14 +110,13 @@ def with_principal(piece, argv):
             continue
         clean.append(argv[i])
         i += 1
+    st, cv = principal_statement()
     # The house executes this bridge, not the approvals piece's standalone main.
-    # Keep its conversation link here too; it is display provenance, never trust.
-    if piece == "approvals" and clean[:1] == ["request"] and not any(
+    # Keep its conversation link here too; it is display provenance, never trust: the one the runtime answered for,
+    # and none when it couldn't tell (never an environment's that may be another conversation's, t-2053).
+    if piece == "approvals" and clean[:1] == ["request"] and cv and not any(
             a == "--conversation" or a.startswith("--conversation=") for a in clean):
-        cv = os.environ.get("LOOM_BODY_CONVERSATION", "")
-        if re.fullmatch(r"cv-[0-9a-f]{12}", cv):
-            clean += ["--conversation", cv]
-    st = principal_statement()
+        clean += ["--conversation", cv]
     return clean + ["--principal", st] if st else clean
 
 

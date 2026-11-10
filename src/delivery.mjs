@@ -1,3 +1,4 @@
+import { observation } from './ticker.mjs';
 // Delivery (loom docs/specs/agent-runtime.md, section 5): anything addressed to an agent arrives the same way.
 //
 //   a source ──► core ──► deliver {source, id, agent, venue, place, label?, from, kind: message|wake, at, text}
@@ -73,6 +74,7 @@
 // runs look like a crash loop (a failure streak, the same output again and again, relay ping-pong, start-stop churn)
 // is paused before its next body: what comes is recorded and waits; a note on the conversation says why, and the owner
 // gets one ask with Resume (what waited starts) and Dismiss (what waited is dropped). Nothing else is ever paused.
+import { askDarkBoxes } from './dark-box.mjs';
 import { houseLaunchHandle, readHouseLaunch } from './house-launch-journal.mjs';
 import { spawn as nodeSpawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
@@ -80,7 +82,7 @@ import { existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync,
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { accountsFrom, accountsOfRecord } from './accounts.mjs';
+import { AccountsError, accountsFrom, accountsOfRecord, stateAccounts } from './accounts.mjs';
 import { commitPreparedBody, endBody, readBody, resumeBody, startBody } from './bodies.mjs';
 import { CoreError, coreFrom } from './core.mjs';
 import { stoppingHosts, HouseRunner, releaseEmptySeatHouses, seatRoom, sweepSeats, sweepTransfers } from './houserunner.mjs';
@@ -100,9 +102,10 @@ import { cancelReservedLaunch, launchAttempt, launchWorkerAlive, launchWorkerIde
 import { launchInjectedNative, observeNativeLaunch, superviseNativeLaunch } from './native-launch.mjs';
 import { raiseAlert } from './alerthook.mjs';
 import { changed as changedCards } from './activity.mjs';
-import { keepKey } from './bodyhost.mjs';
+import { keepKey, keepSession } from './bodyhost.mjs';
 import { spawnCap } from './spawn.mjs';
 import { continuationOutbox } from './continuation-outbox.mjs';
+import { admit, forecastBurn, logShadow, readReadings, recordReadings } from './allocator.mjs';
 import { readRelays } from './relay.mjs';
 import { householdOwners, membersOf, ownersOf } from './owners.mjs';
 import { approvalsFake, approvalsRun, approvalsRunAsync, approvalsWhy } from './approvals-call.mjs';
@@ -368,12 +371,37 @@ function noteHarness(env, agent, r, d) {
 }
 
 /** Whether a harness has a model with room for this conversation's agent now (the resolver's hard limits). */
-async function roomOn(env, c, harness, d) {
+/** Why a pinned model can't run at all (gone from the list, or outside the agent's allow), or null: quota is not this. */
+async function pinGone(env, c, pin, d) {
   try {
-    await resolveFor(env, { agent: c.agent, venue: c.venue, venueKind: c.kind, harness, accounts: d.accounts, now: d.now(), fetchImpl: d.fetchImpl });
+    await resolveFor(env, { agent: c.agent, venue: c.venue, venueKind: c.kind, pin, accounts: d.accounts, now: d.now(), fetchImpl: d.fetchImpl });
+    return null;
+  } catch (e) {
+    if (!(e instanceof StateError)) throw e;
+    if (e.status === 409 && Array.isArray(e.out) && e.out.some((x) => x.account)) return null;
+    if (e.status === 409 || e.status === 410) return e.message;
+    throw e;
+  }
+}
+
+/** Whether a job's failover would find a model: its role's (as admitted), or any it may use, off the harnesses avoided. */
+async function roomElsewhere(env, c, avoid, d) {
+  try {
+    await resolveFor(env, { agent: c.agent, venue: c.venue, venueKind: c.kind, avoid, ...(c.spawn?.role ? { role: c.spawn.role } : {}), accounts: d.accounts, now: d.now(), fetchImpl: d.fetchImpl });
     return true;
   } catch (e) {
-    if (e instanceof StateError && e.status === 409) return false;
+    if (e instanceof StateError && (e.status === 409 || e.status === 410)) return false;
+    throw e;
+  }
+}
+
+async function roomOn(env, c, harness, d, pin) {
+  try {
+    await resolveFor(env, { agent: c.agent, venue: c.venue, venueKind: c.kind, harness, pin, accounts: d.accounts, now: d.now(), fetchImpl: d.fetchImpl });
+    return true;
+  } catch (e) {
+    // 410: a pinned model gone from the list has no room either.
+    if (e instanceof StateError && (e.status === 409 || e.status === 410)) return false;
     throw e;
   }
 }
@@ -799,7 +827,7 @@ async function deliverOnce(env, raw, o) {
           else c.control.resume = true;
         }
         // Whom the clock said a wake is for stays with it while it waits (t-1975): a reset re-notes it as that, never more.
-        c.queue.push({ ...(m.continuation ? { clockContinuation: d.sealer.seal(Buffer.from(JSON.stringify({ ...m.continuation, delivery: m.id }))).toString('base64') } : {}), key, id: m.id, at: m.at, from: m.from, kind: m.kind, ...(wake ? { wakeFor: wakeFor ?? '-' } : {}), ...(local ? { local: true } : {}), ...(o.deferPeer === true && m.from.kind === 'agent' ? { untilIdle: true } : {}), ...(tier ? { tier } : {}), ...(owner ? { owner: true } : {}), ...(tierUnread ? { tierUnread: true } : {}), ...(sealed ? { sealed } : { mem: true }) });
+        c.queue.push({ ...(m.continuation ? { clockContinuation: d.sealer.seal(Buffer.from(JSON.stringify({ ...m.continuation, delivery: m.id }))).toString('base64') } : {}), key, id: m.id, at: m.at, from: m.from, kind: m.kind, ...(wake ? { wakeFor: wakeFor ?? '-', ...(wakeFor === undefined ? { noWord: true } : {}) } : {}), ...(local ? { local: true } : {}), ...(o.deferPeer === true && m.from.kind === 'agent' ? { untilIdle: true } : {}), ...(tier ? { tier } : {}), ...(owner ? { owner: true } : {}), ...(tierUnread ? { tierUnread: true } : {}), ...(sealed ? { sealed } : { mem: true }) });
       }
       c.last = d.now().toISOString();
       saveConv(env, c);
@@ -864,6 +892,39 @@ function statusOf(env, c, d) {
   } catch { return 'unknown'; }
 }
 
+const HOUSE_BODY = /^(?:claude|codex):(h-[0-9]{1,9})-/;
+const HOUSE_OVER = new Set(['stopping', 'done', 'failed', 'stopped', 'lost']);
+/**
+ * Whether a body's house is on its way out or gone (t-2079): draining, stopping, saving its history, ended, or not on
+ * the record at all. A body on loom's own machine (no house in its ref) never is.
+ */
+export function houseLetGo(env, houses, ref) {
+  let house = HOUSE_BODY.exec(ref ?? '')?.[1];
+  try { const rec = readBody(env, ref); if (typeof rec.house === 'string') house = rec.house; } catch { /* its ref says */ }
+  if (!house) return false;
+  const h = houses?.[house];
+  return !h || !!h.draining || !!h.collection || HOUSE_OVER.has(h.state);
+}
+
+/**
+ * `loom runtime body end` (t-2079): the owner ended this body, so no conversation keeps it as its body, nor a retirement
+ * waiting on it (a retirement whose house will never send its history held its spawn slot for hours). The conversation
+ * resumes from its digests, or its saved slot, on its next message.
+ */
+export function releaseBody(env, ref) {
+  return locked(env, () => {
+    const released = [];
+    for (const c of listConvs(env)) {
+      if (c.body !== ref && c.retiring?.body !== ref) continue;
+      if (c.body === ref) { delete c.body; delete c.idleSince; delete c.nativeRetirement; }
+      if (c.retiring?.body === ref) delete c.retiring;
+      saveConv(env, c);
+      released.push(c.conversation);
+    }
+    return released;
+  });
+}
+
 const registrarAlive = marker => Number.isSafeInteger(marker?.pid) && marker.pid > 0
   && (marker.boot && marker.birth ? launchWorkerAlive(marker) !== false : alive(marker.pid));
 const isStarting = c => !!c.starting && (!!c.starting.prepared || c.starting.untracked || c.starting.protocol !== 2 || registrarAlive(c.starting));
@@ -920,8 +981,26 @@ export function workingConversations(env, d = depsOf(env), now = Date.now()) {
     try { st = isStarting(c, now) ? 'working' : statusOf(env, c, d); } catch { st = 'unknown'; }
     if (st !== 'working') continue;
     const run = (c.runLog ?? []).findLast((x) => x.run === c.run);
-    out.push({ agent: c.agent, conversation: c.conversation, venue: c.venue, kind: c.kind, place: c.place,
+    let activity;
+    try {
+      const rec = readBody(env, c.body), runner = d.runner(rec.harness, rec.local), body = bodyOf(c.body, rec);
+      // Do not turn an offline retention/starting/retiring status into a fresh observation.
+      if (!c.retiring && !c.starting && runner.status(body) === 'working') activity = runner.remote
+        ? runner.tickerObservation?.(body)
+        : observation(runner.tickerAction?.(body), new Date(now).toISOString(), now);
+    } catch { /* unknown is not current activity */ }
+    out.push({ ...(activity ? { activity } : {}), agent: c.agent, conversation: c.conversation, venue: c.venue, kind: c.kind, place: c.place,
       ...(c.label !== undefined ? { label: c.label } : {}), ...(Number.isFinite(run?.at) ? { since: run.at } : c.starting ? { since: c.starting.since } : {}) });
+  }
+  return out;
+}
+
+/** Agents whose delivery status cannot prove idleness. Retention during an outage is not idle. */
+export function nonIdleAgents(env, d = depsOf(env), now = Date.now()) {
+  const out = new Set();
+  for (const c of listConvs(env)) {
+    try { if (isStarting(c, now) || ['working', 'unknown'].includes(statusOf(env, c, d))) out.add(c.agent); }
+    catch { out.add(c.agent); }
   }
   return out;
 }
@@ -943,7 +1022,7 @@ export function conversationJobs(env, d = depsOf(env), now = Date.now()) {
 }
 
 /** The working set as one string: it changes when a body starts or ends, nothing else (the tick's word to core). */
-export const workingPrint = (ws) => ws.map((w) => `${w.agent}:${w.conversation}`).sort().join(',');
+export const workingPrint = (ws) => ws.map((w) => `${w.agent}:${w.conversation}${w.activity ? `:${w.activity.action}:${Math.floor(Date.parse(w.activity.observedAt) / 10000)}` : ''}`).sort().join(',');
 
 /**
  * Messages as a body reads them. Who wrote and their tier are the runtime's, out of band: each message is fenced by a
@@ -1170,8 +1249,14 @@ function plan(env, cv, d, mem) {
     return { cv, type: 'loop-note', reason: loop.reason };
   }
   const { busy, idle } = census(env, c.agent, d, now);
-  if (c.spawn && listConvs(env).filter((x) => x.agent === c.agent && x.spawn && x.conversation !== cv &&
-    (isStarting(x, now) || (x.body && statusOf(env, x, d) === 'working'))).length >= spawnCap(env)) return wait('spawn cap: waiting for another spawn to finish');
+  if (c.spawn) {
+    // A body whose house is draining, stopping, over or gone holds no slot (t-2079): one stuck saving its history held
+    // a slot for hours while queued spawns waited.
+    let houses = {};
+    try { houses = load(env).houses ?? {}; } catch { /* unreadable state: every body counts, as before */ }
+    if (listConvs(env).filter((x) => x.agent === c.agent && x.spawn && x.conversation !== cv &&
+      (isStarting(x, now) || (x.body && !houseLetGo(env, houses, x.body) && statusOf(env, x, d) === 'working'))).length >= spawnCap(env)) return wait('spawn cap: waiting for another spawn to finish');
+  }
   const limits = limitsOf(env);
   if (st === 'idle') {
     // Its own body, warm, its turn over: resumed in the same session, if the agent has a slot free. (Resumed in its
@@ -1220,7 +1305,17 @@ export async function drain(env, cv, d = depsOf(env), mem = new Map()) {
  * (loom's machine, t-1830) has no house and is the owner's work only: one whose conversation a person other than the
  * owner has written into has moved too (and its next start is refused: execute, localForeign).
  */
-const conversationSeat = (env, c) => c.spawn?.job ? `j-${c.spawn.job.house}` : seatOf(principalOf(env, c), c.conversation);
+const conversationSeat = (env, c) => jobSeated(env, c) ? `j-${c.spawn.job.house}` : seatOf(principalOf(env, c), c.conversation);
+
+/**
+ * Whether a job's conversation still belongs in its own house (t-2081): only while its principal is the one it started
+ * with, the one that house's secrets were issued for. One that someone else joined (a relay's answer, a wake loom
+ * couldn't say was the owner's) is seated by its principal instead, so its next body runs in that principal's house.
+ */
+export const jobSeated = (env, c) => !!c?.spawn?.job && JSON.stringify(whose(principalOf(env, c))) === JSON.stringify(whose(c.spawn.principal));
+// Whose work a principal is, as a house's secrets are issued (control.mjs, housePrincipal): the owner's whichever owner
+// spoke (a co-owner's word is the owner's), else the person or people and whether anyone unnamed spoke.
+const whose = (p) => (p?.owner === true ? { owner: true } : { for: p?.for ?? null, people: p?.people ?? [], unknown: p?.unknown === true });
 
 export function seatMoved(env, c) {
   if (!c?.body) return false;
@@ -1383,7 +1478,9 @@ async function stopBody(env, c, d, v) {
 
 /**
  * A Comms thread's body's tool steps (activity.mjs), new or moved since last told, to core's POST
- * /api/loom/comms/activity. Only for venue loom. A thread core says is gone (409) is told nothing more of them.
+ * /api/loom/comms/activity. For venue loom, and for a spawned job once core has given it its own thread (spawnComms),
+ * so the job can be watched from the desktop (t-2043); never before, or its first steps would be told to no thread and
+ * lost. A thread core says is gone (409) is told nothing more of them.
  */
 async function activityPass(env, c, d) {
   let rec, r;
@@ -1573,6 +1670,8 @@ async function execute(env, op, d, mem) {
     locked(env, () => {
       const c = loadConv(env, op.cv);
       if (!ours(c, op)) return;
+      // Its body released while this was in flight (`body end`, t-2079): nothing is left to wait on.
+      if (op.retirement ? c.retiring?.id !== op.retirement : op.type === 'retire' && c.body !== op.body) { delete c.starting; saveConv(env, c); return; }
       const { cv, mark: _mark, retirement: _retirement, ...work } = op;
       // Queued text stays sealed across a restart, just as it does on a start marker.
       if (work.msgs) {
@@ -1594,6 +1693,18 @@ const savedBodyRules = (rules, at) => ({ guest: rules.guest, key: rules.key, den
 
 /** The one conversation commit for a native start or its recovered receipt.
  * The snapshot contains no prompt or raw sender key. */
+function shadowAdmission(env, c, r, at) {
+  try {
+    const nowMs = typeof at === 'number' ? at : Date.parse(at);
+    const list = r.accountKey ? stateAccounts(env, { now: () => nowMs }).list().accounts ?? [] : [];
+    const a = list.find((x) => x.name === r.accountKey);
+    if (!a) return;
+    const kind = c.spawn ? 'agent' : c.venue === 'wake' ? 'scheduled' : 'live';
+    const v = admit({ usage: a.usage, kind, burn: forecastBurn(readReadings(deliveryDir(env), a.name)), now: nowMs });
+    logShadow(deliveryDir(env), { at: new Date(nowMs).toISOString(), kind, agent: c.agent, account: a.name, model: r.model, decision: v.allow ? 'allow' : 'defer', why: v.why, windows: v.windows, ...(c.spawn ? { job: c.conversation } : {}) });
+  } catch { /* a shadow log line, never a reason a start fails */ }
+}
+
 export function commitStartedConversation(env, op, { run, senderHash, bodyRules, way, houseLaunch, nativeRecovery }, r, pending, at, localKey) {
   const keys = op.msgs.map(x => x.key);
   return locked(env, () => {
@@ -1616,8 +1727,22 @@ export function commitStartedConversation(env, op, { run, senderHash, bodyRules,
     if (houseLaunch) c.launchAcks = [...(c.launchAcks ?? []).filter(h => h.id !== houseLaunch.id), houseLaunch];
     // A local body speaks with its run's key as a house's body does: from the keys dir (bodyhost.mjs, keyFile), as
     // `claude --bg` gives every session its daemon's environment, not this launch's (t-1830).
-    if (localKey !== undefined) keepKey(env, op.cv, localKey);
+    if (localKey !== undefined) {
+      keepKey(env, op.cv, localKey);
+      // And which conversation its session holds (t-2053): its own CLI reads that, never only the daemon's environment.
+      const session = r.slot?.session ?? (() => { try { return readBody(env, r.body).slot?.session; } catch { return undefined; } })();
+      if (session) keepSession(env, session, op.cv);
+    }
     c.bodyRules = bodyRules;
+    // A worker job's assignment (t-2038): the model it first ran on, kept for every later run. An older job (spawned
+    // before assignments) gets one here, from the body it runs now. A failover re-pins it, the move kept as lineage.
+    if (c.spawn && r.model && (!c.spawn.assignment || (way.failover && c.spawn.assignment.model !== r.model))) {
+      const a = { model: r.model, harness: r.harness, family: r.family, at: new Date(at).toISOString(), ...(c.spawn.role ? { role: c.spawn.role.id, roleVersion: c.spawn.role.version } : {}) };
+      if (c.spawn.assignment) c.spawn.lineage = [...(c.spawn.lineage ?? []), { ...c.spawn.assignment, until: new Date(at).toISOString(), why: way.failover === 'rules' ? 'its rules can\'t be kept on that harness' : 'out of quota; failover allowed' }].slice(-8);
+      c.spawn.assignment = a;
+    }
+    // What capacity admission would have said (allocator.mjs, t-2037): shadow only, a log line, never a decision.
+    if (way.how === 'start') shadowAdmission(env, c, r, at);
     if (!r.inputUncertain) ack(c, op.msgs);
     delete c.retryAt; delete c.startFails; delete c.retryReason; delete c.startStatus;
     c.sendKey = senderHash;
@@ -1770,7 +1895,7 @@ async function recoverPreparedStart(env, op, d) {
 }
 
 function checkContinuationLaunch(env, op, d) {
-  const outbox = continuationOutbox({ dir: join(deliveryDir(env), 'continuations'), sealer: d.sealer, now: () => d.now().getTime() });
+  const outbox = continuationsOf(env, d, {});
   for (const m of op.msgs.filter(x => x.clockContinuation)) {
     const firing = JSON.parse(d.sealer.open(Buffer.from(m.clockContinuation, 'base64')).toString('utf8'));
     outbox.checkFiring(firing.handle, firing, continuationSnapshot(env, outbox.sourceConversation(firing.handle)), continuationSnapshot(env, op.cv));
@@ -1995,9 +2120,9 @@ async function executeOne(env, op, d, mem) {
     bodyDeps.launch = preparedLaunch(env, op, d, { local, runKey, snapshot: () => launchSnapshot ??= {
       run, senderHash: keyHash(runKey).toString('hex'), bodyRules: savedBodyRules(rules, now()),
       ...(c0.nativeRecovery ? { nativeRecovery: c0.nativeRecovery.id } : {}),
-      way: { how: way.how, home: !!way.home, ...(way.file ? { file: way.file } : {}) },
+      way: { how: way.how, home: !!way.home, ...(way.file ? { file: way.file } : {}), ...(way.failover ? { failover: way.failover } : {}) },
     } });
-    const base = { activity: c0.spawn?.interactive === true, agent: c0.agent, venue: c0.venue, venueKind: c0.kind, prefer: c0.spawn?.prefer ? [c0.spawn.prefer] : [], cwd: local ? lb.cwd : d.cwd, deny: rules.deny, guest: rules.guest, ...(local ? { local: true } : {}), ...(rules.seat ? { seat: rules.seat } : {}) };
+    const base = { activity: c0.spawn?.interactive === true, agent: c0.agent, venue: c0.venue, venueKind: c0.kind, prefer: c0.spawn?.prefer ? [c0.spawn.prefer] : [], cwd: local ? lb.cwd : d.cwd, deny: rules.deny, guest: rules.guest, ...(local ? { local: true } : {}), ...(rules.seat ? { seat: rules.seat } : {}), ...jobModel(c0) };
     // Out of quota (t-1907): which session this run continues, on which harness. Its home slot, when the harness it
     // switched away from has room again; its own slot, when that one's harness has room; else a fresh body elsewhere.
     // A deny list Codex can't keep (a tool within a server, a built-in: runners.mjs, codexDeny) keeps this body off
@@ -2017,6 +2142,8 @@ async function executeOne(env, op, d, mem) {
       if (why) { cant = ['codex']; cantWhy = String(why).replace(CODEX_WONT, ''); }
     }
     way = await routeOf(env, c0, op, rules, d, cant);
+    // A failover (t-2038): allowed and out of quota, or its rules forbid its harness: another model, pinned there.
+    if (way.failover) { delete base.pin; if (c0.spawn?.role) base.role = c0.spawn.role; }
     const notes = quotaNotes(c0, way);
     let briefContext = c0;
     if (c0.nativeRecovery?.report && sameRules(c0.nativeRecovery.reportRules ?? {}, rules) && carriesSession(c0.nativeRecovery.reportRules?.seat, rules.seat, op.cv)) {
@@ -2032,6 +2159,9 @@ async function executeOne(env, op, d, mem) {
         cant = ['codex'];
         cantWhy = String(e.message).replace(CODEX_WONT, '');
         d.warn(`${op.cv}: ${String(e.message).slice(0, 200)}; starting it off Codex`);
+        // A job pinned to Codex moves too: its rules come before its assignment (routeOf).
+        // Its launch snapshot is taken again: the first attempt's says no move, and the commit reads the move from it.
+        if (base.pin && c0.spawn?.assignment?.harness === 'codex') { delete base.pin; if (c0.spawn.role) base.role = c0.spawn.role; way = { ...way, failover: 'rules' }; launchSnapshot = undefined; }
         r = await go([...new Set([...(way.avoid ?? []), 'codex'])]);
       }
     } else {
@@ -2049,10 +2179,15 @@ async function executeOne(env, op, d, mem) {
         if (way.home) rmSync(slotFile(env, op.cv), { force: true });
       });
     }
-    const snapshot = launchSnapshot ?? { run, senderHash: keyHash(runKey).toString('hex'), bodyRules: savedBodyRules(rules, now()), way: { how: way.how, home: !!way.home }, ...(c0.nativeRecovery ? { nativeRecovery: c0.nativeRecovery.id } : {}) };
+    const snapshot = launchSnapshot ?? { run, senderHash: keyHash(runKey).toString('hex'), bodyRules: savedBodyRules(rules, now()), way: { how: way.how, home: !!way.home, ...(way.failover ? { failover: way.failover } : {}) }, ...(c0.nativeRecovery ? { nativeRecovery: c0.nativeRecovery.id } : {}) };
     const keep = commitStartedConversation(env, op, snapshot, r, pending, now(), local ? runKey : undefined);
     if (!keep) endAndForget(env, r, d);
-    else { finishLaunchAck(env, op.cv, d); noteHarness(env, c0.agent, r, d); }
+    else {
+      // A local body whose start didn't name its session yet: its runner can (Claude Code's job record), so its own CLI
+      // reads its conversation from its session, never the daemon's environment (t-2053).
+      if (local) { try { const rec = readBody(env, r.body); const s = d.runner(rec.harness, rec.local).slotOf(bodyOf(r.body, rec))?.session ?? rec.slot?.session; if (s) keepSession(env, s, op.cv); } catch { /* its proof fails closed until it's known */ } }
+      finishLaunchAck(env, op.cv, d); noteHarness(env, c0.agent, r, d);
+    }
   } catch (e) {
     // Once admission may have happened, any later storage/commit failure must
     // retain the prepared attempt for recovery rather than replay its input.
@@ -2111,6 +2246,9 @@ async function executeOne(env, op, d, mem) {
         if (ours(c, op)) delete c.starting;
         requeue(c, msgs);
         c.waiting = String(e.message).slice(0, 300);
+        // A job held for its model keeps its session as long as it waits: the continuity window counts from now.
+        if (c.spawn && c.slot?.until) c.slot.until = new Date(Math.max(Date.parse(c.slot.until), now() + windowMs(env, c.venue, c.kind))).toISOString();
+        if (c.spawn && c.home?.until) c.home.until = new Date(Math.max(Date.parse(c.home.until), now() + windowMs(env, c.venue, c.kind))).toISOString();
         outcome(c, msgs.map((x) => x.key), { body: 'queued', reason: c.waiting }, now());
         saveConv(env, c);
       });
@@ -2284,6 +2422,44 @@ async function interruptOp(env, op, d) {
 async function routeOf(env, c0, op, rules, d, cant = []) {
   const now = d.now().getTime();
   const avoid = [...new Set([...(c0.quota?.from ? [c0.quota.from] : []), ...cant])];
+  // A worker job keeps its assigned model (t-2038): never a return home, never a switch because a preference changed
+  // or another account has room. Its own model out of quota, it waits (resolveFor's 409, said as out of quota), unless
+  // its spawn allowed a failover: then it starts on another eligible model, its slot kept as lineage, no return.
+  // Its rules come first: a harness this body's rules can't be kept on (`cant`: a deny list Codex can't hold, a local
+  // body with no Codex opt-in) is never resumed or started, pinned or not; the job moves, said as such in its lineage.
+  const pin = c0.spawn?.assignment?.model;
+  if (pin) {
+    const h = c0.spawn.assignment.harness;
+    const move = (why) => {
+      if (op.type === 'resume') parkSlot(env, op);
+      return { how: 'start', avoid: [...new Set([...avoid, h])], failover: why };
+    };
+    if (cant.includes(h)) return move('rules');
+    // Its model gone from the list, or no longer one the agent may use: not quota, so no reset brings it back and no
+    // failover is for it. The job holds, its session and messages kept (never the failed-resume path, which would
+    // drop its slot), and says why.
+    const gone = await pinGone(env, c0, pin, d);
+    if (gone) throw Object.assign(new DeliveryError(`this job's assigned model ${pin} can't run: ${gone}. It waits, its session kept, until that model can run again (or the job is spawned again)`, 503), { held: true });
+    // Out of quota: a failover if its spawn allowed one; else it waits for its model, its messages queued (not failed).
+    if (!(await roomOn(env, c0, h, d, pin))) {
+      // A failover only when another eligible model has room: else it waits as any job does (its messages queued).
+      if (c0.spawn.failover && await roomElsewhere(env, c0, [...new Set([...avoid, h])], d)) return move('quota');
+      throw Object.assign(new DeliveryError(`this job's assigned model ${pin} is out of quota; it waits for it, its session and messages kept`, 503), { held: true });
+    }
+    // Only a refused turn's own retry is dropped (a pinned job waits for its model instead); `cant` always stays.
+    const keep = avoid.filter((x) => x !== h || cant.includes(x));
+    if (op.type === 'resume' && op.slot?.harness === h) return { how: 'resume', file: slotFile(env, op.cv), avoid: keep };
+    // No slot, and its session parked as home on its own harness (a failover that found no room anywhere): that
+    // session resumed, never a fresh body beside it.
+    // Only under the rules and seat it began with, as every resume (a home that doesn't carry is dropped, never resumed).
+    if (!op.slot && c0.home?.harness === h && existsSync(homeFile(env, op.cv))) {
+      if (sameRules(c0.home.rules ?? {}, rules) && carriesSession(c0.home.rules?.seat, rules.seat, op.cv)) return { how: 'resume', file: homeFile(env, op.cv), home: true, job: true, avoid: keep };
+      dropHome(env, op.cv);
+    }
+    // A slot on another harness (an older job's) is parked as its home, never left as an orphan file.
+    if (op.type === 'resume' && op.slot) parkSlot(env, op);
+    return { how: 'start', avoid: keep };
+  }
   const home = c0.home && Date.parse(c0.home.until) > now && existsSync(homeFile(env, op.cv)) ? c0.home : null;
   const choice = readModelChoice(env, c0.agent, c0.conversation).effective;
   const chosen = choice !== 'auto' && !avoid.includes(choice) && await roomOn(env, c0, choice, d) ? choice : null;
@@ -2295,6 +2471,24 @@ async function routeOf(env, c0, op, rules, d, cant = []) {
   const h = op.slot?.harness;
   if (h && (!chosen || h === chosen) && !avoid.includes(h) && await roomOn(env, c0, h, d)) return { how: 'resume', file: slotFile(env, op.cv) };
   // Its harness has no room: the slot is kept as its home (to go back to), and a fresh body starts elsewhere.
+  parkSlot(env, op);
+  return { how: 'start', avoid: [...new Set([...avoid, ...(h ? [h] : [])])], parked: true, ...(chosen && chosen !== h ? { chosen } : {}) };
+}
+
+/** A parked home that can't be resumed under the current rules: its session file and record gone, never resumed. */
+function dropHome(env, cv) {
+  locked(env, () => {
+    const c = loadConv(env, cv);
+    rmSync(homeFile(env, cv), { force: true });
+    if (!c?.home) return;
+    delete c.home;
+    saveConv(env, c);
+  });
+}
+
+/** A slot whose harness has no room, kept as the conversation's home (its session, to go back to or as lineage). */
+function parkSlot(env, op) {
+  const h = op.slot?.harness;
   locked(env, () => {
     const c = loadConv(env, op.cv);
     if (!c) return;
@@ -2304,14 +2498,25 @@ async function routeOf(env, c0, op, rules, d, cant = []) {
     delete c.slot;
     saveConv(env, c);
   });
-  return { how: 'start', avoid: [...new Set([...avoid, ...(h ? [h] : [])])], parked: true, ...(chosen && chosen !== h ? { chosen } : {}) };
+}
+
+/**
+ * A worker job's model (t-2036, t-2038): its assigned model once it has run (pin), else its role as admitted. Only
+ * spawned jobs: a live conversation keeps its preferred-primary and fallback policy (routeOf).
+ */
+function jobModel(c) {
+  if (!c.spawn) return {};
+  if (c.spawn.assignment?.model) return { pin: c.spawn.assignment.model };
+  return c.spawn.role ? { role: c.spawn.role } : {};
 }
 
 /** What a run is told of a switch, a return home, or a refused turn's retry: runtime notes, ahead of its messages. */
 function quotaNotes(c0, way) {
   const out = [];
   const note = (text) => out.push({ key: `quota-${randomBytes(6).toString('hex')}`, note: true, kind: 'message', text });
-  if (way.choiceReturn) {
+  if (way.job) {
+    note('(The runtime: this job resumes its own session after its model was out of quota. Nothing ran elsewhere meanwhile; messages refused then were answered as refused, so read your digests for what is still asked.)');
+  } else if (way.choiceReturn) {
     note(`(The runtime: the owner selected ${harnessWords(way.choiceReturn)}. This resumes the conversation's saved session; read its digests for what happened while it answered elsewhere.)`);
   } else if (way.home) {
     note(`(The runtime: this conversation went on without this session for a while: since ${c0.fallback?.since ?? c0.home?.saved ?? 'then'}, it was answered on ${harnessWords(c0.fallback?.to ?? 'another harness')}, because this harness's account was out of quota. Read conversation({id: "${c0.conversation}"}) (its digests) for what was said meanwhile before you answer.)`);
@@ -2712,6 +2917,7 @@ async function stopStuck(env, op, d) {
  * (their transcript sealed, not left in the clear); slots past their window go; and every queue is drained.
  * `only`: one conversation's queue first (the detached worker a delivery starts).
  */
+let readingsAt = 0; // the allocator's readings, at most once a minute (a tick is every few seconds)
 export async function tick(env, o = {}, only, mem = new Map()) {
   const d = depsOf(env, o);
   // A physical warm-house stop holds its conversations before any further delivery or replacement work.
@@ -2722,7 +2928,14 @@ export async function tick(env, o = {}, only, mem = new Map()) {
       if (h && !c.control) { c.control = { id: randomBytes(12).toString('hex'), at: d.now().toISOString(), state: c.body || c.starting ? 'pending' : 'held', house: h.house }; saveConv(env, c); }
     }
   });
-  await drainContinuations(env, o);
+  // Follow-up reports (t-2004): never a reason the rest of the tick doesn't run.
+  try { await drainContinuations(env, o); } catch (e) { d.warn(`continuations: ${e.message}`); }
+  // The allocator's readings history (t-2037, shadow): the service's tick only, never a reason the rest doesn't run.
+  if (o.service === true && d.now().getTime() - readingsAt >= 60_000) try {
+    const nowMs = readingsAt = d.now().getTime();
+    const jobs = listConvs(env).filter((c) => c.body && (c.spawn || c.venue === 'wake')).length;
+    recordReadings(deliveryDir(env), stateAccounts(env, { now: () => nowMs }).list().accounts ?? [], { jobs });
+  } catch (e) { if (!(e instanceof AccountsError)) d.warn(`allocator readings: ${e.message}`); } // none off the control plane
   discardPass(env, d);
   if (only) await drain(env, only, d, mem);
   const now = d.now().getTime();
@@ -2730,6 +2943,8 @@ export async function tick(env, o = {}, only, mem = new Map()) {
   try { sweepTransfers(env, now, Date.now()); } catch (e) { d.warn(`sweeping transfers: ${e.message}`); }
   // Seat records whose house is over (houserunner.mjs, sweepSeats, t-1952): a guest's or an unknown's, never the owner's.
   try { sweepSeats(env); } catch (e) { d.warn(`sweeping seats: ${e.message}`); }
+  // Conversations held on a box gone dark (t-2057): the owner is asked whether to carry them on elsewhere.
+  try { await askDarkBoxes(env, { convs: listConvs(env), nowMs: now, warn: d.warn }); } catch (e) { d.warn(`asking about dark boxes: ${e.message}`); }
   const warm = limitsOf(env).warmIdleS * 1000;
   const stuckAfter = stuckAfterOf(env);
   for (const c of listConvs(env)) if (c.launchAcks?.length) finishLaunchAck(env, c.conversation, d);
@@ -2823,7 +3038,7 @@ export async function tick(env, o = {}, only, mem = new Map()) {
   // an end missed (a runtime that stopped mid-way, a home left by an older one). A house's are its host's.
   try { d.runner('codex', true).sweepHomes?.(); } catch { /* no local Codex runner, or its homes are busy: the next tick */ }
   for (const c of listConvs(env)) if (c.presence) { try { await presencePass(env, c, d, now); } catch (e) { d.warn(`presence for ${c.conversation}: ${e.message}`); } }
-  for (const c of listConvs(env)) if (c.venue === COMMS_VENUE && c.body && !c.starting) { try { await activityPass(env, c, d); } catch (e) { d.warn(`activity for ${c.conversation}: ${e.message}`); } }
+  for (const c of listConvs(env)) if ((c.venue === COMMS_VENUE || c.spawn?.thread) && c.body && !c.starting) { try { await activityPass(env, c, d); } catch (e) { d.warn(`activity for ${c.conversation}: ${e.message}`); } }
   for (const c of listConvs(env)) if (c.queue?.length) await drain(env, c.conversation, d);
   await spawnComms(env, d);
   await returnSpawns(env, d, o);
@@ -2900,17 +3115,22 @@ function sessionOf(d, ref) {
  * current run: the same proof `send` takes (LOOM_BODY_KEY, the harness session). The relay's return address uses it
  * (relay.mjs, originOf): a body that proves its conversation needs nothing else to name it.
  */
-export function holdsRun(env, cv, { key, session } = {}, o = {}) {
+export function holdsRun(env, cv, proof = {}, o = {}) {
+  return !!heldConv(env, cv, proof, o);
+}
+
+/** holdsRun's answer as the conversation record it proved against (or null): what was proved is what's read (t-1953). */
+export function heldConv(env, cv, { key, session } = {}, o = {}) {
   const c = loadConv(env, cv);
   const want = typeof c?.sendKey === 'string' && /^[0-9a-f]{64}$/.test(c.sendKey) ? Buffer.from(c.sendKey, 'hex') : null;
-  if (!want || !c.body || typeof key !== 'string' || !key || !timingSafeEqual(keyHash(key), want)) return false;
+  if (!want || !c.body || typeof key !== 'string' || !key || !timingSafeEqual(keyHash(key), want)) return null;
   // From a house, only the body's own (t-1952): a key carried out of its house proves nothing in another.
-  if (houseProblem(env, c, o.caller)) return false;
+  if (houseProblem(env, c, o.caller)) return null;
   // Nor from a body whose conversation has moved to another principal's house (t-1952).
-  if (seatMoved(env, c)) return false;
-  // Fail closed (unlike send's, kept as it was): a body whose session the runner can't name proves nothing yet.
+  if (seatMoved(env, c)) return null;
+  // Fail closed, as send's does (t-2053): a body whose session the runner can't name proves nothing yet.
   const own = sessionOf({ ...depsOf(env, o), env }, c.body);
-  return !!own && session === own;
+  return own && session === own ? c : null;
 }
 
 /**
@@ -2939,7 +3159,8 @@ export async function send(env, { conversation, text, key, session, person, via 
   if (!c) return { ok: false, reason: `no conversation ${conversation} here` };
   if (o.caller && (o.caller.kind !== 'agent' || o.caller.agent !== c.agent)) return { ok: false, reason: `only ${c.agent}'s own body speaks in ${conversation}` };
   const notHolder = holderProblem(env, d, c, { key, session }, undefined, o.caller);
-  if (notHolder) return refusedSend(env, c, notHolder);
+  // A session not known yet is a wait, not a refusal on the record: its CLI asks again (t-2053).
+  if (notHolder) return /session can't be told yet/.test(notHolder) ? { ok: false, reason: notHolder } : refusedSend(env, c, notHolder);
   if (!str(text, MAX_TEXT)) return refusedSend(env, c, `a message is 1-${MAX_TEXT} characters`);
   // To a person (a DM), not the conversation's own place: the relay to a person, through that venue's adapter.
   let to;
@@ -2996,9 +3217,8 @@ function houseProblem(env, c, caller) {
 
 /**
  * Why the caller isn't the body holding conversation `c` in its current run, or null when it is: its run's key
- * (LOOM_BODY_KEY) matches, and so does its harness session, where the runner knows the body's (a sibling body holding
- * this conversation's key, its house's file, is another session; one that names no session is refused once the
- * body's is known). What `send` takes, and what a principal statement takes (bodyPrincipal).
+ * (LOOM_BODY_KEY) matches, and so does its harness session (a sibling body holding this conversation's key, its
+ * house's file, is another session; one whose session the runner can't name yet is refused, t-2053). What `send` takes, and what a principal statement takes (bodyPrincipal).
  */
 function holderProblem(env, d, c, { key, session }, does = 'speaks in it', caller = undefined) {
   const want = typeof c.sendKey === 'string' && /^[0-9a-f]{64}$/.test(c.sendKey) ? Buffer.from(c.sendKey, 'hex') : null;
@@ -3014,11 +3234,36 @@ function holderProblem(env, d, c, { key, session }, does = 'speaks in it', calle
     return `only the body holding ${c.conversation} ${does} (its conversation has moved to another principal's house)`;
   }
   const own = sessionOf({ ...d, env }, c.body);
-  if (own && session !== own) {
+  // Fail closed (t-2053): a key alone proves nothing. Every conversation's key is a file its house keeps, and a reused
+  // `claude --bg` session's environment names another conversation, so a body whose session its runner can't name yet
+  // is refused until it can (its host reports it within a beat of the start).
+  if (!own) return `only the body holding ${c.conversation} ${does} (its session can't be told yet: try again in a moment)`;
+  if (session !== own) {
     return `only the body holding ${c.conversation} ${does} (${session ? 'another session is' : 'no session is named'}: ${c.conversation} is a session of its own)`;
   }
   return null;
 }
+
+/**
+ * How long a continuation may report, from its issue (t-2004): LOOM_RUNTIME_CONTINUATION_DAYS, 1-13, default 7 (under the 14-day idle window a conversation record is kept, so a reset it records can't be forgotten while a grant still names it). One
+ * absolute deadline is sealed at issue and carried to the clock and core; nothing renews it. Its records are collected
+ * LOOM_RUNTIME_CONTINUATION_KEEP_DAYS (1-90, default 7) after that deadline, once their outcome is final.
+ */
+// The runtime service's own settings, written by its tick (policyFile): a body's local CLI runs continuationCall in its
+// own process and environment, and a body never chooses its own deadline, so it reads the service's, not its env's.
+const policyFile = (env) => join(deliveryDir(env), 'continuation-policy.json');
+function envPolicy(env) {
+  const days = (name, dflt, lo, hi) => { const n = env[name] === undefined || env[name] === '' ? dflt : Number(env[name]); return Number.isInteger(n) && n >= lo && n <= hi ? n : null; };
+  return { days: days('LOOM_RUNTIME_CONTINUATION_DAYS', 7, 1, 13), keepDays: days('LOOM_RUNTIME_CONTINUATION_KEEP_DAYS', 7, 1, 90) ?? 7 };
+}
+function continuationPolicy(env, o = {}, own = false) {
+  let p = own ? envPolicy(env) : null;
+  if (!p) { try { p = JSON.parse(readFileSync(policyFile(env), 'utf8')); } catch { p = envPolicy(env); } }
+  const life = Number.isInteger(p?.days) && p.days >= 1 && p.days <= 13 ? p.days : null;
+  const keep = Number.isInteger(p?.keepDays) && p.keepDays >= 1 && p.keepDays <= 90 ? p.keepDays : 7;
+  return { lifetimeMs: o.continuationLifetimeMs ?? (life === null ? null : life * DAY_MS), retainMs: o.continuationRetainMs ?? keep * DAY_MS };
+}
+const continuationsOf = (env, d, o, own = false) => continuationOutbox({ dir: join(deliveryDir(env), 'continuations'), sealer: d.sealer, now: () => d.now().getTime(), warn: d.warn ?? (() => {}), ...continuationPolicy(env, o, own) });
 
 // Runtime-owned snapshots only. Neither a body nor the clock supplies these fields.
 export function continuationSnapshot(env, conversation) {
@@ -3033,7 +3278,14 @@ export function continuationSnapshot(env, conversation) {
 // the registry afresh, but never rebuild payload fields from a newer body/run.
 export async function drainContinuations(env, o = {}) {
   const d = depsOf(env, o);
-  const outbox = continuationOutbox({ dir: join(deliveryDir(env), 'continuations'), sealer: d.sealer, now: () => d.now().getTime(), lifetimeMs: o.continuationLifetimeMs });
+  // The service's tick (`deliver run`, o.service): its settings are the policy (above), kept where a body's own process
+  // reads them. Any other tick (a body's `deliver tick`) reads the file, never writes it.
+  if (o.service === true) try {
+    const want = JSON.stringify(envPolicy(env));
+    let have = null; try { have = readFileSync(policyFile(env), 'utf8'); } catch { /* none yet */ }
+    if (have !== want) { const tmp = `${policyFile(env)}.${process.pid}.tmp`; writeFileSync(tmp, want, { mode: 0o600 }); renameSync(tmp, policyFile(env)); }
+  } catch { /* the env's policy still applies to this tick */ }
+  const outbox = continuationsOf(env, d, o, o.service === true);
   await outbox.drain({ current: (cv) => continuationSnapshot(env, cv), reconcile: async (p) => {
     const venue = (await d.venues())?.[p.target.venue];
     if (!coreAdapted(venue)) return { permanent: true, reason: 'continuation destination has no core reconciliation contract' };
@@ -3048,6 +3300,7 @@ export async function drainContinuations(env, o = {}) {
       text: p.text, run: p.run, expiresAt: p.expiresAt, ...(p.on ? { on: p.on } : {}) });
     return answer?.ok === true && typeof answer.id === 'string' && answer.id.length > 0 ? { ok: true, posted: true } : answer;
   } });
+  outbox.collect({ every: 3600000 });
 }
 
 // Local clock bridge only; there is no body/API operation for inspecting grants.
@@ -3057,7 +3310,7 @@ export function inspectClockContinuation(env, { handle, statement, agent, schedu
   const d = depsOf(env, o);
   const issuer = verifyStatement(env, statement, d.now().getTime());
   if (!issuer.ok || issuer.agent !== agent) throw new StateError('no authenticated continuation issuer', 403);
-  const outbox = continuationOutbox({ dir: join(deliveryDir(env), 'continuations'), sealer: d.sealer, now: () => d.now().getTime() });
+  const outbox = continuationsOf(env, d, o);
   const source = continuationSnapshot(env, outbox.sourceConversation(handle));
   return outbox.inspect(handle, source, issuer, scheduledAt);
 }
@@ -3070,9 +3323,15 @@ export function continuationCall(env, { action, conversation, key, session, hand
     throw new StateError('only its own agent may use a continuation', 403);
   const problem = holderProblem(env, d, c, { key, session }, 'uses a continuation', o.caller);
   if (problem) throw new StateError(problem, 403);
-  const outbox = continuationOutbox({ dir: join(deliveryDir(env), 'continuations'), sealer: d.sealer, now: () => d.now().getTime(), lifetimeMs: o.continuationLifetimeMs });
+  const outbox = continuationsOf(env, d, o);
   const child = continuationSnapshot(env, conversation);
-  if (action === 'issue') return outbox.issue(child);
+  if (action === 'issue') {
+    const grant = outbox.issue(child);
+    // Issuing is activity: the record outlives the grant's deadline (13 days at most, under the 14-day idle window),
+    // so a reset made while it's live is never forgotten and the grant matched again.
+    locked(env, () => { const x = loadConv(env, conversation); if (x) { x.last = d.now().toISOString(); saveConv(env, x); } });
+    return grant;
+  }
   if (action !== 'enqueue' && action !== 'status') throw new StateError('unknown continuation action', 400);
   const source = continuationSnapshot(env, outbox.sourceConversation(handle));
   // Recover admission-to-binding after a runtime crash. These sealed records came
@@ -3108,21 +3367,32 @@ export function bodyPrincipal(env, { conversation, key, session }, o = {}) {
 
 /**
  * The waiting messages a reset card lists (t-1975): each one no person is named in, described in words ("a relay from
- * Mark", "a wake with no word from the clock", "a message from a sender loom can't name"), at most 12. Only these are
+ * Mark", "a wake the clock said nothing about", "a message from a sender loom can't name"), at most 12. Only these are
  * what the owner's Allow counts as his (resetActsFor `counted`, by key); a person's message is theirs, never listed.
  */
 const SHOWN_ROOM = 650;
 /** Who the runtime files, spends and withdraws a reset card as, the same every time. */
 export const runtimeAs = (agent) => JSON.stringify({ kind: 'agent', agent, house: 'loom\'s runtime' });
-export function shownRows(rows) {
+/** When a waiting row arrived, as the owner reads it on a card (t-2008): "Mon, Nov 9, 8:33 AM CST", in the household's tz. */
+export function rowWhen(at, env = {}) {
+  const ms = Date.parse(String(at ?? ''));
+  if (!Number.isFinite(ms)) return '';
+  const o = { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short' };
+  const tz = setting(env, 'TZ') || env.TZ || 'UTC';
+  try { return new Intl.DateTimeFormat('en-US', { ...o, timeZone: tz }).format(new Date(ms)); } catch { return new Intl.DateTimeFormat('en-US', { ...o, timeZone: 'UTC' }).format(new Date(ms)); }
+}
+
+export function shownRows(rows, env = {}) {
   const out = [];
   let used = 0;
   for (const q of rows ?? []) {
     if (!q?.key || q.from?.kind === 'person') continue;
     if (q.from?.kind === 'schedule' && q.wakeFor !== '-') continue;   // the clock's word names whom, or a row from before
-    const words = q.from?.kind === 'schedule' ? 'a wake with no word from the clock'
+    // The clock's word that a wake is no one loom can name (set by work loom couldn't say was yours) isn't the clock
+    // saying nothing (its hand-over failed or expired, t-2009): the card says which.
+    const words = q.from?.kind === 'schedule' ? (q.noWord ? 'a wake the clock said nothing about' : 'a wake set by work loom couldn\'t say was yours')
       : q.from?.kind === 'agent' && /^[a-z][a-z0-9-]{0,39}$/.test(q.from.id ?? '') ? `a relay from ${cap(q.from.id)}` : 'a message from a sender loom can\'t name';
-    const w = `${words} (${String(q.at ?? '').slice(0, 16).replace('T', ' ')})`;
+    const w = `${words} (${rowWhen(q.at, env) || 'time unknown'})`;
     // Every row listed fits on the card whole (approvals' 1000 for details, less the conversation's own line): one that
     // wouldn't isn't listed, so it isn't counted either.
     if (out.length >= 12 || used + w.length + 2 > SHOWN_ROOM) break;
@@ -3183,7 +3453,7 @@ export async function askOwnerReset(env, c, warn = (m) => console.warn(m), taken
     // retry keeps what the first filing listed: approvals hands back that same card, with that first list on it.
     if (cur.resetAsk) { cur.resetAsk = { ...cur.resetAsk, at }; saveConv(env, cur); return cur; }
     const rows = [...(cur.queue ?? []), ...taken.filter((x) => !(cur.queue ?? []).some((q) => q.key === x.key))];
-    const shown = shownRows(rows);
+    const shown = shownRows(rows, env);
     cur.resetAsk = { at, queued: shown.map((r) => r.key), shown: shown.map((r) => r.words) };
     saveConv(env, cur);
     return cur;
@@ -3262,6 +3532,8 @@ export function resetPrincipal(env, conversation, { agent, approval } = {}) {
     delete c.slot; delete c.home; delete c.fallback;
     // The run that heard what came before speaks no more: its key is gone now, not when its body is ended.
     if (c.body) { c.resetPending = true; delete c.sendKey; }
+    // A reset is activity: the record (and the reset it holds) outlives any continuation issued before it (t-2004).
+    c.last = new Date().toISOString();
     saveConv(env, c);
     // Still no one's on loom's machine (something unplaced arrived after he was asked): said, so his Allow isn't "done".
     return { ok: true, conversation, ...(c.local && localForeign(env, c) ? { stillForeign: true } : {}) };
@@ -3570,7 +3842,7 @@ export async function spawnComms(env, d = depsOf(env)) {
         const parent = loadConv(env, c.spawn.origin);
         if (parent?.agent === c.agent) {
           const t = await d.core.turn({ key: `runtime:spawn-link-${c.conversation}`, agent: c.agent, venue: parent.venue, place: parent.place,
-            at: c.spawn.created, from: { kind: 'agent', id: c.agent }, kind: 'note', run: c.spawn.origin_run });
+            at: c.spawn.created, from: { kind: 'agent', id: c.agent }, kind: 'note', outcome: 'none', run: c.spawn.origin_run });
           try { await d.core.audit({ conversation: parent.conversation, seq: t.seq, text: `Spawned [${c.label ?? 'job'}](/comms/${c.spawn.thread.slice(3)}) (${c.conversation}), from run ${c.spawn.origin_run}.` }); } catch (e) { if (e.status !== 409) throw e; }
           locked(env, () => { const fresh = loadConv(env, c.conversation); fresh.spawn.linked = true; saveConv(env, fresh); });
         }

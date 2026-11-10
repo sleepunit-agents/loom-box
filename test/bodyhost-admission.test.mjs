@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { runBodyHost } from '../src/bodyhost.mjs';
 import { runnerFor } from '../src/runners.mjs';
@@ -129,4 +129,20 @@ for (const harness of ['claude', 'codex']) test(`${harness}: history configurati
     } });
   assert.equal(receipt?.nativeNotStarted, true);
   assert.equal(readLaunch(env, attempt), null, 'no launch worker or native admission exists before configuration succeeds');
+});
+
+// t-2072: a body that runs the other harness's CLI itself made that CLI's history a plain folder with files, and
+// every later body on that harness in the house failed to start. The host links both before any body runs.
+test('the body host links both harnesses\' native history before any body runs, so a CLI run by a body can\'t block the other harness', async () => {
+  const home = scratch('native-history-both-'), history = join(home, 'native'); mkdirSync(history);
+  const env = { HOME: home, HOUSE_ID: 'h-1', LOOM_RUNTIME_NATIVE_HISTORY: history };
+  await runBodyHost({ env, runner: (h) => runnerFor(h, env), hostKey: 'boot', idleS: 0, beats: 1, sleep: async () => {},
+    client: async () => ({}) });
+  assert.ok(lstatSync(join(home, '.claude', 'projects')).isSymbolicLink(), 'claude projects linked');
+  assert.ok(lstatSync(join(home, '.codex', 'sessions')).isSymbolicLink(), 'codex sessions linked');
+  // A Claude body runs `codex exec` (a cold review): its rollout lands in native history, not a plain folder.
+  mkdirSync(join(home, '.codex', 'sessions', '2026', '11', '09'), { recursive: true });
+  writeFileSync(join(home, '.codex', 'sessions', '2026', '11', '09', 'rollout-x.jsonl'), '{}\n');
+  assert.ok(existsSync(join(history, 'codex-sessions', '2026', '11', '09', 'rollout-x.jsonl')));
+  assert.doesNotThrow(() => runnerFor('codex', env), 'a Codex body still starts here');
 });

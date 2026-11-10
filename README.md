@@ -2,7 +2,7 @@
 
 loom's **runtime piece** ([loom docs/specs/agent-runtime.md](https://github.com/sleepunit-agents/loom/blob/main/docs/specs/agent-runtime.md)): the layer that lets an agent run. It holds:
 
-- **Boxes and houses** ([runtime.md](https://github.com/sleepunit-agents/loom/blob/main/docs/specs/runtime.md)). A **box** is a machine you keep: wunder, the 5090 box, a laptop, a Thor. You enroll it once. A **house** is one agent's container on a box, built fresh from the agent's repo for one task, then thrown away. **It's not a scheduler.** A house goes to the box you name, or to the one permitted box that has what it needs, or to the agent's primary. If that doesn't come down to exactly one box, it says why and starts nothing.
+- **Boxes and houses** ([runtime.md](https://github.com/sleepunit-agents/loom/blob/main/docs/specs/runtime.md)). A **box** is a machine you keep: wunder, the 5090 box, a laptop, a Thor. You enroll it once. A **house** is one agent's container on a box, built fresh from the agent's repo for one task, then thrown away. **It's not a scheduler.** A house goes to the box you name, or to the one permitted box that has what it needs, or to the agent's primary: the first box of its ordered list (`loom runtime primary art one wunder loom`, or the agent's page) that's up, so when one box goes quiet its next house and its new bodies go to the next one. If that doesn't come down to exactly one box, it says why and starts nothing.
 - **Model accounts**: each box signs in to Claude and Codex itself, with its owner's own subscription, and the accounts are what the boxes report ([docs/model-accounts.md](docs/model-accounts.md)).
 - **Runners**: one interface over the harnesses a body runs in, Claude Code and Codex.
 - **Model choice**: one resolver that picks the model for a body.
@@ -642,6 +642,29 @@ RUN sh /home/<agent>/.local/share/loom-runtime/house/install-tools
 
 It writes `piece-call`, `loom-runtime` (node by its full path), and `taskstore`/`loom-tasks`, `wake` and `approvals` (loom's tasks, clock and approvals pieces, through `piece-call` as the house's own token) into `~/.local/bin`, and `/etc/profile.d/loom-house.sh`. That last one matters for Codex, which runs every command in a login shell: Debian's `/etc/profile` resets PATH to the system dirs, so without it a Codex body finds no `loom`, no `node` and none of the wrappers. The profile file puts back the image's PATH and reads `~/.house-env`, which the entrypoint writes for later shells. `install-tools --pieces` rewrites only the piece wrappers, for a house that links its own over them at start.
 
+### Scopes: who gets which secret and tailnet (t-1963, t-1964)
+
+An agent's secrets and tailnets go to every house of it unless the owner scopes them, on the agent's Houses tab ("Only
+for", "Who steers which project") or `loom runtime agent <agent> … --scope github-token=owner+service:discord --scope
+pond-dev-service-token=pond --scope tailnet:fleet=pond --steer patrick=pond`. A scope is one or more of, joined by `+`:
+`owner` (the owner's own work), a project's slug (the owner's work, and that of the people he lets steer that
+project), `service:<name>` (that service's houses). Whose work a house is for is the runtime's word: a body host's seat
+(owner, `p-<person>`, `u-<conversation>`, t-1952; a job's `j-h-<n>` is that house's, only while its conversation's
+principal is the one it started with: one someone else joined moves to its principal's house, and a task's house is let
+go once its body there is gone; an interactive terminal's house stays up with no body in it until it's taken down, t-2081), a task house's `taskActsFor` (the
+owner's only when nobody else steered it), a service house is its own (people other than the owner may steer a chat
+bridge, and a body can ask for one). "The owner" is whom the runtime counts as the agent's owner (owners.mjs): a
+co-owner's word counts as the owner's here as it does everywhere else.
+
+A claim never issues what's scoped away, and names it (`withheld`) so the box starts the house without it, saying so in
+its log; anything else the house file wants and doesn't get still fails the house. Not given or blank, scopes and
+steers stay as they were (dropping one would widen who gets a secret); `none` clears. A scope stays with a secret
+taken away, so one added back comes back scoped; one stored secret under two names must be scoped alike. Secrets are
+handed over when a house starts: houses already running keep what they had until they're stopped. The boundary is
+the house: a seat's house is shared by that principal's conversations, so a person let steer pond has pond's secrets
+in every conversation they steer. A scope that names `service:<name>` trusts that service's code in the agent's repo:
+a body can ask for a service to start, and whoever can change the repo can change what the service runs.
+
 ## How it talks
 
 A box never reads loom's stores, and loom never reaches into a box. The box polls `POST /api/<piece>/<call>` (loom's piece API, docs/extensions.md "The API") with its **box credential**, a loom token with the role `piece:<piece>/<id>` (the box's id is loom's; its name is only a label). That credential reaches this piece's API and nothing else in loom: no MCP, no CLI, no page.
@@ -711,6 +734,14 @@ once a condition has held its time. An always-on box (loom's own, a report-only 
 on`) quiet for 10 minutes is dark. `loom runtime health [<box>]` says how each is. `loom runtime join … --report-only`
 makes a box that only reports: it hosts nothing and never upgrades itself from what loom says.
 
+A box with an agent's conversations on it that's silent 10 minutes gets the owner a card: carry them on elsewhere?
+(`src/dark-box.mjs`). To rehearse that without stopping the box, on loom's machine: `loom runtime drill dark <box>
+--agent <a> [--house h-…]… [--for 15m]` (at most 60 minutes; it ends by itself, or with `loom runtime drill end <box>`).
+For that agent only, placement takes the box as long silent, so its warm house there drains and new bodies go to the
+next box that's up; the named houses, and only they, go on a write-off card that starts "Drill:". An Allow writes them
+off, and the box, still polling, is told to stop them on its next poll (seconds: until then the old body may overlap the
+new one, which is what the rehearsal tests).
+
 ## Spawned jobs
 
 A body can hand work to a fresh conversation of the same agent. It runs in an
@@ -729,9 +760,9 @@ loom runtime spawn result cv-0123456789ab
 print the final report when ready; a timed-out wait exits 3, a failed job exits
 1. The shell on loom's machine can use these too, with `--agent <name>` (or the
 household default). A body uses `--agent self`, the default: another agent is
-refused. The matching `spawn` MCP tool takes `brief`, `prefer`, `title` and your
+refused. The matching `spawn` MCP tool takes `brief`, `prefer`, `role`, `failover`, `title` and your
 `conversation`; `action: say` takes `handle` and `text`, `action: result` takes
-`handle`. Where multiple bodies could be asking, use the shell, which proves
+`handle`, `action: roles` takes nothing. Where multiple bodies could be asking, use the shell, which proves
 its current run without putting its key in a tool call.
 
 Follow-ups use body feed mid-turn where supported, and otherwise wait for the
@@ -742,6 +773,43 @@ link to the asker; the agent card shows its working body. Reports and handles
 survive runtime restarts. A principal reset invalidates the old handle's access
 and return routing. A source conversation's guest rules and restrictions are
 re-evaluated at each child start, and its inherited tool narrowing is retained.
+
+### Work roles and a job's model
+
+A body says what kind of work a job is; the runtime picks the model. The owner keeps a catalog of **work roles**
+(`coding`, `review`, `light-task`… whatever the household wants: it is not a fixed list), each with the concrete models
+eligible for it, most wanted first, or whole families. A role is not an agent and not a persona: it can name a
+`dossier` to wear, and say what the job `needs`, takes (`input`) and returns (`output`).
+
+```bash
+loom runtime roles                                   # the catalog, for any body or the owner
+loom runtime spawn roles                             # the same, as the spawn tool's action roles answers it
+echo '{"id":"coding","description":"Write and fix code","models":["gpt-6.1-sol","claude-opus-5-5"]}' \
+  | loom runtime roles set --why 'coding jobs on Sol first'      # the household owner's
+loom runtime roles remove coding --why 'folded into review'      # the household owner's
+loom runtime spawn --role coding --brief - < brief.md
+```
+
+Each edit is a new catalog version, logged with who and why (the last 20). A role only narrows: its models are
+intersected with the agent's own `allow`, and accounts, quota, grants and spending rules are untouched by it. A model
+the owner drops from the model list leaves every role too.
+
+A spawned job keeps the version it was admitted under, and, from its first run, its **assignment**: the concrete model
+and harness it ran on. Every later run of that job (a `say`, a resume after a restart) uses that model, whatever changes
+meanwhile: a catalog edit, a new preference, the owner's harness choice, or the primary model's account getting room
+back. This is unlike a live conversation, which falls back when its account is out and goes home when it has room. A
+job whose model is out of quota waits, its session kept and its messages queued (`waiting` says why), unless
+it was spawned with `--failover` (or its role sets `"failover": true`): then it moves to another eligible model,
+pinned there, the move kept in `lineage`; it never goes back by itself. A job whose model left the list (or the agent's
+`allow`) holds, its session and messages kept, until the owner restores it: failover is for quota only. Its rules come before its assignment: a
+harness its rules can't be kept on (a deny list Codex can't hold, a body on loom's machine without the Codex opt-in) is
+never used, pinned or not, and the job moves. A Claude session is never resumed on Codex: a move is a fresh body, from
+the job's digests. `spawn result` says the job's assignment.
+
+**Native subagents stay.** A body's harness may run its own subagents (Claude Code's Agent tool, Codex's) for work
+inside its job: a few independent lookups or edits. They share the job's model and account, and the runtime neither
+intercepts nor counts them one by one; plan their spend as part of the job. Use a loom job (spawn) for work that should
+have its own model, account, lifecycle or report: it has a durable handle, survives restarts and returns its report.
 
 `LOOM_RUNTIME_SPAWN_LIMIT` defaults to 3 concurrent spawned turns per agent;
 extra jobs queue, and also respect delivery's overall busy limit. Spawn chains

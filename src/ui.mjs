@@ -3,6 +3,7 @@ import { checkLoginExpiry, loginExpiryAsks, loginExpiry } from './login-expiry.m
 // boxes, what each has and may host, the houses asked for, and the owner's
 // controls. Data only; loom renders it. Every action is the owner's (the page
 // is), and a box's credential is shown once, in the message after adding it.
+import { writeOffApproved } from './dark-box.mjs';
 import { principalOf } from './principal.mjs';
 import { approvalsFake, approvalsRun, approvalsWhy } from './approvals-call.mjs';
 import { appendFileSync, existsSync, readFileSync, statfsSync } from 'node:fs';
@@ -11,11 +12,12 @@ import { join } from 'node:path';
 import { BOX_NAME, StateError, load, localBoxName, stateDir } from './state.mjs';
 import { sessionsBusy } from './busy.mjs';
 import { allowJoin, blockAllJoins, blockJoin, pendingJoins } from './enroll.mjs';
-import { addBox, assertBoxOwner, resolveBox, isBoxOwner, boxLabelOf, boxOfCall, boxUpdateNow, loginOver, factsOf, lendBox, list, loginCancel, loginCode, loginStart, loginView, primaryOf, remoteDown, remoteUp, revokeBox, shownTask, serviceDown, serviceMove, serviceRestart, serviceUp, setAgent, isHostHouse, setBoxOwner, setMayHost, setBoxWatch, setPrimary, up, down, LIVE } from './control.mjs';
+import { preferenceOf, addBox, assertBoxOwner, resolveBox, isBoxOwner, boxLabelOf, boxOfCall, boxUpdateNow, loginOver, factsOf, lendBox, list, loginCancel, loginCode, loginStart, loginView, primaryOf, remoteDown, remoteUp, revokeBox, shownTask, serviceDown, serviceMove, serviceRestart, serviceUp, setAgent, isHostHouse, setBoxOwner, setMayHost, setBoxWatch, setPrimary, up, down, LIVE } from './control.mjs';
 import { LOGIN_HARNESSES } from './logins.mjs';
 import { ownCommit, swapCommand } from './version.mjs';
 import { stateAccounts } from './accounts.mjs';
-import { COMMS_VENUE, HARNESS_WORDS, conversationJobs, ownerModelChoice, answerLoop, deliveryNotices, listConvs, loadConv, loopAsks, readFallbacks, resetCardProblem, resetPrincipal, runtimeAs, whenWords, workingConversations } from './delivery.mjs';
+import { modelsOf, rolesOf, setRole } from './models.mjs';
+import { COMMS_VENUE, HARNESS_WORDS, conversationJobs, ownerModelChoice, answerLoop, deliveryNotices, listConvs, loadConv, loopAsks, readFallbacks, resetCardProblem, resetPrincipal, runtimeAs, whenWords, workingConversations, nonIdleAgents } from './delivery.mjs';
 import { loomStore } from './store.mjs';
 import { asks as gateAsks, answer as gateAnswer, gatesPage, mergePeople, status as gatesStatus, proposals as gateProposals, PROPOSALS as PROPOSALS_COLLECTION } from './gates.mjs';
 import { GRANTS, KEY as GRANTS_KEY, GrantsError, addGrant, grantPathsOk, grantsProblem, householdOf, setPiece, setRelay, usableBy } from './grants.mjs';
@@ -24,6 +26,15 @@ import { relayNotices } from './relay.mjs';
 import { adapterStatuses, nowAgentPage, nowManifest, nowPage } from './nowboard.mjs';
 import { boxPagePath, checkDark, watchAsks, watchNotices, watchOf, watchRows } from './watch.mjs';
 import { coreFrom } from './core.mjs';
+
+/** Where an agent runs, for its row (t-2048): the boxes its houses are up on, and its order when it has one. */
+function whereRuns(s, a, live, env, nowMs) {
+  const on = [...new Set(live.filter((h) => h.agent === a && h.state === 'running').map((h) => h.box))];
+  const pref = preferenceOf(s, a, env);
+  const order = pref.length > 1 ? ` · prefers ${pref.map((id) => boxLabelOf(s, id)).join(', then ')}` : '';
+  if (on.length) return `Running on ${on.map((id) => boxLabelOf(s, id)).join(', ')}${order}`;
+  return `Next on ${boxLabelOf(s, primaryOf(s, a, env, nowMs))}${order}`;
+}
 
 /**
  * The runtime's own store (the grants, the gates), when it runs as loom's piece: loom names it (LOOM_PIECE_NAME).
@@ -104,7 +115,7 @@ function spendApproval(env, aid, kind, target, agent, { onBehalf } = {}) {
   const fx = approvalsFake(env);
   if (fx) return fx.spend(aid, target, agent, kind);
   // A reset is spent as the runtime filed it (runtimeAs); a grant as the agent, as t-1970 pinned.
-  const as = kind === 'principal-reset' ? runtimeAs(agent) : JSON.stringify({ kind: 'agent', agent });
+  const as = kind === 'principal-reset' || kind === 'box-write-off' ? runtimeAs(agent) : JSON.stringify({ kind: 'agent', agent });
   const r = approvalsRun(env, ['use', aid, '--kind', kind, '--target', target, '--as', as, ...(onBehalf ? ['--on-behalf', onBehalf] : [])]);
   // Spent is exactly what approvals says when it spent one (`<id>: used`), never just an exit 0 from something else.
   if (!r.error && r.status === 0 && (r.stdout || '').trim() === `${aid}: used`) return '';
@@ -209,19 +220,42 @@ function sessionsSection(env, s, view, only) {
   return blocks.length > 1 ? { id: 'sessions', title: 'Sessions', blocks } : null;
 }
 
+/** No agent-wide Idle claim while a source cannot account for its current activity. */
+export function idleUncertain(agent, s, busy, adapters, board) {
+  if (!board || board.activityUnknown?.includes(agent)) return true;
+  for (const v of Object.values(s.services ?? {})) {
+    if (v.agent !== agent || v.want !== 'up') continue;
+    if (BRIDGE.test(v.name) && !(adapters[v.name]?.mode === 'live' && adapters[v.name].agents?.includes(agent))) return true;
+    if (v.name === 'remote' && (s.houses[v.house]?.state !== 'running' || busy[`house:${v.house}`] !== false)) return true;
+  }
+  const r = s.remotes?.[agent];
+  return !!(r?.want === 'up' && (r.state !== 'running' || busy[`box:${r.name}`] !== false));
+}
+
 export function manifest(env, nowMs = Date.now(), o = {}) {
   const s = load(env);
+  // One adapter snapshot serves both the legacy board and modern delivery ownership.
+  // Re-running both adapter CLIs could exceed core's three-second manifest deadline.
+  const adapters = adapterStatuses(env);
   try { checkLoginExpiry(env, nowMs, o.alert ? { alert: o.alert } : {}); } catch { /* next manifest */ }
   // The now board (nowboard.mjs): a bridge actually down is an alert (one restarting, by the runtime's own doing, is
   // not), one back from an outage an FYI, and what each agent's bodies are in is its doing.
-  let board = { asks: [], agents: {}, notices: [] };
-  try { board = nowManifest(env, nowMs / 1000, s, listConvs(env)); } catch { /* a board that can't be read leaves the rest of the manifest */ }
+  let board = { asks: [], agents: {}, notices: [], activityUnknown: Object.keys(s.agents ?? {}) };
+  try { board = nowManifest(env, nowMs / 1000, s, listConvs(env), adapters); } catch { /* a board that can't be read leaves the rest of the manifest */ }
   // An always-on box gone silent is dark (watch.mjs): loom reads this manifest each minute, so it's checked here too.
   try { checkDark(env, s, nowMs, o.alert ? { alert: o.alert } : {}); } catch { /* next time */ }
   let convs = [];
   try { convs = workingConversations(env); } catch { /* the delivery state unreadable this time: the cards say what else is known */ }
   const busy = { ...reportedBusy(s), ...sessionsBusy(join(stateDir(env), 'session-cpu.json')) };
-  const reports = agentReports(s, Date.now(), busy, convs, adapterStatuses(env));
+  const reports = agentReports(s, Date.now(), busy, convs, adapters);
+  try {
+    const busyAgents = nonIdleAgents(env);
+    for (const a of Object.keys(s.agents ?? {})) {
+      if (idleUncertain(a, s, busy, adapters, board) || busyAgents.has(a) || reports[a]?.doing?.length || board.agents[a]?.length || ['unavailable', 'broken'].includes(reports[a]?.state)) continue;
+      reports[a] ??= { readings: [] };
+      reports[a].idle = { observedAt: new Date(nowMs).toISOString(), expiresAt: new Date(nowMs + 30000).toISOString() };
+    }
+  } catch { /* unreadable delivery is not proof of idle */ }
   for (const [a, doing] of Object.entries(board.agents)) reports[a] = { readings: [], ...reports[a], doing: [...(reports[a]?.doing ?? []), ...doing].slice(0, 8) };
   for (const [agent, jobs] of Object.entries(board.jobs ?? {})) {
     reports[agent] ??= { readings: [] };
@@ -668,10 +702,10 @@ export function agentReports(s, nowMs = Date.now(), busy = {}, convs = [], adapt
  * who may see it (loom src/ui/handler.ts atWorkFor), as it does a Comms thread's title (comms.md, rule 4).
  */
 export function convDoing(c) {
-  const since = Number.isFinite(c.since) ? { since: new Date(c.since).toISOString() } : {};
+  const since = { ...(Number.isFinite(c.since) ? { since: new Date(c.since).toISOString() } : {}), ...(c.activity ? { activity: c.activity } : {}) };
   if (c.venue === COMMS_VENUE) return { text: 'In a Comms thread', kind: 'talk', where: 'Comms', conversation: c.conversation, ...since };
   if (c.kind === 'scheduled') return { text: 'On a wake', kind: 'lane', conversation: c.conversation, ...since };
-  return { text: `Working · ${cap(c.venue)}`, kind: 'talk', conversation: c.conversation, ...since };
+  return { text: `Working · ${cap(c.venue)}`, kind: 'talk', ...(['discord', 'slack', 'signal'].includes(c.venue) ? { where: cap(c.venue) } : {}), conversation: c.conversation, ...since };
 }
 
 /** "12 days", "5 hours", "40 minutes": how long, for a box's uptime. */
@@ -916,6 +950,7 @@ function boxesPage(env, nowMs) {
   sections.push({ id: 'boxes', title: 'Boxes', blocks: [rows.length ? { type: 'panel', rows } : { type: 'text', tone: 'muted', text: 'No boxes yet: add one below.' }] });
 
   sections.push(loginsSection(env, s, live_boxes, nowMs, false));
+  sections.push(rolesSection(env));
 
   // Each agent's houses, services and sessions are its own (its Houses tab): here, a row each.
   if (agents.length) {
@@ -924,7 +959,7 @@ function boxesPage(env, nowMs) {
       const svc = view.services.filter((v) => v.agent === a && v.want === 'up');
       const down = svc.filter((v) => v.state === 'failed' || v.state === 'lost');
       return { label: who(a), agent: a, page: `agent:${a}`, value: `${plural(n, 'house')} up · ${plural(svc.length, 'service')}`,
-        detail: down.length ? `${andList(down.map((v) => v.name))} ${down.length === 1 ? 'is' : 'are'} down` : `Primary box: ${boxLabelOf(s, primaryOf(s, a, env))}`, tone: down.length ? 'bad' : n ? 'ok' : 'muted' };
+        detail: down.length ? `${andList(down.map((v) => v.name))} ${down.length === 1 ? 'is' : 'are'} down` : whereRuns(s, a, live, env, nowMs), tone: down.length ? 'bad' : n ? 'ok' : 'muted' };
     }) }] });
   }
 
@@ -1095,6 +1130,55 @@ function loginsSection(env, s, boxes, nowMs, rows) {
     }) }] : [{ type: 'text', tone: 'muted', text: reported ? 'No account has reported its usage yet.' : 'No box has reported its harnesses yet.' }]),
     { type: 'text', tone: 'muted', text: 'Each box signs in to Claude and Codex itself, with its owner\'s own subscription: Log in, on its page, runs the CLI\'s own login on that box. loom never sees the login.' },
   ] };
+}
+
+/**
+ * Work roles (models.mjs, t-2036): the kinds of work an agent can hand off, each with the models eligible for it, the
+ * household owner's to add, change and remove here (`loom runtime roles set` does the same). The form carries the
+ * catalog's version: an edit made against an older catalog is refused, as the grants' rev is, so two editors never
+ * silently overwrite each other. A role never widens what an agent may use (an agent's allow still applies).
+ */
+function roleFields(list, r = null) {
+  const csv = (a) => (a ?? []).join(',');
+  return [
+    ...(r ? [] : [{ name: 'id', label: 'Name', kind: 'text', required: true, hint: 'Lowercase, like coding, review or light-task' }]),
+    { name: 'description', label: 'What it\'s for', kind: 'textarea', required: true, ...(r ? { value: r.description } : {}), hint: 'One or two sentences an agent reads to choose it' },
+    { name: 'models', label: 'Models', kind: 'checks', options: list.map((m) => ({ value: m.id, label: m.id, detail: `${m.family}, on ${HARNESS_WORDS[m.harness] ?? m.harness}` })), ...(r?.models?.length ? { value: csv(r.models) } : {}) },
+    { name: 'families', label: 'Or any model of', kind: 'text', ...(r?.families?.length ? { value: r.families.join(', ') } : {}), hint: 'Optional: anthropic, openai, google, mistral or local:<name>' },
+    { name: 'needs', label: 'Needs', kind: 'text', ...(r?.needs ? { value: r.needs } : {}), hint: 'Optional, e.g. a GPU, or a long context' },
+    { name: 'failover', label: 'If its model runs out', kind: 'choice', value: r?.failover ? 'yes' : 'no', options: [
+      { value: 'no', label: 'Wait for it', detail: 'The job keeps its model and waits for quota' },
+      { value: 'yes', label: 'Move once', detail: 'The job moves once to another eligible model with room' }] },
+    { name: 'why', label: 'Why', kind: 'text', hint: 'Optional: kept in the change log' },
+  ];
+}
+
+function rolesSection(env) {
+  let st, cat;
+  try { st = load(env); cat = rolesOf(st); } catch { return { id: 'roles', title: 'Work roles', blocks: [{ type: 'text', tone: 'muted', text: 'The roles can\'t be read just now.' }] }; }
+  const { list } = modelsOf(st);
+  const hidden = { version: String(cat.version) };
+  const rows = cat.roles.map((r) => ({ label: r.id, value: r.eligible.length ? r.eligible.join(', ') : 'No model in the list fits it',
+    detail: r.description, tone: r.eligible.length ? 'ok' : 'warn',
+    edit: { title: `Change ${r.id}`, action: 'role-set', submit: 'Save', hidden: { ...hidden, id: r.id }, fields: roleFields(list, r) },
+    act: { action: 'role-remove', label: 'Remove', fields: { ...hidden, id: r.id }, confirm: `Remove the ${r.id} role? A job already running keeps it; new jobs can't ask for it.` } }));
+  rows.push({ label: 'A role', value: 'Add a kind of work agents can hand off', tone: 'muted',
+    edit: { title: 'Add a role', action: 'role-set', submit: 'Add', hidden: { ...hidden, new: '1' }, fields: roleFields(list) } });
+  const last = cat.changed ? ` Last change: ${cat.changed.what}${cat.changed.why ? ` (${cat.changed.why})` : ''}, by ${cat.changed.by}.` : '';
+  return { id: 'roles', title: 'Work roles', blocks: [{ type: 'panel', rows },
+    { type: 'text', tone: 'muted', text: `Agents read these when they hand off a job, and the runtime picks a model from the role's. An agent's own model limits still apply.${last}` }] };
+}
+
+/** A role from the page's form fields, or a message saying what's wrong. */
+function roleFromFields(f) {
+  const list = (v) => String(v ?? '').split(',').map((x) => x.trim()).filter(Boolean);
+  const out = { id: String(f.id ?? '').trim(), description: String(f.description ?? '') };
+  const models = list(f.models), families = list(f.families);
+  if (models.length) out.models = models;
+  if (families.length) out.families = families;
+  if (String(f.needs ?? '').trim()) out.needs = String(f.needs);
+  out.failover = f.failover === 'yes';
+  return out;
 }
 
 /**
@@ -1269,14 +1353,18 @@ function agentTabPage(env, agent, caller, nowMs) {
     ] } }] }] });
   if (!own) {
     const c = s.agents[agent];
-    const primary = primaryOf(s, agent, env);
+    const primary = primaryOf(s, agent, env, nowMs);
+    const pref = preferenceOf(s, agent, env);
     const boxOpts = live_boxes.map((b) => ({ value: b.id, label: b.label }));
     const secrets = Object.entries(c.secrets || {});
     const repo = String(c.repo ?? '').replace(/^https:\/\/github\.com\//, '').replace(/\.git$/, '');
     sections.push({ id: `agent-${agent}`, title: 'Its house', side: true, blocks: [{ type: 'panel', rows: [
-      { label: 'Primary box', value: nameOf(primary), ...(boxOpts.length >= 2 && boxOpts.length <= 5
-        ? { choice: { action: 'set-primary', name: 'box', value: primary, options: boxOpts, fields: { agent } } }
-        : boxOpts.length > 5 ? { edit: { title: 'Primary box', action: 'set-primary', submit: 'Set', hidden: { agent }, fields: [{ name: 'box', label: 'Primary', kind: 'choice', value: primary, options: boxOpts }] } } : {}) },
+      // Its boxes in order (t-2048): bodies and houses go to the first that's up and may host it.
+      { label: 'Boxes, in order', value: pref.map(nameOf).join(', then '),
+        detail: pref.length > 1 && primary !== pref[0] ? `${nameOf(pref[0])} is down: it runs on ${nameOf(primary)} for now` : `Runs on ${nameOf(primary)}; the next box takes over when it's down`,
+        ...(boxOpts.length >= 2 ? { edit: { title: `${who(agent)}'s boxes, in order`, action: 'set-primary', submit: 'Save', hidden: { agent },
+          fields: ['first', 'second', 'third'].map((name, i) => ({ name, label: i ? 'Then' : 'First', kind: 'choice', value: pref[i] ?? '',
+            options: [...(i ? [{ value: '', label: 'None' }] : []), ...boxOpts] })) } } : {}) },
       { label: 'Repo', value: repo || 'none', detail: `${c.houseFile || 'house/house.json'}${c.branch ? ` on ${c.branch}` : ''}`, sheet: { title: `${who(agent)}'s house`, blocks: [{ type: 'kv', items: houseFacts(c) }] } },
       { label: 'Nested containers', value: c.nested ? 'Allowed' : 'Not allowed', toggle: { action: 'agent-flag', on: !!c.nested, fields: { agent, flag: 'nested' } } },
       { label: 'GPU', value: c.gpu ? 'Allowed' : 'Not allowed', toggle: { action: 'agent-flag', on: !!c.gpu, fields: { agent, flag: 'gpu' } } },
@@ -1297,6 +1385,8 @@ function houseFacts(c) {
     { label: 'Tailnets', value: (c.tailnets ?? []).map((g) => g.name).join(', ') || 'none' },
     { label: 'Branch', value: c.branch || 'default' }, { label: 'Repo secret', value: c.repoSecret || 'none' },
     { label: 'Secrets a house gets', value: Object.entries(c.secrets || {}).map(([k, v]) => (k === v ? k : `${k} (from ${v})`)).join(', ') || 'none' },
+    { label: 'Only for', value: Object.entries(c.scopes || {}).map(([k, v]) => `${k}: ${v.split('+').map((w) => (w === 'owner' ? 'your own work' : w.startsWith('service:') ? `the ${w.slice(8)} service` : `the ${w} project`)).join(', ')}`).join('; ') || 'every house gets everything' },
+    { label: 'Who steers which project', value: Object.entries(c.steers || {}).map(([k, v]) => `${k}: ${v.join(', ')}`).join('; ') || 'only you' },
   ];
 }
 
@@ -1329,6 +1419,9 @@ function agentForm(agent, c) {
     { name: 'branch', label: 'Branch', kind: 'text', value: c?.branch ?? '' },
     { name: 'repo_secret', label: 'Repo secret', kind: 'text', value: c?.repoSecret ?? '', hint: 'A secrets-store name, for a private repo over https' },
     { name: 'secrets', label: 'Secrets', kind: 'text', value: Object.entries(c?.secrets || {}).map(([k, v]) => `${k}=${v}`).join(', '), hint: 'name-in-house=store-name, comma separated' },
+    // t-1963: who gets what. Blank keeps them as they are; none clears them.
+    { name: 'scopes', label: 'Only for', kind: 'text', value: Object.entries(c?.scopes || {}).map(([k, v]) => `${k}=${v}`).join(', '), hint: 'secret=owner (only your own work), secret=pond or tailnet:fleet=pond (your work and that of people you let steer pond), +service:discord for that service too; comma separated. Left blank, nothing changes; none clears them' },
+    { name: 'steers', label: 'Who steers which project', kind: 'text', value: Object.entries(c?.steers || {}).map(([k, v]) => `${k}=${v.join('+')}`).join(', '), hint: 'person=project, like patrick=pond: their work gets that project\'s secrets and tailnets. Left blank, nothing changes; none clears them' },
   ].map((f) => (f.value === '' ? (({ value: _v, ...r }) => r)(f) : f)) };
 }
 
@@ -1494,11 +1587,27 @@ export function act(env, effects, { action, fields: raw = {}, caller: c }, publi
       case 'login-code': { loginCode(env, effects, fields); return { ok: true, message: 'Got it: the box is checking the code.', page: `login/${fields.id}` }; }
       case 'box-update-now': { const r = boxUpdateNow(env, effects, fields); return { ok: true, message: `${r.name} tries loom's runtime on its next poll.`, page: boxPath(env, fields.name) }; }
       case 'login-cancel': { loginCancel(env, effects, fields); return { ok: true, message: 'Cancelled.', page: '' }; }
+      case 'role-set': case 'role-remove': {
+        const cur = rolesOf(load(env));
+        const expect = String(fields.version ?? '');
+        const why = String(fields.why ?? '').trim() || undefined;
+        const by = typeof OWNER.who === 'string' && /^[a-z0-9]+(-[a-z0-9]+)*$/.test(OWNER.who) ? OWNER.who : 'owner';
+        if (action === 'role-remove') { setRole(env, { remove: String(fields.id ?? ''), why, by, expect }); return { ok: true, message: `Removed the ${fields.id} role.`, page: '' }; }
+        const role = roleFromFields(fields);
+        if (fields.new === '1' && cur.roles.some((x) => x.id === role.id)) return { ok: false, message: `There's already a ${role.id} role: change it from its row.`, page: '' };
+        const r = setRole(env, { role, why, by, expect, keep: true });
+        const had = cur.roles.some((x) => x.id === role.id);
+        return { ok: true, message: `${had ? 'Saved' : 'Added'} the ${role.id} role: ${andList(r.roles.find((x) => x.id === role.id)?.eligible ?? []) || 'no model fits it yet'}.`, page: '' };
+      }
       case 'model-choice': {
         const choice = ownerModelChoice(env, OWNER, fields);
         return { ok: true, message: `Saved ${who(choice.agent)}'s model preference. New turns use ${choice.effective === 'auto' ? 'Auto' : HARNESS_WORDS[choice.effective]} when available.`, page: '' };
       }
-      case 'set-primary': { const r = setPrimary(env, effects, fields); return { ok: true, message: `${r.agent}'s primary is ${label(r.primary)}.`, page: '' }; }
+      case 'set-primary': {
+        const ordered = ['first', 'second', 'third'].some((k) => k in fields);
+        const r = setPrimary(env, effects, { agent: fields.agent, ...(ordered ? { boxes: [fields.first, fields.second, fields.third].filter(Boolean) } : { box: fields.box }) });
+        return { ok: true, message: `${r.agent} runs on ${r.boxes.map(label).join(', then ')}: the first that's up.`, page: '' };
+      }
       case 'set-agent': { const r = setAgent(env, effects, fields); return { ok: true, message: `Saved ${r.agent}'s house.`, page: '' }; }
       case 'up': {
         const r = up(env, effects, OWNER, { agent: fields.agent, box: fields.box, needs: fields.needs, task: fields.task });
@@ -1535,6 +1644,7 @@ export function act(env, effects, { action, fields: raw = {}, caller: c }, publi
         return { ok: true, message: `${who(r.agent)}'s houses ${fields.on === 'on' ? 'may' : 'may not'} have ${what} from their next start.`, page: '' };
       }
       case 'reset-approved': return resetApproved(env, c, fields);
+      case 'writeoff-approved': return writeOffApproved(env, effects, c, fields, spendApproval);
       case 'gates-allow': case 'gates-deny': case 'gates-merge': case 'grants-set': case 'relay-set': case 'relay-pair': case 'grant-approved': {
         const st = permsStore(env);
         if (!st) return { ok: false, message: 'The runtime reads its permissions from loom\'s store when loom runs it.' };

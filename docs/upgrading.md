@@ -20,6 +20,31 @@ running houses when it starts again.
 
 A failed attempt isn't retried for 6 hours. A refused commit isn't either.
 
+### loom core comes along
+
+The box's `loom` CLI (loom core) is a checkout of `sleepunit-agents/loom`,
+built in place (README, step 2). It's core that reads a piece's `loom` block,
+so a runtime can need a newer core than the box was set up with. In
+2026-11, loom#707 raised the settings cap from 20 to 32, the runtime declared
+21, and boxes on an older core failed every retry with `loom.settings is not a
+list of at most 20`.
+
+So when `loom pieces install` fails, the upgrade unit brings core forward and
+tries the install once more. It fetches `main` from the canonical URL,
+fast-forwards only, then runs `npm ci` and `npm run build`. A checkout ahead of
+`main` or beside it is left alone. If the build fails, the old commit goes back
+and is rebuilt, so `loom` still runs. What happened to core is in
+`upgrade.json`, as `core: {from, to}` or `core: {error}`. The checkout is found
+from the `loom` bin's real path. Set `LOOM_CORE_DIR` if it lives somewhere else.
+
+A box on a runtime from before this (loom-box 8718d11 and older) can't do it
+for itself. Update its core once by hand, as the box's user, then press
+**Update now**:
+
+```bash
+cd ~/Code/loom && git pull --ff-only && npm ci && npm run build
+```
+
 ## What the box's page shows
 
 Boxes → the box's card → **Runtime**:

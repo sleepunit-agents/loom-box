@@ -169,7 +169,7 @@ export function bridgesOf(dir, nowS = Date.now() / 1000) {
 }
 
 /** Every agent's board under the base: {agent: [bridge…]}, the agents whose board has a bridge. */
-export function boards(env, nowS = Date.now() / 1000) {
+export function boards(env, nowS = Date.now() / 1000, adapters = adapterStatuses(env)) {
   let names = [];
   try { names = readdirSync(nowBase(env)); } catch { /* Adapters may have no legacy board. */ }
   const out = {};
@@ -179,19 +179,37 @@ export function boards(env, nowS = Date.now() / 1000) {
     const bs = bridgesOf(join(nowBase(env), n), nowS);
     if (bs.length) out[m[1]] = bs;
   }
-  return mergeAdapters(out, adapterStatuses(env), nowS);
+  return mergeAdapters(out, adapters, nowS);
 }
 
-export function adapterStatuses(env) {
-  const out = {};
+/**
+ * How long one read of the adapters' status serves (t-2065). Each read is `loom <venue> status --json`: two node
+ * processes per adapter, and every manifest, Now page and delivery-loop watch asked again, several a second with
+ * pages open. It's display only (which bridges show live), never who may do what.
+ */
+export const ADAPTER_STATUS_MS = 15_000;
+const adapterFile = (env) => join(dataDir(env), 'adapter-status.json');
+
+const adapterShape = (out) => out && typeof out === 'object' && !Array.isArray(out)
+  && Object.values(out).every((d) => d && d.mode === 'live' && Array.isArray(d.agents) && d.agents.every((a) => typeof a === 'string'));
+
+export function adapterStatuses(env, nowMs = Date.now()) {
   const home = env.LOOM_HOME || join(env.XDG_CONFIG_HOME || join(env.HOME || homedir(), '.config'), 'loom');
-  for (const venue of ['discord', 'slack']) {
-    if (!existsSync(join(home, 'pieces', venue, 'piece.json'))) continue;
+  const venues = ['discord', 'slack'].filter((v) => existsSync(join(home, 'pieces', v, 'piece.json')));
+  if (!venues.length) return {};
+  const key = JSON.stringify([home, venues]);
+  const had = readJson(adapterFile(env));
+  if (had && had.key === key && typeof had.at === 'number' && nowMs - had.at >= 0 && nowMs - had.at < ADAPTER_STATUS_MS && adapterShape(had.out)) return had.out;
+  const out = {};
+  let failed = false;
+  for (const venue of venues) {
     try {
       const d = JSON.parse(execFileSync(env.LOOM_BIN || 'loom', [venue, 'status', '--json'], { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] }));
       if (d.mode === 'live' && Array.isArray(d.agents)) out[venue] = d;
-    } catch { /* Missing or unavailable: the old board remains authoritative. */ }
+    } catch { failed = true; /* Missing or unavailable: the old board remains authoritative. */ }
   }
+  // A read that failed isn't kept: the next caller asks again rather than showing the bridge down for the window.
+  if (!failed) try { ensureDir(dataDir(env)); writePrivate(adapterFile(env), JSON.stringify({ at: nowMs, key, out })); } catch { /* asked again next time */ }
   return out;
 }
 
@@ -269,7 +287,7 @@ const watchFile = (env) => join(dataDir(env), 'now-watch.json');
  * best-effort: a watch file that can't be had leaves the states as they are, with no FYI.
  */
 export function watchBridges(env, nowS = Date.now() / 1000, s = undefined, o = {}) {
-  const all = boards(env, nowS);
+  const all = boards(env, nowS, o.adapters);
   let st = s;
   if (st === undefined) { try { st = load(env); } catch { st = null; } }
   const darkS = darkAfterS(env);
@@ -354,8 +372,8 @@ const withWhom = (t) => {
 const why = (w) => String(w?.why ?? w?.reason ?? w?.hold ?? '').slice(0, 80);
 
 /** The manifest's part: an alert for each bridge actually down (dark or looping), the FYIs, and each agent's doing. */
-export function nowManifest(env, nowS = Date.now() / 1000, s = undefined, conversations = []) {
-  const { all, notices } = watchBridges(env, nowS, s);
+export function nowManifest(env, nowS = Date.now() / 1000, s = undefined, conversations = [], adapters = undefined) {
+  const { all, notices } = watchBridges(env, nowS, s, { adapters });
   const asks = [];
   const agents = {};
   const jobs = {};
@@ -411,7 +429,9 @@ export function nowManifest(env, nowS = Date.now() / 1000, s = undefined, conver
     }));
     if (doing.length) agents[agent] = doing.slice(0, DOING_MAX);
   }
-  return { asks: asks.slice(0, ASKS_MAX), agents, jobs, notices };
+  // Legacy bridges have no current-tool observation contract, even when their board is empty.
+  const activityUnknown = Object.entries(all).filter(([, bs]) => bs.some(b => !b.adapter)).map(([agent]) => agent);
+  return { asks: asks.slice(0, ASKS_MAX), agents, jobs, notices, activityUnknown };
 }
 
 /** The Now page: the old status board's tiles (bridges, talking, waiting, quota), then a row per agent. */

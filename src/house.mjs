@@ -221,6 +221,21 @@ export function specFor(house, service) {
   return { ...sv, build: house.build };
 }
 
+/**
+ * The house as it starts when the control plane withheld some of what its file asks for (t-1963: scoped to the owner's
+ * work, or to a project this house's work isn't allowed): those secrets and tailnets taken out, by name, and said
+ * (`said`, once, naming them). Only names the control plane listed: anything else missing still fails the house.
+ */
+export function withoutWithheld(house, withheld, said = () => {}) {
+  const names = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string') : []);
+  const ws = names(withheld?.secrets).filter((n) => Object.hasOwn(house.secrets, n));
+  const wt = names(withheld?.tailnets).filter((n) => Object.hasOwn(house.tailnets ?? {}, n));
+  if (!ws.length && !wt.length) return house;
+  said([...ws.map((n) => `secret ${n}`), ...wt.map((n) => `tailnet ${n}`)].join(', '));
+  return { ...house, secrets: Object.fromEntries(Object.entries(house.secrets).filter(([n]) => !ws.includes(n))),
+    tailnets: Object.fromEntries(Object.entries(house.tailnets ?? {}).filter(([n]) => !wt.includes(n))) };
+}
+
 /** Which of the house's secrets the control plane didn't hand over. */
 export function missingSecrets(house, given) {
   return Object.keys(house.secrets).filter((n) => !(n in given));

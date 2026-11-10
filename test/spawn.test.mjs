@@ -202,3 +202,28 @@ test('a stale house report keeps the same spawn open until it reconnects with it
   update(w.env, s => { s.houses['h-1'].state = 'done'; });
   assert.equal(house.pending({ agent: 'art', house: 'h-1' }), false, 'authoritative termination still releases it');
 });
+
+test('a refused spawn call over the API says why, as a 403, never the runtime\'s opaque 500', async () => {
+  const { api } = await import('../src/control.mjs');
+  const { scratch } = await import('./scratch.mjs');
+  const D = scratch('rt-spawn-api-');
+  const env = { HOME: D, LOOM_BOX_HOME: `${D}/state`, LOOM_BOX_DATA: `${D}/data`, LOOM_BOX_LOCAL_NAME: 'loom' };
+  const r = await api(env, { now: () => new Date() }, { caller: { kind: 'agent', agent: 'art', house: 'h-1' }, path: 'spawn', body: { action: 'result', handle: 'cv-000000000000' } });
+  assert.equal(r.status, 403);
+  assert.match(r.body.error, /^spawn: /);
+  const roles = await api(env, { now: () => new Date() }, { caller: { kind: 'agent', agent: 'art', house: 'h-1' }, path: 'spawn', body: { action: 'roles' } });
+  assert.equal(roles.status, 200);
+});
+
+test('a spawn with a Comms thread links itself in its parent conversation with a note core accepts', async () => {
+  const w = world();
+  w.core.commsAnswer = (b) => (b.op === 'spawn' ? { ok: true, id: 'th:abcdefghij' } : { ok: true });
+  const parent = await deliver(w.env, w.msg('dm:loren', 'do this'), w.o);
+  const r = await spawnCall(w.env, { kind: 'agent', agent: 'art' }, { ...proof(w, parent.conversation), brief: 'help', principal: { owner: true } }, w.o);
+  await tick(w.env, w.o);
+  assert.equal(loadConv(w.env, r.handle).spawn.thread, 'th:abcdefghij');
+  assert.equal(loadConv(w.env, r.handle).spawn.linked, true, 'the parent link note was accepted');
+  const link = w.core.turns.find((t) => t.kind === 'note' && t.conversation === parent.conversation);
+  assert.ok(link, 'a link note lands in the parent conversation');
+  assert.ok(w.core.audits.some((a) => a.conversation === parent.conversation && a.seq === link.seq && a.text.startsWith('Spawned [')));
+});

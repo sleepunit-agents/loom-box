@@ -47,6 +47,12 @@
         "default": "5"
       },
       {
+        "name": "LOOM_RUNTIME_SPAWN_LIMIT",
+        "label": "Spawned jobs an agent has running before a new one waits",
+        "default": "3",
+        "hint": "1-32; a body whose house is draining, stopping or gone doesn't count"
+      },
+      {
         "name": "LOOM_RUNTIME_SEAT_HOUSES",
         "label": "Houses an agent may have at once for anyone but its owner",
         "default": "4"
@@ -124,6 +130,18 @@
         "name": "LOOM_RUNTIME_TASK_COMMENT",
         "label": "How a stopped stuck body is noted on its task",
         "hint": "a JSON argv with {task} and {text}; unset: taskstore comment {task} {text} when taskstore is on the local bodies' PATH; off: never"
+      },
+      {
+        "name": "LOOM_RUNTIME_CONTINUATION_DAYS",
+        "label": "Days a follow-up report capability lasts",
+        "default": "7",
+        "hint": "1-13; a wake can carry it until then, and nothing renews it. Anything else stops new ones"
+      },
+      {
+        "name": "LOOM_RUNTIME_CONTINUATION_KEEP_DAYS",
+        "label": "Days finished follow-up reports are kept after their deadline",
+        "default": "7",
+        "hint": "1-90"
       }
     ],
     "services": [
@@ -232,13 +250,13 @@
         ]
       },
       "spawn": {
-        "description": "Start a fresh body of yourself with a brief. Its final report returns here. Principal and house rules carry over. Use action say to steer it, result to fetch its report. If the asking conversation is ambiguous, use loom runtime spawn from your shell.",
+        "description": "Hand an independent job to a fresh body of yourself: it runs with its own model, account and lifecycle, and its final report returns here. Principal and house rules carry over. action roles lists the kinds of work you can ask for (they change: read them, don't assume); pass role to have the runtime pick the model, and the job keeps that model on every resume. action say steers it, result fetches its report. Work inside your own job (a few parallel lookups or edits) can still use your harness's own subagents: they share your job's model and account. If the asking conversation is ambiguous, use loom runtime spawn from your shell.",
         "input_schema": {
           "type": "object",
           "properties": {
             "action": {
               "type": "string",
-              "description": "start (default), say or result"
+              "description": "start (default), say, result, or roles (the work roles you can ask for)"
             },
             "brief": {
               "type": "string",
@@ -247,6 +265,14 @@
             "prefer": {
               "type": "string",
               "description": "Preferred model"
+            },
+            "role": {
+              "type": "string",
+              "description": "A work role from action roles; the runtime picks an eligible model"
+            },
+            "failover": {
+              "type": "boolean",
+              "description": "Allow the job to move to another eligible model if its own runs out of quota (default: it waits)"
             },
             "title": {
               "type": "string",
@@ -281,6 +307,10 @@
       "loom-runtime",
       "grants",
       "ask"
+    ],
+    "grants_store": "grants",
+    "api_serve": [
+      "body-sync"
     ],
     "store": {
       "grants": {

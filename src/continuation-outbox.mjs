@@ -2,7 +2,7 @@
 // the current holder (key, session, house) or the clock's trusted delivery identity.
 // originConversation is deliberately absent from this interface.
 import { createHash, randomBytes } from 'node:crypto';
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { StateError, withLock } from './state.mjs';
 
@@ -31,21 +31,33 @@ const unchanged = (saved, current) => current && !current.resetPending && same(s
  * a receipt; rename alone isn't a power-loss durability guarantee. Locks never span I/O.
  * post must implement stable-ref idempotency, including identical-payload checking.
  */
-export function continuationOutbox({ dir, sealer, now = Date.now, lifetimeMs = null }) {
+export function continuationOutbox({ dir, sealer, now = Date.now, lifetimeMs = null, retainMs = 7 * 86400000, maxLive = 20, maxReports = 20, warn = () => {} }) {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const path = (id) => join(dir, `${id}.sealed`);
-  const read = (id) => {
-    try { return JSON.parse(sealer.open(readFileSync(path(id))).toString('utf8')); }
-    catch (e) { if (e.code === 'ENOENT') return null; throw e; }
+  // Reports with a final outcome live in done/: drain lists only the top level, so finished reports cost a tick
+  // nothing (never opened again there), and only collection, hourly, reads done/.
+  const doneDir = join(dir, 'done'), badDir = join(dir, 'unreadable');
+  mkdirSync(doneDir, { recursive: true, mode: 0o700 });
+  const FINAL = ['delivered', 'expired', 'failed', 'withdrawn'];
+  const isFinal = (v) => FINAL.includes(v?.state);
+  const path = (id, done = false) => join(done ? doneDir : dir, `${id}.sealed`);
+  const open1 = (file) => {
+    try { return JSON.parse(sealer.open(readFileSync(file)).toString('utf8')); }
+    catch (e) { if (e.code === 'ENOENT') return undefined; throw e; }
   };
+  const read = (id) => open1(path(id)) ?? (id.startsWith('report-') ? open1(path(id, true)) : undefined) ?? null;
+  const syncDir = (d) => { const dd = openSync(d, 'r'); try { fsyncSync(dd); } finally { closeSync(dd); } };
   const save = (id, value) => {
-    const temp = join(dir, `.${id}.${randomBytes(8).toString('hex')}.tmp`);
+    const done = id.startsWith('report-') && isFinal(value);
+    const where = done ? doneDir : dir;
+    const temp = join(where, `.${id}.${randomBytes(8).toString('hex')}.tmp`);
     try {
       writeFileSync(temp, sealer.seal(Buffer.from(JSON.stringify(value))), { flag: 'wx', mode: 0o600 });
       const fd = openSync(temp, 'r'); try { fsyncSync(fd); } finally { closeSync(fd); }
-      renameSync(temp, path(id));
-      const dd = openSync(dir, 'r'); try { fsyncSync(dd); } finally { closeSync(dd); }
+      renameSync(temp, path(id, done));
+      syncDir(where);
     } finally { rmSync(temp, { force: true }); }
+    // Then the other copy goes: a crash between leaves two, and read prefers the top level (re-saved next drain).
+    if (id.startsWith('report-')) { rmSync(path(id, !done), { force: true }); syncDir(done ? dir : doneDir); }
   };
   const locked = (fn) => withLock(dir, 'outbox.lock', fn, 'continuation outbox');
   const grantId = (handle) => {
@@ -84,6 +96,17 @@ export function continuationOutbox({ dir, sealer, now = Date.now, lifetimeMs = n
         if (!Number.isSafeInteger(lifetimeMs) || lifetimeMs <= 0) deny('continuation deadline policy is not configured');
         const issuedAt = observe(), expiresAt = issuedAt + lifetimeMs;
         if (!Number.isSafeInteger(expiresAt)) deny('invalid continuation deadline policy');
+        // A bounded number live per source conversation (its deadlines in a plaintext ledger: ids and times only),
+        // so no body can grow the outbox, and every tick's work, without limit.
+        const ledger = join(dir, 'issued.json');
+        let live = {};
+        try { live = JSON.parse(readFileSync(ledger, 'utf8')); } catch { live = {}; }
+        for (const k of Object.keys(live)) { live[k] = (Array.isArray(live[k]) ? live[k] : []).filter((t) => Number.isSafeInteger(t) && t > issuedAt); if (!live[k].length) delete live[k]; }
+        const mine = live[source.conversation] ?? [];
+        if (mine.length >= maxLive) throw new StateError(`${source.conversation} already has ${maxLive} live continuations: wait for one to reach its deadline`, 429);
+        live[source.conversation] = [...mine, expiresAt];
+        const tmp = `${ledger}.${randomBytes(6).toString('hex')}.tmp`;
+        writeFileSync(tmp, JSON.stringify(live), { mode: 0o600 }); renameSync(tmp, ledger);
         save(grantId(handle), { version: 2, source, issuedAt, expiresAt, expired: false, binding: null });
         return { handle, expiresAt };
       });
@@ -111,6 +134,10 @@ export function continuationOutbox({ dir, sealer, now = Date.now, lifetimeMs = n
         if (firing.expiresAt !== g.expiresAt) deny('continuation deadline differs');
         if (child?.agent !== g.source.agent || !same(child?.principal, g.source.principal) || child?.resetPending)
           deny('continuation principal differs');
+        // The bound child's own conversation starting again (a quota requeue of the same firing): it starts, with no
+        // new authority (bind refuses any other run). Refusing it would kill the wake's work.
+        if (g.binding && g.binding.wake === firing.wake && g.binding.delivery === firing.delivery && g.binding.child.conversation === child?.conversation)
+          return { expiresAt: g.expiresAt, bound: true };
         if (g.binding) deny('continuation capability is already bound');
         active(id, g, observe());
         if (!wake.test(firing.wake ?? '') || typeof firing.delivery !== 'string' || !firing.delivery || !cv.test(child?.conversation ?? '')) deny('an exact clock firing is required');
@@ -154,6 +181,9 @@ export function continuationOutbox({ dir, sealer, now = Date.now, lifetimeMs = n
           return receipt(prior);
         }
         const time = observe(); active(gid, g, time);
+        // A bounded number of reports per continuation: a looping child can't grow the outbox without limit.
+        if ((g.reports ?? 0) >= maxReports) throw new StateError(`this continuation has sent its ${maxReports} reports`, 429);
+        g.reports = (g.reports ?? 0) + 1; save(gid, g);
         const row = { version: 2, expiresAt: g.expiresAt, ref, grant: gid, child, on, text, hash: digest(text), state: 'pending', attempts: 0, next: now() };
         save(rid, row);
         return receipt(row);
@@ -171,8 +201,11 @@ export function continuationOutbox({ dir, sealer, now = Date.now, lifetimeMs = n
     async drain({ current, post, reconcile }) {
       for (const name of readdirSync(dir).filter((n) => /^report-[0-9a-f]{64}\.sealed$/.test(n))) {
         const id = name.slice(0, -7);
-        const row = locked(() => {
+        let row;
+        // One record that won't open (a damaged file, a replaced key) is skipped and said, never a stop for the rest.
+        try { row = locked(() => {
           const r = read(id);
+          if (r && isFinal(r)) { save(id, r); return null; } // an older layout's finished row: moved to done/
           if (!r || !['pending', 'indeterminate'].includes(r.state)) return null;
           const recovering = r.state === 'indeterminate';
           const g = read(r.grant);
@@ -186,18 +219,31 @@ export function continuationOutbox({ dir, sealer, now = Date.now, lifetimeMs = n
             g.expired = true; save(r.grant, g); expireRow(r); save(id, r);
             if (r.state !== 'indeterminate' || !reconcile) return null;
           }
-          if (!recovering && r.state === 'pending' && r.next > time) return null;
+          // Backoff for both: posting by attempts, reconciling by its own count (never a core call every tick).
+          if (r.next > time) return null;
+          // Reconciliation only asks core what became of the exact sealed payload; it can't post. So an uncertain
+          // row is resolved even after its source or child changed; only a new post needs current authority.
+          const asking = recovering || r.state === 'indeterminate';
           const source = g && current(g.source.conversation), child = current(r.child.conversation);
-          if (!g || !unchanged(g.source, source) || !unchanged(r.child, child) || child.run !== r.child.run) {
-            r.state = r.attempts > 0 ? 'indeterminate' : 'failed'; r.reason = 'continuation authority was reset or changed'; save(id, r); return null;
+          if (!g || (!asking && (!unchanged(g.source, source) || !unchanged(r.child, child) || child.run !== r.child.run))) {
+            // Not every tick: an unchanged reset stays unchanged. Checked again after the backoff.
+            r.state = r.attempts > 0 ? 'indeterminate' : 'failed'; r.reason = 'continuation authority was reset or changed';
+            r.next = time + 3600000; save(id, r); return null;
           }
           const reconciliation = recovering || r.state === 'indeterminate';
           if (reconciliation && !reconcile) return null;
-          if (!reconciliation) r.attempts += 1;
-          r.next = now() + Math.min(3600000, 1000 * 2 ** Math.min(r.attempts, 12));
+          if (!reconciliation) r.attempts += 1; else r.reconciles = (r.reconciles ?? 0) + 1;
+          r.next = now() + Math.min(3600000, (reconciliation ? 5000 : 1000) * 2 ** Math.min(reconciliation ? r.reconciles : r.attempts, 12));
           save(id, r);
           return { ...r, reconciliation, target: g.source.target, agent: g.source.agent, conversation: g.source.conversation };
-        });
+        }); } catch (e) {
+          if (e instanceof StateError) throw e;
+          // Said once, then set aside in unreadable/ (kept, never deleted: a restored key may open it). While anything
+          // is there, no grant is collected.
+          try { mkdirSync(badDir, { recursive: true, mode: 0o700 }); renameSync(path(id), join(badDir, `${id}.sealed`)); } catch { /* said again next tick */ }
+          warn(`continuation ${id} won't open (${e.message}): set aside in unreadable/; grants are kept until it's gone`);
+          continue;
+        }
         if (!row) continue;
         let result;
         try { result = await (row.reconciliation ? reconcile : post)({ ref: row.ref, text: row.text, target: row.target, agent: row.agent, conversation: row.conversation, run: row.child.run, on: row.on ?? null, expiresAt: row.expiresAt }); }
@@ -210,14 +256,55 @@ export function continuationOutbox({ dir, sealer, now = Date.now, lifetimeMs = n
         } // A crash/timeout after acceptance retries the same ref.
         locked(() => {
           const r = read(id);
-          if (!['pending', 'indeterminate', 'expired'].includes(r.state)) return;
+          // Another tick resolved (and perhaps collected) it while this answer was in flight.
+          if (!r || !['pending', 'indeterminate', 'expired'].includes(r.state)) return;
           if (result?.ok && (row.reconciliation ? result.state === 'delivered' && typeof result.id === 'string' && result.id.length > 0 : result.posted === true)) { r.state = 'delivered'; r.posted = true; delete r.reason; }
           else if (row.reconciliation && result?.ok && result.state === 'not-accepted') { r.state = 'expired'; r.reason = 'core fenced acceptance and found no accepted report'; }
+          // Core's thread tombstone refuses every later post: nothing can land there again.
+          else if (row.reconciliation && result?.ok && result.state === 'deleted') { r.state = 'withdrawn'; r.reason = 'the destination thread was deleted'; }
           else if (result?.permanent) { r.state = 'indeterminate'; r.reason = String(result.reason ?? 'destination refused report').slice(0, 300); }
           // An accepted/pending response alone never means delivered.
           save(id, r);
         });
       }
+    },
+    // Bounded retention. Only after the shared deadline plus retainMs, and only
+    // terminal outcomes: an expired grant can never bind, enqueue or post again
+    // (every path checks the deadline against the persisted highwater), so its
+    // records may go. Pending/indeterminate rows stay until drain resolves them,
+    // and a grant stays while any row still names it. Legacy records are held.
+    collect({ every = 0 } = {}) {
+      // At most once per `every` ms (the tick asks hourly): a plaintext stamp, so a quiet outbox costs a stat.
+      const stamp = join(dir, 'collected-at');
+      if (every > 0) { try { if (now() - statSync(stamp).mtimeMs < every) return { reports: 0, grants: 0, skipped: true }; } catch { /* first */ } }
+      return locked(() => {
+        let time;
+        try { time = observe(); } catch { return { reports: 0, grants: 0 }; } // Hold during clock uncertainty.
+        try { writeFileSync(stamp, '', { mode: 0o600 }); utimesSync(stamp, time / 1000, time / 1000); } catch { /* best effort */ }
+        const names = readdirSync(dir);
+        const old = (x) => x?.version === 2 && Number.isSafeInteger(x.expiresAt) && x.expiresAt + retainMs <= time;
+        const held = new Set();
+        let reports = 0, grants = 0, unreadable = false;
+        const isReport = (n) => /^report-[0-9a-f]{64}\.sealed$/.test(n);
+        for (const [n, done] of [...names.filter(isReport).map((n) => [n, false]), ...readdirSync(doneDir).filter(isReport).map((n) => [n, true])]) {
+          const id = n.slice(0, -7);
+          let r; try { r = open1(path(id, done)); } catch (e) { unreadable = true; warn(`continuation ${id}: ${e.message}`); continue; }
+          if (!r) continue;
+          if (old(r) && isFinal(r)) { rmSync(path(id, done), { force: true }); reports += 1; }
+          else held.add(r.grant);
+        }
+        // A report that won't open might name any grant: keep them all until it does (or is removed).
+        let setAside = false; try { setAside = readdirSync(badDir).length > 0; } catch { /* none */ }
+        if (unreadable || setAside) { if (reports) { syncDir(dir); syncDir(doneDir); } return { reports, grants: 0 }; }
+        for (const n of names.filter((n) => /^grant-[0-9a-f]{64}\.sealed$/.test(n))) {
+          const id = n.slice(0, -7);
+          if (held.has(id)) continue;
+          let g; try { g = read(id); } catch (e) { warn(`continuation ${id}: ${e.message}`); continue; }
+          if (old(g)) { rmSync(path(id), { force: true }); grants += 1; }
+        }
+        if (reports || grants) { syncDir(dir); syncDir(doneDir); }
+        return { reports, grants };
+      });
     },
   };
 }
