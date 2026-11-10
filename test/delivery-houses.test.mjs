@@ -1,3 +1,4 @@
+import { setModelChoice } from '../src/models.mjs';
 // Bodies in the agent's own house, end to end (agent-runtime.md section 5, bridges.md "Bodies before the one service"):
 // `loom-runtime deliver` (the offer's argv) asks for the agent's warm house, placed on a box its owner owns with the
 // harness logged in; the house's body host (`loom-runtime body-host`, its task) wakes the body with the house's own
@@ -108,6 +109,7 @@ test('a delivered body is a session in its agent\'s own house: placed, woken by 
   env.FAKE_SEND = S;
   // Art's house is how the owner set it; the box isn't logged in to Claude yet.
   setAgent(env, { now: () => new Date() }, { agent: 'art', repo: 'https://example.com/art.git' });
+  setModelChoice(env, { agent: 'art', harness: 'claude' });
   const local = () => Object.keys(load(env).boxes).find((k) => load(env).boxes[k].local);
   try {
     const msg = (id, place, text) => JSON.stringify({ source: 'slack', id, agent: 'art', venue: 'slack', place, label: 'Loren (DM)', from: { kind: 'person', slug: 'loren' }, kind: 'message', at: new Date().toISOString(), text });
@@ -346,6 +348,8 @@ test('a house is who its token says: one that names another house is refused, an
   env.LOOM_RUNTIME_SCORECARDS = 'off';
   setModels(env, { list: [{ id: 'opus', harness: 'claude', family: 'anthropic' }], agent: 'art', prefer: ['opus'] });
   setModels(env, { agent: 'mark', prefer: ['opus'] });
+  setModelChoice(env, { agent: 'art', harness: 'claude' });
+  setModelChoice(env, { agent: 'mark', harness: 'claude' });
   const o = { runner: () => hr, accounts: staticAccounts({ accounts: [{ name: 'max', provider: 'anthropic', harness: 'claude', kind: 'login', agents: ['art', 'mark', 'pip'], credentials: [{ kind: 'login', status: 'valid' }], usage: {} }] }) };
   const artStart = startBody(env, { agent: 'art', venue: 'slack', brief: 'hi art' }, o);
   await until(() => load(env).houses['h-1']);

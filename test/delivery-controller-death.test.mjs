@@ -8,7 +8,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { api, setAgent } from '../src/control.mjs';
 import { load, update } from '../src/state.mjs';
-import { setModels } from '../src/models.mjs';
+import { setModels, setModelChoice } from '../src/models.mjs';
 import { loadConv } from '../src/delivery.mjs';
 import { readBody } from '../src/bodies.mjs';
 import { readHouseLaunch } from '../src/house-launch-journal.mjs';
@@ -60,6 +60,7 @@ for(const boundary of ['reserved-before-publication','before-house-receipt','aft
   const server=await serverFor(env,boundary==='before-house-receipt');env.LOOM_RUNTIME_LOOM_URL=server.url;
   setAgent(env,{now:()=>new Date()},{agent:'art',repo:'https://example.com/art.git'});
   setModels(env,{list:[{id:harness==='claude'?'opus':'gpt-5.5',harness,family:harness==='claude'?'anthropic':'openai'}]});
+  setModelChoice(env,{agent:'art',harness});
   update(env,s=>{const box=Object.values(s.boxes).find(b=>b.local);box.harnesses={[harness]:{loggedIn:true}};});
   mkdirSync(join(house,'work'),{recursive:true});writeFileSync(join(house,'token'),'fixture-house-token\n');
   const houseEnv={PATH:process.env.PATH,HOME:house,LOOM_URL:server.url,LOOM_TOKEN_FILE:join(house,'token'),HOUSE_ID:'h-1',HOUSE_AGENT:'art',FAKE_HARNESS:house,

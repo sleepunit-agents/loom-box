@@ -463,13 +463,13 @@ test('an agent\'s work runs only on its owner\'s boxes: member B\'s agent never 
   ok(call(box('one'), 'poll', { harnesses: { claude: { installed: true, loggedIn: true, plan: 'max', account: 'claude-0123456789' } } }));
   const accounts = stateAccounts(env, { now: () => Date.parse('2026-10-25T03:00:00Z') });
   const models = { ...env, LOOM_RUNTIME_SCORECARDS: 'off' };
-  assert.equal((await resolveFor(models, { agent: 'art', venue: 'wake', accounts })).harness, 'claude');
-  await assert.rejects(resolveFor(models, { agent: 'pond-bot', venue: 'wake', accounts }), (e) => e.status === 409 && /no box of pond-bot's owner is logged in to claude/.test(e.message));
+  assert.equal((await resolveFor(models, { agent: 'art', venue: 'wake', accounts, modelNeed: 'coordinator: exercise owner account isolation' })).harness, 'claude');
+  await assert.rejects(resolveFor(models, { agent: 'pond-bot', venue: 'wake', accounts, modelNeed: 'coordinator: exercise owner account isolation' }), (e) => e.status === 409 && /no box of pond-bot's owner is logged in to claude/.test(e.message));
   // Lent by name, jonathan's box takes pond-bot's work, but never on jonathan's login: nothing is offered for it,
   // as the claim won't mount it (one rule for both: owners.mjs, mayUseLogin).
   ok(call(owner, 'box-lend', { name: 'one', agents: 'pond-bot' }));
   assert.equal(ok(call(owner, 'up', { agent: 'pond-bot', box: 'one', task: 't' })).box, 'one');
-  await assert.rejects(resolveFor(models, { agent: 'pond-bot', venue: 'wake', accounts }), (e) => e.status === 409);
+  await assert.rejects(resolveFor(models, { agent: 'pond-bot', venue: 'wake', accounts, modelNeed: 'coordinator: exercise owner account isolation' }), (e) => e.status === 409);
   ok(call(owner, 'box-lend', { name: 'one', agents: '' }));
   assert.equal(call(owner, 'up', { agent: 'pond-bot', box: 'one', task: 't' }).status, 403);
 });

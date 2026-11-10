@@ -6,7 +6,7 @@ import { continuationCall, deliver, handOverWake, loadConv, ownerConversationCon
 import { HouseRunner } from '../src/houserunner.mjs';
 import { readHouseLaunch } from '../src/house-launch-journal.mjs';
 import { load } from '../src/state.mjs';
-import { setModels } from '../src/models.mjs';
+import { setModels, setModelChoice } from '../src/models.mjs';
 import { hostPath, cvOf, hasAge, houseWorld, world } from './delivery-world.mjs';
 const wait = async fn => { const end = Date.now() + 5000; while (!fn()) { if (Date.now() > end) throw Error('continuation native fixture timed out'); await new Promise(r => setTimeout(r, 10)); } };
 
@@ -14,11 +14,13 @@ for (const harness of ['claude', 'codex']) for (const mode of ['lost-receipt', '
   test(`${harness}: continuation through completed native admission: ${mode}`, { skip: !hasAge }, async () => {
     const w = world(), h = houseWorld({ harness });
     setModels(h.env, { list: [{ id: 'opus', harness: 'claude', family: 'anthropic' }], agent: 'art', prefer: ['opus'] });
+    setModelChoice(h.env, { agent: 'art', harness: 'claude' });
     const source = await deliver(h.env, w.msg('native-source', 'owner', { source: 'loom', venue: 'loom', from: { kind: 'person', slug: 'jonathan' } }), { ...w.o, sealer: h.sealer });
     const sc = loadConv(h.env, source.conversation);
     const grant = continuationCall(h.env, { action: 'issue', conversation: sc.conversation, key: w.runner.envs[sc.body.split(':')[1]].LOOM_BODY_KEY, session: w.runner.slotOf({ id: sc.body.split(':')[1] }).session }, { ...w.o, sealer: h.sealer });
     const model = harness === 'claude' ? 'opus' : 'gpt';
     setModels(h.env, { list: [{ id: model, harness, family: harness === 'claude' ? 'anthropic' : 'openai' }], agent: 'art', prefer: [model] });
+    setModelChoice(h.env, { agent: 'art', harness });
     const firing = w.msg('wake:w-abcdef', 'continue', { source: 'clock', venue: 'wake', id: 'w-abcdef', kind: 'wake', from: { kind: 'schedule' }, continuation: { handle: grant.handle, expiresAt: grant.expiresAt, wake: 'w-abcdef' } });
     handOverWake(h.env, { agent: 'art', place: firing.place, id: firing.id, for: 'owner' });
     const prepare = h.hr.prepareLaunch.bind(h.hr), observe = h.hr.waitPreparedLaunch.bind(h.hr);

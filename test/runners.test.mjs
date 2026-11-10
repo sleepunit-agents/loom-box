@@ -476,7 +476,7 @@ test('loom-runtime body start: the CLI a source calls, end to end on a stand-in 
     LOOM_RUNTIME_CLAUDE: join(here, 'fake-claude.mjs'), LOOM_RUNTIME_CLAUDE_JOBS: join(h.D, 'jobs'), LOOM_RUNTIME_ACCOUNTS: 'none', LOOM_RUNTIME_SCORECARDS: 'off' };
   mkdirSync(join(h.D, 'work'));
   const cli = (args, input) => spawnSync(process.execPath, [join(here, '..', 'src', 'cli.mjs'), ...args], { env, input, encoding: 'utf-8', cwd: join(h.D, 'work') });
-  const r = cli(['body', 'start', '--agent', 'art', '--venue', 'wake', '--prefer', 'claude-sonnet-5', '--brief', '-', '--json'], 'run the knowledge lane\nnow');
+  const r = cli(['body', 'start', '--agent', 'art', '--venue', 'wake', '--prefer', 'claude-sonnet-5', '--model-need', 'coordinator: test Claude runner integration', '--brief', '-', '--json'], 'run the knowledge lane\nnow');
   assert.equal(r.status, 0, r.stderr);
   const b = JSON.parse(r.stdout);
   assert.deepEqual([b.agent, b.venue, b.kind, b.model, b.harness, b.family], ['art', 'wake', 'scheduled', 'claude-sonnet-5', 'claude', 'anthropic']);
@@ -485,7 +485,7 @@ test('loom-runtime body start: the CLI a source calls, end to end on a stand-in 
   const fed = cli(['body', 'feed', b.body, '--text', 'x'], '');
   assert.equal(fed.status, 3, 'not fed: no inbox dir');
   assert.equal(cli(['body', 'end', b.body], '').status, 0);
-  assert.equal(cli(['models', 'resolve', '--agent', 'art', '--venue', 'relay'], '').stdout.split('\n')[0], 'claude-opus-5-5 (claude, anthropic)');
+  assert.equal(cli(['models', 'resolve', '--agent', 'art', '--venue', 'relay'], '').stdout.split('\n')[0], 'gpt-6.1-sol (codex, openai)');
   assert.match(cli(['body', 'start', '--agent', 'art', '--venue', 'wake', '--brief', ''], '').stderr, /^loom runtime: a body needs a brief/);
 });
 
