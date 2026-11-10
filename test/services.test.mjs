@@ -280,9 +280,10 @@ test('a service its house file doesn\'t name stays down, and only the owner brin
   const p = ok(call(box('one'), 'poll'));
   const h = p.start.find((x) => x.service === 'ghost');
   ok(call(box('one'), 'claim', { id: h.id }));
-  ok(call(box('one'), 'report', { id: h.id, state: 'failed', log: 'the box couldn\'t start it: the house file has no service ghost\nbuild output' }));
+  ok(call(box('one'), 'report', { id: h.id, state: 'failed', log: `the box couldn't start it: the house file has no service ghost\n${'build output\n'.repeat(400)}` }));
   const v = ok(call(owner, 'list')).services.find((x) => x.name === 'ghost' || x.service === 'art/ghost');
   assert.equal(v.want, 'down', 'no crash loop');
+  assert.equal(v.unnamed, true, 'the owner sees why');
   assert.equal(live().filter((x) => x.service === 'ghost').length, 0);
   const r = call(mine, 'service-up', { name: 'ghost' });
   assert.equal(r.status, 403);

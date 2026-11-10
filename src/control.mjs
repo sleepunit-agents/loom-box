@@ -657,7 +657,7 @@ export function list(env, caller) {
   const primary = caller.kind === 'agent' ? primaryOf(s, caller.agent, env) : undefined;
   const services = Object.entries(s.services ?? {})
     .filter(([, v]) => sees(caller, v.agent))
-    .map(([key, v]) => ({ service: key, agent: v.agent, name: v.name, box: v.box, want: v.want, moveTo: v.moveTo ?? null, house: v.house, state: s.houses[v.house]?.state ?? null, restarts: v.restarts ?? 0, stateSaved: s.serviceState?.[key]?.at ?? null }));
+    .map(([key, v]) => ({ service: key, agent: v.agent, name: v.name, box: v.box, want: v.want, moveTo: v.moveTo ?? null, house: v.house, state: s.houses[v.house]?.state ?? null, restarts: v.restarts ?? 0, ...(v.unnamed ? { unnamed: true } : {}), stateSaved: s.serviceState?.[key]?.at ?? null }));
   const sessions = Object.entries(s.remotes ?? {}).filter(([a]) => sees(caller, a))
     .map(([a, r]) => remoteView(a, r));
   return { boxes, houses, services, remotes: sessions, ...(primary ? { primary } : {}) };
@@ -1055,7 +1055,11 @@ export function report(env, effects, caller, { id, state, exit, log, build }) {
     h.updated = now(effects);
     if (state === 'running') h.started ??= h.updated;
     if (Number.isInteger(exit)) h.exit = exit;
-    if (typeof log === 'string') h.log = log.slice(-MAX_LOG);
+    // The box's own refusal line (BOX_REFUSED…) is kept whole at the head, so a long tail never cuts it (t-2132).
+    if (typeof log === 'string') {
+      const first = log.split('\n')[0];
+      h.log = log.length > MAX_LOG && first.startsWith(BOX_REFUSED) && first.length < 300 ? `${first}\n${log.slice(-(MAX_LOG - first.length - 1))}` : log.slice(-MAX_LOG);
+    }
     if (TERMINAL.has(h.state)) delete h.collection;
     if (TERMINAL.has(h.state) && h.tokenLabel) revokeOrQueue(s, effects, h.tokenLabel);
     if (TERMINAL.has(h.state) && h.service) serviceHouseEnded(s, h, effects);
