@@ -194,7 +194,9 @@ export function continuationOutbox({ dir, sealer, now = Date.now, lifetimeMs = n
           if (r.next > time) return null;
           const source = g && current(g.source.conversation), child = current(r.child.conversation);
           if (!g || !unchanged(g.source, source) || !unchanged(r.child, child) || child.run !== r.child.run) {
-            r.state = r.attempts > 0 ? 'indeterminate' : 'failed'; r.reason = 'continuation authority was reset or changed'; save(id, r); return null;
+            // Not every tick: an unchanged reset stays unchanged. Checked again after the backoff.
+            r.state = r.attempts > 0 ? 'indeterminate' : 'failed'; r.reason = 'continuation authority was reset or changed';
+            r.next = time + 3600000; save(id, r); return null;
           }
           const reconciliation = recovering || r.state === 'indeterminate';
           if (reconciliation && !reconcile) return null;
@@ -215,7 +217,8 @@ export function continuationOutbox({ dir, sealer, now = Date.now, lifetimeMs = n
         } // A crash/timeout after acceptance retries the same ref.
         locked(() => {
           const r = read(id);
-          if (!['pending', 'indeterminate', 'expired'].includes(r.state)) return;
+          // Another tick resolved (and perhaps collected) it while this answer was in flight.
+          if (!r || !['pending', 'indeterminate', 'expired'].includes(r.state)) return;
           if (result?.ok && (row.reconciliation ? result.state === 'delivered' && typeof result.id === 'string' && result.id.length > 0 : result.posted === true)) { r.state = 'delivered'; r.posted = true; delete r.reason; }
           else if (row.reconciliation && result?.ok && result.state === 'not-accepted') { r.state = 'expired'; r.reason = 'core fenced acceptance and found no accepted report'; }
           // Core's thread tombstone refuses every later post: nothing can land there again.

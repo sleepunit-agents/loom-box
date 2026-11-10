@@ -3212,14 +3212,23 @@ function holderProblem(env, d, c, { key, session }, does = 'speaks in it', calle
 /**
  * How long a continuation may report, from its issue (t-2004): LOOM_RUNTIME_CONTINUATION_DAYS, 1-30, default 7. One
  * absolute deadline is sealed at issue and carried to the clock and core; nothing renews it. Its records are collected
- * LOOM_RUNTIME_CONTINUATION_KEEP_DAYS (0-90, default 7) after that deadline, once their outcome is final.
+ * LOOM_RUNTIME_CONTINUATION_KEEP_DAYS (1-90, default 7) after that deadline, once their outcome is final.
  */
-function continuationPolicy(env, o = {}) {
+// The runtime service's own settings, written by its tick (policyFile): a body's local CLI runs continuationCall in its
+// own process and environment, and a body never chooses its own deadline, so it reads the service's, not its env's.
+const policyFile = (env) => join(deliveryDir(env), 'continuation-policy.json');
+function envPolicy(env) {
   const days = (name, dflt, lo, hi) => { const n = env[name] === undefined || env[name] === '' ? dflt : Number(env[name]); return Number.isInteger(n) && n >= lo && n <= hi ? n : null; };
-  const life = days('LOOM_RUNTIME_CONTINUATION_DAYS', 7, 1, 30), keep = days('LOOM_RUNTIME_CONTINUATION_KEEP_DAYS', 7, 0, 90);
-  return { lifetimeMs: o.continuationLifetimeMs ?? (life === null ? null : life * DAY_MS), retainMs: o.continuationRetainMs ?? (keep ?? 7) * DAY_MS };
+  return { days: days('LOOM_RUNTIME_CONTINUATION_DAYS', 7, 1, 30), keepDays: days('LOOM_RUNTIME_CONTINUATION_KEEP_DAYS', 7, 1, 90) ?? 7 };
 }
-const continuationsOf = (env, d, o) => continuationOutbox({ dir: join(deliveryDir(env), 'continuations'), sealer: d.sealer, now: () => d.now().getTime(), ...continuationPolicy(env, o) });
+function continuationPolicy(env, o = {}, own = false) {
+  let p = own ? envPolicy(env) : null;
+  if (!p) { try { p = JSON.parse(readFileSync(policyFile(env), 'utf8')); } catch { p = envPolicy(env); } }
+  const life = Number.isInteger(p?.days) && p.days >= 1 && p.days <= 30 ? p.days : null;
+  const keep = Number.isInteger(p?.keepDays) && p.keepDays >= 1 && p.keepDays <= 90 ? p.keepDays : 7;
+  return { lifetimeMs: o.continuationLifetimeMs ?? (life === null ? null : life * DAY_MS), retainMs: o.continuationRetainMs ?? keep * DAY_MS };
+}
+const continuationsOf = (env, d, o, own = false) => continuationOutbox({ dir: join(deliveryDir(env), 'continuations'), sealer: d.sealer, now: () => d.now().getTime(), ...continuationPolicy(env, o, own) });
 
 // Runtime-owned snapshots only. Neither a body nor the clock supplies these fields.
 export function continuationSnapshot(env, conversation) {
@@ -3234,7 +3243,13 @@ export function continuationSnapshot(env, conversation) {
 // the registry afresh, but never rebuild payload fields from a newer body/run.
 export async function drainContinuations(env, o = {}) {
   const d = depsOf(env, o);
-  const outbox = continuationsOf(env, d, o);
+  // The service's tick: its settings are the policy (above), kept where a body's own process reads them.
+  try {
+    const want = JSON.stringify(envPolicy(env));
+    let have = null; try { have = readFileSync(policyFile(env), 'utf8'); } catch { /* none yet */ }
+    if (have !== want) { const tmp = `${policyFile(env)}.${process.pid}.tmp`; writeFileSync(tmp, want, { mode: 0o600 }); renameSync(tmp, policyFile(env)); }
+  } catch { /* the env's policy still applies to this tick */ }
+  const outbox = continuationsOf(env, d, o, true);
   await outbox.drain({ current: (cv) => continuationSnapshot(env, cv), reconcile: async (p) => {
     const venue = (await d.venues())?.[p.target.venue];
     if (!coreAdapted(venue)) return { permanent: true, reason: 'continuation destination has no core reconciliation contract' };

@@ -377,3 +377,25 @@ test("the bound child's own conversation may start again on the same firing, wit
   assert.throws(() => w.out.bind(w.handle, firing, w.source, next), /already bound/);
   assert.throws(() => w.out.enqueue(w.handle, next, w.source, { id: 'x', text: 'y' }), /bound/);
 });
+
+test('an answer arriving after another tick resolved and collected the row is ignored, not a crash', async (t) => {
+  const w = world(t); bind(w); queue(w);
+  const { unlinkSync } = await import('node:fs');
+  await w.out.drain({ current: w.current, post: async () => {
+    for (const n of readdirSync(w.dir).filter((x) => x.startsWith('report-'))) unlinkSync(join(w.dir, n));
+    return { ok: true, posted: true };
+  } });
+  assert.equal(w.out.status(w.handle, w.child, 'final'), null);
+});
+
+test('a report whose authority was reset is rechecked after a backoff, not resealed every tick', async (t) => {
+  const w = world(t); bind(w); queue(w);
+  await w.out.drain({ current: w.current, post: async () => { throw new Error('receipt lost'); } });
+  w.source.reset = 1; w.advance();
+  await w.reload().drain({ current: w.current, post: () => assert.fail('reset post') });
+  assert.equal(w.out.status(w.handle, w.child, 'final').state, 'indeterminate');
+  const file = readdirSync(w.dir).find((n) => n.startsWith('report-'));
+  const before = readFileSync(join(w.dir, file));
+  await w.reload().drain({ current: w.current, post: () => assert.fail('reset post') });
+  assert.deepEqual(readFileSync(join(w.dir, file)), before);
+});

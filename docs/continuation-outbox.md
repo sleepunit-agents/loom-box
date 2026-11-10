@@ -1,9 +1,7 @@
-> Staged cutoff work: production issuance currently fails closed until a trusted
-> lifetime policy is wired after review. Version2 expiry/highwater states are tested
-> internally; core deadline enforcement and fenced reconciliation, clock inspection,
-> and queued/native admission checks remain shipping gates. No collection is enabled.
+> Shipped 2026-11-10 (t-2004): issuance on with a 7-day default lifetime, finished records collected 7 days after
+> their deadline. See "Lifetime policy and collection" at the end. Sections between are the build's dated checkpoints.
 
-# Continuation report delivery (draft integration)
+# Continuation report delivery
 
 The runtime issues an opaque capability only after the current holder proves its
 agent, key, session and house through the existing holderProblem boundary. The
@@ -176,11 +174,11 @@ issuance remains refused and no retention collector is enabled.
 
 ### Lifetime policy and collection (2026-11-10)
 
-Production issuance is on. `LOOM_RUNTIME_CONTINUATION_DAYS` (an integer 1-30, default 7) is the lifetime from issue; the
-absolute deadline it gives is sealed in the grant, handed to the clock at scheduling, and committed in core's payload
+Production issuance is on. The runtime service's `LOOM_RUNTIME_CONTINUATION_DAYS` (an integer 1-30, default 7) is the lifetime from issue; the
+absolute deadline it gives is sealed (the service's tick writes its settings to `continuation-policy.json`, which a body's local CLI reads, so a body's own environment never chooses its deadline) in the grant, handed to the clock at scheduling, and committed in core's payload
 hash. Nothing renews it. An out-of-range or non-integer value refuses issuance (fail closed), as no policy did before.
 
-The tick collects after the shared deadline plus `LOOM_RUNTIME_CONTINUATION_KEEP_DAYS` (0-90, default 7):
+The tick collects after the shared deadline plus `LOOM_RUNTIME_CONTINUATION_KEEP_DAYS` (1-90, default 7):
 
 - a report whose outcome is final (`delivered`, `expired`, `failed`, `withdrawn`) is removed;
 - a grant is removed once no report row names it;
