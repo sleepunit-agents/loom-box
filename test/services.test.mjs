@@ -299,6 +299,8 @@ test('a running service that prints the box\'s words is a crash, never taken dow
   assert.equal(svc().want, 'up');
   const v = ok(call(owner, 'list')).services[0];
   assert.equal(v.unnamed, undefined);
+});
+
 test('a house sees its own house whole and the agent\'s others only as there, never their tasks (t-2135)', () => {
   update(env, (s) => {
     const base = { agent: 'art', box: Object.keys(s.boxes)[0], needs: [], state: 'running', created: new Date(clock).toISOString(), updated: new Date(clock).toISOString() };
