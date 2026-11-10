@@ -233,12 +233,24 @@ test('through the body API, a caller that proves nothing is refused before anyth
   assert.equal(w.calls.length, 0);
 });
 
-test('a long line is redacted in pieces, never emptied', async () => {
+test('a long line is redacted in pieces, never emptied, and never cut inside a token or after a secret\'s name', async () => {
   const { boundOutput } = await import('../src/hostverbs.mjs');
-  const line = JSON.stringify({ a: 'x'.repeat(2900), token: 'ghp_abcdefghijklmnopqrstuvwxyz0123456789' });
-  const r = boundOutput(line);
-  assert.ok(r.output.length > 2500);
-  assert.doesNotMatch(r.output, /ghp_abcdefghij/);
+  const words = 'loom http started on port 8787 ok '.repeat(80);
+  const r = boundOutput(words + 'end');
+  assert.ok(r.output.length > 2500, 'kept');
+  // A token straddling where a plain cut at 1500 would fall.
+  const tok = 'ghp_abcdefghijklmnopqrstuvwxyz0123456789';
+  for (let at = 1480; at <= 1500; at += 4) {
+    const line = 'x '.repeat(at / 2) + tok + ' tail'.repeat(400);
+    assert.doesNotMatch(boundOutput(line).output, /abcdefghijklmnop/, `token at ${at}`);
+  }
+  // A secret's name just before a cut: its value stays with it.
+  const pw = 'y '.repeat(745) + 'password: S3cretValue99 ' + ' more'.repeat(400);
+  assert.doesNotMatch(boundOutput(pw).output, /S3cretValue99/);
+  // One token-like run longer than a piece: out whole.
+  const long = 'k'.repeat(1700) + ' after';
+  assert.doesNotMatch(boundOutput(long).output, /kkkk/);
+  assert.match(boundOutput(long).output, /after$/);
 });
 
 test('art-chain-check runs a script a push can change, so it asks', async () => {
