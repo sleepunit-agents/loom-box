@@ -3,6 +3,7 @@ import { checkLoginExpiry, loginExpiryAsks, loginExpiry } from './login-expiry.m
 // boxes, what each has and may host, the houses asked for, and the owner's
 // controls. Data only; loom renders it. Every action is the owner's (the page
 // is), and a box's credential is shown once, in the message after adding it.
+import { writeOffApproved } from './dark-box.mjs';
 import { principalOf } from './principal.mjs';
 import { approvalsFake, approvalsRun, approvalsWhy } from './approvals-call.mjs';
 import { appendFileSync, existsSync, readFileSync, statfsSync } from 'node:fs';
@@ -113,7 +114,7 @@ function spendApproval(env, aid, kind, target, agent, { onBehalf } = {}) {
   const fx = approvalsFake(env);
   if (fx) return fx.spend(aid, target, agent, kind);
   // A reset is spent as the runtime filed it (runtimeAs); a grant as the agent, as t-1970 pinned.
-  const as = kind === 'principal-reset' ? runtimeAs(agent) : JSON.stringify({ kind: 'agent', agent });
+  const as = kind === 'principal-reset' || kind === 'box-write-off' ? runtimeAs(agent) : JSON.stringify({ kind: 'agent', agent });
   const r = approvalsRun(env, ['use', aid, '--kind', kind, '--target', target, '--as', as, ...(onBehalf ? ['--on-behalf', onBehalf] : [])]);
   // Spent is exactly what approvals says when it spent one (`<id>: used`), never just an exit 0 from something else.
   if (!r.error && r.status === 0 && (r.stdout || '').trim() === `${aid}: used`) return '';
@@ -1575,6 +1576,7 @@ export function act(env, effects, { action, fields: raw = {}, caller: c }, publi
         return { ok: true, message: `${who(r.agent)}'s houses ${fields.on === 'on' ? 'may' : 'may not'} have ${what} from their next start.`, page: '' };
       }
       case 'reset-approved': return resetApproved(env, c, fields);
+      case 'writeoff-approved': return writeOffApproved(env, effects, c, fields, spendApproval);
       case 'gates-allow': case 'gates-deny': case 'gates-merge': case 'grants-set': case 'relay-set': case 'relay-pair': case 'grant-approved': {
         const st = permsStore(env);
         if (!st) return { ok: false, message: 'The runtime reads its permissions from loom\'s store when loom runs it.' };
