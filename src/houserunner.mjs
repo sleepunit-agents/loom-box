@@ -37,7 +37,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { listConvs } from './delivery.mjs';
-import { boxUp, outdatedHouse, up } from './control.mjs';
+import { boxUp, outdatedHouse, preferenceOf, up } from './control.mjs';
 import { pieceName } from './piece.mjs';
 import { bodyBox } from './placement.mjs';
 import { isParts } from './briefs.mjs';
@@ -854,7 +854,8 @@ export class HouseRunner {
     const where = s.houses?.[house]?.box;
     if (!where || boxUp(s.boxes?.[where], nowMs)) return false;
     const at = bodyBox(s, agent, this.harness, this.env, nowMs);
-    if (!at.box || at.box === where || !boxUp(s.boxes?.[at.box], nowMs)) return false;
+    // Only to a box the owner listed for it: an agent with one primary keeps waiting for that box, as it always did.
+    if (!at.box || at.box === where || !boxUp(s.boxes?.[at.box], nowMs) || !preferenceOf(s, agent, this.env).includes(at.box)) return false;
     return this.drain(agent, house, seat, `its box ${s.boxes?.[where]?.name ?? where} went quiet; new bodies go to ${s.boxes?.[at.box]?.name ?? at.box}`);
   }
 

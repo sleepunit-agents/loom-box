@@ -135,3 +135,23 @@ test('the agent page shows its boxes in order and where it runs; the owner saves
   assert.match(r.message, /art runs on wunder, then one: the first that's up/);
   assert.deepEqual(load(env).primaries.art, [idOf('wunder'), idOf('one')]);
 });
+
+test('an agent with one primary keeps its house when that box goes quiet: no drain to a box it never listed', async () => {
+  mkdirSync(env.LOOM_BOX_DATA, { recursive: true });
+  ok(call(owner, 'set-primary', { agent: 'art', box: 'one' }));
+  update(env, (s) => { for (const b of Object.values(s.boxes)) b.harnesses = { claude: { loggedIn: true } }; });
+  seen('one'); seen('wunder');
+  const asked = [];
+  const upFn = (e, f, who, b) => {
+    const id = `h-${asked.length + 1}`;
+    asked.push(b.box);
+    update(env, (s) => { s.houses[id] = { id, agent: 'art', box: b.box, state: 'running', task: b.task, kind: 'body-host', seat: 'owner' }; });
+    return { id };
+  };
+  const hr = new HouseRunner(env, 'claude', { poll: 5, warmMs: 60, up: upFn, now: () => new Date(clock) });
+  await assert.rejects(hr.warm('art'), /didn't start/);
+  seen('one', PLACE_UP_MS + 1000);
+  await assert.rejects(hr.warm('art'), /didn't start/);
+  assert.deepEqual(asked, [idOf('one')], 'wunder is up, but art never listed it');
+  assert.equal(load(env).houses['h-1'].draining, undefined);
+});
