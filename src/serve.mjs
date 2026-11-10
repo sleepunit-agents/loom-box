@@ -9,7 +9,8 @@
 //
 // Only SERVED paths: every other module here may keep what one process saw (delivery's store client, its gates) on
 // the understanding that a process is one call. A path joins SERVED only once what it reaches keeps nothing of one
-// caller for another; anything else is refused here even if core asks (exit 2), and core asks it the one-shot way.
+// caller for another; anything else is refused here even if core asks (exit 2: the call fails, it never runs here).
+// A path core serves must be in SERVED and in the loom block's api_serve alike (a test keeps the two the same).
 import { createInterface } from 'node:readline';
 import { api } from './control.mjs';
 import { realEffects } from './effects.mjs';
