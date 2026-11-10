@@ -28,11 +28,11 @@ export function refuseOneShot(env, caller, { harness } = {}) {
   return { ok: true };
 }
 
-export async function chooseOneShot(env, caller, { prefer = [], avoid = [] } = {}) {
+export async function chooseOneShot(env, caller, { prefer = [], avoid = [], modelNeed } = {}) {
   const { list } = oneShotAccounts(env, caller);
   if (!Array.isArray(prefer) || prefer.some(x => typeof x !== 'string') || prefer.length > 32) fail('prefer is a list of models');
   if (!Array.isArray(avoid) || avoid.some(x => !['claude', 'codex'].includes(x))) fail('avoid is a list of harnesses');
-  const pick = await resolveFor(env, { agent: caller.agent, venueKind: 'agent', prefer, avoid,
+  const pick = await resolveFor(env, { agent: caller.agent, venueKind: 'agent', prefer, avoid, modelNeed,
     accounts: { list: () => list }, gate: shortCallGate(env, 'agent') });
   const { accountKey: _private, ...out } = pick;
   return out;
@@ -45,12 +45,12 @@ export function oneShotArgs(harness, model, cwd) {
   fail('unsupported one-shot harness');
 }
 
-export async function runOneShot(env, { input, cwd, prefer = [], timeout = 600_000 }, { call, run = runAsync, warn = s => process.stderr.write(`${s}\n`) } = {}) {
+export async function runOneShot(env, { input, cwd, prefer = [], modelNeed, timeout = 600_000 }, { call, run = runAsync, warn = s => process.stderr.write(`${s}\n`) } = {}) {
   if (!env.HOUSE_ID || !call) fail('one-shot needs a runtime house and its piece connection');
   if (!prefer.length && env.LOOM_BODY_MODEL) prefer = [env.LOOM_BODY_MODEL];
   const avoid = [];
   for (let attempt = 0; attempt < 2; attempt++) {
-    const pick = await call('oneshot-choice', { prefer, avoid });
+    const pick = await call('oneshot-choice', { prefer, avoid, ...(modelNeed ? { modelNeed } : {}) });
     if (pick.error || pick.ok === false) fail(pick.error || pick.reason);
     if (!['claude', 'codex'].includes(pick.harness) || !/^[A-Za-z0-9][A-Za-z0-9._:/\[\]-]{0,79}$/.test(pick.model ?? '')) fail('invalid runtime choice');
     const dir = mkdtempSync(join(tmpdir(), 'loom-oneshot-'));

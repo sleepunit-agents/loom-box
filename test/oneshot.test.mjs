@@ -25,7 +25,7 @@ test('one-shot uses agent preference, headroom fallback, and only mounted accoun
   const env = setup();
   assert.equal((await chooseOneShot(env, caller)).model, 'codex');
   update(env, s => { s.boxes.box.usage.codex.windows['7d'] = .96; });
-  assert.equal((await chooseOneShot(env, caller)).model, 'opus');
+  assert.equal((await chooseOneShot(env, caller, { modelNeed: 'coordinator: test quota fallback' })).model, 'opus');
   update(env, s => { s.houses.h1.logins = ['codex']; });
   await assert.rejects(chooseOneShot(env, caller), /no model|kept for conversations/);
 });
@@ -36,7 +36,7 @@ test('another house or agent cannot select or hold accounts', async () => {
   assert.throws(() => refuseOneShot(env, { ...caller, house: 'gone' }, { harness: 'claude' }), /no such house/);
   const pick = await chooseOneShot(env, caller); assert.equal(pick.accountKey, undefined);
   refuseOneShot(env, caller, { harness: 'codex' });
-  assert.equal((await chooseOneShot(env, caller)).model, 'opus');
+  assert.equal((await chooseOneShot(env, caller, { modelNeed: 'coordinator: test quota fallback' })).model, 'opus');
 });
 test('runtime reports usage before returning answer, and retries quota refusal only once', async () => {
   const env = { ...setup(), ANTHROPIC_API_KEY: 'private-key' }, calls = [], runs = [];
@@ -87,7 +87,7 @@ test('quota boundary is 97 percent when worker reserve is in shadow',async()=>{
  const env=setup();update(env,s=>{s.allocator.mode='shadow';s.boxes.box.usage.codex.windows['7d']=.969;});
  assert.equal((await chooseOneShot(env,caller)).model,'codex');
  update(env,s=>{s.boxes.box.usage.codex.windows['7d']=.97;});
- assert.equal((await chooseOneShot(env,caller)).model,'opus');
+ assert.equal((await chooseOneShot(env,caller,{modelNeed:'coordinator: test quota fallback'})).model,'opus');
 });
 test('short calls account for pending workers and conversation forecast',()=>{
  const env=setup(),now=Date.now(),account={name:'measured',usage:{'7d':.914,checked:now/1000,reset_7d:now/1000+36000}};

@@ -33,10 +33,10 @@ test('agent choice, per-thread override and Auto inheritance retain quota and al
   assert.equal((await pick({ conversation })).harness, 'claude');
   setModelChoice(w.env, { agent: 'art', conversation, harness: 'auto' });
   assert.equal((await pick({ conversation })).harness, 'codex');
-  assert.equal((await pick({ accounts: accounts({ '5h': 1 }) })).harness, 'claude', 'quota still falls back');
+  await assert.rejects(pick({ accounts: accounts({ '5h': 1 }) }), /no model is left/, 'Codex exhaustion cannot implicitly spend Claude');
   setModels(w.env, { agent: 'art', allow: ['opus'] });
   assert.throws(() => setModelChoice(w.env, { agent: 'art', harness: 'codex' }), /no allowed/);
-  assert.equal((await pick()).harness, 'claude', 'old preference cannot widen a later restriction');
+  await assert.rejects(pick(), /no model is left|none of/, 'the default cannot widen a later restriction');
 });
 test('changing a thread choice affects its next turn and resumes its saved session when selected again', async () => {
   const w = setup();

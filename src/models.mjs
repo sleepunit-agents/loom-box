@@ -35,7 +35,9 @@ export const SCORE_DAYS = 14;
 export const MIN_GRADED = 5;
 
 /** Until the owner sets a list: the models the clock and the bridges ran on before the runtime chose. */
+export const DEFAULT_MODEL = 'gpt-6.1-sol';
 export const DEFAULT_MODELS = [
+  { id: DEFAULT_MODEL, harness: 'codex', family: 'openai' },
   { id: 'claude-opus-5-5', harness: 'claude', family: 'anthropic', window: '7d_opus' },
   { id: 'claude-opus-5', harness: 'claude', family: 'anthropic', window: '7d_opus' },
   { id: 'claude-sonnet-5', harness: 'claude', family: 'anthropic', window: '7d_sonnet' },
@@ -73,12 +75,16 @@ export function checkAgentModels(list, v) {
     if (bad) fail(`${k}: ${bad} isn't in the model list`);
     out[k] = [...new Set(v[k])];
   }
+  if (v?.default !== undefined) {
+    if (!list.some(m => m.id === v.default && m.harness === 'codex')) fail('default must name a listed Codex model');
+    out.default = v.default;
+  }
   return out;
 }
 
 /** The runtime's models: the owner's list (state.json `models`), else the defaults, and each agent's settings. */
 export function modelsOf(s) {
-  return { list: s.models?.list ?? DEFAULT_MODELS, agents: s.models?.agents ?? {} };
+  return { list: s.models?.list ?? DEFAULT_MODELS, default: s.models?.default ?? DEFAULT_MODEL, agents: s.models?.agents ?? {} };
 }
 
 export function readModels(env) { return modelsOf(load(env)); }
@@ -116,20 +122,22 @@ export function setModelChoice(env, { agent, conversation, harness }) {
 }
 
 /** The owner sets the list, an agent's settings, or both. */
-export function setModels(env, { list, agent, allow, prefer }) {
+export function setModels(env, { list, agent, allow, prefer, default: defaultModel }) {
   return update(env, (s) => {
     const cur = modelsOf(s);
     const next = list !== undefined ? checkModels(list) : cur.list;
     const agents = { ...cur.agents };
     // A list that drops a model drops it from every agent's settings too.
     for (const [a, v] of Object.entries(agents)) {
-      agents[a] = Object.fromEntries(Object.entries(v).map(([k, ids]) => [k, ids.filter((id) => next.some((m) => m.id === id))]));
+      agents[a] = Object.fromEntries(Object.entries(v).map(([k, ids]) => [k, k === 'default' ? (next.some(m => m.id === ids) ? ids : DEFAULT_MODEL) : ids.filter((id) => next.some((m) => m.id === id))]));
     }
     if (agent !== undefined) {
       if (!AGENT.test(agent)) fail('which agent');
-      agents[agent] = { ...agents[agent], ...checkAgentModels(next, { allow, prefer }) };
+      agents[agent] = { ...agents[agent], ...checkAgentModels(next, { allow, prefer, ...(defaultModel !== undefined ? { default: defaultModel } : {}) }) };
     }
-    s.models = { list: next, agents };
+    const fallback = agent === undefined ? defaultModel ?? cur.default : cur.default;
+    if (agent === undefined && defaultModel !== undefined && !next.some(m => m.id === fallback && m.harness === 'codex')) fail('default must name a listed Codex model');
+    s.models = { list: next, default: fallback, agents };
     // …and from every role; a role left with nothing eligible stays, and says so when asked for (roleOf, resolveFor).
     if (s.roles?.list?.length) {
       const before = JSON.stringify(s.roles.list);
@@ -458,11 +466,12 @@ export async function fetchScorecards(env, { kind, since, fetchImpl = fetch } = 
 //          job's at each resume (slice 4)
 //   pin    a worker job's assigned model (t-2038): that model and no other; a job is never moved by a preference,
 //          a new model or a quota reset. Out of quota, it waits (the 409 a caller treats as out of quota).
-export async function resolveFor(env, { agent, venue, venueKind: told, prefer = [], harness, conversation, avoid = [], accounts, now = new Date(), fetchImpl, role, pin, gate } = {}) {
+export async function resolveFor(env, { agent, venue, venueKind: told, prefer = [], harness, conversation, avoid = [], accounts, now = new Date(), fetchImpl, role, pin, gate, modelNeed } = {}) {
   if (!AGENT.test(agent ?? '')) fail('which agent');
   const kind = venueKind(venue, told);
   const s = load(env);
-  const { list: everything, agents } = modelsOf(s);
+  const { list: everything, agents, default: defaultModel } = modelsOf(s);
+  if (modelNeed !== undefined && (typeof modelNeed !== 'string' || !/^(authorization|privacy|coordinator):\s*\S/.test(modelNeed) || modelNeed.length > 400)) fail('modelNeed is authorization:, privacy: or coordinator: followed by the stated need (at most 400 characters)');
   let all = everything;
   const head = [];
   if (pin) {
@@ -474,11 +483,22 @@ export async function resolveFor(env, { agent, venue, venueKind: told, prefer = 
     const r = typeof role === 'object' ? role : roleOf(s, role);
     all = r.eligible.map((id) => everything.find((m) => m.id === id)).filter(Boolean);
     if (!all.length) fail(`role ${r.id} has no eligible model left in the runtime's model list`, 409);
-    prefer = [...prefer, ...r.eligible];
+    if (prefer.length || modelNeed) prefer = [...prefer, ...r.eligible];
     head.push(`role ${r.id} (catalog v${r.version}): eligible ${r.eligible.join(', ')}`);
   }
   // A resume keeps its harness: its slot is that harness's session.
+  const choice = pin ? 'auto' : modelChoiceOf(s, agent, conversation).effective;
+  // Existing assigned jobs and saved sessions keep their model. New work cannot spend Claude implicitly,
+  // through an old preference, role order, scorecard, or an exhausted Codex account.
+  const explicitClaude = Boolean(modelNeed) || choice === 'claude';
+  if (!pin && !harness && !explicitClaude) all = all.filter(m => m.harness !== 'claude');
   const list = harness ? all.filter((m) => m.harness === harness) : all;
+  const effectiveDefault = agents[agent]?.default ?? defaultModel;
+  const implicitDefault = !pin && !prefer.length && !explicitClaude;
+  if (implicitDefault) prefer = [effectiveDefault, ...all.filter(m => m.harness === 'codex').map(m => m.id)];
+  if (modelNeed) head.push(`stated model need: ${modelNeed}`);
+  if (!pin && !harness && !explicitClaude) head.push(`runtime default: ${effectiveDefault}; Claude needs an explicit authorization, privacy or coordinator reason`);
+  if (!list.length && !explicitClaude && !pin && !harness) fail('no Codex model is eligible; Claude requires an explicit stated model need', 409);
   if (!list.length) fail(`the runtime has no ${harness} model${pin || role ? ` for ${pin ? `assigned model ${pin}` : `role ${role.id ?? role}`}` : ''}`, 409);
   let listed = null;
   // `none` is a household that doesn't want quota read; off the control plane there are no box reports to read.
@@ -486,9 +506,8 @@ export async function resolveFor(env, { agent, venue, venueKind: told, prefer = 
   const since = sinceDay(now);
   const cards = await fetchScorecards(env, { kind, since, fetchImpl });
   // A pinned job has its model already: the owner's harness choice applies when a job is assigned, not after.
-  const choice = pin ? 'auto' : modelChoiceOf(s, agent, conversation).effective;
   const r = resolveModel({ agent, kind, models: list, all, settings: agents[agent] ?? {}, accounts: listed,
-    scorecards: cards.rows, prefer, since, avoid, harnessChoice: choice, now: now.getTime(), ...(gate ? { gate } : {}) });
+    scorecards: implicitDefault ? [] : cards.rows, prefer, since, avoid, harnessChoice: choice, now: now.getTime(), ...(gate ? { gate } : {}) });
   if (gate) r.why.push(`capacity: ${r.admission ?? 'admitted with the conversations\' reserve kept'}`);
   if (choice !== 'auto') r.why.unshift(`owner preference: ${choice}${conversation ? ' for this conversation' : ''}`);
   r.why.unshift(...head);

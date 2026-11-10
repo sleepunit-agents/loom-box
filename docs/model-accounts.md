@@ -357,3 +357,27 @@ Remote-control remains a Claude-only vendor interface, with no Codex substitute
 for that interface; its profile preflight uses `claude mcp list`, with no model
 call. Old shuttle runners remain compatibility paths pending bridge retirement;
 they are inventoried exceptions, not a new entry point to copy.
+
+### Default for new jobs (t-2145)
+
+`loom runtime models` (including `--json`) shows the runtime's `default` model:
+`gpt-6.1-sol`, run by Codex. Every agent inherits it. The built-in model list
+includes it, ahead of Claude. An owner can set a different listed **Codex** model
+with `models set` JSON `{ "default": "…" }`, or set one agent's default with
+`{ "agent": "art", "default": "…" }`. This is runtime state, not a prompt rule.
+Old Claude preferences and role order cannot silently select Claude for new work;
+scorecards cannot move an unspecified job off its default. Role eligibility,
+agent allow lists, available accounts and capacity gates still apply. A custom
+model list must include the desired default; when it does not, another eligible
+Codex model can run. No eligible Codex account means wait/refusal, never implicit
+Claude spending.
+
+Claude requires a stated need: `--model-need 'authorization: review the permission
+boundary'`, `privacy: …`, or `coordinator: …`, alongside `--prefer <Claude model>`.
+The field is `modelNeed` in one-shot/spawn requests. The reason is retained in
+spawn metadata and body records and included in resolver explanations. An
+explicit owner harness choice on the agent/conversation is also honored as
+coordinator direction. With an exception, normal measured account fallback is
+available. A bare `--prefer` naming Claude does not grant an exception.
+Assigned jobs and saved native sessions retain their existing model; the default
+applies when assigning new work. A running job is never silently migrated.
