@@ -401,13 +401,16 @@ function unwrapShell(c) {
  * value piped to a login, given to a secrets store, or written into a private file). Its command isn't shown, only its
  * label. Read on the command as written and on it as shown (where a private path reads PRIVATE_FILE).
  */
-const SECRET_IN = /--password-stdin\b|--with-token\b|--token-stdin\b|\bsudo\b[^|;&\n]*\s-[A-Za-z]*S\b|\bgh\s+secret\s+set\b|\bgh\s+auth\s+login\b|\b(?:vault\s+(?:kv\s+)?(?:put|write)|kubectl\s+create\s+secret|docker\s+secret\s+create|secret-tool\s+store|pass\s+(?:insert|edit)|op\s+item\s+(?:create|edit)|aws\s+secretsmanager|gcloud\s+secrets|az\s+keyvault\s+secret\s+set|security\s+add-\w+-password|htpasswd|chpasswd|passwd)\b/i;
+const SECRET_IN = /--password-stdin\b|--with-token\b|--token-stdin\b|\bsudo\b[^|;&\n]{0,200}?\s-[A-Za-z]{0,10}S\b|\bgh\s+secret\s+set\b|\bgh\s+auth\s+login\b|\b(?:vault\s+(?:kv\s+)?(?:put|write)|kubectl\s+create\s+secret|docker\s+secret\s+create|secret-tool\s+store|pass\s+(?:insert|edit)|op\s+item\s+(?:create|edit)|aws\s+secretsmanager|gcloud\s+secrets|az\s+keyvault\s+secret\s+set|security\s+add-\w+-password|htpasswd|chpasswd|passwd)\b/i;
+const CMD_MAX = 64_000;
+const WRITES_PRIVATE = new RegExp(`(?:>{1,2}|\\btee\\b)[^|;&\\n]{0,200}?${PRIVATE_FILE}`);
 const REDIRECT = /(?:>{1,2}|\btee\b(?:\s+-\w+)*)\s*(['"]?)([^\s'"|;&<>]+)\1/g;
 export function secretIn(command) {
-  const c = String(command ?? '');
+  // Read to CMD_MAX (a command past it isn't shown whole anyway); each scan bounded, so none backtracks far.
+  const c = String(command ?? '').slice(0, CMD_MAX);
   if (SECRET_IN.test(c)) return true;
   for (const m of c.matchAll(REDIRECT)) if (privateFile(m[2])) return true;
-  return new RegExp(`(?:>{1,2}|\\btee\\b)[^|;&\\n]*${PRIVATE_FILE}`).test(c);
+  return WRITES_PRIVATE.test(c);
 }
 
 /**
@@ -416,6 +419,8 @@ export function secretIn(command) {
  * secret in (secretIn). Worked out once for the process (worked).
  */
 export function commandLine(command) {
+  // Past CMD_MAX, it isn't read for a secret taken in: so it isn't shown.
+  if (String(command ?? '').length > CMD_MAX) return '';
   const c = String(command ?? '').replace(/\\\r?\n[ \t]*/g, ' ');
   if (secretIn(c)) return '';
   return worked('cmd', c, () => { const d = shownText(c.replace(SGR, ''), MAX_DETAIL); return secretIn(d) ? '' : d; });
