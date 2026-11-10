@@ -89,7 +89,7 @@ describe('test 6: relay', () => {
   test('an unpaired relay is refused without an approval, and goes once with an allowed one', async () => {
     const allowed = { 'a-0000000f': 'art->fez' };
     const { w, d, delivered, spent } = relayWorld({ allowed });
-    await assert.rejects(relay(w.env, art, { to: 'fez', say: 'hi' }, d), /doesn't pair art with fez .*approvals request --kind relay --target art->fez/);
+    await assert.rejects(relay(w.env, art, { to: 'fez', say: 'hi' }, d), /doesn't pair art with fez .*approvals request --kind relay --target art->fez .*--ask 'OK for Art to ask Fez about/);
     assert.equal(delivered.length, 0);
     await assert.rejects(relay(w.env, art, { to: 'fez', say: 'hi', approval: 'a-00000001' }, d), /approval a-00000001 isn't allowed for a relay from art to fez: a-00000001 allows nothing/);
     assert.equal(delivered.length, 0);
