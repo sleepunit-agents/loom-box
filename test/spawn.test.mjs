@@ -214,3 +214,16 @@ test('a refused spawn call over the API says why, as a 403, never the runtime\'s
   const roles = await api(env, { now: () => new Date() }, { caller: { kind: 'agent', agent: 'art', house: 'h-1' }, path: 'spawn', body: { action: 'roles' } });
   assert.equal(roles.status, 200);
 });
+
+test('a spawn with a Comms thread links itself in its parent conversation with a note core accepts', async () => {
+  const w = world();
+  w.core.commsAnswer = (b) => (b.op === 'spawn' ? { ok: true, id: 'th:abcdefghij' } : { ok: true });
+  const parent = await deliver(w.env, w.msg('dm:loren', 'do this'), w.o);
+  const r = await spawnCall(w.env, { kind: 'agent', agent: 'art' }, { ...proof(w, parent.conversation), brief: 'help', principal: { owner: true } }, w.o);
+  await tick(w.env, w.o);
+  assert.equal(loadConv(w.env, r.handle).spawn.thread, 'th:abcdefghij');
+  assert.equal(loadConv(w.env, r.handle).spawn.linked, true, 'the parent link note was accepted');
+  const link = w.core.turns.find((t) => t.kind === 'note' && t.conversation === parent.conversation);
+  assert.ok(link, 'a link note lands in the parent conversation');
+  assert.ok(w.core.audits.some((a) => a.conversation === parent.conversation && a.seq === link.seq && a.text.startsWith('Spawned [')));
+});

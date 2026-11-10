@@ -106,6 +106,9 @@ export function fakeCore(log, now = () => new Date()) {
     async activity(b) { c.activityCalls.push(b); return { ok: true, added: b.cards.length, updated: 0 }; },
     async turn(t) {
       if (c.down) throw new CoreError('core didn\'t answer conversations/turn: connect ECONNREFUSED', 503);
+      // As core checks it (loom src/backends/conversations.ts): the agent's own turns name their outcome.
+      if (['reply', 'action', 'note'].includes(t.kind) && !['answered', 'progressed', 'deferred', 'failed', 'none'].includes(t.outcome))
+        throw new CoreError(`core refused conversations/turn: bad-input: a ${t.kind} has an outcome: answered, progressed, deferred, failed, none`, 400);
       // Its idempotency key, as core's turn route has it: the same key and turn answer the first write; the same key
       // with another turn is refused. Kept 24 hours.
       if (t.key !== undefined) {
