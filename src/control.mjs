@@ -593,7 +593,8 @@ function pollState(env, effects, caller, { facts, sessions, harnesses, usage, lo
           // A house asked for with a GPU need gets the box's GPU (t-1616).
           gpu: (h.needs ?? []).some((n) => /^gpu(:|$)/.test(n)) };
       }),
-      stop: mine.filter((h) => h.state === 'stopping' && !h.cooperativeStop).map((h) => h.id),
+      // A written-off house it still has (it came back): stopped, and what it says after that isn't taken (t-2057).
+      stop: mine.filter((h) => (h.state === 'stopping' && !h.cooperativeStop) || (h.writtenOff && !h.writtenOff.stopped)).map((h) => h.id),
       // Its body hosts' houses, running: the box checks their agents' repos for a newer image (build-check).
       bodyHosts: mine.filter((h) => h.state === 'running' && !h.collection && isHostHouse(h, s)).map((h) => ({ id: h.id, agent: h.agent, known: !!h.build })),
       // Taken by this box and not over: one the box doesn't have (it restarted) is lost.
@@ -839,6 +840,11 @@ export function report(env, effects, caller, { id, state, exit, log, build }) {
     boxOf(s, caller);
     const h = s.houses[id];
     if (!h || h.box !== caller.subject) fail(`no house ${id} for this box`, 404);
+    // Written off while its box was dark (t-2057): its end is noted, so the box stops being told to stop it; nothing else.
+    if (h.writtenOff) {
+      if (TERMINAL.has(state) && !h.writtenOff.stopped) { h.writtenOff.stopped = now(effects); h.updated = now(effects); }
+      return houseView(h);
+    }
     // A cooperative Down exits naturally after native collection and Git rescue.
     // The box sees a clean completion; retain the owner's explicit stop intent.
     if (h.cooperativeStop && state === 'done' && exit === 0) state = 'stopped';
@@ -979,6 +985,46 @@ export function serviceDown(env, effects, caller, body) {
     const h = s.houses[svc.house];
     if (h && LIVE.has(h.state)) { h.state = h.state === 'wanted' ? 'stopped' : 'stopping'; h.updated = now(effects); }
     return { service: key, want: 'down', house: svc.house, state: h?.state };
+  });
+}
+
+/** How long a box must have been silent before the owner may write off its houses (t-2057): the alwaysOn alert's. */
+export const WRITE_OFF_AFTER_MS = 10 * 60_000;
+
+/**
+ * The bodies' houses on a box that's gone dark, written off (t-2057): the owner's call, as a forced service move is.
+ * Each live house there that isn't a service (those move with `service move --force`) is lost, its token revoked,
+ * and its native history counted as terminated without recovery, so the runtime retires its bodies with the loss
+ * notice ("effects may already have happened") and their conversations go on in a house on the next box of the agent's
+ * list. If the box comes back it's told to stop each of them, and nothing they say is taken. Only a box silent for
+ * WRITE_OFF_AFTER_MS, never loom's own; `agent`, when given, only its houses; `houses`, when given, are exactly the ones the owner was asked about.
+ */
+export function writeOffBox(env, effects, { name, agent, houses: asked, lastSeen, heard }) {
+  return update(env, (s) => {
+    const id = resolveBox(s, name);
+    const b = s.boxes[id];
+    if (b.local) fail(`${boxNameOf(s, id)} is loom's own machine; its houses can't be written off`, 409);
+    const at = Date.parse(now(effects));
+    // The card was for one stretch of silence: a box heard from since then isn't written off on it.
+    if (lastSeen !== undefined && b.lastSeen !== lastSeen) fail(`${boxNameOf(s, id)} has been heard from since you were asked`, 409);
+    if (b.lastSeen && at - Date.parse(b.lastSeen) < WRITE_OFF_AFTER_MS) fail(`${boxNameOf(s, id)} was heard from in the last ${WRITE_OFF_AFTER_MS / 60_000} minutes; its houses aren't written off`, 409);
+    const want = Array.isArray(asked) ? new Set(asked.filter((x) => typeof x === 'string')) : null;
+    const done = [];
+    for (const h of Object.values(s.houses)) {
+      if (h.box !== id || !LIVE.has(h.state) || h.service) continue;
+      if (agent !== undefined && h.agent !== agent) continue;
+      if (want && !want.has(h.id)) continue;
+      // Checked again under the lock: a house whose own body host spoke since the card was answered is running.
+      if (heard?.(h.id)) continue;
+      if (h.tokenLabel) revokeOrQueue(s, effects, h.tokenLabel);
+      h.state = 'lost'; h.updated = now(effects); h.note = `written off: its box ${boxNameOf(s, id)} went dark`;
+      h.writtenOff = { at: now(effects), box: id };
+      // Its history stays on the dark box: nothing is collected, and that is the recorded outcome.
+      if (h.nativeHistory?.v === 1 && !h.nativeHistory.complete) { h.nativeHistory.complete = true; h.nativeHistory.writtenOff = true; }
+      delete h.collection;
+      done.push(h.id);
+    }
+    return { box: id, name: boxNameOf(s, id), writtenOff: done };
   });
 }
 

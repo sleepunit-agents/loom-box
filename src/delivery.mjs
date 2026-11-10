@@ -74,6 +74,7 @@ import { observation } from './ticker.mjs';
 // runs look like a crash loop (a failure streak, the same output again and again, relay ping-pong, start-stop churn)
 // is paused before its next body: what comes is recorded and waits; a note on the conversation says why, and the owner
 // gets one ask with Resume (what waited starts) and Dismiss (what waited is dropped). Nothing else is ever paused.
+import { askDarkBoxes } from './dark-box.mjs';
 import { houseLaunchHandle, readHouseLaunch } from './house-launch-journal.mjs';
 import { spawn as nodeSpawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
@@ -2843,6 +2844,8 @@ export async function tick(env, o = {}, only, mem = new Map()) {
   try { sweepTransfers(env, now, Date.now()); } catch (e) { d.warn(`sweeping transfers: ${e.message}`); }
   // Seat records whose house is over (houserunner.mjs, sweepSeats, t-1952): a guest's or an unknown's, never the owner's.
   try { sweepSeats(env); } catch (e) { d.warn(`sweeping seats: ${e.message}`); }
+  // Conversations held on a box gone dark (t-2057): the owner is asked whether to carry them on elsewhere.
+  try { await askDarkBoxes(env, { convs: listConvs(env), nowMs: now, warn: d.warn }); } catch (e) { d.warn(`asking about dark boxes: ${e.message}`); }
   const warm = limitsOf(env).warmIdleS * 1000;
   const stuckAfter = stuckAfterOf(env);
   for (const c of listConvs(env)) if (c.launchAcks?.length) finishLaunchAck(env, c.conversation, d);

@@ -226,6 +226,14 @@ function recordOfHouse(env, agent, house) {
   return null;
 }
 
+/** Whether a house's own body host has reported lately (t-2057): its box's silence is no proof its bodies stopped. */
+export function houseHeard(env, agent, house, nowMs = Date.now()) {
+  try {
+    const found = recordOfHouse(env, agent, house);
+    return !!found && freshRec(houseRec(found.h, house), house, nowMs);
+  } catch { return true; } // Unreadable: never take it for silence.
+}
+
 /**
  * Seat records that are over: no house that's live, nothing draining, nothing asked. The owner's is kept (it's the
  * agent's own); an unknown conversation's or a person's goes, and comes back with its next body.
@@ -401,6 +409,8 @@ export function bodySync(env, caller, body, o = {}) {
     const startingUnknown = malformedStarting || (x.admissionProtocol === true && !caps.includes('native-admission'));
     if (caps.includes('native-admission')) x.admissionProtocol = true;
     const current = load(env).houses?.[house];
+    // Written off while its box was dark (t-2057): its bodies' conversations went on elsewhere; it has nothing left to do.
+    if (current?.writtenOff) return { exit: true, reason: 'the owner wrote this house off while its box was dark' };
     if (current?.nativeHistory?.plan) return { exit: true, reason: 'its box is collecting this physically stopped house' };
     const stopping = current?.state === 'stopping' && !current.job && !current.session;
     if (stopping) {
@@ -848,7 +858,8 @@ export class HouseRunner {
    * does, and the next body gets a fresh house there. Either its box has gone quiet (no host report, the box unheard for
    * PLACE_UP_MS) while another box of its preference is up and may run its body, or a box ahead of it in the agent's
    * order is up and may (the order changed, or that box came back): a lower box takes no new bodies once a better one
-   * can. Its own bodies stay its (held, never written off: the box may come back), and it idles out the usual way.
+   * can. Its own bodies stay its (held: the box may come back) until the owner writes them off (t-2057, dark-box.mjs), and it
+   * idles out the usual way.
    */
   leaveForPreferred(agent, house, seat, nowMs, quiet) {
     let s;
@@ -1077,8 +1088,14 @@ export class HouseRunner {
     return x && (collecting || x.offlineCollection?.complete === true || freshRec(x, body.house, this.now().getTime())) ? x : null;
   }
 
+  /** The owner wrote its house off while its box was dark (t-2057): over, whatever its last report said. */
+  writtenOff(body) {
+    try { return !!load(this.env).houses?.[body.house]?.writtenOff; } catch { return false; }
+  }
+
   entry(body) {
     const raw = rawOf(body);
+    if (raw && this.writtenOff(body)) return { status: 'ended', feedable: false };
     const x = raw ? this.rec(body) : null;
     if (!x) return null;
     const entry = x.report?.bodies?.[raw] ?? { status: 'ended' };
@@ -1102,6 +1119,8 @@ export class HouseRunner {
       if (receipt && receipt.consumed !== true) return true;
       const h = load(this.env).houses?.[body.house];
       if (!h) return true; // Missing ownership metadata is not physical termination.
+      // The owner's write-off stands for the termination its dark box can't report (t-2057).
+      if (h.writtenOff && h.agent === body.agent) return false;
       if (h?.agent === body.agent && h.nativeHistory?.v === 1 && !h.nativeHistory.complete) return true;
       return !!h && !h.collection && h.agent === body.agent && ['wanted', 'starting', 'running', 'stopping'].includes(h.state);
     } catch { return true; } // An unreadable control plane cannot prove termination either.
@@ -1157,6 +1176,8 @@ export class HouseRunner {
     // can narrow replay; unknown receipts replay all runtime-owned fed copies.
     const final = this.finalInbox(body);
     if (final) return final.ready ? final.pending : null;
+    // Written off (t-2057): its last report can't say what it heard after it, so every one fed is unheard.
+    if (this.writtenOff(body)) return null;
     const x = raw ? this.rec(body) : null;
     if (!x) return null;
     return [...new Set([...(x.inbox?.[raw] ?? []).map((y) => y.key), ...(x.report.bodies[raw]?.pending ?? [])])];
@@ -1167,6 +1188,8 @@ export class HouseRunner {
     const raw = rawOf(body), x = raw ? houseRec(this.host(body.agent, this.seatFor(body)), body.house) : null;
     if (!x?.offlineCollection) return undefined;
     const receipt = collectionReceipt(x, raw);
+    // Written off mid-collection (t-2057): no receipt is coming from the dark box; it retires as a loss (pack()).
+    if (!receipt && this.writtenOff(body)) return undefined;
     if (!receipt) return { ready: false };
     return { ready: true, lost: receipt.lost === true, pending: Array.isArray(receipt.pending)
       ? [...new Set([...(x.inbox?.[raw] ?? []).map(y => y.key), ...receipt.pending])] : null };
@@ -1229,6 +1252,9 @@ export class HouseRunner {
     const owner = houseRec(this.host(body.agent, this.seatFor(body)), body.house);
     const receipt = collectionReceipt(owner, raw);
     if (!existsSync(f) && receipt && receipt.consumed !== true) throw new RunnerError('acknowledged native collection pack is unavailable; ownership remains held');
+    // Written off (t-2057): no host is left to send it, and its history stays on the dark box. Retired as a loss, with
+    // its notice: whatever it did after its last word may have happened.
+    if (!existsSync(f) && collecting?.writtenOff && collecting.agent === body.agent) throw new SessionHistoryMissing();
     if (!existsSync(f) && collecting?.nativeHistory?.v === 1 && collecting.collection?.phase === 'native') throw new RunnerError('native session collection is still pending on its box');
     // No key here: no slot, at once. It's stopped, and its session stays in its house (thrown away with it).
     if (!this.canSeal()) {
