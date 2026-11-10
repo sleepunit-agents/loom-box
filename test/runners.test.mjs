@@ -725,3 +725,28 @@ test('final drops oversized unfinished storage under a constrained heap', () => 
   const result=spawnSync(process.execPath,['--max-old-space-size=128','--input-type=module','-e',script],{encoding:'utf8',timeout:30_000});
   assert.equal(result.status,0,result.stderr);
 });
+
+
+test('final shortening is compared to observed size even behind an unfinished UTF-8 byte', () => {
+  const h=harness(),file=join(h.D,'short-partial.jsonl');
+  const event=text=>JSON.stringify({type:'assistant',message:{content:[{type:'text',text}]}})+'\n';
+  writeFileSync(file,Buffer.concat([Buffer.from(event('old')),Buffer.from([0xe7])]));
+  const runner=new ClaudeRunner();runner.transcriptOf=()=>file;
+  assert.equal(runner.final({}),'old');
+  writeFileSync(file,event('new'));
+  assert.equal(runner.final({}),'new');
+});
+
+test('final retries a changing snapshot once and then returns no words', async () => {
+  const fs=(await import('node:fs')).default;
+  const {syncBuiltinESMExports}=await import('node:module');
+  const h=harness(),file=join(h.D,'unstable.jsonl');
+  const event=text=>JSON.stringify({type:'assistant',message:{content:[{type:'text',text}]}})+'\n';
+  writeFileSync(file,event('old'));
+  const runner=new ClaudeRunner();runner.transcriptOf=()=>file;
+  const read=fs.readSync;let reads=0;
+  fs.readSync=(...args)=>{const n=read(...args);writeFileSync(file+'.new',event(`new ${++reads}`));fs.renameSync(file+'.new',file);return n;};
+  syncBuiltinESMExports();
+  try{assert.equal(runner.final({}),null);assert.equal(reads,2,'one original scan and one retry');}
+  finally{fs.readSync=read;syncBuiltinESMExports();}
+});

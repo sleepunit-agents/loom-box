@@ -337,7 +337,7 @@ export class ClaudeRunner {
       if (!st.isFile()) return null;
     let m = FINAL_MEMO.get(f);
     // Another file at that path, or one cut shorter, is read again from its start.
-    if (!m || m.ino !== st.ino || st.size < m.offset) m = { ino: st.ino, offset: 0, rest: '', last: null };
+    if (!m || m.ino !== st.ino || m.dev !== st.dev || st.size < (m.size ?? m.offset)) m = { ino: st.ino, dev: st.dev, offset: 0, rest: '', last: null };
     while (st.size > m.offset) {
       const { text, next } = readFrom(f, m.offset, this.readMax.final, fd);
       if (next === m.offset) break;
@@ -366,6 +366,7 @@ export class ClaudeRunner {
       FINAL_MEMO.delete(f);
       return retry < 1 ? this.final(body, retry + 1) : null;
     }
+    m.size = st.size;
     FINAL_MEMO.delete(f); FINAL_MEMO.set(f, m);
     if (FINAL_MEMO.size > 64) FINAL_MEMO.delete(FINAL_MEMO.keys().next().value);
     return m.omitted ? `… (transcript line exceeded 16 MiB; last readable words follow)\n${last ?? ''}` : last;
