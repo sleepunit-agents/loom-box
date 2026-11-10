@@ -2533,7 +2533,10 @@ async function routeOf(env, c0, op, rules, d, cant = []) {
     if (op.type === 'resume' && op.slot) parkSlot(env, op);
     return { how: 'start', avoid: keep };
   }
-  const home = c0.home && Date.parse(c0.home.until) > now && existsSync(homeFile(env, op.cv)) ? c0.home : null;
+  let home = c0.home && Date.parse(c0.home.until) > now && existsSync(homeFile(env, op.cv)) ? c0.home : null;
+  // A local conversation's home saved on the other side of "where" (a local run's rules keep no seat, a housed run's
+  // keep the owner's): not resumed across machines, as its slot isn't (deliverOp, `crossed`).
+  if (home && c0.local && !!home.rules?.seat !== !!rules.seat) { dropHome(env, op.cv); home = null; }
   const choice = readModelChoice(env, c0.agent, c0.conversation).effective;
   const chosen = choice !== 'auto' && !avoid.includes(choice) && await roomOn(env, c0, choice, d) ? choice : null;
   if (home && (!chosen || home.harness === chosen) && sameRules(home.rules ?? {}, rules) && carriesSession(home.rules?.seat, rules.seat, op.cv) && !avoid.includes(home.harness)
