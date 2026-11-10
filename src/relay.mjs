@@ -26,7 +26,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync, appendFileSync, mkdirSync } from 'node:fs';
 import { delimiter, dirname, join } from 'node:path';
 import { coreFrom } from './core.mjs';
-import { deliver, deliveryDir, heldConv, holdsRun, listConvs, loadConv, seatMoved } from './delivery.mjs';
+import { deliver, deliveryDir, heldConv, holdsRun, houseProblem, listConvs, loadConv, seatMoved } from './delivery.mjs';
 import { readBody } from './bodies.mjs';
 import { principalOf } from './principal.mjs';
 import { GRANTS, KEY, householdOf, paired } from './grants.mjs';
@@ -261,7 +261,10 @@ export async function relay(env, caller, args, d = depsOf(env), proof = {}) {
     // A peer can answer only a recorded request. Its sender chose the return address;
     // the responder cannot supply or replace it. Old/missing origins use the relay venue.
     original = replyTo ? log.find((r) => r.id === replyTo) : null;
-    const fresh = original?.origin && now - original.at < RETURN_MS;
+    // Only from the house holding the conversation the request reached does an answer go into the asker's (t-2134):
+    // another house of the same agent (another conversation, someone else's work) answers into the relay conversation.
+    const answering = answeringHouse(env, caller, original);
+    const fresh = answering && original?.origin && now - original.at < RETURN_MS;
     const back = fresh ? loadConv(env, original.origin) : null;
     returnTo = back?.agent === to ? back : null;
     const message = {
@@ -278,8 +281,20 @@ export async function relay(env, caller, args, d = depsOf(env), proof = {}) {
   const { say: _words, ...kept } = entry;
   d.append({ ...kept, conversation: out?.conversation ?? null });
   const body = out?.body === 'failed' ? `, but its body didn't start (${out.reason ?? 'no reason given'}); the runtime tries again` : out?.body === 'queued' ? ': it waits for a body of theirs' : '';
-  const routing = returnTo ? ` Returned to ${out?.conversation ?? returnTo.conversation}.` : original?.origin ? ` ${original.origin} ${now - original.at < RETURN_MS ? 'is no longer kept' : 'asked over 6 hours ago'}; delivered to the relay conversation instead.` : origin ? ` Replies return to ${origin.conversation}.` : originId !== undefined || caller.house ? ` Replies will use the relay conversation: ${originId !== undefined ? `${originId} couldn't be confirmed as the one asking (another conversation of yours is at work, or it isn't; from a house body's shell, \`loom runtime relay\` proves its own)` : 'no single conversation of yours is at work (name yours with conversation)'}.` : '';
+  const routing = returnTo ? ` Returned to ${out?.conversation ?? returnTo.conversation}.` : original?.origin && !answeringHouse(env, caller, original) ? ` Only the house holding the conversation ${replyTo} reached answers into the asker's; delivered to the relay conversation instead.` : original?.origin ? ` ${original.origin} ${now - original.at < RETURN_MS ? 'is no longer kept' : 'asked over 6 hours ago'}; delivered to the relay conversation instead.` : origin ? ` Replies return to ${origin.conversation}.` : originId !== undefined || caller.house ? ` Replies will use the relay conversation: ${originId !== undefined ? `${originId} couldn't be confirmed as the one asking (another conversation of yours is at work, or it isn't; from a house body's shell, \`loom runtime relay\` proves its own)` : 'no single conversation of yours is at work (name yours with conversation)'}.` : '';
   return { text: `${entry.id}: ${to} has it${body}.${routing}` };
+}
+
+/**
+ * Whether `caller` answers relay `original` from where it was delivered: a caller in a house only when that house runs
+ * the body of the conversation the relay reached (houseProblem); one on loom's machine (no house) as before. A relay
+ * with no recorded conversation (an older one, or one whose delivery failed) is answered by no house.
+ */
+function answeringHouse(env, caller, original) {
+  if (!original) return false;
+  if (typeof caller?.house !== 'string') return true;
+  const c = original.conversation ? loadConv(env, original.conversation) : null;
+  return !!c && c.agent === caller.agent && !houseProblem(env, c, caller);
 }
 
 export function depsOf(env) {
@@ -322,8 +337,10 @@ export async function relayTool(env, argv, input, d) {
 }
 
 /** This agent's relays, sent and received (or one thread), oldest first: lines for `loom runtime relays`. */
-export function relaysOf(env, agent, thread) {
+export function relaysOf(env, agent, thread, conversation) {
   let rows = readRelays(env).filter((r) => r.from === agent || r.to === agent);
+  // From a house (t-2134): only the relays its own conversation asked or was reached by, never the agent's others.
+  if (conversation !== undefined) rows = rows.filter((r) => (r.from === agent && r.origin === conversation) || (r.to === agent && r.conversation === conversation));
   if (thread) rows = rows.filter((r) => (r.thread ?? r.id) === thread);
   if (!rows.length) return `${agent} has no relays\n`;
   return rows.slice(-50).map((r) => `${r.id} ${new Date(r.at).toISOString().slice(5, 16).replace('T', ' ')} ${r.from} -> ${r.to}${r.reply_to ? ` re ${r.reply_to}` : ''}${r.why ? `: ${r.why}` : ''}${r.origin && r.from === agent ? ` [from ${r.origin}${r.origin_run ? ` ${r.origin_run}` : ''}]` : ''}${r.reply_to && r.conversation && r.to === agent ? ` [to ${r.conversation}]` : ''}\n`).join('');

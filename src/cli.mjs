@@ -817,7 +817,8 @@ async function main(argv, env) {
         // holds it, as `send` does: its run's key and harness session, in the body of the call, never in argv.
         let argv = [cmd, ...rest];
         let proof = {};
-        if (cmd === 'relay') {
+        // relays too (t-2134): from a house, only its own conversation's, so it proves which that is.
+        if (cmd === 'relay' || cmd === 'relays') {
           const mine = ownConversation(env);
           const named = argv.includes('--conversation') ? argv[argv.indexOf('--conversation') + 1] : undefined;
           // Only this body's own conversation: naming another is refused here, and proved nowhere (the runtime checks too).

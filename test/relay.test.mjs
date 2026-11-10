@@ -203,7 +203,11 @@ describe('the tool core runs, and the house CLI', () => {
     assert.equal(no.exit, 1);
     assert.match(no.stderr, /doesn't pair/);
     assert.equal((await runFor(w.env, art, ['relay', '--to', 'mark', '--yell', 'x'], memStore(), undefined, d)).exit, 2);
-    assert.match((await runFor(w.env, art, ['relays'], memStore(), undefined, d)).stdout, /art -> mark/);
+    // From a house, relays are its own conversation's only, proved (t-2134): without the proof, nothing.
+    const r2 = await runFor(w.env, art, ['relays'], memStore(), undefined, d);
+    assert.equal(r2.exit, 1);
+    assert.match(r2.stderr, /only its own conversation's, proved/);
+    assert.match((await runFor(w.env, { kind: 'agent', agent: 'art' }, ['relays'], memStore(), undefined, d)).stdout, /art -> mark/, 'loom\'s machine: the agent\'s');
   });
 
   test('the approvals piece counts as installed in loom\'s pieces bin dir or on PATH', () => {
@@ -739,5 +743,49 @@ describe('place in a place with members (t-1745)', () => {
     assert.equal(p.membersAt, c.bodyRules.membersAt);
     assert.match(p.membersAt, /^\d{4}-\d\d-\d\dT/);
     assert.deepEqual(p.principal, { for: 'phil', owner: false, ownerSpoke: false });
+  });
+});
+
+describe('relays and answers held to the house holding the conversation (t-2134)', () => {
+  const inHouse = (w, cv, house) => {
+    const c = loadConv(w.env, cv);
+    const path = join(w.env.LOOM_BOX_DATA, 'bodies', `${c.body.replace(':', '-')}.json`);
+    const rec = JSON.parse(readFileSync(path)); rec.house = house;
+    writeFileSync(path, JSON.stringify(rec));
+    return { key: w.runner.envs[c.body.split(':')[1]].LOOM_BODY_KEY, session: w.sessionFor(cv) };
+  };
+
+  test('a house lists only the relays its own conversation asked or was reached by', async () => {
+    const { w, d } = relayWorld();
+    const mine = (await deliver(w.env, w.msg('dm:mine', 'mine'), w.o)).conversation;
+    const other = (await deliver(w.env, w.msg('dm:other', 'other'), w.o)).conversation;
+    const proof = inHouse(w, mine, 'h-12');
+    const caller = { kind: 'agent', agent: 'art', house: 'h-12' };
+    await relay(w.env, caller, { to: 'mark', say: 'from mine', conversation: mine }, d, proof);
+    await relay(w.env, { agent: 'art' }, { to: 'mark', say: 'from elsewhere', why: 'elsewhere', conversation: other }, d);
+    const listed = await runFor(w.env, caller, ['relays', '--conversation', mine], memStore(), undefined, d, proof);
+    assert.equal(listed.exit, 0, listed.stderr);
+    assert.match(listed.stdout, /art -> mark/);
+    assert.doesNotMatch(listed.stdout, /elsewhere/);
+    assert.equal(listed.stdout.trim().split('\n').length, 1);
+    // Another conversation's id, or this one's without its proof: refused.
+    assert.equal((await runFor(w.env, caller, ['relays', '--conversation', other], memStore(), undefined, d, proof)).exit, 1);
+    assert.equal((await runFor(w.env, caller, ['relays', '--conversation', mine], memStore(), undefined, d, {})).exit, 1);
+  });
+
+  test('an answer from another house of the agent goes to the relay conversation, never the asker\'s', async () => {
+    const { w, d, delivered } = relayWorld();
+    const origin = await deliver(w.env, w.msg('th:origin', 'ask for a review', { venue: 'loom', source: 'loom' }), w.o);
+    w.runner.finish(loadConv(w.env, origin.conversation).body);
+    const id = (await relay(w.env, { agent: 'art' }, { to: 'mark', say: 'review this', conversation: origin.conversation }, d)).text.slice(0, 10);
+    const reached = readRelays(w.env, w.clock.now().getTime()).find((r) => r.id === id).conversation;
+    inHouse(w, reached, 'h-mark');
+    const reply = await relay(w.env, { agent: 'mark', house: 'h-elsewhere' }, { to: 'art', say: 'looks good from elsewhere', reply_to: id }, d);
+    assert.match(reply.text, /Only the house holding the conversation .* answers into the asker's/);
+    assert.equal(delivered.at(-1).venue, 'relay');
+    assert.notEqual(w.core.turns.at(-1)?.conversation, origin.conversation);
+    // From the house that holds it: returned to the asker's conversation.
+    const back = await relay(w.env, { agent: 'mark', house: 'h-mark' }, { to: 'art', say: 'looks good', reply_to: id }, d);
+    assert.match(back.text, new RegExp(`Returned to ${origin.conversation}`));
   });
 });
