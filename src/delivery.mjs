@@ -3057,7 +3057,8 @@ export async function send(env, { conversation, text, key, session, person, via 
   if (!c) return { ok: false, reason: `no conversation ${conversation} here` };
   if (o.caller && (o.caller.kind !== 'agent' || o.caller.agent !== c.agent)) return { ok: false, reason: `only ${c.agent}'s own body speaks in ${conversation}` };
   const notHolder = holderProblem(env, d, c, { key, session }, undefined, o.caller);
-  if (notHolder) return refusedSend(env, c, notHolder);
+  // A session not known yet is a wait, not a refusal on the record: its CLI asks again (t-2053).
+  if (notHolder) return /session can't be told yet/.test(notHolder) ? { ok: false, reason: notHolder } : refusedSend(env, c, notHolder);
   if (!str(text, MAX_TEXT)) return refusedSend(env, c, `a message is 1-${MAX_TEXT} characters`);
   // To a person (a DM), not the conversation's own place: the relay to a person, through that venue's adapter.
   let to;

@@ -649,7 +649,7 @@ async function main(argv, env) {
       // Where this body is (gates-api.mjs, placeOf): its own conversation, proved as a relay or `send` proves it. In a
       // house, through the piece API; on loom's machine (a local body), here.
       const mine = ownConversation(env);
-      if (!mine) throw new Fail('loom runtime place: this body can\'t tell its own conversation (its house says none for its session, and its LOOM_BODY_CONVERSATION isn\'t its own)', 2);
+      if (!mine) throw new Fail('loom runtime place: can\'t tell this body\'s own conversation (none mapped for its session, or none in its environment)', 2);
       if (env.LOOM_URL && env.LOOM_TOKEN_FILE) return runAnswer(await pieceCall(env, flag(rest, '--piece'))('run', { argv: ['place', '--conversation', mine], ...bodyProof(env, mine) }));
       const { placeOf } = await import('./gates-api.mjs');
       const r = await placeOf(env, mine, bodyProof(env, mine));
