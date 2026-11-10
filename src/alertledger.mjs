@@ -80,7 +80,9 @@ export function show(art, id) {
   const source = SOURCE.test(e.source ?? '') ? e.source : '?';
   const severity = SEVERITY.test(e.severity ?? '') ? e.severity : 'warn';
   let data = JSON.stringify({ summary: e.msg ?? null, facts: e.facts ?? {}, detail: e.detail ?? '' }, null, 1);
-  if (data.length > SHOW_MAX) data = `${data.slice(0, SHOW_MAX)}\n… (cut: ${data.length} characters in all)`;
+  // Cut by bytes (what the output bound counts), on a character boundary: the fence's opening must survive the bound.
+  const bytes = Buffer.byteLength(data);
+  if (bytes > SHOW_MAX) data = `${Buffer.from(data).subarray(0, SHOW_MAX).toString('utf-8').replace(/\uFFFD+$/, '')}\n… (cut: ${bytes} bytes in all)`;
   const f = fenceWord();
   return { exit: 0, out: [
     `Alert ${id} from ${source} (${severity}) at ${ct(e.ts)} CT.`,

@@ -383,7 +383,9 @@ test('the alert ledger: show, verdicts, peek and a verdict, in-process, never th
   // A long alert is cut inside its fence, so the fence's opening always reaches the body.
   alert('al-0011aadd', { detail: 'y'.repeat(200_000) });
   const long = await run('alert-show', ['al-0011aadd']);
-  assert.match(long.output, /^Alert al-0011aadd [^]*<<<alert data [0-9a-f]{12}\n[^]*\(cut: \d+ characters in all\)\nalert data [0-9a-f]{12}>>>/);
+  assert.match(long.output, /^Alert al-0011aadd [^]*<<<alert data [0-9a-f]{12}\n[^]*\(cut: \d+ bytes in all\)\nalert data [0-9a-f]{12}>>>/);
+  alert('al-0011aaee', { detail: '\u{1F600}'.repeat(40_000) });
+  assert.match((await run('alert-show', ['al-0011aaee'])).output, /^Alert al-0011aaee [^]*<<<alert data [0-9a-f]{12}\n/, 'four-byte characters count as bytes');
   // Typed words only: a line break, a flag twice, an unknown flag, a verdict that isn't one, a long cause, a bad or missing id, a flag-like value.
   for (const args of [['unit-x', 'fixed', '--cause', 'a\nb', '--why', 'w', '--alert', 'al-0011aabb'], ['unit-x', 'fixed', '--cause', 'c', '--cause', 'd', '--why', 'w', '--alert', 'al-0011aabb'],
     ['unit-x', 'fixed', '--cause', 'c', '--why', 'w', '--to', 'x'], ['unit-x', 'maybe', '--cause', 'c', '--why', 'w', '--alert', 'al-0011aabb'], ['unit-x', 'fixed', '--why', 'w', '--alert', 'al-0011aabb'],
