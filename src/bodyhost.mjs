@@ -38,7 +38,7 @@ export const PACKED_MAX = 400 * 1024;
 export function fitCards(report, max) {
   fitFinals(report);
   const all = [];
-  for (const [id, b] of Object.entries(report.bodies ?? {})) if (Array.isArray(b.cards)) b.cards.forEach((c, i) => all.push({ id, i, at: String(c?.at ?? ''), n: Buffer.byteLength(JSON.stringify(c)) + 1 }));
+  for (const [id, b] of Object.entries(report.bodies ?? {})) if (Array.isArray(b.cards)) b.cards.forEach((c, i) => all.push({ id, i, at: Date.parse(c?.at ?? '') || 0, n: Buffer.byteLength(JSON.stringify(c)) + 1 }));
   const total = Buffer.byteLength(JSON.stringify(report));
   if (total <= max) return report;
   let room = max - (total - all.reduce((k, x) => k + x.n, 0));

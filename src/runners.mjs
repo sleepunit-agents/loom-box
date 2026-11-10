@@ -364,7 +364,7 @@ export class ClaudeRunner {
       cards.push(...claudeCards(jsonLines(tailOf(join(dir, `agent-${agent}.jsonl`), this.readMax.helper) ?? ''), `${agent}:`, parent ?? undefined));
     }
     // In the order they happened, so a host's "newest 100" keeps the newest of the body's and its helpers' alike.
-    return cards.map((c, i) => [c, i]).sort((x, y) => (x[0].at < y[0].at ? -1 : x[0].at > y[0].at ? 1 : x[1] - y[1])).map(([c]) => c);
+    return cards.map((c, i) => [c, i]).sort((x, y) => ((Date.parse(x[0].at) || 0) - (Date.parse(y[0].at) || 0) || x[1] - y[1])).map(([c]) => c);
   }
 
 

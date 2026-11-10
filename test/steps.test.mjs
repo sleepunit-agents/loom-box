@@ -672,3 +672,14 @@ test('a colour code inside a key\'s BEGIN line can\'t hide the block (t-2109)', 
   assert.ok(cards.some(c => c.id === '20:tool-20'));
   assert.ok(!cards.some(c => c.id === '0:tool-0'));
 });
+
+ test('report budgets compare instants across timezone offsets', async () => {
+  const {fitCards} = await import('../src/bodyhost.mjs');
+  const newer = {id: 'newer', at: '2026-11-10T09:00:00+00:00', tool: 'Bash', summary: 'Ran a command', state: 'done'};
+  const older = {...newer, id: 'older', at: '2026-11-10T10:00:00+03:00'};
+  const report = {bodies: {one: {cards: [newer]}, two: {cards: [older]}}};
+  const max = Buffer.byteLength(JSON.stringify({bodies: {one: {cards: [newer]}, two: {cards: []}}}));
+  fitCards(report, max);
+  assert.deepEqual(report.bodies.one.cards.map(c => c.id), ['newer']);
+  assert.deepEqual(report.bodies.two.cards, []);
+});
