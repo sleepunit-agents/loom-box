@@ -536,3 +536,39 @@ test('spawn reports use the final assistant text from Claude and Codex, not tool
   ];
   assert.equal(codex.final({ id: 'one' }), 'ok');
 });
+
+test('a Claude job\'s last words are read as its transcript grows, never whole each beat (t-2138)', async () => {
+  const { appendFileSync, openSync, writeSync, closeSync, renameSync } = await import('node:fs');
+  const h = harness();
+  const a = (text) => JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text }] } });
+  const u = JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', content: 'tool output' }] } });
+  const transcript = join(h.D, 'grow.jsonl');
+  writeFileSync(transcript, `${a('first 界')}\n${u}\n`);
+  // Slices of 7 bytes: a line and a character are cut across reads, and read whole.
+  const claude = new ClaudeRunner({ jobsDir: join(h.D, 'jobs'), readMax: { final: 7 } });
+  claude.transcriptOf = () => transcript;
+  assert.equal(claude.final({ id: 'one' }), 'first 界');
+  // What it has read isn't read again: spoil its start in place (same file, same size); a whole read would lose it.
+  const fd = openSync(transcript, 'r+');
+  writeSync(fd, 'X', 0); closeSync(fd);
+  appendFileSync(transcript, `${u}\n`);
+  assert.throws(() => JSON.parse(readFileSync(transcript, 'utf-8').split('\n')[0]), 'its start no longer reads');
+  assert.equal(claude.final({ id: 'one' }), 'first 界', 'the kept words, from the new bytes only');
+  // A line not yet ended counts once it's whole; then the next one.
+  appendFileSync(transcript, a('second'));
+  assert.equal(claude.final({ id: 'one' }), 'second');
+  appendFileSync(transcript, `\n${u}\n${a('third')}\n`);
+  assert.equal(claude.final({ id: 'one' }), 'third');
+  // Another file in its place is read from its start.
+  const other = join(h.D, 'other.jsonl');
+  writeFileSync(other, `${a('fresh')}\n${u}\n${u}\n${u}\n${u}\n${u}\n${u}\n`);
+  renameSync(other, transcript);
+  assert.equal(claude.final({ id: 'one' }), 'fresh');
+  // A FIFO a body put in its place is never waited on.
+  const fifo = join(h.D, 'fifo.jsonl');
+  assert.equal(spawnSync('mkfifo', [fifo]).status, 0);
+  claude.transcriptOf = () => fifo;
+  const t0 = Date.now();
+  assert.equal(claude.final({ id: 'one' }), null);
+  assert.ok(Date.now() - t0 < 2000);
+});

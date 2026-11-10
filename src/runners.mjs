@@ -71,6 +71,15 @@ const SIGN_READ_MAX = 4 * 1024 * 1024;
 const HELPER_READ_MAX = 2 * 1024 * 1024;
 const SIGN_MEMO = new Map();
 const CODEX_CARD_TIMES = new Map();
+/** Each transcript's last words so far and where its read stopped (ClaudeRunner.final, t-2138), kept for the process. */
+const FINAL_MEMO = new Map();
+/** A transcript line's words: an assistant message's text parts, joined; null for any other line, or one not JSON. */
+function lastWordsOf(l) {
+  let e;
+  try { e = JSON.parse(l); } catch { return null; }
+  if (e?.type !== 'assistant' || !Array.isArray(e.message?.content) || !e.message.content.some((p) => p?.type === 'text')) return null;
+  return e.message.content.filter((p) => p?.type === 'text').map((p) => p.text).join('\n');
+}
 /** The longest unfinished line a sign of life carries between reads; past it, the line's dropped. */
 const REST_MAX = 16 * 1024 * 1024;
 /** At most how much of a helper's meta file is read (a few hundred bytes, as Claude Code writes it). */
@@ -157,7 +166,7 @@ export class ClaudeRunner {
 
   constructor({ claude = 'claude', jobsDir = join(homedir(), '.claude', 'jobs'), projectsDir, args = [], inboxDir, usageDir = usageDirOf(), node = process.execPath, run = spawnSync, sleep = sleepMs, claimPolls = 10, token = hex8, readMax = {} } = {}) {
     // How much it reads of a transcript a pass (t-2109): its steps, a helper's, its sign of life.
-    this.readMax = { activity: ACTIVITY_READ_MAX, helper: HELPER_READ_MAX, sign: SIGN_READ_MAX, ...readMax };
+    this.readMax = { activity: ACTIVITY_READ_MAX, helper: HELPER_READ_MAX, sign: SIGN_READ_MAX, final: SIGN_READ_MAX, ...readMax };
     Object.assign(this, { claude, jobsDir, args, usageDir, node, run, sleep, claimPolls, token });
     this.inbox = inboxDir ? inbox(inboxDir, { run }) : null;
     // Claude Code keeps a session's transcript at <config>/projects/<cwd, slugged>/<session>.jsonl (and its tool
@@ -306,10 +315,36 @@ export class ClaudeRunner {
     return out;
   }
 
+  /**
+   * Its last words: the text of its transcript's last assistant message that has any. Read as the transcript grows
+   * (t-2138), from where the last call of this process stopped (FINAL_MEMO), in slices of at most readMax.final: a
+   * body host asks each beat, and a long session is read whole once, never every beat.
+   */
   final(body) {
     const f = this.transcriptOf(body);
-    const last = f ? lines(f).findLast((e) => e.type === 'assistant' && Array.isArray(e.message?.content) && e.message.content.some((p) => p.type === 'text')) : null;
-    return last?.message.content.filter((p) => p.type === 'text').map((p) => p.text).join('\n') ?? null;
+    if (!f) return null;
+    let st;
+    try { st = statSync(f); } catch { return null; }
+    let m = FINAL_MEMO.get(f);
+    // Another file at that path, or one cut shorter, is read again from its start.
+    if (!m || m.ino !== st.ino || st.size < m.offset) m = { ino: st.ino, offset: 0, rest: '', last: null };
+    while (st.size > m.offset) {
+      const { text, next } = readFrom(f, m.offset, this.readMax.final);
+      if (next === m.offset) break;
+      const parts = (m.rest + text).split('\n');
+      const tail = parts.pop() ?? '';
+      m.rest = tail.length > REST_MAX ? '' : tail;
+      for (const l of parts) {
+        const w = lastWordsOf(l);
+        if (w !== null) m.last = w;
+      }
+      m.offset = next;
+    }
+    // A last line not yet ended (no newline after it) counts once it's whole JSON, as reading the file whole did.
+    const last = (m.rest ? lastWordsOf(m.rest) : null) ?? m.last;
+    FINAL_MEMO.delete(f); FINAL_MEMO.set(f, m);
+    if (FINAL_MEMO.size > 64) FINAL_MEMO.delete(FINAL_MEMO.keys().next().value);
+    return last;
   }
 
   /** Its session's transcript, the newest of that name under projects; null when there's none. */
