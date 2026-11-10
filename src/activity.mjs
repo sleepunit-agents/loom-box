@@ -655,7 +655,7 @@ function codexWhy(item) {
 }
 
 /** The cards in a Codex run's events (parsed JSON objects), in order; `prefix` keeps item ids unique per thread. */
-export function codexCards(events, prefix = '') {
+export function codexCards(events, prefix = '', timeOf = () => new Date().toISOString()) {
   const cards = new Map();
   for (const e of events) {
     const item = e?.item;
@@ -664,14 +664,14 @@ export function codexCards(events, prefix = '') {
       if (e.type !== 'item.completed' || typeof item.text !== 'string' || !item.text.trim()) continue;
       const id = `${prefix}${item.id}`.slice(0, 80);
       const text = item.text;
-      const card = { id, at: new Date().toISOString(), tool: 'text', summary: finish(text.split('\n')[0]), fixed: 'Wrote its words', state: 'done' };
+      const card = { id, at: timeOf(id), tool: 'text', summary: finish(text.split('\n')[0]), fixed: 'Wrote its words', state: 'done' };
       cards.set(id, lazyBody(card, () => worked('text', text, () => shownText(text, MAX_TEXT))));
       continue;
     }
     if (!CODEX_TYPES.includes(item.type)) continue;
     const id = `${prefix}${item.id}`.slice(0, 80);
     if (!cards.has(id) && ['item.started', 'item.updated', 'item.completed'].includes(e.type)) {
-      cards.set(id, { id, at: new Date().toISOString(), tool: toolName(item.type), summary: '', state: item.type === 'todo_list' ? 'done' : 'running' });
+      cards.set(id, { id, at: timeOf(id), tool: toolName(item.type), summary: '', state: item.type === 'todo_list' ? 'done' : 'running' });
     }
     const card = cards.get(id);
     if (!card) continue;

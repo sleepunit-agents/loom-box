@@ -70,6 +70,7 @@ const stableLaunchToken = value => {
 const SIGN_READ_MAX = 4 * 1024 * 1024;
 const HELPER_READ_MAX = 2 * 1024 * 1024;
 const SIGN_MEMO = new Map();
+const CODEX_CARD_TIMES = new Map();
 /** The longest unfinished line a sign of life carries between reads; past it, the line's dropped. */
 const REST_MAX = 16 * 1024 * 1024;
 /** At most how much of a helper's meta file is read (a few hundred bytes, as Claude Code writes it). */
@@ -352,7 +353,7 @@ export class ClaudeRunner {
     let metas = [];
     // The body writes there: a meta is only ever a plain file, never followed through a link, read to META_MAX.
     try { metas = readdirSync(dir).filter((n) => /^agent-[A-Za-z0-9_-]{1,64}\.meta\.json$/.test(n)).slice(0, 500); } catch { return cards; }
-    const helpers = metas.map((n) => { try { const st = lstatSync(join(dir, n)); return st.isFile() ? { n, t: st.mtimeMs } : null; } catch { return null; } }).filter(Boolean).sort((a, b) => b.t - a.t).slice(0, 20);
+    const helpers = metas.map((n) => { try { const st = lstatSync(join(dir, n)); if (!st.isFile()) return null; let t = st.mtimeMs; try { const transcript = lstatSync(join(dir, n.replace('.meta.json', '.jsonl'))); if (transcript.isFile()) t = transcript.mtimeMs; } catch { /* no transcript */ } return { n, t }; } catch { return null; } }).filter(Boolean).sort((a, b) => b.t - a.t).slice(0, 20);
     for (const { n } of helpers) {
       const agent = n.slice('agent-'.length, -'.meta.json'.length);
       let meta;
@@ -721,7 +722,23 @@ export class CodexRunner {
 
   activity(body) {
     // Its newest ACTIVITY_READ_MAX of events (t-2109), never the whole of a long run each pass.
-    return codexCards(jsonLines(tailOf(join(this.runsDir, body.id, 'events.jsonl'), ACTIVITY_READ_MAX) ?? ''), `${body.id}:`);
+    const file = join(this.runsDir, body.id, 'events.jsonl');
+    let stat;
+    try { stat = statSync(file); } catch { return []; }
+    let memo = CODEX_CARD_TIMES.get(file);
+    if (!memo || memo.ino !== stat.ino || stat.size < memo.size) memo = {ino: stat.ino, times: new Map()};
+    memo.size = stat.size;
+    // Codex events have no timestamp: keep when each card was first observed, never retime old cards on a reread.
+    const at = new Date().toISOString();
+    const cards = codexCards(jsonLines(tailOf(file, ACTIVITY_READ_MAX) ?? ''), `${body.id}:`, (id) => {
+      if (!memo.times.has(id)) memo.times.set(id, at);
+      return memo.times.get(id);
+    });
+    const retained = new Set(cards.slice(-1000).map(c => c.id));
+    for (const id of memo.times.keys()) if (!retained.has(id)) memo.times.delete(id);
+    CODEX_CARD_TIMES.delete(file); CODEX_CARD_TIMES.set(file, memo);
+    if (CODEX_CARD_TIMES.size > 64) CODEX_CARD_TIMES.delete(CODEX_CARD_TIMES.keys().next().value);
+    return cards;
   }
 
   /** Its last sign of life (t-2109): when its events were last written. Codex says its tokens only at a turn's end. */

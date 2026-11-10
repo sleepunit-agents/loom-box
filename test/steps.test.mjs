@@ -153,7 +153,10 @@ test('any part that moves is sent again: its label, fixed label, target, result,
   const base = { id: 'x', tool: 'Bash', summary: 's', fixed: 'Ran a command', state: 'done', at: 'x', detail: 'd', result: 'no output', body: 'a', exit: 0, end: '2026-11-10T10:00:00.000Z', items: [{ text: 'a', state: 'now' }], parent: 'p' };
   const a = changed([base], {});
   for (const [k, v] of Object.entries({ summary: 's2', fixed: 'Ran a command — exit 1', detail: 'd2', result: '1 line of output', body: 'b', exit: 1, limit: 600, end: '2026-11-10T10:00:01.000Z', items: [{ text: 'a', state: 'done' }], parent: 'q' })) {
-    assert.equal(changed([{ ...base, [k]: v }], a.next).out.length, 1, k);
+    const updated = { ...base, [k]: v };
+    const sent = changed([updated], a.next);
+    assert.equal(sent.out.length, 1, k);
+    assert.equal(changed([updated], sent.next).out.length, 0, `${k} stays told`);
   }
   assert.equal(changed([base], a.next).out.length, 0);
 });
@@ -634,4 +637,38 @@ test('a colour code inside a key\'s BEGIN line can\'t hide the block (t-2109)', 
     assert.ok(!out.includes('QyNTUxOQ'));
     assert.ok(out.includes('before') && out.includes('after'));
   }
+});
+
+ test('unchanged Codex runner cards keep first observation times so newer Claude work wins a report budget', async () => {
+  const { CodexRunner } = await import('../src/runners.mjs');
+  const { fitCards } = await import('../src/bodyhost.mjs');
+  const dir = scratch('codex-times-'); mkdirSync(join(dir, 'run'), {recursive: true});
+  writeFileSync(join(dir, 'run', 'events.jsonl'), JSON.stringify({type: 'item.completed', item: {id: 'own', type: 'agent_message', text: 'old words'}}) + '\n');
+  const runner = new CodexRunner({runsDir: dir});
+  const old = runner.activity({id: 'run'})[0];
+  await new Promise(resolve => setTimeout(resolve, 10));
+  const newer = {id: 'newer', at: new Date().toISOString(), tool: 'Bash', summary: 'Ran a command', state: 'done'};
+  await new Promise(resolve => setTimeout(resolve, 10));
+  const again = runner.activity({id: 'run'})[0];
+  assert.equal(again.at, old.at);
+  const report = {bodies: {codex: {cards: [again]}, claude: {cards: [newer]}}};
+  fitCards(report, Buffer.byteLength(JSON.stringify(newer)) + Buffer.byteLength(JSON.stringify({bodies: {codex: {cards: []}, claude: {cards: []}}})) + 2);
+  assert.deepEqual(report.bodies.claude.cards.map(c => c.id), ['newer']);
+  assert.deepEqual(report.bodies.codex.cards, []);
+});
+
+ test('helper selection prefers a recently written transcript over newer metadata when more than 20 helpers exist', async () => {
+  const {utimesSync} = await import('node:fs');
+  const root = scratch('helpers-many-'), file = join(root, 'main.jsonl'), dir = join(root, 'main', 'subagents');
+  mkdirSync(dir, {recursive: true}); writeFileSync(file, '');
+  for (let i = 0; i < 21; i++) {
+    const meta = join(dir, `agent-${i}.meta.json`), log = join(dir, `agent-${i}.jsonl`);
+    writeFileSync(meta, '{}'); writeFileSync(log, JSON.stringify(use(`tool-${i}`, 'Bash', {command: 'ls'})));
+    utimesSync(meta, 2000-i, 2000-i); utimesSync(log, i === 20 ? 3000 : 1000+i, i === 20 ? 3000 : 1000+i);
+  }
+  const runner = new ClaudeRunner(); runner.transcriptOf = () => file;
+  const cards = runner.activity({});
+  assert.equal(cards.length, 20);
+  assert.ok(cards.some(c => c.id === '20:tool-20'));
+  assert.ok(!cards.some(c => c.id === '0:tool-0'));
 });
