@@ -114,6 +114,12 @@ test('a service is its own principal: only what\'s scoped to it by name, and a b
   assert.equal(inScope(a, { service: 'jobs' }, a.scopes['github-token']), true);
   assert.equal(inScope(a, { service: 'discord' }, a.scopes['github-token']), false);
   assert.equal(inScope(a, { service: 'jobs' }, a.scopes['tailnet:fleet']), false);
+  // A secret scoped to services alone stays out of the owner's own houses (t-2118); with owner or a project too, it's his.
+  assert.equal(inScope(a, { owner: true }, 'service:discord'), false);
+  assert.equal(inScope(a, { owner: true }, 'service:discord+service:jobs'), false);
+  assert.equal(inScope(a, { owner: true }, 'owner+service:discord'), true);
+  assert.equal(inScope(a, { owner: true }, 'pond+service:jobs'), true);
+  assert.equal(inScope(a, { service: 'discord' }, 'service:discord'), true);
   // service:… never reaches a person, and owner never does.
   assert.equal(inScope({ steers: { jobs: ['pond'] } }, { person: 'jobs' }, 'service:jobs'), false);
   assert.equal(inScope({ steers: { constructor: ['pond'] } }, { person: 'toString' }, 'pond'), false);

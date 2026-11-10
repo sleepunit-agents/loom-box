@@ -456,7 +456,7 @@ export function setAgent(env, effects, { agent, repo, houseFile, nested, gpu, br
 // secret or tailnet the owner scopes goes only to the houses whose work may have it: `owner` (his own work only) or a
 // project's slug (his work, and that of the people he lets steer that project: steers, "patrick=pond"). Unscoped ones
 // go to every house of the agent, as before. Whose work a house is for is the runtime's word (t-1952): a body host's
-// seat, a task house's taskActsFor; a service house is the owner's (its house file names what each service gets).
+// seat, a task house's taskActsFor; a service house is its own (service:<name>), never the owner's (t-2118).
 // Kept here, with the rest of the agent's settings, so neither a box, a body nor the agent's repo can widen it.
 const SCOPE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 const SCOPE_MAX = 40;
@@ -536,11 +536,15 @@ function taskPrincipal(env, agent, p) {
   return { unknown: true };
 }
 
-/** Whether a house for `p` (housePrincipal) gets what's scoped to `scope` under agent config `a`. Unscoped: yes. */
+/**
+ * Whether a house for `p` (housePrincipal) gets what's scoped to `scope` under agent config `a`. Unscoped: yes. The
+ * owner's houses get anything scoped to him or a project, but not what's scoped to services alone (t-2118): a chat
+ * venue's raw token kept for its bridge (`discord-token=service:discord`) is a way to post in any of its conversations.
+ */
 export function inScope(a, p, scope) {
   if (scope === undefined) return true;
-  if (p.owner) return true;
   const words = String(scope).split('+');
+  if (p.owner) return words.some((w) => !w.startsWith('service:'));
   if (p.service) return words.includes(`service:${p.service}`);
   if (!p.person || !Object.hasOwn(a.steers ?? {}, p.person)) return false;
   const may = a.steers[p.person];
@@ -1845,7 +1849,9 @@ export function api(env, effects, { caller, path, body }) {
       return import('./trace.mjs').then(async (m) => {
         const q = {};
         for (const k of ['thread', 'run', 'conversation']) if (typeof b[k] === 'string') q[k] = b[k];
-        try { return { status: 200, body: await m.trace(env, { agent: caller.agent }, q) }; } catch (e) { if (e instanceof m.TraceError) return { status: 200, body: { ok: false, reason: e.message } }; throw e; }
+        // From a house, only its own conversation; from a service's, none (t-2118).
+        const where = { ...(caller.house ? { house: caller.house } : {}), ...(caller.service ? { service: caller.service } : {}) };
+        try { return { status: 200, body: await m.trace(env, { agent: caller.agent, ...where }, q) }; } catch (e) { if (e instanceof m.TraceError) return { status: 200, body: { ok: false, reason: e.message } }; throw e; }
       }).catch(apiError);
     }
     if (path === 'now/snapshot' || path === 'now/event') {

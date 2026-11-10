@@ -10,7 +10,7 @@
 // runtime's `trace/<cv>` page, `loom runtime trace` at loom's machine). Never across agents, and never a message's
 // words: a trace is mechanism.
 import { coreFrom } from './core.mjs';
-import { COMMS_VENUE, CV, listConvs, loadConv } from './delivery.mjs';
+import { COMMS_VENUE, CV, houseProblem, listConvs, loadConv } from './delivery.mjs';
 import { readBody } from './bodies.mjs';
 
 const THREAD = /^th:[a-z2-7]{10}$/;
@@ -112,10 +112,15 @@ export function stepsOf(c, run, thread, next = null) {
 
 /**
  * The trace: {conversation, agent, venue, place, label, now, runs (newest last), run (the one asked, else the newest),
- * steps, thread (core's half, Comms only), note?}. `who`: {agent} or {agents}.
+ * steps, thread (core's half, Comms only), note?}. `who`: {agent} or {agents}, and from a house its `house` (and
+ * `service`): then only the conversation whose body that house runs (t-2118), and none from a service's house. Any
+ * other is refused the same way as one that isn't there.
  */
 export async function trace(env, who, q = {}, o = {}) {
   const c = findConv(env, who, q);
+  if (who.service || (who.house !== undefined && (typeof who.house !== 'string' || houseProblem(env, c, { house: who.house })))) {
+    no(NONE);
+  }
   const runs = (c.runLog ?? []).map((r) => runOf(env, r));
   const run = q.run !== undefined ? runs.find((r) => r.run === q.run) ?? null : runs.at(-1) ?? null;
   let thread = null;
@@ -168,8 +173,11 @@ export async function traceTool(env, argv, input, o = {}) {
   try { args = JSON.parse(input || '{}'); } catch { return { exit: 1, answer: { text: 'comms_trace: the arguments aren\'t JSON', isError: true } }; }
   const q = {};
   for (const k of ['thread', 'run', 'conversation']) if (typeof args?.[k] === 'string' && args[k]) q[k] = args[k];
+  // From a house, only its own conversation; from a service's, none (t-2118). Core names both from the session's token.
+  const h = argv.indexOf('--house'), s = argv.indexOf('--service');
+  const where = { ...(h >= 0 ? { house: argv[h + 1] ?? '' } : {}), ...(s >= 0 ? { service: argv[s + 1] || 'service' } : {}) };
   try {
-    const t = await trace(env, { agent }, q, o);
+    const t = await trace(env, { agent, ...where }, q, o);
     return { exit: 0, answer: { text: `${traceText(t)}\n\n${JSON.stringify(t)}`.slice(0, 60_000) } };
   } catch (e) {
     if (e instanceof TraceError) return { exit: 1, answer: { text: e.message, isError: true } };

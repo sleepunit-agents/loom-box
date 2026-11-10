@@ -684,7 +684,8 @@ An agent's secrets and tailnets go to every house of it unless the owner scopes 
 for", "Who steers which project") or `loom runtime agent <agent> … --scope github-token=owner+service:discord --scope
 pond-dev-service-token=pond --scope tailnet:fleet=pond --steer patrick=pond`. A scope is one or more of, joined by `+`:
 `owner` (the owner's own work), a project's slug (the owner's work, and that of the people he lets steer that
-project), `service:<name>` (that service's houses). Whose work a house is for is the runtime's word: a body host's seat
+project), `service:<name>` (that service's houses; a secret scoped to services alone stays out of the owner's own
+houses too, t-2118: keep a chat venue's raw token, which posts in any of its conversations, for its bridge). Whose work a house is for is the runtime's word: a body host's seat
 (`owner.<conversation>`, `p-<person>.<conversation>`, `u-<conversation>`, t-1952, t-2061; a job's `j-h-<n>` is that house's, only while its conversation's
 principal is the one it started with: one someone else joined moves to its principal's house, and a task's house is let
 go once its body there is gone; an interactive terminal's house stays up with no body in it until it's taken down, t-2081), a task house's `taskActsFor` (the
