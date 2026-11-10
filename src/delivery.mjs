@@ -2114,7 +2114,10 @@ async function executeOne(env, op, d, mem) {
     const was = op.slot?.rules ?? {};
     // ...and a session only follows the conversation into a house no one else's bodies would read it in (principal.mjs,
     // carriesSession): never into a person's house that runs their other conversations.
-    if (op.type === 'resume' && (!sameRules(was, rules) || !carriesSession(was.seat, rules.seat, op.cv))) {
+    // A local conversation's session saved on the other side of "where" (loom's machine, or the owner's house: a local
+    // run keeps no seat, a housed one keeps the owner's) isn't resumed across machines: a fresh body, from its digests.
+    const crossed = !!c0.local && op.type === 'resume' && !!was.seat !== housed;
+    if (op.type === 'resume' && (crossed || !sameRules(was, rules) || !carriesSession(was.seat, rules.seat, op.cv))) {
       // A session is resumed only under the rules it began with: a guest venue's never as anyone else's, nor the other
       // way; nor one that heard a place's people, or a person's standing authority, under any others (t-1745). Its
       // slot goes, and its messages go back for a fresh body, in this same drain.
@@ -2187,9 +2190,10 @@ async function executeOne(env, op, d, mem) {
     // A failover (t-2038): allowed and out of quota, or its rules forbid its harness: another model, pinned there.
     if (way.failover) { delete base.pin; if (c0.spawn?.role) base.role = c0.spawn.role; }
     const notes = quotaNotes(c0, way);
-    let briefContext = c0;
+    // A housed local body (above) isn't on loom's machine: its brief says so, and it relays as a house body does.
+    let briefContext = housed ? { ...c0, local: false } : c0;
     if (c0.nativeRecovery?.report && sameRules(c0.nativeRecovery.reportRules ?? {}, rules) && carriesSession(c0.nativeRecovery.reportRules?.seat, rules.seat, op.cv)) {
-      try { briefContext = { ...c0, nativeRecovery: { ...c0.nativeRecovery, reportText: d.sealer.open(Buffer.from(c0.nativeRecovery.report, 'base64')).toString('utf8') } }; }
+      try { briefContext = { ...briefContext, nativeRecovery: { ...c0.nativeRecovery, reportText: d.sealer.open(Buffer.from(c0.nativeRecovery.report, 'base64')).toString('utf8') } }; }
       catch { throw Object.assign(new DeliveryError('the captured recovery report is unavailable; retaining its work', 503), { held: true }); }
     }
     if (way.how === 'start') {

@@ -63,3 +63,31 @@ test('"house": still only the clock delivers one, and only for the agents the ow
   assert.equal((await deliver(w.env, { ...m, source: 'other' }, w.o)).status, 403);
   assert.equal((await deliver(w.env, { ...m, id: 'z', agent: 'mark' }, w.o)).status, 403);
 });
+
+test('"house": its brief says it relays as a house body does, never as one on loom\'s machine', async () => {
+  const { w, lwake } = setup('house');
+  await deliver(w.env, lwake('lane:r', 'go'), w.o);
+  const start = w.log.find((l) => l[0] === 'start');
+  assert.match(JSON.stringify(start), /loom runtime relay --to/);
+});
+
+test('a session saved on loom\'s machine is not resumed in the owner\'s house after the switch: a fresh body', async () => {
+  const s = setup();
+  await deliver(s.w.env, s.lwake('lane:z', 'first'), s.w.o);
+  const c = s.conv('lane:z');
+  const ref = c.body;
+  assert.ok(ref && s.asked.includes(true), 'started here first');
+  // Its turn over and its body idled out: its session saved as a slot.
+  s.w.o.runner('claude', true).finish(ref);
+  const { tick } = await import('../src/delivery.mjs');
+  await tick(s.w.env, s.w.o);
+  s.w.clock.advance(601_000);
+  await tick(s.w.env, s.w.o);
+  assert.ok(s.conv('lane:z').slot, 'a slot to resume');
+  // The owner moves local bodies into his house: the next wake starts fresh there, never resumes that session.
+  s.w.env.LOOM_RUNTIME_LOCAL_BODIES = JSON.stringify({ ...base, where: 'house' });
+  await deliver(s.w.env, s.lwake('lane:z', 'second'), s.w.o);
+  const runs = s.w.log.filter((l) => l[0] === 'start' || l[0] === 'resume');
+  assert.equal(runs.at(-1)[0], 'start');
+  assert.equal(readBody(s.w.env, s.conv('lane:z').body).local, undefined);
+});
