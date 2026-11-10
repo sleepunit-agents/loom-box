@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { act } from '../src/ui.mjs';
-import { askOwnerReset, deliver, deliveryDir, loadConv, resetPrincipal, runtimeAs, seatMoved, shownRows } from '../src/delivery.mjs';
+import { askOwnerReset, conversationJobs, deliveryNotices, drain, deliver, deliveryDir, depsOf, loadConv, resetPrincipal, runtimeAs, seatMoved, shownRows } from '../src/delivery.mjs';
 import { putWakeFor, resetSigned } from '../src/principal.mjs';
 import { cvOf, fakeRunner, world } from './delivery-world.mjs';
 import { scratch } from './scratch.mjs';
@@ -451,4 +451,90 @@ test('a label can\'t fake the card\'s words; the withdraw goes as the card was f
   assert.equal(resetPrincipal({ ...env, LOOM_BIN: bin }, cv).ok, true);
   const withdrew = readFileSync(log, 'utf-8').trim().split('\n').map((l) => JSON.parse(l)).find((a) => a[1] === 'withdraw');
   assert.deepEqual(withdrew, ['approvals', 'withdraw', 'a-0000abcf', '--as', runtimeAs('art')]);
+});
+
+for (const state of ['expired', 'denied']) test(`${state} vouch quietly finishes its unstarted local wake (t-2046)`, async () => {
+  const { w, ap, lwake } = setup();
+  await deliver(w.env, lwake('wake:w-lost', 'approved bench', '-'), w.o);
+  const cv = cvOf('art', 'wake', 'wake:w-lost');
+  const before = loadConv(w.env, cv);
+  assert.equal(before.queue.length, 1);
+  ap.check = async () => state;
+  const alerts = [];
+  const d = depsOf(w.env, { ...w.o, alert: (...args) => alerts.push(args) });
+  await drain(w.env, cv, d);
+  const after = loadConv(w.env, cv);
+  assert.equal(after.queue.length, 0);
+  assert.equal(after.waiting, undefined);
+  assert.equal(after.runs, 0);
+  assert.equal(after.body, undefined);
+  assert.deepEqual(after.actsFor, before.actsFor);
+  assert.equal(after.outcomes[before.queue[0].key].body, 'failed');
+  assert.match(after.outcomes[before.queue[0].key].reason, /not run: nobody vouched for it/);
+  assert.deepEqual(conversationJobs(w.env, d), []);
+  assert.deepEqual(alerts, []);
+  assert.deepEqual(deliveryNotices(w.env, w.clock.now().getTime()), []);
+  await drain(w.env, cv, d);
+  assert.equal(loadConv(w.env, cv).queue.length, 0);
+});
+
+for (const state of ['pending', 'allowed', 'used', 'unreadable']) test(`${state} vouch never discards the wake`, async () => {
+  const { w, ap, lwake } = setup();
+  await deliver(w.env, lwake('wake:w-keep', 'bench', '-'), w.o);
+  const cv = cvOf('art', 'wake', 'wake:w-keep');
+  ap.check = async () => { if (state === 'unreadable') throw new Error('offline'); return state; };
+  await drain(w.env, cv, depsOf(w.env, w.o));
+  assert.equal(loadConv(w.env, cv).queue.length, 1);
+});
+
+test('a reset racing the vouch read keeps the wake for the allowed body', async () => {
+  const { w, ap, lwake } = setup();
+  await deliver(w.env, lwake('wake:w-race', 'bench', '-'), w.o);
+  const cv = cvOf('art', 'wake', 'wake:w-race');
+  ap.allowed['a-00000001'] = { target: `art:${cv}`, agent: 'art' };
+  ap.check = async () => { assert.equal(allow(w.env, { id: 'a-00000001', agent: 'art', target: `art:${cv}` }).ok, true); return 'expired'; };
+  await drain(w.env, cv, depsOf(w.env, w.o));
+  assert.equal(loadConv(w.env, cv).runs, 1);
+});
+
+test('terminal vouch drops only the scheduled wake shown, preserving later messages', async () => {
+  const { w, ap, lwake } = setup();
+  await deliver(w.env, lwake('wake:w-later', 'bench', '-'), w.o);
+  const cv = cvOf('art', 'wake', 'wake:w-later');
+  await deliver(w.env, w.msg('wake:w-later', 'later', { venue: 'wake', from: { kind: 'person', slug: 'loren' } }), w.o);
+  const c = loadConv(w.env, cv);
+  ap.check = async () => 'denied';
+  await drain(w.env, cv, depsOf(w.env, w.o));
+  const after = loadConv(w.env, cv);
+  assert.equal(after.queue.some(x => x.key === c.queue.find(x => x.from.kind === 'schedule').key), false);
+  assert.deepEqual(after.actsFor, c.actsFor);
+  assert.equal(after.queue.some(x => x.key === c.queue.find(x => x.from.kind === 'person').key), true);
+  assert.equal(after.runs, 0);
+});
+
+test('a new wake after the terminal queue finished can ask on its own card', async () => {
+  const { w, ap, lwake } = setup();
+  const cv = cvOf('art', 'wake', 'wake:w-new');
+  await deliver(w.env, lwake('wake:w-new', 'first', '-'), w.o);
+  ap.check = async () => 'expired';
+  await drain(w.env, cv, depsOf(w.env, w.o));
+  assert.equal(loadConv(w.env, cv).resetAsk, undefined);
+  await deliver(w.env, lwake('wake:w-new', 'second', '-'), w.o);
+  assert.equal(loadConv(w.env, cv).resetAsk.approval, 'a-00000002');
+  assert.equal(loadConv(w.env, cv).queue.length, 1);
+});
+
+test('terminal vouch reads the real approvals CLI as the filing agent, without a store grant', async () => {
+  const { w, lwake } = setup();
+  await deliver(w.env, lwake('wake:w-cli', 'bench', '-'), w.o);
+  const cv = cvOf('art', 'wake', 'wake:w-cli');
+  const bin = join(w.env.HOME, 'check-loom');
+  const log = join(w.env.HOME, 'check-argv');
+  writeFileSync(bin, `#!${process.execPath}\nconst fs = require('node:fs');\nfs.writeFileSync(${JSON.stringify(log)}, JSON.stringify({argv:process.argv.slice(2),grant:process.env.LOOM_STORE_GRANT ?? null}));\nconsole.log('expired');\n`);
+  chmodSync(bin, 0o755);
+  const env = { ...w.env, LOOM_BIN: bin, LOOM_STORE_GRANT: 'private-grant' };
+  delete env.LOOM_RUNTIME_TEST_APPROVALS;
+  await drain(env, cv, depsOf(env, w.o));
+  assert.deepEqual(JSON.parse(readFileSync(log, 'utf8')), { argv: ['approvals', 'check', 'a-00000001', '--as', runtimeAs('art')], grant: null });
+  assert.equal(loadConv(env, cv).queue.length, 0);
 });

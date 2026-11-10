@@ -1312,9 +1312,49 @@ function plan(env, cv, d, mem) {
   return begin({ type: 'start', msgs: take() });
 }
 
+/** A local wake held for a vouch is finished quietly when that card is denied or expires.
+ * Read outside the lock; recheck the exact card and queue under it so an Allow/reset or a concurrent start wins.
+ * This never grants authority, spends a card, or discards a person's later message. Unreadable is still waiting.
+ */
+async function finishUnvouchedWake(env, cv, d) {
+  const c = loadConv(env, cv);
+  if (!c?.local || c.venue !== 'wake' || c.body || c.starting || !c.resetAsk?.approval || !c.queue?.length) return;
+  const aid = c.resetAsk.approval;
+  if (!/^a-[0-9a-f]{8,40}$/.test(aid)) return;
+  const listedWake = x => c.resetAsk.queued?.includes(x.key) && x.kind === 'wake' && x.local && x.from?.kind === 'schedule';
+  if (!c.queue.some(listedWake)) return;
+  let state;
+  try {
+    const fx = approvalsFake(env);
+    if (fx) state = await fx.check?.(aid);
+    else {
+      const r = await approvalsRunAsync(env, ['check', aid, '--as', runtimeAs(c.agent)]);
+      if (!r.error && r.status === 0) state = r.stdout.trim();
+    }
+  } catch { return; }
+  if (!['denied', 'expired'].includes(state)) return;
+  locked(env, () => {
+    const cur = loadConv(env, cv);
+    if (!cur?.local || cur.venue !== 'wake' || cur.body || cur.starting || cur.resetAsk?.approval !== aid) return;
+    const shown = new Set(cur.resetAsk.queued ?? []);
+    const drop = (cur.queue ?? []).filter(x => shown.has(x.key) && x.kind === 'wake' && x.local && x.from?.kind === 'schedule');
+    if (!drop.length) return;
+    outcome(cur, drop.map(x => x.key), { body: 'failed', reason: `not run: nobody vouched for it (vouch ${state})` }, d.now().getTime());
+    const keys = new Set(drop.map(x => x.key));
+    cur.queue = cur.queue.filter(x => !keys.has(x.key));
+    if (!cur.queue.length) {
+      delete cur.waiting;
+      delete cur.resetAsk;
+      delete cur.retryAt; delete cur.startFails; delete cur.retryReason; delete cur.startStatus;
+    }
+    saveConv(env, cur);
+  });
+}
+
 /** Drain one conversation: plan, run what the plan says outside the lock, again, until there's nothing to do. */
 export async function drain(env, cv, d = depsOf(env), mem = new Map()) {
   if (!CV.test(cv ?? '')) return;
+  await finishUnvouchedWake(env, cv, d);
   for (let i = 0; i < 6; i++) {
     const op = locked(env, () => plan(env, cv, d, mem));
     if (!op) break;
