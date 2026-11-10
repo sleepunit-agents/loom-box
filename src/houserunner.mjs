@@ -335,14 +335,14 @@ export function cleanCards(cards) {
     if (typeof c.summary !== 'string' || !c.summary || c.summary.length > 120 || UNPRINTABLE_ONE.test(c.summary)) return [];
     if (!['running', 'done', 'failed'].includes(c.state)) return [];
     // A house's word is data: its label passes the same gate as one made here (redacted, a private path named
-    // "a private file", one printable line of 120 at most), its id and tool must be nothing secret-shaped, and its
-    // time is an ISO time or now.
+    // "a private file", one printable line of 120 at most), its tool must be nothing secret-shaped (else the card is
+    // dropped), its id is renamed when it looks like one (below), and its time is an ISO time or now.
     if (redact(c.tool) !== c.tool) return [];
     // An id is only a handle, never shown. A real one often looks random (a Claude tool_use id, a Codex item under its
-    // 24-hex body id), and redact() would take it for a secret: so one it would change is renamed to a short stable
-    // hash, the same step every time, never the id itself (t-2109: dropping them dropped every house body's steps).
-    const id = redact(c.id) === c.id ? c.id : `h:${createHash('sha256').update(c.id).digest('hex').slice(0, 16)}`;
-    if (redact(id) !== id) return [];
+    // 24-hex body id), and redact() would take it for a secret: so one it would change is renamed to `h:` (hashed) and
+    // the first 16 hex of the id's sha256, the same step every time, never the id itself (t-2109: dropping them dropped
+    // every house body's steps). An id that already starts `h:` is renamed too, so a house can't name a renamed one.
+    const id = redact(c.id) === c.id && !c.id.startsWith('h:') ? c.id : `h:${createHash('sha256').update(c.id).digest('hex').slice(0, 16)}`;
     const summary = part('text', c.summary, 120);
     if (summary === GONE || summary.length > 120 || UNPRINTABLE_ONE.test(summary)) return [];
     return [{ id, at: cardTime(c.at), tool: c.tool, summary, state: c.state }];
