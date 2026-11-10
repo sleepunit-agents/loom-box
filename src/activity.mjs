@@ -1,5 +1,5 @@
 // Activity: what a body in a Comms thread is doing, as plain one-line cards (loom docs/specs/comms.md, section 3).
-// Read only for bodies of venue `loom`, from the harness's own record:
+// Read only for managed bodies, from the harness's own record:
 //   - Claude: the session transcript (<projects>/<cwd>/<session>.jsonl). An `assistant` line's `tool_use` entry makes a
 //     `running` card; a later `user` line's `tool_result` for it makes it `done`, or `failed` when `is_error`.
 //   - Codex: events.jsonl. `item.started` makes a card, `item.completed` finishes it (`status: "failed"` is failed).
