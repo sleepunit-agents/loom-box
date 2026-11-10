@@ -155,3 +155,55 @@ test('an agent with one primary keeps its house when that box goes quiet: no dra
   assert.deepEqual(asked, [idOf('one')], 'wunder is up, but art never listed it');
   assert.equal(load(env).houses['h-1'].draining, undefined);
 });
+
+test('a warm house on a box behind the first one up drains, even while its own box is up, and new bodies go first (t-2070)', async () => {
+  mkdirSync(env.LOOM_BOX_DATA, { recursive: true });
+  ok(call(owner, 'set-primary', { agent: 'art', boxes: ['one', 'loom'] }));
+  update(env, (s) => { for (const b of Object.values(s.boxes)) b.harnesses = { claude: { loggedIn: true } }; });
+  seen('one', PLACE_UP_MS + 1000); seen('wunder');
+  const asked = [];
+  const upFn = (e, f, who, b) => {
+    const id = `h-${asked.length + 1}`;
+    asked.push(b.box);
+    update(env, (s) => { s.houses[id] = { id, agent: 'art', box: b.box, state: 'running', task: b.task, kind: 'body-host', seat: 'owner' }; });
+    return { id };
+  };
+  const hr = new HouseRunner(env, 'claude', { poll: 5, warmMs: 60, up: upFn, now: () => new Date(clock) });
+  await assert.rejects(hr.warm('art'), /didn't start/);
+  assert.deepEqual(asked, ['loom'], 'one is quiet: its house goes to loom');
+  // one is back: loom's house takes no new body, and the next asks for a house on one.
+  seen('one');
+  await assert.rejects(hr.warm('art'), /didn't start/);
+  assert.deepEqual(asked, ['loom', idOf('one')]);
+  assert.equal(hostOf(env, 'art').house, 'h-2');
+  assert.match(load(env).houses['h-1'].draining.reason, /one is ahead of loom in art's boxes; new bodies go there/);
+  assert.equal(load(env).houses['h-1'].state, 'running', 'its bodies finish there; it idles out the usual way');
+  // Once on the first box, it stays: nothing ahead of it.
+  await assert.rejects(hr.warm('art'), /didn't start/);
+  assert.deepEqual(asked, ['loom', idOf('one')]);
+});
+
+test('an order changed while a warm house runs on the old first box: the next body goes to the new first (t-2070)', async () => {
+  mkdirSync(env.LOOM_BOX_DATA, { recursive: true });
+  update(env, (s) => { for (const b of Object.values(s.boxes)) b.harnesses = { claude: { loggedIn: true } }; });
+  seen('one'); seen('wunder');
+  ok(call(owner, 'set-primary', { agent: 'art', boxes: ['wunder', 'one'] }));
+  const asked = [];
+  const upFn = (e, f, who, b) => {
+    const id = `h-${asked.length + 1}`;
+    asked.push(b.box);
+    update(env, (s) => { s.houses[id] = { id, agent: 'art', box: b.box, state: 'running', task: b.task, kind: 'body-host', seat: 'owner' }; });
+    return { id };
+  };
+  const hr = new HouseRunner(env, 'claude', { poll: 5, warmMs: 60, up: upFn, now: () => new Date(clock) });
+  await assert.rejects(hr.warm('art'), /didn't start/);
+  assert.deepEqual(asked, [idOf('wunder')]);
+  ok(call(owner, 'set-primary', { agent: 'art', boxes: ['one', 'wunder'] }));
+  await assert.rejects(hr.warm('art'), /didn't start/);
+  assert.deepEqual(asked, [idOf('wunder'), idOf('one')]);
+  // A box the agent's body can't run on (no login) is never a reason to leave.
+  ok(call(owner, 'set-primary', { agent: 'art', boxes: ['wunder', 'one'] }));
+  update(env, (s) => { s.boxes[idOf('wunder')].harnesses = {}; });
+  await assert.rejects(hr.warm('art'), /didn't start/);
+  assert.deepEqual(asked, [idOf('wunder'), idOf('one')]);
+});
