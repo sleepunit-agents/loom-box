@@ -19,7 +19,7 @@
 // plan, `items`, its checklist. The body's own words between steps are a `text` card (tool `text`), which delivery
 // shows only for a conversation that acts for the owner alone. A read shows its line count, never what it read.
 import { createHash } from 'node:crypto';
-import { commandLabel, cutTo, failWhy, fileName, GONE, INPUT_MAX, part, PRIVATE_FILE, privateFile, privateWords, redact, UNPRINTABLE, UNPRINTABLE_ONE } from './redact.mjs';
+import { commandLabel, cutInput, cutTo, failWhy, fileName, GONE, INPUT_MAX, part, PRIVATE_FILE, privateFile, privateWords, redact, UNPRINTABLE, UNPRINTABLE_ONE } from './redact.mjs';
 
 const INVISIBLE_CH = /[\p{Cf}\u034f\u115f\u1160\u17b4\u17b5\u180b-\u180f\u2800\u3164\ufe00-\ufe0f\uffa0\u{E0100}-\u{E01EF}]/gu;
 
@@ -222,16 +222,22 @@ export const cardTime = (t) => (typeof t === 'string' && /^\d{4}-\d{2}-\d{2}T\d{
 const SGR = /\x1b\[[0-9;]{0,30}m/g;
 const CONTROL = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g;
 
-/** One line of shown text: redacted (with its colours set aside, so a code inside a token can't hide it), a private
- * path named, its colours kept only when redaction left it as it was; cut to INPUT_MAX. */
+/**
+ * One line of shown text. Normalised first: every terminal code but colour (SGR) goes whole, then every other control
+ * and invisible character but a tab, so nothing can sit inside a token. Then the colour-free text is cut to INPUT_MAX
+ * and redacted, a private path named. Its colours are kept only when redaction left that text as it was; else it's the
+ * redacted text, without them. Nothing is taken out after redaction runs.
+ */
 function shownTextLine(line) {
-  // Terminal codes other than colour go whole: a title (OSC), a cursor move or erase (CSI), a lone escape.
-  const raw = String(line).replace(/\r$/, '').replace(/\x1b\][^\x07\x1b]{0,2000}(?:\x07|\x1b\\)?/g, '').replace(/\x1b\[[0-9;?]{0,30}[A-Za-ln-z]/g, '').replace(INVISIBLE_CH, '');
-  const plain = raw.replace(SGR, '');
-  const r = privateWords(redact(plain));
-  const keep = r === plain ? raw : r;
-  const cut = keep.length > INPUT_MAX ? `${cutTo(keep.replace(SGR, ''), INPUT_MAX)}` : keep;
-  return cut.replace(/\x1b(?!\[[0-9;]{0,30}m)/g, '').replace(CONTROL, (c) => (c === '\x1b' || c === '\t' ? c : ''));
+  const norm = String(line)
+    .replace(/\x1b\][^\x07\x1b]{0,2000}(?:\x07|\x1b\\)?/g, '')
+    .replace(/\x1b\[[0-9;?]{0,30}[A-Za-ln-z]/g, '')
+    .replace(/\x1b\[[0-9;]{0,30}m|\x1b|[\x00-\x08\x0a-\x1f\x7f-\x9f]/g, (m) => (m.length > 1 ? m : ''))
+    .replace(INVISIBLE_CH, '');
+  const plain = norm.replace(SGR, '');
+  const cut = plain.length > INPUT_MAX ? cutInput(plain) : plain;
+  const r = privateWords(redact(cut));
+  return r === plain ? norm : r;
 }
 
 /**
@@ -260,7 +266,7 @@ function unwrapShell(c) {
 
 /** A shell step's whole command, as its card's `detail`: shown text (redacted line by line), at most MAX_DETAIL. */
 export function commandLine(command) {
-  return shownText(command, MAX_DETAIL).replace(SGR, '');
+  return shownText(String(command ?? '').replace(SGR, ''), MAX_DETAIL);
 }
 
 /** A diff (Claude Code's structuredPatch hunks) as shown text: `@@ -a,b +c,d @@` and its lines. */
@@ -323,6 +329,13 @@ function claudeDetail(name, i) {
   }
 }
 
+/** Whether a file's contents must never show: no path, a private one, or one whose shown name isn't plain. */
+function hidden(path) {
+  if (typeof path !== 'string' || !path) return true;
+  const n = fileName(path);
+  return privateFile(path) || n === PRIVATE_FILE || n === GONE;
+}
+
 /** A shell step's own timeout, in seconds (Claude Code's Bash: `timeout` ms, 2 minutes when unset; none in the background). */
 function claudeLimit(name, i) {
   if (name !== 'Bash' || i.run_in_background === true) return null;
@@ -331,8 +344,10 @@ function claudeLimit(name, i) {
 }
 
 /** A finished Claude step's result line and its body (a shell step's output, an edit's diff): from its `toolUseResult`. */
-function claudeResult(name, r, text, failed, exit) {
+function claudeResult(name, r, text, failed, exit, input = {}) {
   const u = r && typeof r === 'object' ? r : {};
+  // A private file's contents never show, in a diff or as written (a .env, a key, loom's private stores): its counts only.
+  const shows = !hidden(input.file_path ?? input.notebook_path);
   switch (name) {
     case 'Bash': {
       const output = typeof u.stdout === 'string' || typeof u.stderr === 'string' ? [u.stdout, u.stderr].filter(Boolean).join('\n') : text;
@@ -340,10 +355,10 @@ function claudeResult(name, r, text, failed, exit) {
       return { result: shellResult({ exit, output, failed }), ...(body ? { body } : {}) };
     }
     case 'Read': { const n = count(u.file?.numLines); return n === null ? {} : { result: `Read ${plural(n, 'line')}` }; }
-    case 'Edit': case 'MultiEdit': { const p = patchLine(u.structuredPatch), body = patchText(u.structuredPatch); return p ? { result: p, ...(body ? { body } : {}) } : {}; }
+    case 'Edit': case 'MultiEdit': { const p = patchLine(u.structuredPatch), body = shows ? patchText(u.structuredPatch) : ''; return p ? { result: p, ...(body ? { body } : {}) } : {}; }
     case 'Write': {
-      if (u.type === 'create' && typeof u.content === 'string') { const body = shownText(u.content.split('\n').map((l) => `+${l}`).join('\n')); return { result: `Wrote ${plural(u.content.split('\n').length, 'line')}`, ...(body ? { body } : {}) }; }
-      const p = patchLine(u.structuredPatch), body = patchText(u.structuredPatch); return p ? { result: p, ...(body ? { body } : {}) } : {};
+      if (u.type === 'create' && typeof u.content === 'string') { const body = shows ? shownText(u.content.split('\n').map((l) => `+${l}`).join('\n')) : ''; return { result: `Wrote ${plural(u.content.split('\n').length, 'line')}`, ...(body ? { body } : {}) }; }
+      const p = patchLine(u.structuredPatch), body = shows ? patchText(u.structuredPatch) : ''; return p ? { result: p, ...(body ? { body } : {}) } : {};
     }
     case 'Grep': { const f = count(u.numFiles), n = count(u.numLines); return n !== null && u.mode === 'content' ? { result: `Found ${plural(n, 'line')}` } : f !== null ? { result: `Found ${plural(f, 'file')}` } : {}; }
     case 'Glob': { const f = count(u.numFiles); return f === null ? {} : { result: `Found ${plural(f, 'file')}` }; }
@@ -354,7 +369,7 @@ function claudeResult(name, r, text, failed, exit) {
 
 /** The cards in a Claude transcript's lines (parsed JSON objects), in order; `prefix` keeps ids unique per thread. */
 export function claudeCards(lines, prefix = '', parent = null) {
-  const cards = new Map(), names = new Map();
+  const cards = new Map(), names = new Map(), inputs = new Map();
   for (const l of lines) {
     const content = l?.message?.content;
     if (!Array.isArray(content)) continue;
@@ -365,7 +380,7 @@ export function claudeCards(lines, prefix = '', parent = null) {
       content.forEach((c, n) => {
         if (c?.type !== 'text' || typeof c.text !== 'string' || !c.text.trim() || !mid) return;
         const id = `${prefix}${mid}:${n}`.slice(0, 80);
-        const body = shownText(c.text, MAX_TEXT).replace(SGR, '');
+        const body = shownText(c.text.replace(SGR, ''), MAX_TEXT);
         const label = part('text', firstLine(c.text), MAX_SUMMARY);
         if (!body || label === GONE) return;
         cards.set(id, { id, at: cardTime(l.timestamp), tool: 'text', summary: clean(label), state: 'done', body, ...(parent ? { parent } : {}) });
@@ -381,6 +396,7 @@ export function claudeCards(lines, prefix = '', parent = null) {
         if (limit) card.limit = limit;
         if (name === 'TodoWrite') card.items = planItems((Array.isArray(input.todos) ? input.todos : []).map((t) => ({ text: t?.status === 'in_progress' ? (t.activeForm || t.content) : t?.content, done: t?.status === 'completed', now: t?.status === 'in_progress' })));
         names.set(id, name);
+        inputs.set(id, input);
         cards.set(id, card);
       }
     } else if (l.type === 'user') {
@@ -395,7 +411,7 @@ export function claudeCards(lines, prefix = '', parent = null) {
         const exit = code ? Number(code) : undefined;
         if (card.state === 'failed') card.summary = withWhy(card.summary, failWhy({ exit, output: text }));
         if (Number.isInteger(exit)) card.exit = exit;
-        const { result, body } = claudeResult(names.get(card.id), l.toolUseResult, text, card.state === 'failed', exit);
+        const { result, body } = claudeResult(names.get(card.id), l.toolUseResult, text, card.state === 'failed', exit, inputs.get(card.id));
         if (result) card.result = clean(redact(result));
         if (body) card.body = body;
         if (typeof l.timestamp === 'string') card.end = cardTime(l.timestamp);
@@ -492,7 +508,7 @@ export function cleanAlive(a) {
 export function stepParts(c, idOf = (x) => x) {
   const o = {};
   const int = (v, lo, hi) => (Number.isInteger(v) && v >= lo && v <= hi ? v : null);
-  if (typeof c?.detail === 'string' && c.detail) { const d = shownText(c.detail, MAX_DETAIL).replace(SGR, ''); if (d) o.detail = d; }
+  if (typeof c?.detail === 'string' && c.detail) { const d = shownText(c.detail.replace(SGR, ''), MAX_DETAIL); if (d) o.detail = d; }
   if (typeof c?.body === 'string' && c.body) { const t = shownText(c.body, MAX_BODY); if (t) o.body = t; }
   if (typeof c?.result === 'string' && c.result) { const r = part('text', c.result, MAX_SUMMARY); if (r !== GONE && !UNPRINTABLE_ONE.test(r)) o.result = r; }
   const exit = int(c?.exit, -999_999, 999_999); if (exit !== null) o.exit = exit;

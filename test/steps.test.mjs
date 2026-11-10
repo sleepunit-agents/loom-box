@@ -131,3 +131,28 @@ test('a result or body that moves is sent again', () => {
   const a = changed([{ id: 'x', tool: 'Bash', summary: 's', state: 'done', at: 'x', body: 'a' }], {});
   assert.equal(changed([{ id: 'x', tool: 'Bash', summary: 's', state: 'done', at: 'x', body: 'b' }], a.next).out.length, 1);
 });
+
+test('a private file\'s contents never show: an edit of .env, a write of a key, loom\'s stores show counts only', () => {
+  const patch = [{ oldStart: 1, oldLines: 1, newStart: 1, newLines: 1, lines: ['-A=PRIVATEVALUE1', '+A=PRIVATEVALUE2'] }];
+  const cards = claudeCards([
+    use('e1', 'Edit', { file_path: '/home/art/Code/x/.env' }), res('e1', 'ok', { structuredPatch: patch }),
+    use('e2', 'MultiEdit', { file_path: '/home/art/.ssh/id_ed25519' }), res('e2', 'ok', { structuredPatch: patch }),
+    use('w1', 'Write', { file_path: '/home/art/.config/loom/secrets.json' }), res('w1', 'ok', { type: 'create', content: 'PRIVATEVALUE3' }),
+    use('w2', 'Write', { file_path: '/home/art/Code/x/deploy.key' }), res('w2', 'ok', { type: 'update', structuredPatch: patch }),
+    use('w3', 'Write', {}), res('w3', 'ok', { type: 'create', content: 'PRIVATEVALUE4' }),
+  ]);
+  assert.equal(cards.length, 5);
+  for (const c of cards) assert.equal(c.body, undefined, c.id);
+  assert.ok(!JSON.stringify(cards).includes('PRIVATEVALUE'));
+  assert.deepEqual(cards.map((c) => c.result), ['1 addition, 1 removal', '1 addition, 1 removal', 'Wrote 1 line', '1 addition, 1 removal', 'Wrote 1 line']);
+});
+
+test('a token split by a backspace, a carriage return or a lone escape is still caught: controls go before redaction, nothing after', () => {
+  for (const sep of ['\b', '\r', '\x1b', '\x1b[1m', '\x00', '​']) {
+    const t = shownText(`x ${GH.slice(0, 12)}${sep}${GH.slice(12)} y`);
+    assert.ok(!leak(t), JSON.stringify([sep, t]));
+  }
+  // A colour around a clean word stays; around a token, the token goes and so do the colours.
+  assert.equal(shownText('\x1b[31merror\x1b[0m: bad'), '\x1b[31merror\x1b[0m: bad');
+  assert.ok(!shownText(`\x1b[31m${GH}\x1b[0m`).includes('\x1b'));
+});

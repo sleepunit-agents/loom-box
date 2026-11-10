@@ -189,3 +189,15 @@ test('the body\'s own words go only where it works for the owner alone; its sign
   assert.deepEqual(calls[1].cards, [{ id: 't1', at: 'x', tool: 'Bash', summary: 'Ran the tests', state: 'done' }]);
   assert.equal(calls[1].alive, undefined);
 });
+
+test('whose words show: only a conversation for the owner alone, read from its principal now (t-2109)', async () => {
+  const { wordsShown } = await import('../src/delivery.mjs');
+  const w = world();
+  const base = { agent: 'art', conversation: 'cv-000000000001' };
+  assert.equal(wordsShown(w.env, { ...base, actsFor: { owner: true, people: [], unknown: false } }), true);
+  assert.equal(wordsShown(w.env, { ...base, actsFor: { owner: true, people: [], unknown: true } }), false, 'unknown');
+  assert.equal(wordsShown(w.env, { ...base, actsFor: { owner: true, people: ['loren'], unknown: false } }), false, 'a person in it');
+  assert.equal(wordsShown(w.env, { ...base, actsFor: { owner: false, people: [], unknown: false } }), false, 'not the owner');
+  assert.equal(wordsShown(w.env, { ...base, actsFor: { owner: true, people: [], unknown: false, owners: ['someone-else-gone'] } }), false, 'a former owner is a person now');
+  assert.equal(wordsShown(w.env, { ...base }), false, 'no record');
+});

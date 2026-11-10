@@ -1578,8 +1578,9 @@ async function activityPass(env, c, d) {
   if (typeof r.activity !== 'function') return;
   const body = bodyOf(c.body, rec);
   // The body's own words between steps only where it works for the owner alone (t-2109): never where someone else is
-  // in the conversation, whose words its own might carry.
-  const ownersAlone = c.actsFor?.owner === true && !(c.actsFor.people?.length) && !c.actsFor.unknown;
+  // in the conversation, whose words its own might carry. Read from its principal now (principalOf: a former owner
+  // counts as a person), as localForeign reads it, never from the stored field alone.
+  const ownersAlone = wordsShown(env, c);
   const cards = (r.activity(body) ?? []).filter((x) => x.tool !== 'text' || ownersAlone);
   const { out, next } = changedCards(cards, c.cardsSent ?? {});
   let alive = null;
@@ -1605,6 +1606,19 @@ async function activityPass(env, c, d) {
     if (x && x.body === c.body) { x.cardsSent = next; if (sendAlive) x.aliveSent = { at: alive.at, told: Date.now() }; saveConv(env, x); }
   });
 }
+/**
+ * Whether a conversation's body works for the owner alone (t-2109), so its own words may show in his view: its
+ * principal now is the owner, known, with no person in it, and at most one owner spoke (several owners' words are
+ * each other's). Fails closed: anything it can't read says no.
+ */
+export function wordsShown(env, c) {
+  try {
+    const p = principalOf(env, c);
+    const spoke = Array.isArray(c?.actsFor?.owners) ? new Set(c.actsFor.owners) : new Set();
+    return p.owner === true && !p.unknown && Array.isArray(p.people) && p.people.length === 0 && spoke.size <= 1;
+  } catch { return false; }
+}
+
 /** At most how often a body's sign of life alone is told (t-2109), and the conversations whose core refused it. */
 const ALIVE_MS = 20_000;
 const oldCore = new Set();
