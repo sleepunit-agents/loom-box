@@ -202,3 +202,15 @@ test('a stale house report keeps the same spawn open until it reconnects with it
   update(w.env, s => { s.houses['h-1'].state = 'done'; });
   assert.equal(house.pending({ agent: 'art', house: 'h-1' }), false, 'authoritative termination still releases it');
 });
+
+test('a refused spawn call over the API says why, as a 403, never the runtime\'s opaque 500', async () => {
+  const { api } = await import('../src/control.mjs');
+  const { scratch } = await import('./scratch.mjs');
+  const D = scratch('rt-spawn-api-');
+  const env = { HOME: D, LOOM_BOX_HOME: `${D}/state`, LOOM_BOX_DATA: `${D}/data`, LOOM_BOX_LOCAL_NAME: 'loom' };
+  const r = await api(env, { now: () => new Date() }, { caller: { kind: 'agent', agent: 'art', house: 'h-1' }, path: 'spawn', body: { action: 'result', handle: 'cv-000000000000' } });
+  assert.equal(r.status, 403);
+  assert.match(r.body.error, /^spawn: /);
+  const roles = await api(env, { now: () => new Date() }, { caller: { kind: 'agent', agent: 'art', house: 'h-1' }, path: 'spawn', body: { action: 'roles' } });
+  assert.equal(roles.status, 200);
+});

@@ -4,14 +4,15 @@ import { bodyPrincipal, deliver, depsOf, loadConv, seatMoved } from './delivery.
 import { originOf } from './relay.mjs';
 import { principalOf } from './principal.mjs';
 import { detectLoop } from './loops.mjs';
-import { AGENT_NAME, load } from './state.mjs';
+import { AGENT_NAME, StateError, load } from './state.mjs';
 import { readModels, readRoles, roleOf } from './models.mjs';
 export const SPAWN_DEPTH = 8;
 export function spawnCap(env) {
   const n = Number(env.LOOM_RUNTIME_SPAWN_LIMIT ?? 3);
   return Number.isInteger(n) && n >= 1 && n <= 32 ? n : 3;
 }
-const no = (s) => { throw new Error(`spawn: ${s}`); };
+// A refusal, said to the asker: over the API a 4xx with these words, never the runtime's opaque 500.
+const no = (s) => { throw new StateError(`spawn: ${s}`, 403); };
 function asking(env, caller, q, o) {
   if (caller.kind === 'owner') return null;
   if (caller.kind !== 'agent') no('only an agent body or the local owner can ask');
