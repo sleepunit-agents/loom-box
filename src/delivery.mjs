@@ -1482,7 +1482,7 @@ async function stopBody(env, c, d, v) {
 
 /**
  * A Comms thread's body's tool steps (activity.mjs), new or moved since last told, to core's POST
- * /api/loom/comms/activity. For venue loom, and for a spawned job once core has given it its own thread (spawnComms),
+ * /api/loom/comms/activity. For every managed conversation, and for a spawned job once core has given it its own thread (spawnComms),
  * so the job can be watched from the desktop (t-2043); never before, or its first steps would be told to no thread and
  * lost. A thread core says is gone (409) is told nothing more of them.
  */
@@ -2167,7 +2167,7 @@ async function executeOne(env, op, d, mem) {
       ...(c0.nativeRecovery ? { nativeRecovery: c0.nativeRecovery.id } : {}),
       way: { how: way.how, home: !!way.home, ...(way.file ? { file: way.file } : {}), ...(way.failover ? { failover: way.failover } : {}), ...(base.gate ? { gated: true } : {}) },
     } });
-    const base = { activity: c0.spawn?.interactive === true, agent: c0.agent, venue: c0.venue, venueKind: c0.kind, prefer: c0.spawn?.prefer ? [c0.spawn.prefer] : [], cwd: local ? lb.cwd : d.cwd, deny: rules.deny, guest: rules.guest, ...(local ? { local: true } : {}), ...(rules.seat ? { seat: rules.seat } : {}), ...jobModel(c0), ...(Array.isArray(c0.spawn?.role?.needs) && c0.spawn.role.needs.length ? { needs: c0.spawn.role.needs } : {}) };
+    const base = { activity: true, agent: c0.agent, venue: c0.venue, venueKind: c0.kind, prefer: c0.spawn?.prefer ? [c0.spawn.prefer] : [], cwd: local ? lb.cwd : d.cwd, deny: rules.deny, guest: rules.guest, ...(local ? { local: true } : {}), ...(rules.seat ? { seat: rules.seat } : {}), ...jobModel(c0), ...(Array.isArray(c0.spawn?.role?.needs) && c0.spawn.role.needs.length ? { needs: c0.spawn.role.needs } : {}) };
     // Out of quota (t-1907): which session this run continues, on which harness. Its home slot, when the harness it
     // switched away from has room again; its own slot, when that one's harness has room; else a fresh body elsewhere.
     // A deny list Codex can't keep (a tool within a server, a built-in: runners.mjs, codexDeny) keeps this body off
@@ -3132,7 +3132,7 @@ export async function tick(env, o = {}, only, mem = new Map()) {
   // an end missed (a runtime that stopped mid-way, a home left by an older one). A house's are its host's.
   try { d.runner('codex', true).sweepHomes?.(); } catch { /* no local Codex runner, or its homes are busy: the next tick */ }
   for (const c of listConvs(env)) if (c.presence) { try { await presencePass(env, c, d, now); } catch (e) { d.warn(`presence for ${c.conversation}: ${e.message}`); } }
-  for (const c of listConvs(env)) if ((c.venue === COMMS_VENUE || c.spawn?.thread) && c.body && !c.starting) { try { await activityPass(env, c, d); } catch (e) { d.warn(`activity for ${c.conversation}: ${e.message}`); } }
+  for (const c of listConvs(env)) if ((!c.spawn || c.spawn.thread) && c.body && !c.starting) { try { await activityPass(env, c, d); } catch (e) { d.warn(`activity for ${c.conversation}: ${e.message}`); } }
   for (const c of listConvs(env)) if (c.queue?.length) await drain(env, c.conversation, d);
   await spawnComms(env, d);
   await returnSpawns(env, d, o);
