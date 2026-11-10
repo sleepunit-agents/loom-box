@@ -739,6 +739,13 @@ loom runtime host unit-status <unit>                 do    /usr/bin/systemctl --
 loom runtime host journal <unit> [--since 2h] [--lines 200]   do    journalctl --user -u <unit>
 loom runtime host read <path>                        do    a runtime log (allocator-shadow.jsonl, allocator-readings.jsonl,
                                                            host-exec/log.jsonl) or hosts/<your agent>.json
+loom runtime host box-health <box>                   do    loom runtime health <box>
+loom runtime host art-checkout                       do    git status --short --branch of loom's ~/Art (no fsmonitor, no pager)
+loom runtime host alert-show <al-id>                 do    Art's alert ledger (~/Art/.alerts), read in-process: the alert
+loom runtime host alert-verdicts <source> [--days 30]   do    its verdicts, and its false alarms by cause
+loom runtime host alert-peek [--hours 24]            do    what alerted lately, grouped by kind and source
+loom runtime host alert-verdict <source> real|fixed|false-alarm --cause C --why W [--alert al-…]
+                                                     do    one typed, bounded record appended (O_APPEND, no link)
 loom runtime host art-chain-check --approval a-…     ask   ~/Art/bin/art-chain-check (a script a push can change)
 loom runtime host deploy-loom <label> --approval a-… ask   flock /tmp/deploy-loom.lock ~/Art/bin/deploy-loom <label>
 loom runtime host pieces-update <piece> --approval a-…  ask   loom pieces update <piece>
@@ -752,7 +759,9 @@ loom runtime host-exec                               loom's machine: the executo
   `send` does), from the house holding that body. The conversation's principal is the owner, and so is the caller's
   house (the owner's seat, or a job house doing the owner's work); a body on loom's machine only for a local
   conversation. Anyone else is refused before anything else is read, the verb included.
-- **The tier.** Each verb's own: the fixed reads `do`; changes, and any script from a checkout that syncs by itself
+- **The tier.** Each verb's own: the fixed reads `do`, and `alert-verdict` (t-2119: alert triage's own record of
+  each alert it looked at, typed words appended in-process, nothing run; asking each time would page the owner per
+  alert); changes, and any script from a checkout that syncs by itself
   (`art-chain-check`, `deploy-loom`), `ask`. With `LOOM_RUNTIME_HOST_RULES=1` (once the approvals piece has standing
   rules for kind `host`, t-2104), the owner's rule for `<verb>:<arg>` (`approvals rule host …`) decides instead. An
   unreadable answer is the verb's own tier. `ask`: an approval of kind `host` for exactly that target, which the
