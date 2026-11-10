@@ -697,7 +697,7 @@ named step from a fixed table, with typed arguments, run by a separate executor 
 loom runtime host unit-status <unit>                 do    /usr/bin/systemctl --user status (loom-*, art-*, wake-rearm)
 loom runtime host journal <unit> [--since 2h] [--lines 200]   do    journalctl --user -u <unit>
 loom runtime host read <path>                        do    a runtime log (allocator-shadow.jsonl, allocator-readings.jsonl,
-                                                           relays.jsonl, host-exec/log.jsonl) or hosts/<your agent>.json
+                                                           host-exec/log.jsonl) or hosts/<your agent>.json
 loom runtime host art-chain-check --approval a-…     ask   ~/Art/bin/art-chain-check (a script a push can change)
 loom runtime host deploy-loom <label> --approval a-… ask   flock /tmp/deploy-loom.lock ~/Art/bin/deploy-loom <label>
 loom runtime host pieces-update <piece> --approval a-…  ask   loom pieces update <piece>
@@ -724,7 +724,9 @@ loom runtime host-exec                               loom's machine: the executo
   PATH of node's dir and the system's only, and keeps the output's last 64 KB, every line through `redact.mjs`, in
   `done/` (7 days, 200 results). Changes run one at a time; reads alongside. One executor at a time
   (a kernel lock, `flock` on `executor.lock`, gone with the process however it ends). A verb past its time is a failure. A stop finishes what's running and begins nothing more. A request the executor was running when
-  it stopped is recorded as `lost` and never run again. A request file that isn't a private file of the executor's
+  it stopped is recorded as `lost` and never run again; one that waited more than 15 minutes for the executor (none
+  installed yet, or it was down) is recorded as `expired`, never run late. A tail cut from longer output starts at its
+  first whole line. A request file that isn't a private file of the executor's
   user is dropped. The executor trusts the spool as the runtime trusts its own state: anything running as loom's user
   on loom's machine could write it (a local body already has that machine's shell), so the owner's yes is checked by
   the runtime before spooling, not again by the executor. `art-chain-check` and `deploy-loom` run what `~/Art/bin` holds when they run,

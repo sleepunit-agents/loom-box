@@ -33,6 +33,8 @@ export const OUTPUT_MAX = 64 * 1024;
 /** How long a body's call waits for a quick verb's result before it answers with the request's id (inside loom's 15 s). */
 const WAIT_MS = 2_000;
 const KEEP_RESULTS = 200;
+/** The longest a request waits for the executor before it's expired, never run. */
+export const MAX_WAIT_MS = 15 * 60_000;
 const KEEP_MS = 7 * 24 * 3600 * 1000;
 
 // ─── The verbs: a fixed table, each argument typed ──────────────────────────
@@ -293,11 +295,12 @@ export function hostResult(env, caller, args, proof, d) {
 /** Where `read` may look: the delivery dir's runtime logs (not its subdirectories but hosts/), and hosts/. */
 export function readAllowed(env, p, agent) {
   const base = join(dataDir(env), 'delivery');
-  const LOGS = /^(?:allocator-(?:shadow|readings)\.jsonl(?:\.1)?|relays\.jsonl|host-exec\/log\.jsonl(?:\.1)?)$/;
+  // Not relays.jsonl: it holds every agent's relayed words (`loom runtime relays` is the agent's own view of its own).
+  const LOGS = /^(?:allocator-(?:shadow|readings)\.jsonl(?:\.1)?|host-exec\/log\.jsonl(?:\.1)?)$/;
   const rel = String(p).replace(/^\.\//, '');
   // hosts/: only the asking agent's own owner-seat record, never another agent's or a person's seat's.
   const own = typeof agent === 'string' && /^[a-z][a-z0-9-]{0,39}$/.test(agent) && rel === `hosts/${agent}.json`;
-  if (rel.startsWith('/') || rel.split('/').includes('..') || !(LOGS.test(rel) || own)) return { error: 'read is for the runtime\'s logs (allocator-shadow.jsonl, allocator-readings.jsonl, relays.jsonl, host-exec/log.jsonl) and hosts/<your agent>.json, named under its delivery dir' };
+  if (rel.startsWith('/') || rel.split('/').includes('..') || !(LOGS.test(rel) || own)) return { error: 'read is for the runtime\'s logs (allocator-shadow.jsonl, allocator-readings.jsonl, host-exec/log.jsonl) and hosts/<your agent>.json, named under its delivery dir' };
   const full = join(base, rel);
   let real;
   try { if (lstatSync(full).isSymbolicLink()) return { error: 'read doesn\'t follow a link' }; real = realpathSync(full); } catch { return { error: `no ${rel}` }; }
@@ -314,15 +317,18 @@ function tailOf(path, max = OUTPUT_MAX) {
     const n = Math.min(size, max);
     const b = Buffer.alloc(n);
     readSync(fd, b, 0, n, size - n);
-    return { text: b.toString('utf-8'), cut: size > n };
+    return size > n ? { text: fromFirstLine(b.toString('utf-8')), cut: true } : { text: b.toString('utf-8'), cut: false };
   } finally { closeSync(fd); }
 }
+
+/** A tail cut mid-line starts at its first whole line: a token cut in half at the front would pass redaction. */
+const fromFirstLine = (t) => { const i = t.indexOf('\n'); return i < 0 ? '' : t.slice(i + 1); };
 
 /** Output kept: its tail, bounded, every line through redact.mjs. */
 export function boundOutput(s) {
   const t = String(s ?? '');
   const cut = Buffer.byteLength(t) > OUTPUT_MAX;
-  const tail = cut ? Buffer.from(t).subarray(-OUTPUT_MAX).toString('utf-8') : t;
+  const tail = cut ? fromFirstLine(Buffer.from(t).subarray(-OUTPUT_MAX).toString('utf-8')) : t;
   return { output: tail.split('\n').map(redactLine).join('\n'), ...(cut ? { cut: true } : {}) };
 }
 
@@ -347,6 +353,10 @@ export async function runOne(env, req, exec = runCommand) {
   const parsed = parseVerb(req?.verb, req?.args);
   const started = new Date().toISOString();
   if (parsed.error) return { id: req?.id, state: 'refused', reason: parsed.error, startedAt: started, endedAt: started };
+  // The owner's yes, and a body's ask, are for now: a request that waited past its time (no executor yet, or one
+  // that was down) never runs late.
+  const age = Date.now() - Date.parse(req.at ?? '');
+  if (!(age >= -60_000 && age <= MAX_WAIT_MS)) return { id: req.id, verb: req.verb, target: parsed.target, state: 'expired', reason: `it waited ${Number.isFinite(age) ? `${Math.round(age / 60_000)} minutes` : 'an unknown time'} for the executor (at most ${MAX_WAIT_MS / 60_000}); ask again`, startedAt: started, endedAt: started };
   const v = VERBS[parsed.verb];
   if (parsed.verb === 'read') {
     const ok = readAllowed(env, parsed.p.path, req.agent);
@@ -359,7 +369,8 @@ export async function runOne(env, req, exec = runCommand) {
   // Past its time is a failure, whatever the last process said.
   const state = r.exit === 0 && !r.timedOut ? 'done' : 'failed';
   const note = r.timedOut ? `\n(stopped after ${Math.round(v.timeoutMs / 1000)} s)` : r.spawnError ? `\n(couldn't start ${cmd}: ${r.spawnError})` : '';
-  return { id: req.id, verb: req.verb, target: parsed.target, state, exit: r.exit, ...(r.signal ? { signal: r.signal } : {}), ...boundOutput(r.out + note), startedAt: started, endedAt: new Date().toISOString() };
+  const kept = boundOutput(r.out + note);
+  return { id: req.id, verb: req.verb, target: parsed.target, state, exit: r.exit, ...(r.signal ? { signal: r.signal } : {}), ...kept, ...(r.cut ? { cut: true } : {}), startedAt: started, endedAt: new Date().toISOString() };
 }
 
 /**
@@ -370,7 +381,9 @@ export async function runOne(env, req, exec = runCommand) {
 export function runCommand(cmd, argv, { env, timeoutMs }) {
   return new Promise((resolve) => {
     let out = Buffer.alloc(0);
-    const keep = (b) => { out = Buffer.concat([out, b]); if (out.length > 2 * OUTPUT_MAX) out = out.subarray(-OUTPUT_MAX); };
+    let cut = false;
+    const keep = (b) => { out = Buffer.concat([out, b]); if (out.length > 2 * OUTPUT_MAX) { out = out.subarray(-OUTPUT_MAX); cut = true; } };
+    const text = () => (cut ? fromFirstLine(out.toString('utf-8')) : out.toString('utf-8'));
     let child;
     try { child = spawn(cmd, argv, { env, shell: false, detached: true, stdio: ['ignore', 'pipe', 'pipe'] }); } catch (e) { resolve({ exit: null, spawnError: e.code ?? e.message, out: '' }); return; }
     let timedOut = false, done = false;
@@ -379,8 +392,8 @@ export function runCommand(cmd, argv, { env, timeoutMs }) {
     const t = setTimeout(() => { timedOut = true; group('SIGTERM'); kill = setTimeout(() => group('SIGKILL'), 10_000); kill.unref(); }, timeoutMs);
     child.stdout.on('data', keep);
     child.stderr.on('data', keep);
-    child.on('error', (e) => { if (done) return; done = true; clearTimeout(t); resolve({ exit: null, spawnError: e.code ?? e.message, out: out.toString('utf-8') }); });
-    child.on('close', (code, signal) => { if (done) return; done = true; clearTimeout(t); if (kill) clearTimeout(kill); if (timedOut) group('SIGKILL'); resolve({ exit: code, signal, timedOut, out: out.toString('utf-8') }); });
+    child.on('error', (e) => { if (done) return; done = true; clearTimeout(t); resolve({ exit: null, spawnError: e.code ?? e.message, out: text(), cut }); });
+    child.on('close', (code, signal) => { if (done) return; done = true; clearTimeout(t); if (kill) clearTimeout(kill); if (timedOut) group('SIGKILL'); resolve({ exit: code, signal, timedOut, out: text(), cut }); });
   });
 }
 
@@ -405,7 +418,7 @@ export async function execPass(env, { exec = runCommand, state = { busy: new Set
     const id = n.replace(/\.json$/, '');
     if (!HOST_ID.test(id) || busy.has(id)) continue;
     const req = readJson(join(run, n));
-    writeJson(join(done, `${id}.json`), { id, verb: req?.verb, target: req?.target, state: 'lost', reason: 'the executor stopped while it ran; it may have acted, and it isn\'t run again', endedAt: new Date().toISOString() });
+    writeJson(join(done, `${id}.json`), { id, verb: req?.verb, target: req?.target, agent: req?.agent, conversation: req?.conversation, state: 'lost', reason: 'the executor stopped while it ran; it may have acted, and it isn\'t run again', endedAt: new Date().toISOString() });
     rmSync(join(run, n), { force: true });
     log(env, { id, event: 'lost' });
   }
