@@ -22,7 +22,7 @@
 // back by the timer (recoverUpgrade). Only a box already running this code can do that; one
 // older says so on its page, with the command (swapCommand).
 import { spawnSync } from 'node:child_process';
-import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, mkdirSync } from 'node:fs';
+import { cpSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync, mkdirSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -218,7 +218,7 @@ export function maybeUpgrade({ want, mine = ownCommit(), piece = ownPiece(), sta
 
 const short = (c) => String(c ?? '').slice(0, 7);
 /** What a detached unit is given of the box's environment (systemd-run's own env is the user manager's). */
-const passEnv = (env) => ['LOOM_HOME', 'LOOM_BIN', 'LOOM_BOX_HOME', 'HOME', 'PATH'].filter((k) => env[k]).map((k) => `--setenv=${k}=${env[k]}`);
+const passEnv = (env) => ['LOOM_HOME', 'LOOM_BIN', 'LOOM_BOX_HOME', 'LOOM_CORE_DIR', 'HOME', 'PATH'].filter((k) => env[k]).map((k) => `--setenv=${k}=${env[k]}`);
 
 /** $LOOM_HOME, else ~/.config/loom: where loom keeps its pieces. */
 export const loomHome = (env) => env.LOOM_HOME || join(env.HOME || homedir(), '.config', 'loom');
@@ -286,6 +286,70 @@ export function carrySettings(env, { from = 'box', to = 'runtime', run = spawnSy
 const tailOf = (r) => `${r?.stdout ?? ''}\n${r?.stderr ?? ''}`.split('\n').map((l) => l.trimEnd()).filter((l) => l.trim()).slice(-6).join('\n')
   .replace(/\b(token|secret|password|bearer|key)(["':= ]+)\S+/gi, '$1$2[…]').replace(/[A-Za-z0-9+/_=-]{32,}/g, '[…]').slice(-600);
 
+/**
+ * loom core on a box: the checkout `loom` runs from (README, "Node and the loom CLI": a clone of loom's canonical repo,
+ * built in place, its dist/index.js linked onto PATH). Nothing else updates it, and a runtime piece can need a newer one
+ * than the box was set up with: core is what reads the piece's loom block (loom#707 raised loom.settings from 20 to 32,
+ * and a box on an older core refused every runtime that declares 21). So when an install fails, the upgrade brings core
+ * forward and tries once more (installWithCore).
+ */
+export const CORE_REPO = 'sleepunit-agents/loom';
+const CORE_PACKAGE = '@jbarket/loomai';
+
+/** The loom checkout `loom` resolves to: $LOOM_CORE_DIR, else up from the bin's real path. null when it isn't one. */
+export function coreDir(env = process.env, { real = realpathSync } = {}) {
+  const isCore = (d) => readJson(join(d, 'package.json'))?.name === CORE_PACKAGE && existsSync(join(d, '.git'));
+  if (env.LOOM_CORE_DIR) return isCore(env.LOOM_CORE_DIR) ? env.LOOM_CORE_DIR : null;
+  const bin = env.LOOM_BIN || 'loom';
+  const found = bin.includes('/') ? bin : (env.PATH || '').split(':').filter(Boolean).map((d) => join(d, bin)).find((p) => existsSync(p));
+  if (!found) return null;
+  let d;
+  try { d = dirname(real(found)); } catch { return null; }
+  for (let i = 0; i < 4 && d !== dirname(d); i++, d = dirname(d)) if (isCore(d)) return d;
+  return null;
+}
+
+/**
+ * Bring a box's loom core forward to its canonical repo's main: fetched from the canonical URL (not whatever origin
+ * says), fast-forward only (a checkout ahead of main or beside it is left alone), then `npm ci` and the build. A build
+ * that fails puts the old commit back and builds that, so `loom` still runs. Returns {from, to} or {error}.
+ */
+export function updateCore(env, { run = spawnSync, dir = coreDir(env), url = env.LOOM_CORE_URL || `https://github.com/${CORE_REPO}.git` } = {}) {
+  if (!dir) return { error: 'loom core here isn\'t a checkout of loom this box can update (set LOOM_CORE_DIR to it)' };
+  const opts = { env, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] };
+  const git = (...a) => run('git', ['-C', dir, ...a], { ...opts, timeout: 300_000 }) ?? { status: 1 };
+  const npm = (...a) => run('npm', a, { ...opts, cwd: dir, timeout: 20 * 60_000 }) ?? { status: 1 };
+  const head = () => (git('rev-parse', 'HEAD').stdout ?? '').trim();
+  const from = head();
+  if (!COMMIT.test(from)) return { error: `couldn't read loom core's commit in ${dir}` };
+  if (git('fetch', '-q', url, 'main').status !== 0) return { error: `couldn't fetch ${CORE_REPO}'s main` };
+  const to = (git('rev-parse', 'FETCH_HEAD').stdout ?? '').trim();
+  if (to === from) return { from, to };
+  if (git('merge-base', '--is-ancestor', from, 'FETCH_HEAD').status !== 0) return { error: `loom core's ${short(from)} isn't behind ${CORE_REPO}'s main; left as it is` };
+  const ff = git('merge', '-q', '--ff-only', 'FETCH_HEAD');
+  if (ff.status !== 0) return { error: `couldn't fast-forward loom core to ${short(to)} (exit ${ff.status})`, detail: tailOf(ff) };
+  const build = () => { const c = npm('ci', '--no-audit', '--no-fund'); return c.status !== 0 ? c : npm('run', 'build'); };
+  const b = build();
+  if (b.status === 0) return { from, to };
+  git('reset', '-q', '--hard', from);
+  const back = build();
+  return { error: `building loom core at ${short(to)} failed (exit ${b.status}); ${back.status === 0 ? `it's back at ${short(from)}` : `and rebuilding ${short(from)} failed too (exit ${back.status})`}`, detail: tailOf(b) };
+}
+
+/**
+ * `loom pieces install …`, and if it fails, loom core brought forward (updateCore) and the install tried once more: a
+ * piece newer than the box's core (core/piece skew) doesn't wedge the box. `out.core` says what happened to core.
+ */
+function installWithCore(kit, env, args, out = {}) {
+  const first = kit.loom('pieces', 'install', ...args);
+  if (first.status === 0) return first;
+  const core = (kit.updateCore ?? updateCore)(env, { run: kit.run });
+  out.core = core;
+  if (core.error || core.from === core.to) return first;
+  return kit.loom('pieces', 'install', ...args);
+}
+const coreNote = (c) => (!c ? {} : c.error ? { core: { error: c.error } } : { core: { from: c.from, to: c.to } });
+
 /** The detached units' common part: run loom, and write each step of an upgrade to upgrade.json. */
 function upgradeKit({ env, stateDir, run, node = process.execPath, cli = fileURLToPath(new URL('./cli.mjs', import.meta.url)) }) {
   const loomBin = env.LOOM_BIN || 'loom';
@@ -303,7 +367,7 @@ function upgradeKit({ env, stateDir, run, node = process.execPath, cli = fileURL
   const arm = (rec) => {
     const dir = userUnitDir(env);
     const q = (v) => `"${String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
-    const pass = ['LOOM_HOME', 'LOOM_BIN', 'LOOM_BOX_HOME', 'HOME', 'PATH'].filter((k) => env[k] && !/[\n\r]/.test(env[k]));
+    const pass = ['LOOM_HOME', 'LOOM_BIN', 'LOOM_BOX_HOME', 'LOOM_CORE_DIR', 'HOME', 'PATH'].filter((k) => env[k] && !/[\n\r]/.test(env[k]));
     try {
       mkdirSync(dir, { recursive: true });
       writeFileSync(join(dir, `${RECOVER_UNIT}.service`), ['# Written by loom-runtime (src/version.mjs): finishes or rolls back a box→runtime swap. Removed when it\'s over.',
@@ -350,13 +414,14 @@ function continueSwap(kit, env, rec) {
   }
   if (r.state === 'installing') {
     let inst = { status: 0 };
-    if (!installed(env, r.target, r.commit)) inst = loom('pieces', 'install', '--from', src, '--yes');
+    const o = {};
+    if (!installed(env, r.target, r.commit)) inst = installWithCore(kit, env, ['--from', src, '--yes'], o);
     if (inst.status === 0) {
       const c = carrySettings(env, { from: r.piece, to: r.target, run: kit.run, loomBin: kit.loomBin });
-      return say({ ...disarm(r), state: 'done', swapped: { from: r.piece, to: r.target, settings: c.carried, declared: c.declared },
+      return say({ ...disarm(r), state: 'done', swapped: { from: r.piece, to: r.target, settings: c.carried, declared: c.declared }, ...coreNote(o.core),
         ...(c.error ? { error: `installed; ${c.error}: set them by hand (every old value is in pieces/${r.target}/${CARRIED})` } : {}) });
     }
-    r = say({ ...r, state: 'rolling-back', error: `installing ${r.target} failed (exit ${inst.status})`, detail: tailOf(inst) });
+    r = say({ ...r, state: 'rolling-back', error: `installing ${r.target} failed (exit ${inst.status})`, detail: tailOf(inst), ...coreNote(o.core) });
   }
   if (r.state === 'rolling-back') {
     // The kept copy first: no network. Then the old commit from GitHub.
@@ -379,14 +444,15 @@ function continueSwap(kit, env, rec) {
  * recovery timer, then remove the old piece (loom keeps its settings and data), install the new one, and carry the
  * settings over. If the install fails, the kept copy goes back in (path:, no network), else the old commit.
  */
-export function applyUpgrade({ commit, from, repo = DEFAULT_REPO, piece, target, env = process.env, stateDir, run = spawnSync, nowMs = Date.now(), keepDir = ownPackageDir(), node, cli }) {
+export function applyUpgrade({ commit, from, repo = DEFAULT_REPO, piece, target, env = process.env, stateDir, run = spawnSync, nowMs = Date.now(), keepDir = ownPackageDir(), node, cli, core }) {
   if (!COMMIT.test(commit ?? '') || !COMMIT.test(from ?? '')) throw new Error('upgrade-apply needs --commit and --from, full commits');
-  const kit = { ...upgradeKit({ env, stateDir, run, node, cli }), run };
+  const kit = { ...upgradeKit({ env, stateDir, run, node, cli }), run, ...(core ? { updateCore: core } : {}) };
   const prev = readRecord(stateDir);
   const base = { commit, from, repo, piece, target, at: new Date(nowMs).toISOString(), retryAt: new Date(nowMs + UPGRADE_RETRY_MS).toISOString(), ...(prev?.commit === commit && prev.now ? { now: prev.now } : {}) };
   if (!piece || !target || piece === target) {
-    const r = kit.loom('pieces', 'install', '--from', `github:${repo}#${commit}`, '--yes');
-    return kit.say(r.status === 0 ? { ...base, state: 'done' } : { ...base, state: 'failed', error: `loom pieces install failed (exit ${r.status})`, detail: tailOf(r) });
+    const o = {};
+    const r = installWithCore(kit, env, ['--from', `github:${repo}#${commit}`, '--yes'], o);
+    return kit.say(r.status === 0 ? { ...base, state: 'done', ...coreNote(o.core) } : { ...base, state: 'failed', error: `loom pieces install failed (exit ${r.status})`, detail: tailOf(r), ...coreNote(o.core) });
   }
   // 1. A copy of what runs now, outside the piece home `remove` empties: the rollback needs no network.
   const keep = join(stateDir, 'upgrade-keep', from);
