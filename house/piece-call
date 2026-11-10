@@ -20,7 +20,8 @@ For approvals and clock (and tasks, when it names a --source, t-2117), a body in
 sends `--principal <statement>` (any it typed is taken off first): on whose behalf it acts, signed by the runtime
 (`loom-runtime principal`, t-1943; PIECE_CALL_RUNTIME names another program,
 for tests). Without one the piece treats the body as acting for someone it
-can't name, never the owner.
+can't name, never the owner, and piece-call says on stderr why the runtime gave
+none (t-2136: a lane read only "ask, for ?" and stopped with six reviewed PRs).
 
 Exit 1 with loom's words when the call itself fails (refused, unreachable).
 """
@@ -74,27 +75,44 @@ def in_body():
         re.fullmatch(r"cv-[0-9a-f]{12}", os.environ.get("LOOM_BODY_CONVERSATION", "")))
 
 
+def why_none(why):
+    """Say on stderr why this body sends no statement (t-2136): the piece will answer for someone it can't name, and a
+    body reading only that can't tell a refusal (a body left in the shared house from before t-2061) from a conversation
+    others steered. The runtime's reason, one line and short; it names conversations and houses, never a key."""
+    why = " ".join(str(why or "no answer").split())[:300]
+    sys.stderr.write(f"piece-call: no statement of whom this body works for ({why}), so the piece treats it as "
+                     "someone loom can't name\n")
+
+
 def principal_statement():
     """This body's principal, as the runtime signs it (`loom-runtime principal`: its conversation, proven with its run's
     key and session), and the conversation it names: (statement, conversation), or (None, None). The runtime's CLI
     tells the body's own conversation (its house says which one its session holds, t-2053): never this process's
     LOOM_BODY_CONVERSATION alone, which a reused `claude --bg` session keeps from the body it was first started for.
     The run's key stays with the runtime; the piece checks the statement on loom's machine. Anything that fails gives
-    (None, None), and the piece then treats the body as acting for someone it can't name (never the owner)."""
+    (None, None), said on stderr (why_none), and the piece then treats the body as acting for someone it can't name
+    (never the owner)."""
     if not in_body():
         return None, None
     exe = os.environ.get("PIECE_CALL_RUNTIME") or shutil.which("loom-runtime")
     if not exe:
+        why_none("no loom-runtime in this house")
         return None, None
     try:
         r = subprocess.run([exe, "principal"], capture_output=True, text=True, timeout=45, stdin=subprocess.DEVNULL)
         out = json.loads(r.stdout or "{}")
-    except (OSError, ValueError, subprocess.SubprocessError):
+    except (OSError, ValueError, subprocess.SubprocessError) as e:
+        why_none(f"the runtime's answer couldn't be read: {type(e).__name__}")
         return None, None
     if not isinstance(out, dict) or out.get("ok") is not True:
+        # Only its answer's reason (the runtime's own words), never its raw stderr, which nothing keeps free of secrets.
+        reason = out.get("reason") if isinstance(out, dict) else None
+        why_none(reason if isinstance(reason, str) else f"the runtime refused (exit {r.returncode})")
         return None, None
     st = out.get("statement")
     st = st if isinstance(st, str) and 0 < len(st) <= 8000 and not re.search(r"\s", st) else None
+    if not st:
+        why_none("the runtime's answer had no statement")
     cv = out.get("conversation")
     cv = cv if isinstance(cv, str) and re.fullmatch(r"cv-[0-9a-f]{12}", cv) else None
     if not cv:

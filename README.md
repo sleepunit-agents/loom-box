@@ -404,10 +404,14 @@ message a body does (`src/principal.mjs`):
   agent), it answers `{for, owner, people, statement}`. The statement is signed with a key only the runtime holds
   (`delivery/principal.key`) and lasts 5 minutes; the run's key never goes to a piece. A house's `piece-call` adds it,
   to every approvals and clock call from a body in a conversation, when the runtime answers, after taking off any the
-  caller typed; with none, the piece treats the body as acting for someone it can't name. The runtime's own daily
+  caller typed; with none, the piece treats the body as acting for someone it can't name, and `piece-call` says on
+  stderr why the runtime gave none (a body left in the shared house from before t-2061, say). The runtime's own daily
   review wake is the owner's schedule. The runtime's own relay spends a relay approval with `--as` and
   no principal (it has no conversation to ask about): approvals then checks everything but whom it was for.
-- `loom runtime principal --verify` (stdin) checks one, on loom's machine: what approvals and the clock run.
+- `loom runtime principal --verify [--house h-N]` (stdin) checks one, on loom's machine: what approvals and the clock
+  run. With `--house` (approvals passes its caller's, core's word from the house's token), it holds only when that
+  house runs the body of the statement's conversation: a statement is a bearer word for its 5 minutes, so one another
+  conversation's body was shown (a relay's text, a task comment) never speaks for it from there.
 - `loom runtime principal --wake --agent a --place p --id <delivery id> --for owner|<slug>|-`: the clock's word on whom
   that firing wake is for, given just before it delivers it, and taken as that delivery's message is queued (a word for
   a wake that never arrives is never another's). A wake set by a body working for Loren stays Loren's.

@@ -238,6 +238,9 @@ test('the CLI: --verify checks a statement on this machine; --wake takes the clo
   const ok = cli(env, ['principal', '--verify'], s);
   assert.equal(ok.status, 0, ok.stderr);
   assert.deepEqual([JSON.parse(ok.stdout).for, JSON.parse(ok.stdout).owner], ['owner', true]);
+  // --house: an id, or - for a caller in no house; a bare one, or one that isn't an id, is refused, never unbound.
+  for (const h of [[], ['-x'], ['.']]) assert.notEqual(cli(env, ['principal', '--verify', '--house', ...h], s).status, 0, `--house ${h}`);
+  assert.equal(JSON.parse(cli(env, ['principal', '--verify', '--house', 'h-1'], s).stdout).ok, false, 'its conversation has no body in h-1');
   const gone = cli(env, ['principal', '--verify'], mint(dir, { agent: 'art', conversation: 'cv-000000000002', principal: { for: 'owner', owner: true, people: [] } }));
   assert.equal(gone.status, 1, 'a conversation this runtime has no record of');
   assert.equal(JSON.parse(gone.stdout).reason, 'this runtime has no record of its conversation');
@@ -317,6 +320,17 @@ test('piece-call sends approvals and the clock the runtime\'s statement and neve
     ]);
     // The runtime's CLI tells the body's conversation itself (its house's session map, t-2053), never piece-call from env.
     assert.equal(readFileSync(join(D, 'asked'), 'utf-8'), 'principal\nprincipal\n');
+    // A runtime that refuses (a body left in the shared house from before t-2061): no statement, and it says why
+    // (t-2136), so a body reading "ask, for ?" knows it isn't the rules. Nothing it typed stands in.
+    const refuses = join(D, 'refuses');
+    writeFileSync(join(D, 'refusal'), JSON.stringify({ ok: false, reason: 'only the body holding cv-0123456789ab asks on whose behalf it acts (its conversation has moved to another principal\'s house)' }));
+    writeFileSync(refuses, `#!/bin/sh\ncat '${join(D, 'refusal')}'\nexit 1\n`, { mode: 0o755 });
+    seen.length = 0;
+    const r = await pieceCall({ ...env, PIECE_CALL_RUNTIME: refuses }, ['approvals', 'rule', 'merge', 'x', '--principal', 'typed.owner']);
+    assert.deepEqual(seen.map((s) => s.argv), [['rule', 'merge', 'x']]);
+    assert.match(r.stderr, /^piece-call: no statement of whom this body works for \(only the body holding cv-0123456789ab .*moved to another principal's house\)\), so the piece treats it as someone loom can't name\n$/);
+    // Out of a body there's nothing to prove, and nothing said.
+    assert.equal((await pieceCall({ ...env, PIECE_CALL_RUNTIME: refuses, LOOM_BODY_CONVERSATION: '' }, ['approvals', 'list'])).stderr, '');
   } finally { server.close(); }
 });
 
