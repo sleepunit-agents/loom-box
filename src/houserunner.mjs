@@ -48,7 +48,7 @@ import { GONE, part, redact, UNPRINTABLE_ONE } from './redact.mjs';
 import { cardTime } from './activity.mjs';
 import { ageSealer } from './sealed.mjs';
 import { AGENT_NAME, StateError, load, update, withLock } from './state.mjs';
-import { HOST_KEY, OWNER_SEAT, SEAT, hostKeyOf, seatCapProblem, seatOfKey } from './principal.mjs';
+import { HOST_KEY, OWNER_SEAT, SEAT, hostKeyOf, isOwnerSeat, seatCapProblem, seatConversation, seatOfKey } from './principal.mjs';
 
 /** A host report older than this: no host (its house is gone, or its host stopped). */
 export const HOST_STALE_MS = 30_000;
@@ -159,6 +159,43 @@ function keepHouseLaunchReceipt(env, record, receipt) {
   return record;
 }
 
+/**
+ * Why a launch can't go to the seat it names, or null (t-2061): a body that holds a conversation runs only in a house
+ * of that conversation alone (its seat names it), or in its job's own house. Never in a shared house from before, and
+ * never in another conversation's: inside a house every body is root, so it could read a sibling's key and session.
+ */
+export function sharedSeatProblem(o) {
+  const cv = o?.env?.LOOM_BODY_CONVERSATION;
+  if (!/^cv-[0-9a-f]{12}$/.test(cv ?? '')) return null;
+  const seat = o.seat ?? OWNER_SEAT;
+  if (/^j-h-[0-9]{1,9}$/.test(seat)) return null;
+  const own = seatConversation(seat);
+  if (!own) return `a body holding ${cv} runs in a house of its conversation alone, never the shared ${seat} house`;
+  return own === cv ? null : `a body holding ${cv} never runs in ${own}'s house`;
+}
+
+/**
+ * Tells core which conversation each live body's house holds (t-2061), once per house a process: for a house up before
+ * launches said so (the cut-over), whose body's seat is that conversation's own or its job's. A shared seat from before
+ * (`owner`, `p-<person>`) is never bound: it holds several conversations, so core takes no digest from it. `bodies`:
+ * [{agent, conversation, house, seat}]. A failure is said and tried again next time.
+ */
+const boundLive = new Set();
+export async function bindLiveHouses(bodies, bind, warn = () => {}) {
+  if (typeof bind !== 'function') return [];
+  const done = [];
+  for (const { agent, conversation, house, seat } of bodies) {
+    if (!AGENT_NAME.test(agent ?? '') || !HOUSE.test(house ?? '') || !/^cv-[0-9a-f]{12}$/.test(conversation ?? '')) continue;
+    const key = `${agent}\0${house}\0${conversation}`;
+    if (boundLive.has(key)) continue;
+    const s = seatOfKey(seat);
+    const own = seatConversation(s);
+    if (own ? own !== conversation : s !== `j-${house}`) continue;
+    try { await bind({ agent, house, conversation }); boundLive.add(key); done.push(house); } catch (e) { warn(`telling core ${house} holds ${conversation}: ${String(e?.message ?? e).split('\n')[0].slice(0, 200)}`); }
+  }
+  return done;
+}
+
 const rawOf = (body) => (body?.house && HOUSE.test(body.house) && String(body.id).startsWith(`${body.house}-`) ? String(body.id).slice(body.house.length + 1) : null);
 
 const readJson = (p) => { try { return JSON.parse(readFileSync(p, 'utf-8')); } catch { return null; } };
@@ -181,7 +218,7 @@ export const hostOf = loadHost;
  */
 export function seatRoom(env, agent, seat) {
   // `seat` may be a host key (a seat's needs house): the cap is the seat's.
-  if (ownerSeat(seatOfKey(seat))) return null;
+  if (isOwnerSeat(seatOfKey(seat))) return null;
   let s;
   try { s = load(env); } catch { return null; }   // the start reads it again, and says so
   const own = loadHost(env, agent, seat);
@@ -204,7 +241,7 @@ function releaseLocked(env, agent, seat, nowMs) {
   const empty = [];
   for (const other of seatsOf(env, agent)) {
     // Another seat's houses only: never the owner's (any of its records), never this seat's own (any of its needs).
-    if (seatOfKey(other) === OWNER_SEAT || seatOfKey(other) === seatOfKey(seat)) continue;
+    if (isOwnerSeat(seatOfKey(other)) || seatOfKey(other) === seatOfKey(seat)) continue;
     const h = loadHost(env, agent, other);
     if (!h.house || s.houses[h.house]?.collection || s.houses[h.house]?.session || s.houses[h.house]?.state !== 'running' || !freshRec(h, h.house, nowMs) || h.draining) continue;
     if (Object.values(h.report.bodies ?? {}).some((b) => b.status !== 'ended')) continue;
@@ -776,7 +813,23 @@ export class HouseRunner {
 
   constructor(env, harness, o = {}) {
     Object.assign(this, { env, harness, sealer: o.sealer ?? ageSealer(env, join(dataDir(env), 'delivery')), now: o.now ?? (() => new Date()), up: o.up ?? up, warmMs: o.warmMs ?? WARM_MS, claimMs: o.claimMs ?? CLAIM_MS, poll: o.poll ?? 250 });
+    // How core is told which one conversation a house holds (core.mjs, bindHouse; t-2061), before the house is handed
+    // its body: core then takes that house's digests for that conversation only. None (a test's runner): not told.
+    this.bindHouse = o.bindHouse ?? null;
     this.transit = transit(this.sealer);
+  }
+
+  /**
+   * Tells core that `house` holds the launch's conversation (t-2061), before the house is handed anything. Core keeps
+   * one conversation per house and refuses a second, so a house can never be handed two conversations' bodies. A
+   * failure is a start that didn't happen (nothing was asked of the house): tried again later.
+   */
+  async bound(o, house) {
+    const conversation = o.env?.LOOM_BODY_CONVERSATION;
+    if (!this.bindHouse || !/^cv-[0-9a-f]{12}$/.test(conversation ?? '')) return;
+    try { await this.bindHouse({ agent: o.agent, house, conversation }); } catch (e) {
+      throw Object.assign(new RunnerError(`core didn't record that ${house} holds ${conversation}: ${String(e?.message ?? e).split('\n')[0].slice(0, 200)}`), { nativeNotStarted: true });
+    }
   }
 
   /** Whether the runtime's key works here (age is installed): without it, no session is kept (no slot). */
@@ -912,6 +965,8 @@ export class HouseRunner {
   async prepareLaunch(id, o, resume) {
     if (!/^[0-9a-f]{64}$/.test(id ?? '') || !AGENT_NAME.test(o.agent ?? '')) throw new RunnerError('a house launch needs its durable attempt and agent');
     if (!SEAT.test(o.seat ?? OWNER_SEAT)) throw new RunnerError('invalid house launch seat');
+    const alone = sharedSeatProblem(o);
+    if (alone) throw new RunnerError(alone);
     // Its record's key: the seat, and its needs when it has some (t-2092): a house on a box that has them.
     const needs = o.needs ?? [];
     const seat = hostKeyOf(o.seat ?? OWNER_SEAT, needs);
@@ -928,6 +983,7 @@ export class HouseRunner {
     const old = readHouseLaunch(this.env, id);
     if (old) return check(old);
     const house = await this.warm(o.agent, seat, needs);
+    await this.bound(o, house);
     return hostLocked(this.env, () => {
       const existing = readHouseLaunch(this.env, id);
       if (existing) return check(existing);
@@ -1043,7 +1099,9 @@ export class HouseRunner {
   async launch(o, resume) {
     if (!AGENT_NAME.test(o.agent ?? '')) throw new RunnerError('a body in a house is some agent\'s: say which');
     // Whose house (t-1952): the seat delivery gives, by the conversation's principal; none given is the owner's.
-    if (!SEAT.test(o.seat ?? OWNER_SEAT)) throw new RunnerError('a body\'s seat is owner, p-<person> or u-<conversation>');
+    if (!SEAT.test(o.seat ?? OWNER_SEAT)) throw new RunnerError('a body\'s seat is owner.<conversation>, p-<person>.<conversation> or u-<conversation>');
+    const alone = sharedSeatProblem(o);
+    if (alone) throw new RunnerError(alone);
     const needs = o.needs ?? [];
     const seat = hostKeyOf(o.seat ?? OWNER_SEAT, needs);
     // A brief that names the agent's files goes as `parts`, never as `brief`: only a host that says it reads them
@@ -1058,6 +1116,7 @@ export class HouseRunner {
       // No native request exists until warm succeeds and req is published.
       try { house = await this.warm(o.agent, seat, needs); }
       catch (error) { error.nativeNotStarted = true; throw error; }
+      await this.bound(o, house);
       const asked = hostLocked(this.env, () => {
         const h = loadHost(this.env, o.agent, seat);
         if (h.house !== house) return false;

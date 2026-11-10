@@ -7,7 +7,7 @@ import { HouseRunner } from '../src/houserunner.mjs';
 import { readHouseLaunch } from '../src/house-launch-journal.mjs';
 import { load } from '../src/state.mjs';
 import { setModels } from '../src/models.mjs';
-import { cvOf, hasAge, houseWorld, world } from './delivery-world.mjs';
+import { hostPath, cvOf, hasAge, houseWorld, world } from './delivery-world.mjs';
 const wait = async fn => { const end = Date.now() + 5000; while (!fn()) { if (Date.now() > end) throw Error('continuation native fixture timed out'); await new Promise(r => setTimeout(r, 10)); } };
 
 for (const harness of ['claude', 'codex']) for (const mode of ['lost-receipt', 'expires-during-prepare', 'source-reset-during-prepare', 'uncertain-held']) {
@@ -73,7 +73,7 @@ for (const harness of ['claude', 'codex']) for (const mode of ['lost-receipt', '
       assert.equal(c.run, prepared.snapshot.run);
       assert.equal(c.continuationAdmissions.length, 1);
       assert.equal(c.launchAcks, undefined);
-      assert.equal(fresh.host('art', 'owner').req[prepared.handle.rid], undefined);
+      assert.equal(fresh.host('art', prepared.handle.seat).req[prepared.handle.rid], undefined);
       assert.equal(h.local.startsEntered, 1);
       assert.equal(c.actsFor.owner, true);
       const q = { action: 'enqueue', conversation: c.conversation, key: h.local.envs.b0000000.LOOM_BODY_KEY, session: 's-b0000000', handle: grant.handle, id: 'result', text: 'native continuation complete' };
@@ -83,7 +83,7 @@ for (const harness of ['claude', 'codex']) for (const mode of ['lost-receipt', '
       const changed = loadConv(h.env, c.conversation); changed.actsFor.reset = 'changed'; saveConv(h.env, changed);
       assert.throws(() => continuationCall(h.env, { ...q, id: 'after-reset' }, o), /bound/);
     } finally {
-      if (host) { const path = join(h.env.LOOM_BOX_DATA, 'delivery/hosts/art.json'); const record = JSON.parse(readFileSync(path, 'utf8')); writeFileSync(path, JSON.stringify({ ...record, house: 'h-999' })); await host; }
+      if (host) { const path = hostPath(h.env); const record = JSON.parse(readFileSync(path, 'utf8')); writeFileSync(path, JSON.stringify({ ...record, house: 'h-999' })); await host; }
       await first;
     }
   });

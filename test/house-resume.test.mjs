@@ -55,7 +55,7 @@ test('a follow-up after its house body\'s turn ended resumes that body, once: on
     // Its turn ends (a reply posted): idle, warm, in its house.
     const st = w.local.status;
     w.local.status = (b) => (b.id === 'b0000000' ? 'idle' : st(b));
-    await until(() => hostOf(w.env, 'art').report?.bodies?.b0000000?.status === 'idle', 5000);
+    await until(() => hostOf(w.env, 'art', `owner.${cv}`).report?.bodies?.b0000000?.status === 'idle', 5000);
     // The owner's second message, then a third while its body is still coming back.
     const second = deliver(w.env, msg(2, 'second'), o);
     await until(() => loadConv(w.env, cv)?.starting || resumed.length, 5000);
@@ -75,7 +75,7 @@ test('a follow-up after its house body\'s turn ended resumes that body, once: on
     // (to pack its session) ended that run once, and never the body that came back under its id.
     await sleep(300);
     assert.deepEqual(w.ended, ['b0000000'], 'ended once, for its pack');
-    const live = Object.entries(hostOf(w.env, 'art').report.bodies).filter(([, b]) => b.status !== 'ended').map(([id, b]) => [id, b.status]);
+    const live = Object.entries(hostOf(w.env, 'art', `owner.${cv}`).report.bodies).filter(([, b]) => b.status !== 'ended').map(([id, b]) => [id, b.status]);
     assert.deepEqual(live, [['b0000000', 'working']]);
     // And a stop asked of it now is carried out.
     w.hr.end({ id: 'h-1-b0000000', agent: 'art', house: 'h-1', harness: 'claude' });

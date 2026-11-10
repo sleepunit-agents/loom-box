@@ -16,7 +16,7 @@ test('continuation holder boundary refuses borrowed keys, sessions, houses and u
   assert.throws(() => continuationCall(w.env, args, { ...w.o, caller: { kind: 'agent', agent: 'mark' } }), /own agent/);
   assert.throws(() => continuationCall(w.env, args, { ...w.o, caller: { kind: 'agent', agent: 'art', house: 'foreign' } }), /machine|house/);
   c.actsFor = { owner: true, people: [], unknown: false };
-  c.bodyRules = { ...c.bodyRules, seat: "owner" };
+  c.bodyRules = { ...c.bodyRules, seat: `owner.${c.conversation}` };
   writeFileSync(join(deliveryDir(w.env), 'conversations', `${c.conversation}.json`), JSON.stringify(c));
   const grant = continuationCall(w.env, { ...args, principal: { unknown: true }, target: { place: 'forged' } }, w.o);
   assert.match(grant.handle, /^cont-/);
@@ -105,7 +105,7 @@ test('local clock inspection verifies a signed source statement and refuses bodi
   const r = await deliver(w.env, w.msg('inspect', 'hello'), w.o);
   const c = loadConv(w.env, r.conversation);
   c.actsFor = { owner: true, people: [], unknown: false };
-  c.bodyRules = { ...c.bodyRules, seat: 'owner' };
+  c.bodyRules = { ...c.bodyRules, seat: `owner.${c.conversation}` };
   writeFileSync(join(deliveryDir(w.env), 'conversations', `${c.conversation}.json`), JSON.stringify(c));
   const args = { conversation: c.conversation, key: w.runner.envs[c.body.split(':')[1]].LOOM_BODY_KEY, session: w.sessionFor(c.conversation) };
   const grant = continuationCall(w.env, { ...args, action: 'issue' }, w.o);
@@ -126,7 +126,7 @@ for (const change of ['cutoff', 'deadline']) test(`queued continuation rechecks 
   const r = await deliver(w.env, w.msg('queued-cutoff', 'hello'), w.o);
   const c = loadConv(w.env, r.conversation);
   c.actsFor = { owner: true, people: [], unknown: false };
-  c.bodyRules = { ...c.bodyRules, seat: 'owner' };
+  c.bodyRules = { ...c.bodyRules, seat: `owner.${c.conversation}` };
   writeFileSync(join(deliveryDir(w.env), 'conversations', `${c.conversation}.json`), JSON.stringify(c));
   const grant = continuationCall(w.env, { action: 'issue', conversation: c.conversation, key: w.runner.envs[c.body.split(':')[1]].LOOM_BODY_KEY, session: w.sessionFor(c.conversation) }, w.o);
   const firing = w.msg('wake:w-abcdef', 'continue', { source: 'clock', venue: 'wake', id: 'w-abcdef', kind: 'wake', from: { kind: 'schedule' }, continuation: { handle: grant.handle, wake: 'w-abcdef', expiresAt: grant.expiresAt + (change === 'deadline' ? 1 : 0) } });
@@ -146,7 +146,7 @@ test('issuance lifetime comes from the runtime policy: 7 days by default, refuse
   const r = await deliver(w.env, w.msg('policy', 'hello'), w.o);
   const c = loadConv(w.env, r.conversation);
   c.actsFor = { owner: true, people: [], unknown: false };
-  c.bodyRules = { ...c.bodyRules, seat: 'owner' };
+  c.bodyRules = { ...c.bodyRules, seat: `owner.${c.conversation}` };
   writeFileSync(join(deliveryDir(w.env), 'conversations', `${c.conversation}.json`), JSON.stringify(c));
   const args = { action: 'issue', conversation: c.conversation, key: w.runner.envs[c.body.split(':')[1]].LOOM_BODY_KEY, session: w.sessionFor(c.conversation) };
   const { continuationLifetimeMs: _, ...o } = w.o;
@@ -168,7 +168,7 @@ test("once the runtime's tick has run, its policy is the one used: a body's own 
   const r = await deliver(w.env, w.msg('policy2', 'hello'), w.o);
   const c = loadConv(w.env, r.conversation);
   c.actsFor = { owner: true, people: [], unknown: false };
-  c.bodyRules = { ...c.bodyRules, seat: 'owner' };
+  c.bodyRules = { ...c.bodyRules, seat: `owner.${c.conversation}` };
   writeFileSync(join(deliveryDir(w.env), 'conversations', `${c.conversation}.json`), JSON.stringify(c));
   const args = { action: 'issue', conversation: c.conversation, key: w.runner.envs[c.body.split(':')[1]].LOOM_BODY_KEY, session: w.sessionFor(c.conversation) };
   const { continuationLifetimeMs: _, ...o } = w.o;
@@ -209,7 +209,7 @@ test("a sibling conversation's key with this body's own session issues nothing f
   }
   // Its own conversation, proven with its own key and session, is the one it gets.
   b.actsFor = { owner: true, people: [], unknown: false };
-  b.bodyRules = { ...b.bodyRules, seat: 'owner' };
+  b.bodyRules = { ...b.bodyRules, seat: `owner.${b.conversation}` };
   writeFileSync(join(deliveryDir(w.env), 'conversations', `${b.conversation}.json`), JSON.stringify(b));
   const grant = continuationCall(w.env, { action: 'issue', conversation: b.conversation, key: keyOf(b), session: ownSession }, w.o);
   assert.match(grant.handle, /^cont-/);

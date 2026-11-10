@@ -8,7 +8,7 @@ import { load, update } from '../src/state.mjs';
 import { HouseRunner, sweepTransfers } from '../src/houserunner.mjs';
 import { deliver, loadConv, ownerConversationControl, tick } from '../src/delivery.mjs';
 import { readHouseLaunch } from '../src/house-launch-journal.mjs';
-import { hasAge, houseWorld, world } from './delivery-world.mjs';
+import { hostPath, hasAge, houseWorld, world } from './delivery-world.mjs';
 const wait = async fn => { const end = Date.now() + 10_000; while (!await fn()) { if (Date.now() > end) throw Error('native collection fixture timed out'); await new Promise(r => setTimeout(r, 10)); } };
 const ok = r => { assert.equal(r.status, 200, JSON.stringify(r.body)); return r.body; };
 function collection(w) {
@@ -23,14 +23,16 @@ function upload(entry, text = 'original native transcript', { omitted = false } 
   const base = { phase: 'part', key: entry.key, bodyId: entry.bodyId ?? 'deadbeef', session: entry.session ?? 'recovered-session', sha256: createHash('sha256').update(whole).digest('hex'), parts: 2, ...(omitted ? { omitted: 'size-limit' } : {}) };
   return { files, first: { ...base, part: 0, data: encoded.slice(0, half) }, last: { ...base, part: 1, data: encoded.slice(half) } };
 }
+// The conversation's own house (t-2061).
+const SEAT = 'owner.cv-abcdef123456';
 async function prepared(harness, ready = true) {
   const w = houseWorld({ harness }), id = (harness === 'claude' ? 'a' : 'b').repeat(64);
   let oldHostKey;
   w.setDrop(answer => { if (answer.hostKey) oldHostKey = answer.hostKey; return false; });
-  const preparation = w.hr.prepareLaunch(id, { agent: 'art', brief: 'private native collection intent', model: harness === 'claude' ? 'opus' : 'gpt', env: { LOOM_BODY_KEY: 'private-fixture-sender', LOOM_BODY_CONVERSATION: 'cv-abcdef123456' } });
+  const preparation = w.hr.prepareLaunch(id, { agent: 'art', brief: 'private native collection intent', model: harness === 'claude' ? 'opus' : 'gpt', seat: SEAT, env: { LOOM_BODY_KEY: 'private-fixture-sender', LOOM_BODY_CONVERSATION: 'cv-abcdef123456' } });
   await wait(() => load(w.env).houses['h-1']); const host = w.host();
   const handle = await preparation;
-  if (ready) { w.hr.publishPreparedLaunch(handle); await w.hr.waitPreparedLaunch(handle); await wait(() => Object.keys(w.hr.host('art').report?.bodies ?? {}).length); }
+  if (ready) { w.hr.publishPreparedLaunch(handle); await w.hr.waitPreparedLaunch(handle); await wait(() => Object.keys(w.hr.host('art', SEAT).report?.bodies ?? {}).length); }
   await w.kill(); await host;
   if (!ready) w.hr.publishPreparedLaunch(handle);
   return { ...w, handle, oldHostKey };
@@ -140,7 +142,7 @@ test('a declared size-limit omission cannot contain files or complete a malforme
 test('a sealed history-loss marker retains its loss disposition after host journal reconstruction', { skip: !hasAge }, async () => {
   const w = await prepared('codex'), c = collection(w), plan = ok(c.call({ phase: 'plan', physical: 'gone' })), entry = plan.entries[0];
   ok(c.call({ phase: 'loss', plan: plan.plan, key: entry.key, reason: 'missing-history', pending: [] }));
-  const path = join(w.env.LOOM_BOX_DATA, 'delivery/hosts/art.json'), host = JSON.parse(readFileSync(path, 'utf8'));
+  const path = hostPath(w.env), host = JSON.parse(readFileSync(path, 'utf8'));
   delete host.offlineCollection; writeFileSync(path, JSON.stringify(host));
   const rebuilt = ok(c.call({ phase: 'plan', physical: 'gone' }));
   assert.equal(rebuilt.entries[0].received, true);
@@ -156,13 +158,13 @@ test('termination is immutable and an early consumer acknowledgement survives a 
   assert.equal(terminated.state, 'terminated'); assert.equal(terminated.termination.consumed, true);
   // Reproduce controller acknowledgement between the durable termination
   // record and the host-journal completion write. The late write cannot undo it.
-  const path = join(w.env.LOOM_BOX_DATA, 'delivery/hosts/art.json'), host = JSON.parse(readFileSync(path, 'utf8'));
+  const path = hostPath(w.env), host = JSON.parse(readFileSync(path, 'utf8'));
   delete host.offlineCollection.done[entry.key]; writeFileSync(path, JSON.stringify(host));
   assert.equal(c.call({ phase: 'refuse', plan: plan.plan, key: entry.key, nativeNotStarted: true }).status, 409);
   assert.equal(c.call({ ...upload(entry).first, plan: plan.plan }).status, 409, 'late native data cannot reactivate a terminated attempt');
   ok(c.call(loss)); ok(c.call({ phase: 'finish', plan: plan.plan }));
   assert.equal(readHouseLaunch(w.env, w.handle.id).termination.consumed, true);
-  assert.equal(w.hr.host('art').offlineCollection.done[entry.key].consumed, true);
+  assert.equal(w.hr.host('art', SEAT).offlineCollection.done[entry.key].consumed, true);
 });
 
 for (const harness of ['claude', 'codex']) for (const mode of ['normal', 'size', 'missing']) test(`${harness}: delivery holds the original body until its ${mode} collection disposition is committed`, { skip: !hasAge }, async () => {
@@ -179,7 +181,7 @@ for (const harness of ['claude', 'codex']) for (const mode of ['normal', 'size',
     await deliver(w.env, { ...local.msg('dm:offline-retirement', text), from: { kind: 'person', slug: 'jonathan' } }, o);
   }
   const raw = before.body.split(':')[1].slice(4);
-  await wait(() => w.fed.length === 2 && !(w.hr.host('art').inbox?.[raw] ?? []).length);
+  await wait(() => w.fed.length === 2 && !(w.hr.host('art', before.bodyRules.seat).inbox?.[raw] ?? []).length);
   const fed = loadConv(w.env, start.conversation).fed.map(x => x.key);
   assert.equal(fed.length, 2);
   w.hr.claimMs = 20;

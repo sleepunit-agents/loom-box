@@ -422,7 +422,43 @@ message a body does (`src/principal.mjs`):
   of a conversation someone else steers. On loom's machine, the signing key is the runtime's account's, which a local
   body shares.
 
+### One house per conversation (t-2061)
+
+A house's bodies are root together in one container, with the harness's one `claude --bg` daemon, one home, one
+checkout of the agent's repo (its hooks too) and the house's one loom token. So a body could read a sibling's key file,
+its `/proc` environment and session id, or plant a hook the sibling's session runs, and pose as the sibling's
+conversation, even one of the same principal (a prompt-injected thread posting as another of the owner's). A separate
+uid per body doesn't close that (the shared daemon, checkout and token stay), so each conversation gets a house of its
+own, and no house is ever reused for another:
+
+- **The seat is the conversation's**, and says whose work it is: `owner.cv-…` (the owner's), `p-<person>.cv-…` (one
+  person's), `u-cv-…` (unknown), or a job's `j-h-<n>` (its one conversation). The bare `owner` and `p-<person>` are the
+  shared houses from before: read on old records, never given to a new body. A launch that holds a conversation goes
+  only to a seat naming that conversation, or its job's (`houserunner.mjs`, `sharedSeatProblem`).
+- **Core is told which conversation a house holds** before the house is handed its body (`POST /api/loom/
+  conversations/house`, the runtime's only, set once). `conversation_digest`, `comms_title` and `comms_thread` from a
+  body's house reach only that conversation, and nothing at all from a house core was told nothing of. A failed bind
+  is a start that didn't happen. Houses already up at the cut-over (an unknown principal's, a job's) are told on the
+  service's tick (`bindLiveHouses`); the shared houses from before never are.
+- **Every route the runtime checks against the caller's house** (`send`, `principal`, the continuation calls, `place`,
+  the relay's return address, `spawn`, host verbs) now has one conversation behind that house, so a key and session
+  id carried out of their house prove nothing anywhere else.
+- **Moving in.** A body of the owner's in the shared owner house from before has moved: it can't speak, ask its
+  principal or continue there (any sibling there could hold its key), and its next message ends it there and starts
+  it fresh, from its digests, in its own house. Its session stays behind: any sibling there was root and could have
+  rewritten it. The same for a person's shared house.
+- **Cost.** One container per conversation at work, about 0.7-1 GB each. The owner's are bounded by the busy limit
+  (`LOOM_RUNTIME_BUSY_LIMIT`, bodies per agent), and each house idles out `LOOM_RUNTIME_WARM_IDLE_S` after its body
+  ends. Houses for other people stay capped by `LOOM_RUNTIME_SEAT_HOUSES`, now counted per conversation, so its
+  default is 8 (was 4).
+- **Not covered here** (follow-ups): a service's house (a chat bridge runs many conversations in one house), bodies on
+  loom's machine (no house: they share the runtime account), and other pieces that take a conversation a body names
+  (the approvals piece's `--conversation`, the clock's `wake park`, the tasks piece's `--source`).
+
 ### One house per steering principal (t-1952)
+
+(Since t-2061 each conversation has its own house, above; the seats below are per conversation, and what's said about
+principals still holds for which house a conversation's body moves to.)
 
 The owner's ruling, 2026-11-07: bodies doing his work run in his house; bodies doing anyone else's (Loren, Daniel, a
 Discord or Slack guest, someone unnamed) run in a separate house for that principal. A house's bodies are one uid in
@@ -462,8 +498,8 @@ one container, so walling conversations apart inside a house isn't possible; wal
   house's (where they are). One in a conversation someone else steers moves at that conversation's next message, or
   idles out (`LOOM_RUNTIME_WARM_IDLE_S`); until then it sits in the owner's house. A proof with no caller at all is
   loom's own CLI on loom's machine, which no house reaches: there the house check doesn't apply.
-- **Cost.** Houses for other people are capped per agent: `LOOM_RUNTIME_SEAT_HOUSES` (default 4; a value outside 1-64
-  is taken as 4) live
+- **Cost.** Houses for other people are capped per agent: `LOOM_RUNTIME_SEAT_HOUSES` (default 8 since t-2061, one per conversation; a value outside 1-64
+  is taken as 8) live
   houses for seats other than the owner's and the asking seat's own (a seat's draining house and its new one count as
   one), counted in the same state write that makes a house (two starts at once can't both pass it). At the cap a
   conversation that needs another house waits (`queued`, saying so), keeping its slot; any other seat's house that
@@ -649,7 +685,7 @@ for", "Who steers which project") or `loom runtime agent <agent> … --scope git
 pond-dev-service-token=pond --scope tailnet:fleet=pond --steer patrick=pond`. A scope is one or more of, joined by `+`:
 `owner` (the owner's own work), a project's slug (the owner's work, and that of the people he lets steer that
 project), `service:<name>` (that service's houses). Whose work a house is for is the runtime's word: a body host's seat
-(owner, `p-<person>`, `u-<conversation>`, t-1952; a job's `j-h-<n>` is that house's, only while its conversation's
+(`owner.<conversation>`, `p-<person>.<conversation>`, `u-<conversation>`, t-1952, t-2061; a job's `j-h-<n>` is that house's, only while its conversation's
 principal is the one it started with: one someone else joined moves to its principal's house, and a task's house is let
 go once its body there is gone; an interactive terminal's house stays up with no body in it until it's taken down, t-2081), a task house's `taskActsFor` (the
 owner's only when nobody else steered it), a service house is its own (people other than the owner may steer a chat
@@ -746,6 +782,9 @@ loom runtime host-exec                               loom's machine: the executo
 - **A body host's boot key is shown to nobody.** A house's task carries it (`--host-key`), and only the box that claims the house gets it whole: `list`, `down` and the page show `--host-key …`. It's good for one use anyway, traded on the host's first sync.
 - **A body can't fetch secrets.** A house's token is an ordinary `agent:<name>` token. It reaches MCP and the CLI as that agent, and the secrets piece won't hand a value to a body. Only the box fetched them, for the house.
 - **A box only runs containers.** The agent's code runs inside its container, which is rootless podman with no host home, no box env and only its own dirs and secrets. The agent's Containerfile builds under podman too. So a house can't read the box's credential, the box's files, or (on loom's own machine) the household. Nested containers widen what the container may do inside its own user namespace, which is why the owner has to allow them per agent.
+- **One house per conversation (t-2061).** Below is how it stood with one house per principal: a sibling in a house
+  could pose as another conversation of the same principal. Now no house holds two conversations, and core takes a
+  digest from a body's house only for the one it holds (Permissions, "One house per conversation").
 - **One house per steering principal (t-1952).** A house's bodies are one agent, one uid, in one container, so inside a house a body's run key and session only keep that house's bodies apart, not walled off: a body that sets out to pose as a sibling in its house can read the sibling's key file and session id and set `CLAUDE_CODE_SESSION_ID` itself. So a house holds one principal's conversations only (the owner's; one person's; or one unknown conversation's, alone), and a body moves house when its conversation's principal does (Permissions, "One house per steering principal"). What a sibling can pose as is a conversation of the same principal, toward approvals and the clock the same principal it already acts for. And the runtime refuses `send`, `principal`, `place` and a relay's return address from any house but the one holding the conversation's body, so a key or session id carried out of its house (a guest's house to the owner's, or back) proves nothing. A send is checked against the house's agent token first: never another agent's. A harness whose runner reports no session (Codex today: each body is its own process, with its own `LOOM_BODY_KEY`) is checked by its key and its house.
 - **Host verbs are the one way from a house onto loom's machine.** Only the owner's own work, proved; a fixed table of
   verbs with typed arguments; the owner's yes for each change (or his standing rule); no shell; bounded, redacted

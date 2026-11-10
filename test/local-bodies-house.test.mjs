@@ -43,7 +43,7 @@ test('"house": the owner\'s local wake runs in his own house, seated as the owne
   assert.ok(!asked.includes(true), 'never the local runner');
   const c = conv('lane:boot');
   assert.equal(c.local, true, 'still a local wake\'s conversation: its rules stand');
-  assert.equal(c.bodyRules.seat, 'owner');
+  assert.equal(c.bodyRules.seat, `owner.${c.conversation}`, 'in a house of its own (t-2061)');
   assert.equal(readBody(w.env, c.body).local, undefined);
   const start = w.log.find((l) => l[0] === 'start');
   assert.ok(start, 'started by the house runner');

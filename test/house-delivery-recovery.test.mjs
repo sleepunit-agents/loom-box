@@ -20,7 +20,7 @@ async function stopHost(h, host, seat) {
 }
 
 for (const harness of ['claude', 'codex']) test(`${harness}: a terminated pre-bind attempt preserves its reconciliation notice and sealed input under owner hold`, { skip: !hasAge }, async () => {
-  const w = world(), h = houseWorld({ harness }), seat = 'p-loren', cv = cvOf('art', 'slack', 'dm:lost-prebind');
+  const w = world(), h = houseWorld({ harness }), cv = cvOf('art', 'slack', 'dm:lost-prebind'), seat = `p-loren.${cv}`;
   const publish = h.hr.publishPreparedLaunch.bind(h.hr);
   h.hr.publishPreparedLaunch = handle => { const result = publish(handle); h.setRequestDrop(() => true); return result; };
   h.hr.waitPreparedLaunch = async () => { throw Error('fixture registrar stopped observing after publication'); };
@@ -54,7 +54,7 @@ for (const harness of ['claude', 'codex']) test(`${harness}: a terminated pre-bi
 });
 for (const harness of ['claude','codex']) test(`${harness}: conversation recovery binds the original house receipt, generation, run and sender without promoting its principal`, {skip:!hasAge}, async()=>{
   const w=world(), h=houseWorld({harness});
-  const cv=cvOf('art','slack','dm:house-recovery'), seat='p-loren';
+  const cv=cvOf('art','slack','dm:house-recovery'), seat=`p-loren.${cv}`;
   const originalWait=h.hr.waitPreparedLaunch.bind(h.hr);
   h.hr.waitPreparedLaunch=async handle=>{ await originalWait(handle); throw Error('fixture registrar lost the ready native receipt'); };
   const o={...w.o,runner:()=>h.hr,accounts:h.accounts,sealer:h.sealer};
@@ -90,7 +90,7 @@ for (const harness of ['claude','codex']) test(`${harness}: conversation recover
 });
 
 test('a committed conversation retains its failed house acknowledgement for a fresh controller', {skip:!hasAge}, async()=>{
-  const w=world(),h=houseWorld({harness:'codex'}),seat='p-loren',cv=cvOf('art','slack','dm:house-ack');
+  const w=world(),h=houseWorld({harness:'codex'}),cv=cvOf('art','slack','dm:house-ack'),seat=`p-loren.${cv}`;
   h.hr.acknowledgePreparedLaunch=()=>{throw Error('fixture acknowledgement storage unavailable');};
   const o={...w.o,runner:()=>h.hr,accounts:h.accounts,sealer:h.sealer};
   let host,drained;
@@ -117,7 +117,7 @@ test('a committed conversation retains its failed house acknowledgement for a fr
 });
 
 for (const harness of ['claude','codex']) test(`${harness}: uncertain input is replayed only after its original writer stopped and its native context was restored`, {skip:!hasAge}, async()=>{
-  const w=world(),h=houseWorld({harness}),seat='p-loren',cv=cvOf('art','slack','dm:uncertain-house');
+  const w=world(),h=houseWorld({harness}),cv=cvOf('art','slack','dm:uncertain-house'),seat=`p-loren.${cv}`;
   let resumed=0, uncertain=true, host, drained;
   const originalWait=h.hr.waitPreparedLaunch.bind(h.hr),slotOf=h.local.slotOf.bind(h.local),slots=new Map();
   h.hr.waitPreparedLaunch=async handle=>{const body=await originalWait(handle);if(uncertain){uncertain=false;return {...body,inputUncertain:true};}return body;};
@@ -152,7 +152,7 @@ for (const harness of ['claude','codex']) test(`${harness}: uncertain input is r
 
 
 for (const harness of ['claude','codex']) test(`${harness}: owner interruption holds uncertain input after collection without starting a replacement`, {skip:!hasAge}, async()=>{
-  const w=world(),h=houseWorld({harness}),seat='p-loren',cv=cvOf('art','slack','dm:held-uncertain-house');
+  const w=world(),h=houseWorld({harness}),cv=cvOf('art','slack','dm:held-uncertain-house'),seat=`p-loren.${cv}`;
   const o={...w.o,runner:()=>h.hr,accounts:h.accounts,sealer:h.sealer};
   const originalWait=h.hr.waitPreparedLaunch.bind(h.hr);
   h.hr.waitPreparedLaunch=async handle=>{
@@ -190,7 +190,8 @@ test('recovery binds a needs job\'s house receipt: its reservation is checked ag
   const w=world(), h=houseWorld({harness:'claude'});
   update(h.env,(s)=>{ const k=Object.keys(s.boxes).find((x)=>s.boxes[x].local); s.boxes[k].facts=['gpu:nvidia-geforce-rtx-5090']; });
   setRole(h.env,{ role:{ id:'render', description:'Render frames', models:['opus'], needs:['gpu:5090'] } });
-  const key=hostKeyOf('owner',['gpu:5090']);
+  // Its seat is its conversation's own (t-2061), with its needs: known once the spawn names its conversation.
+  let key;
   const originalWait=h.hr.waitPreparedLaunch.bind(h.hr);
   h.hr.waitPreparedLaunch=async handle=>{ await originalWait(handle); throw Error('fixture registrar lost the ready native receipt'); };
   const o={...w.o,runner:()=>h.hr,accounts:h.accounts,sealer:h.sealer};
@@ -200,6 +201,7 @@ test('recovery binds a needs job\'s house receipt: its reservation is checked ag
     await wait(()=>load(h.env).houses['h-1']); host=h.host();
     const out=await first; await drained;
     const cv=out.handle;
+    key=hostKeyOf(`owner.${cv}`,['gpu:5090']);
     const before=loadConv(h.env,cv), prepared=before.starting?.prepared;
     assert.equal(prepared?.mode,'house');
     assert.equal(readHouseLaunch(h.env,prepared.id).seat,key,'its reservation is the needs house\'s');

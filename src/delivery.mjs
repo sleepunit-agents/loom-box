@@ -85,7 +85,7 @@ import { fileURLToPath } from 'node:url';
 import { AccountsError, accountsFrom, accountsOfRecord, stateAccounts } from './accounts.mjs';
 import { commitPreparedBody, endBody, readBody, resumeBody, startBody } from './bodies.mjs';
 import { CoreError, coreFrom } from './core.mjs';
-import { stoppingHosts, HouseRunner, releaseEmptySeatHouses, seatRoom, sweepSeats, sweepTransfers } from './houserunner.mjs';
+import { bindLiveHouses, stoppingHosts, HouseRunner, releaseEmptySeatHouses, seatRoom, sweepSeats, sweepTransfers } from './houserunner.mjs';
 import { venueKind as kindOf, resolveFor, readModelChoice, readModels, setModelChoice } from './models.mjs';
 import { pieceName, setting } from './piece.mjs';
 import { dropSession, packSession, restoreFiles, SessionSizeError, SessionHistoryMissing } from './sessions.mjs';
@@ -506,7 +506,7 @@ export function depsOf(env, o = {}) {
     // (LOOM_RUNTIME_LOCAL_BODIES). A test hands in a local (fake) runner.
     runner: o.runner ?? ((h, local) => (local
       ? (locals[h] ??= runnerFor(h, localRunnerEnv(env, localBodiesOf(env))))
-      : (houses[h] ??= new HouseRunner(env, h, { sealer: seal, now: o.now })))),
+      : (houses[h] ??= new HouseRunner(env, h, { sealer: seal, now: o.now, bindHouse: typeof core.bindHouse === 'function' ? (b) => core.bindHouse(b) : null })))),
     injectedRunner: typeof o.runner === 'function',
     sealer: seal,
     now: o.now ?? (() => new Date()),
@@ -2155,7 +2155,7 @@ async function executeOne(env, op, d, mem) {
     // A local conversation whose bodies the owner moved into his house (LOOM_RUNTIME_LOCAL_BODIES "where": "house",
     // t-2049): past the same owner's-work-only check as a body here (above), in the owner's seat, never anyone else's.
     const housed = !!c0.local && localBodiesOf(env)?.where === 'house';
-    if (housed) rules = { ...rules, seat: OWNER_SEAT };
+    if (housed) rules = { ...rules, seat: `owner.${c0.conversation}` };
     const was = op.slot?.rules ?? {};
     // ...and a session only follows the conversation into a house no one else's bodies would read it in (principal.mjs,
     // carriesSession): never into a person's house that runs their other conversations.
@@ -3093,6 +3093,16 @@ export async function tick(env, o = {}, only, mem = new Map()) {
   try { sweepTransfers(env, now, Date.now()); } catch (e) { d.warn(`sweeping transfers: ${e.message}`); }
   // Seat records whose house is over (houserunner.mjs, sweepSeats, t-1952): a guest's or an unknown's, never the owner's.
   try { sweepSeats(env); } catch (e) { d.warn(`sweeping seats: ${e.message}`); }
+  // Houses up before launches told core which conversation they hold (t-2061, the cut-over): told now, the service's
+  // tick only. A shared house from before is never bound (bindLiveHouses).
+  if (o.service === true) {
+    const live = [];
+    for (const c of listConvs(env)) {
+      if (!c.body) continue;
+      try { const rec = readBody(env, c.body); if (rec?.house) live.push({ agent: c.agent, conversation: c.conversation, house: rec.house, seat: rec.seat ?? c.bodyRules?.seat }); } catch { /* no record: nothing to bind */ }
+    }
+    try { await bindLiveHouses(live, typeof d.core?.bindHouse === 'function' ? (b) => d.core.bindHouse(b) : null, d.warn); } catch (e) { d.warn(`binding houses: ${e.message}`); }
+  }
   // Conversations held on a box gone dark (t-2057): the owner is asked whether to carry them on elsewhere.
   try { await askDarkBoxes(env, { convs: listConvs(env), nowMs: now, warn: d.warn }); } catch (e) { d.warn(`asking about dark boxes: ${e.message}`); }
   const warm = limitsOf(env).warmIdleS * 1000;
@@ -3378,9 +3388,11 @@ function holderProblem(env, d, c, { key, session }, does = 'speaks in it', calle
   const away = houseProblem(env, c, caller);
   if (away) return `only the body holding ${c.conversation} ${does} (${away})`;
   // Bound to the seat its rules were made for, too (t-1952): a body whose conversation has moved to another principal's
-  // house speaks no more there (it's being ended), unless it's the owner's body and the move only narrows it (a relay's
-  // answer waiting on its turn). Its principal it never asks once moved (bodyPrincipal).
-  if (seatMoved(env, c) && (does !== 'speaks in it' || (c.local ? OWNER_SEAT : c.bodyRules?.seat ?? OWNER_SEAT) !== OWNER_SEAT)) {
+  // house speaks no more there (it's being ended), unless it's the owner's body in a house of this conversation alone
+  // and the move only narrows it (a relay's answer waiting on its turn). Never from the shared owner house from before
+  // (t-2061): a sibling there could hold its key and session. Its principal it never asks once moved (bodyPrincipal).
+  const ownAlone = c.local || c.bodyRules?.seat === `owner.${c.conversation}`;
+  if (seatMoved(env, c) && (does !== 'speaks in it' || !ownAlone)) {
     return `only the body holding ${c.conversation} ${does} (its conversation has moved to another principal's house)`;
   }
   const own = sessionOf({ ...d, env }, c.body);

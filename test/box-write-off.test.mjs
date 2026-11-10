@@ -10,7 +10,7 @@ import { deliver, loadConv, tick } from '../src/delivery.mjs';
 import { load, update } from '../src/state.mjs';
 import { WRITE_OFF_AFTER_MS, api, writeOffBox } from '../src/control.mjs';
 import { bodySync } from '../src/houserunner.mjs';
-import { cvOf, hasAge, houseWorld, world } from './delivery-world.mjs';
+import { cvOf, hasAge, hostPath, houseWorld, world } from './delivery-world.mjs';
 
 const wait = async (fn) => { const end = Date.now() + 5000; while (!fn()) { if (Date.now() > end) throw Error('timed out'); await new Promise((r) => setTimeout(r, 10)); } };
 const owner = { kind: 'owner' };
@@ -63,7 +63,7 @@ for (const harness of ['claude', 'codex']) test(`${harness}: a conversation mid-
     // h-1's box is "far", and far goes dark: its host stops being heard (it's still "working" as far as its last report).
     assert.equal(api(h.env, fx, { caller: owner, path: 'add-box', body: { name: 'far', mayHost: '*' } }).status, 200);
     const far = Object.entries(load(h.env).boxes).find(([, b]) => b.name === 'far')[0];
-    const path = join(h.env.LOOM_BOX_DATA, 'delivery/hosts', 'art@p-loren.json');
+    const path = hostPath(h.env);
     const record = readFileSync(path, 'utf8');
     writeFileSync(path, JSON.stringify({ ...JSON.parse(record), house: 'h-999' })); await host; host = undefined; writeFileSync(path, record);
     update(h.env, (s) => {
@@ -90,7 +90,7 @@ for (const harness of ['claude', 'codex']) test(`${harness}: a conversation mid-
     assert.ok(next.length && next.every((x) => x.box !== far && x.state === 'wanted'), JSON.stringify(next));
     const late = bodySync(h.env, { kind: 'agent', agent: 'art', house: 'h-1' }, { hostKey: 'x'.repeat(48), report: { bodies: {} } }, { sealer: h.sealer });
     assert.equal(late.exit, true);
-  } finally { if (host) { const p = join(h.env.LOOM_BOX_DATA, 'delivery/hosts', 'art@p-loren.json'); const rec = readFileSync(p, 'utf8'); writeFileSync(p, JSON.stringify({ ...JSON.parse(rec), house: 'h-999' })); await host; } await first; }
+  } finally { if (host) { const p = hostPath(h.env); const rec = readFileSync(p, 'utf8'); writeFileSync(p, JSON.stringify({ ...JSON.parse(rec), house: 'h-999' })); await host; } await first; }
 });
 
 test('the owner is asked once per agent and stretch of silence; his Allow writes off exactly the houses on the card', async () => {

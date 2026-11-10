@@ -63,6 +63,9 @@ export function coreFrom(env, { fetchImpl = fetch, timeoutMs = 5000 } = {}) {
       return { conversation: out.conversation, seq: out.seq };
     },
     audit: (a) => post('audit', a),
+    // Which one conversation a body's house holds (t-2061): said once, before the house is handed its body. Core then
+    // takes a digest from that house for that conversation only; a house is never bound to a second.
+    bindHouse: ({ agent, house, conversation }) => post('conversations/house', { agent, house, conversation }),
     // A person's card (person-cards.md, "Ensure" and "Merge"): the gates' seam (gates.mjs).
     ensure: (b) => post('people/ensure', b),
     merge: (b) => post('people/merge', b),
