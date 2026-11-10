@@ -249,3 +249,23 @@ that harness is unavailable the same resolver chooses an available fallback.
 Switching back can resume the conversation's saved session. The preference is
 stored by the runtime in `state.json` under `modelChoices`, separate from model
 allow-lists; it grants no new model or tool access.
+
+## Worker capacity: keeping room for conversations (t-2037)
+
+The allocator (`src/allocator.mjs`) decides whether a **new worker job** may start on an account: a handed-off job
+(spawn) or a wake. It keeps a reserve per account window for conversations until that window resets: the larger of a
+floor (5%) and the conversations' forecast use until the reset, plus a 50% margin. Both numbers are first guesses, to
+be checked against the shadow log. The forecast comes from the readings history (`allocator-readings.jsonl`), using
+only intervals in which no worker body was held on that account. A job's own use is a guess too: 3% of an hourly
+window and 0.5% of a daily or weekly one, the same for each job already running on that account.
+
+- **Off (the default, "shadow"):** nothing changes. Each start logs, without any brief or text, what admission would
+  have decided and why, in `allocator-shadow.jsonl`.
+- **On ("enforce", the household owner's switch under *Worker capacity* on the runtime page):** a new worker job only
+  takes an account that leaves the reserve. Of a model's accounts, it takes the one with the most headroom. A model
+  whose accounts are all kept for conversations counts as having no room, so the next eligible model (a Codex model,
+  for example) is chosen as an ordinary pick. When every model with room is kept, the job **waits**: its messages stay
+  queued, it is not failed, and the owner gets no alert. It is checked again within 15 minutes, or at the reset if
+  that comes sooner. The deferral is logged with `enforced: true`.
+- **Never gated:** live conversations (the final chat fallback), and a pinned job continuing on its assigned model.
+  Checking continuing jobs at each resume is the next slice.

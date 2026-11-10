@@ -105,7 +105,7 @@ import { changed as changedCards } from './activity.mjs';
 import { keepKey, keepSession } from './bodyhost.mjs';
 import { spawnCap } from './spawn.mjs';
 import { continuationOutbox } from './continuation-outbox.mjs';
-import { admit, forecastBurn, logShadow, readReadings, recordReadings } from './allocator.mjs';
+import { admit, allocatorOf, capacityGate, forecastBurn, logShadow, readReadings, recordReadings, startKind } from './allocator.mjs';
 import { readRelays } from './relay.mjs';
 import { householdOwners, membersOf, ownersOf } from './owners.mjs';
 import { approvalsFake, approvalsRun, approvalsRunAsync, approvalsWhy } from './approvals-call.mjs';
@@ -1691,6 +1691,32 @@ async function execute(env, op, d, mem) {
 
 const savedBodyRules = (rules, at) => ({ guest: rules.guest, key: rules.key, deny: rules.deny, readers: rules.readers, ...(rules.seat ? { seat: rules.seat } : {}), ...(rules.members?.length ? { members: rules.members, membersAt: new Date(at).toISOString() } : {}), ...(rules.grantFor ? { grantFor: rules.grantFor } : {}), ...(rules.words ? { words: rules.words, persons: rules.persons, notes: rules.notes ?? [] } : {}) });
 
+const RESERVE_RECHECK_MS = 15 * 60_000;
+
+/**
+ * Worker bodies held now, by the account they draw on (their body record's account key): what's in flight against
+ * each account, for admission and for the readings history. A body whose record can't be read counts on `unknown`.
+ */
+function workerBodiesByAccount(env) {
+  const on = {};
+  for (const c of listConvs(env)) {
+    if (!c.body || startKind(c) === 'live') continue;
+    let key = 'unknown';
+    try { key = readBody(env, c.body).accountKey ?? 'unknown'; } catch { /* unreadable: unknown */ }
+    on[key] = (on[key] ?? 0) + 1;
+  }
+  return on;
+}
+
+/** The capacity gate for a new worker start, or null: a live conversation, or the owner's allocator in shadow. */
+function workerGate(env, c, d) {
+  const kind = startKind(c);
+  if (kind === 'live') return null;
+  try { if (allocatorOf(load(env)).mode !== 'enforce') return null; } catch { return null; }
+  const dir = deliveryDir(env);
+  return capacityGate({ kind, jobsOn: workerBodiesByAccount(env), burnOf: (name) => forecastBurn(readReadings(dir, name)), now: d.now().getTime() });
+}
+
 /** The one conversation commit for a native start or its recovered receipt.
  * The snapshot contains no prompt or raw sender key. */
 function shadowAdmission(env, c, r, at) {
@@ -1699,9 +1725,11 @@ function shadowAdmission(env, c, r, at) {
     const list = r.accountKey ? stateAccounts(env, { now: () => nowMs }).list().accounts ?? [] : [];
     const a = list.find((x) => x.name === r.accountKey);
     if (!a) return;
-    const kind = c.spawn ? 'agent' : c.venue === 'wake' ? 'scheduled' : 'live';
+    const kind = startKind(c);
     const v = admit({ usage: a.usage, kind, burn: forecastBurn(readReadings(deliveryDir(env), a.name)), now: nowMs });
-    logShadow(deliveryDir(env), { at: new Date(nowMs).toISOString(), kind, agent: c.agent, account: a.name, model: r.model, decision: v.allow ? 'allow' : 'defer', why: v.why, windows: v.windows, ...(c.spawn ? { job: c.conversation } : {}) });
+    let enforced = false;
+    try { enforced = kind !== 'live' && !c.spawn?.assignment && allocatorOf(load(env)).mode === 'enforce'; } catch { /* shadow */ }
+    logShadow(deliveryDir(env), { at: new Date(nowMs).toISOString(), kind, agent: c.agent, account: a.name, model: r.model, decision: v.allow ? 'allow' : 'defer', why: v.why, windows: v.windows, ...(enforced ? { enforced: true } : {}), ...(c.spawn ? { job: c.conversation } : {}) });
   } catch { /* a shadow log line, never a reason a start fails */ }
 }
 
@@ -2151,6 +2179,10 @@ async function executeOne(env, op, d, mem) {
       catch { throw Object.assign(new DeliveryError('the captured recovery report is unavailable; retaining its work', 503), { held: true }); }
     }
     if (way.how === 'start') {
+      // A new worker job, with the owner's allocator on (t-2037, slice 3): only an account that leaves conversations
+      // their reserve until its reset. A pinned job continuing (a failover or a home) is slice 4's, never gated here.
+      const gate = !base.pin && workerGate(env, c0, d);
+      if (gate) base.gate = gate;
       const go = (avoid) => startBody(env, { ...base, place: c0.place, avoid, brief: startBrief(briefContext, [...notes, ...msgs], run, sends, rules) }, bodyDeps);
       try { r = await go(way.avoid); } catch (e) {
         // A Codex that won't run this body where it would run (a house's: only its host can tell, at the start;
@@ -2212,6 +2244,28 @@ async function executeOne(env, op, d, mem) {
         saveConv(env, c);
       });
       return { pending: true };
+    }
+    // A new worker job whose every model with room is kept for conversations (allocator.mjs, t-2037): it waits, its
+    // messages queued, and is looked at again within 15 minutes (or at the reset, if sooner). Not out of quota: no
+    // failure, no alert. The shadow log says why.
+    if (e instanceof StateError && e.reserved) {
+      for (const p of restored) rmSync(p, { recursive: true, force: true });
+      const nowMs = now();
+      const until = Number.isFinite(e.until) ? e.until * 1000 : Infinity;
+      const at = Math.min(nowMs + RESERVE_RECHECK_MS, Math.max(nowMs + 60_000, until));
+      locked(env, () => {
+        const c = loadConv(env, op.cv);
+        if (!c) return;
+        const msgs = ours(c, op) ? op.msgs : stillMine(c, op.msgs);
+        if (ours(c, op)) delete c.starting;
+        requeue(c, msgs);
+        c.waiting = `waiting for capacity: the model accounts it may use are kept for conversations until their reset; looked at again ${new Date(at).toISOString()}`;
+        c.retryAt = at;
+        outcome(c, msgs.map((x) => x.key), { body: 'queued', reason: c.waiting }, nowMs);
+        saveConv(env, c);
+      });
+      try { logShadow(deliveryDir(env), { at: new Date(nowMs).toISOString(), kind: startKind(c0), agent: c0.agent, decision: 'defer', why: String(e.message).slice(0, 2000), enforced: true, ...(c0.spawn ? { job: c0.conversation } : {}) }); } catch { /* a log line */ }
+      return;
     }
     // No model the agent may use has room (t-1907): said plainly, once, and its messages aren't tried again on the
     // tick (a wait of minutes can't help a window that resets in hours); a slot it would have resumed stays.
@@ -2933,8 +2987,11 @@ export async function tick(env, o = {}, only, mem = new Map()) {
   // The allocator's readings history (t-2037, shadow): the service's tick only, never a reason the rest doesn't run.
   if (o.service === true && d.now().getTime() - readingsAt >= 60_000) try {
     const nowMs = readingsAt = d.now().getTime();
-    const jobs = listConvs(env).filter((c) => c.body && (c.spawn || c.venue === 'wake')).length;
-    recordReadings(deliveryDir(env), stateAccounts(env, { now: () => nowMs }).list().accounts ?? [], { jobs });
+    // Per account (the body record's key), so a worker on one account doesn't hide another's quiet hours; a body whose
+    // account isn't known counts on every account, the cautious reading.
+    const on = workerBodiesByAccount(env);
+    const unknown = on.unknown ?? 0;
+    recordReadings(deliveryDir(env), stateAccounts(env, { now: () => nowMs }).list().accounts ?? [], { jobs: (name) => (on[name] ?? 0) + unknown });
   } catch (e) { if (!(e instanceof AccountsError)) d.warn(`allocator readings: ${e.message}`); } // none off the control plane
   discardPass(env, d);
   if (only) await drain(env, only, d, mem);

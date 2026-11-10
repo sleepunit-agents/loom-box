@@ -84,11 +84,11 @@ export function commitPreparedBody(env, prepared, body, at = new Date().toISOStr
   return { ...rec, why: prepared.why, preferred: prepared.preferred };
 }
 
-export async function startBody(env, { agent, brief: b, venue, venueKind, prefer = [], avoid = [], cwd, deny = [], place, guest, local, seat, activity = false, role, pin }, o = {}) {
+export async function startBody(env, { agent, brief: b, venue, venueKind, prefer = [], avoid = [], cwd, deny = [], place, guest, local, seat, activity = false, role, pin, gate }, o = {}) {
   const d = deps(env, o);
   const text = brief(b);
   if (typeof venue !== 'string' || !/^[a-z][a-z0-9-]{0,39}$/.test(venue)) fail('which venue (wake, relay, session, discord, slack, …)');
-  const pick = await resolveFor(env, { agent, venue, venueKind, prefer, avoid, role, pin, conversation: o.bodyEnv?.LOOM_BODY_CONVERSATION, accounts: d.accounts, now: d.now(), fetchImpl: d.fetchImpl });
+  const pick = await resolveFor(env, { agent, venue, venueKind, prefer, avoid, role, pin, gate, conversation: o.bodyEnv?.LOOM_BODY_CONVERSATION, accounts: d.accounts, now: d.now(), fetchImpl: d.fetchImpl });
   const runner = d.runner(pick.harness, !!local);
   // Comms and interactive terminal bodies expose their native tool steps as activity cards (activity.mjs).
   // Whose house (t-1952): a house's runner seats it there; a local one has no houses.

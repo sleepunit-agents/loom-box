@@ -94,3 +94,69 @@ test('readings history (slice 1b): one line per newer reading, bounded, read bac
     assert.ok(readReadings(dir, 'b').length >= 2);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+// ---- Slice 3: the gate a new worker start passes through, and the resolver with it ----
+import { capacityGate, allocatorOf, setAllocatorMode, startKind } from '../src/allocator.mjs';
+import { resolveModel } from '../src/models.mjs';
+import { StateError } from '../src/state.mjs';
+
+const login = (name, provider, usage) => ({ name, label: name, provider, harness: provider === 'anthropic' ? 'claude' : 'codex', kind: 'login', agents: ['art'], credentials: [{ kind: 'login', status: 'valid' }], usage });
+const CLAUDE = { id: 'opus', harness: 'claude', family: 'anthropic' };
+const CODEX = { id: 'sol', harness: 'codex', family: 'openai' };
+
+test('the switch: shadow until the owner turns it on, and only shadow or enforce', () => {
+  const s = {};
+  assert.equal(allocatorOf(s).mode, 'shadow');
+  assert.equal(setAllocatorMode(s, { mode: 'enforce', by: 'jonathan-barket', at: '2026-11-10T00:00:00Z' }).mode, 'enforce');
+  assert.deepEqual(allocatorOf(s).changed, { at: '2026-11-10T00:00:00Z', by: 'jonathan-barket' });
+  assert.throws(() => setAllocatorMode(s, { mode: 'on' }), /shadow or enforce/);
+  assert.equal(allocatorOf({ allocator: { mode: 'bogus' } }).mode, 'shadow');
+  assert.equal(startKind({ spawn: {} }), 'agent');
+  assert.equal(startKind({ venue: 'wake' }), 'scheduled');
+  assert.equal(startKind({ venue: 'discord' }), 'live');
+});
+
+test('a live start has no gate; a job counts the jobs already on its account', () => {
+  assert.equal(capacityGate({ kind: 'live' }), null);
+  const usage = { '5h': 0.80, reset_5h: S + 3 * 3600, checked: S };
+  const g0 = capacityGate({ kind: 'agent', now: NOW });
+  assert.equal(g0(login('max', 'anthropic', usage)).allow, true);
+  // Five jobs already on it at the 3% guess each: 0.80 + 0.15 + 0.03 + 0.05 floor > 0.97.
+  const g5 = capacityGate({ kind: 'agent', jobsOn: { max: 5 }, now: NOW });
+  const v = g5(login('max', 'anthropic', usage));
+  assert.equal(v.allow, false);
+  assert.equal(v.until, S + 3 * 3600);
+});
+
+test('a model is gated only on its own windows: another model\'s full window does not hold it back', () => {
+  const usage = { '7d': 0.2, '7d_opus': 0.99, reset_7d_opus: S + 86400, checked: S };
+  const g = capacityGate({ kind: 'agent', now: NOW });
+  assert.equal(g(login('max', 'anthropic', usage)).allow, true);              // a model with no window of its own
+  assert.equal(g(login('max', 'anthropic', usage), '7d_opus').allow, false);  // opus itself
+});
+
+test('enforced: a job goes to the eligible model with headroom, Codex as an ordinary pick', () => {
+  const accounts = { accounts: [login('max', 'anthropic', { '7d': 0.93, reset_7d: S + 3 * 86400, checked: S }), login('pro', 'openai', { '7d': 0.3, reset_7d: S + 3 * 86400, checked: S })] };
+  const gate = capacityGate({ kind: 'agent', now: NOW });
+  const r = resolveModel({ agent: 'art', kind: 'spawn', models: [CLAUDE, CODEX], settings: { prefer: ['opus'] }, accounts, gate, now: NOW });
+  assert.equal(r.model, 'sol');
+  assert.match(r.admission, /room in every window/);
+  // Without the gate (shadow, or a live conversation), opus still has room and is chosen: nothing changes.
+  assert.equal(resolveModel({ agent: 'art', kind: 'spawn', models: [CLAUDE, CODEX], settings: { prefer: ['opus'] }, accounts, now: NOW }).model, 'opus');
+});
+
+test('enforced: every model with room kept for conversations is a wait, not out of quota', () => {
+  const accounts = { accounts: [login('max', 'anthropic', { '7d': 0.93, reset_7d: S + 3 * 86400, checked: S }), login('pro', 'openai', { '7d': 0.95, reset_7d: S + 86400, checked: S })] };
+  const gate = capacityGate({ kind: 'scheduled', now: NOW });
+  let e;
+  try { resolveModel({ agent: 'art', kind: 'wake', models: [CLAUDE, CODEX], accounts, gate, now: NOW }); } catch (x) { e = x; }
+  assert.ok(e instanceof StateError);
+  assert.equal(e.reserved, true);
+  assert.equal(e.until, S + 86400);
+  assert.match(e.message, /kept for conversations/);
+  // Truly out of quota everywhere (no room before the gate) stays the quota answer.
+  const full = { accounts: [login('max', 'anthropic', { '7d': 0.99, reset_7d: S + 3600, checked: S })] };
+  try { resolveModel({ agent: 'art', kind: 'wake', models: [CLAUDE], accounts: full, gate, now: NOW }); } catch (x) { e = x; }
+  assert.equal(e.reserved, undefined);
+  assert.match(e.message, /no model is left/);
+});

@@ -9,13 +9,14 @@ import { approvalsFake, approvalsRun, approvalsWhy } from './approvals-call.mjs'
 import { appendFileSync, existsSync, readFileSync, statfsSync } from 'node:fs';
 import { uptime } from 'node:os';
 import { join } from 'node:path';
-import { BOX_NAME, StateError, load, localBoxName, stateDir } from './state.mjs';
+import { BOX_NAME, StateError, load, localBoxName, stateDir, update } from './state.mjs';
 import { sessionsBusy } from './busy.mjs';
 import { allowJoin, blockAllJoins, blockJoin, pendingJoins } from './enroll.mjs';
 import { preferenceOf, addBox, assertBoxOwner, resolveBox, isBoxOwner, boxLabelOf, boxOfCall, boxUpdateNow, loginOver, factsOf, lendBox, list, loginCancel, loginCode, loginStart, loginView, primaryOf, remoteDown, remoteUp, revokeBox, shownTask, serviceDown, serviceMove, serviceRestart, serviceUp, setAgent, isHostHouse, setBoxOwner, setMayHost, setBoxWatch, setPrimary, up, down, LIVE } from './control.mjs';
 import { LOGIN_HARNESSES } from './logins.mjs';
 import { ownCommit, swapCommand } from './version.mjs';
 import { stateAccounts } from './accounts.mjs';
+import { allocatorOf, setAllocatorMode, RESERVE_FLOOR, RESERVE_MARGIN } from './allocator.mjs';
 import { modelsOf, rolesOf, setRole } from './models.mjs';
 import { COMMS_VENUE, HARNESS_WORDS, conversationJobs, ownerModelChoice, answerLoop, deliveryNotices, listConvs, loadConv, loopAsks, readFallbacks, resetCardProblem, resetPrincipal, runtimeAs, whenWords, workingConversations, nonIdleAgents } from './delivery.mjs';
 import { loomStore } from './store.mjs';
@@ -951,6 +952,7 @@ function boxesPage(env, nowMs) {
 
   sections.push(loginsSection(env, s, live_boxes, nowMs, false));
   sections.push(rolesSection(env));
+  sections.push(capacitySection(env));
 
   // Each agent's houses, services and sessions are its own (its Houses tab): here, a row each.
   if (agents.length) {
@@ -1167,6 +1169,26 @@ function rolesSection(env) {
   const last = cat.changed ? ` Last change: ${cat.changed.what}${cat.changed.why ? ` (${cat.changed.why})` : ''}, by ${cat.changed.by}.` : '';
   return { id: 'roles', title: 'Work roles', blocks: [{ type: 'panel', rows },
     { type: 'text', tone: 'muted', text: `Agents read these when they hand off a job, and the runtime picks a model from the role's. An agent's own model limits still apply.${last}` }] };
+}
+
+/**
+ * Worker capacity (allocator.mjs, t-2037): the household owner's switch. Off (the default), the runtime only notes what
+ * it would have decided. On, a new worker job (a handed-off job or a wake) starts only on an account that leaves
+ * conversations their reserve until its reset, and otherwise waits. Live conversations are never held back.
+ */
+function capacitySection(env) {
+  let a;
+  try { a = allocatorOf(load(env)); } catch { return { id: 'capacity', title: 'Worker capacity', blocks: [{ type: 'text', tone: 'muted', text: 'Can\'t be read just now.' }] }; }
+  const on = a.mode === 'enforce';
+  const pct = (v) => `${Math.round(v * 100)}%`;
+  const changed = a.changed ? ` Changed ${a.changed.at.slice(0, 10)} by ${a.changed.by}.` : '';
+  return { id: 'capacity', title: 'Worker capacity', blocks: [{ type: 'panel', rows: [{
+    label: 'Keep room for conversations', value: on ? 'On: jobs wait when they would use it' : 'Off: only noted, nothing held back',
+    detail: `Before a handed-off job or a wake starts, the runtime keeps at least ${pct(RESERVE_FLOOR)} of each model account, or what conversations are expected to use before it resets plus ${pct(RESERVE_MARGIN)}, whichever is more. Both numbers are first guesses.${changed}`,
+    tone: on ? 'ok' : 'muted',
+    act: { action: 'allocator-mode', label: on ? 'Turn off' : 'Turn on', fields: { mode: on ? 'shadow' : 'enforce' },
+      confirm: on ? 'Stop holding jobs back? They start whenever an account has any room, as before.' : 'Hold jobs back when they would eat into the room kept for conversations? A held job waits, and starts once there is room.' },
+  }] }, { type: 'text', tone: 'muted', text: 'Conversations are never held back by this.' }] };
 }
 
 /** A role from the page's form fields, or a message saying what's wrong. */
@@ -1587,6 +1609,12 @@ export function act(env, effects, { action, fields: raw = {}, caller: c }, publi
       case 'login-code': { loginCode(env, effects, fields); return { ok: true, message: 'Got it: the box is checking the code.', page: `login/${fields.id}` }; }
       case 'box-update-now': { const r = boxUpdateNow(env, effects, fields); return { ok: true, message: `${r.name} tries loom's runtime on its next poll.`, page: boxPath(env, fields.name) }; }
       case 'login-cancel': { loginCancel(env, effects, fields); return { ok: true, message: 'Cancelled.', page: '' }; }
+      case 'allocator-mode': {
+        if (!['shadow', 'enforce'].includes(fields.mode)) return { ok: false, message: 'Turn it on or off.', page: '' };
+        const by = typeof OWNER.who === 'string' && /^[a-z0-9]+(-[a-z0-9]+)*$/.test(OWNER.who) ? OWNER.who : 'owner';
+        const r = update(env, (st) => setAllocatorMode(st, { mode: String(fields.mode ?? ''), by }));
+        return { ok: true, message: r.mode === 'enforce' ? 'Jobs now wait when they would use the room kept for conversations.' : 'Jobs are no longer held back; the runtime only notes what it would decide.', page: '' };
+      }
       case 'role-set': case 'role-remove': {
         const cur = rolesOf(load(env));
         const expect = String(fields.version ?? '');
