@@ -1,4 +1,6 @@
-import test from 'node:test';
+import test, { afterEach } from 'node:test';
+import { cleanupAdministrationFixture, trackAdministrationFixture } from './administration-fixture.mjs';
+afterEach(cleanupAdministrationFixture);
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
@@ -50,8 +52,9 @@ async function fixture(t, lose, from = { kind: 'person', slug: 'owner' }, princi
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); });
   const url = 'http://127.0.0.1:' + server.address().port, client = remoteClient(url, 'fixture-box-client');
+  trackAdministrationFixture(join(root, 'executions'), () => op.id);
   const config = { root, id: op.id, env: { PATH: process.env.PATH, HOME: w.env.HOME },
-    supervisor: process.env.LOOM_ADMIN_TEST_SUPERVISOR === 'systemd' ? 'systemd' : 'process-fixture' };
+    supervisor: process.env.LOOM_ADMIN_TEST_SUPERVISOR === 'systemd' ? 'systemd-fixture' : 'process-fixture' };
   return { ...w, root, op, marker, journal, proof, caller, calls, client, config, url };
 }
 

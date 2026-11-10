@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { executionTransaction } from './administration-execution-journal.mjs';
 
-export const administrationUnit = (root, id) => 'loom-admin-' + id.slice(4) + '-' + createHash('sha256').update(root).digest('hex').slice(0, 12) + '.service';
+export const administrationUnit = (root, id, fixture = false) => (fixture ? 'loom-admin-test-' : 'loom-admin-') + id.slice(4) + '-' + createHash('sha256').update(root).digest('hex').slice(0, 12) + '.service';
 const managerKind = () => process.getuid() === 0 ? 'systemd-system' : 'systemd-user';
 const managerArgs = () => process.getuid() === 0 ? [] : ['--user'];
 const managerEnv = env => ({ PATH: env.PATH, HOME: env.HOME,
@@ -30,7 +30,7 @@ export function administrationSupervisorAvailable(env = process.env) {
   return true;
 }
 export function administrationUnitState(env, unit) {
-  if (!/^loom-admin-[0-9a-f]{32}-[0-9a-f]{12}\.service$/.test(unit ?? '')) throw Error('invalid administrative supervisor unit');
+  if (!/^loom-admin-(?:test-)?[0-9a-f]{32}-[0-9a-f]{12}\.service$/.test(unit ?? '')) throw Error('invalid administrative supervisor unit');
   const r = call(env, ['show', unit, '--property=MainPID,InvocationID,ActiveState,LoadState,KillMode,RuntimeMaxUSec,TimeoutStopUSec']);
   if (r.status !== 0 || r.error) return null;
   const fields = Object.fromEntries(r.stdout.trim().split('\n').map(line => { const at = line.indexOf('='); return [line.slice(0, at), line.slice(at + 1)]; }));
@@ -45,9 +45,9 @@ export function signalAdministrationUnit(env, record, signal) {
   const r = call(env, ['kill', '--kill-whom=all', '--signal=' + signal, s.unit]);
   return r.status === 0;
 }
-export async function startAdministrationUnit({ root, id, env, gateEnv, boot, maxMs }) {
+export async function startAdministrationUnit({ root, id, env, gateEnv, boot, maxMs, fixture = false }) {
   if (!administrationSupervisorAvailable(env)) throw Error('administrative commands require an available systemd manager for its OS identity');
-  const unit = administrationUnit(root, id);
+  const unit = administrationUnit(root, id, fixture);
   executionTransaction(root, id, r => ({ ...r, supervisor: { kind: managerKind(), unit } }));
   const args = [...managerArgs(), '--quiet', '--pipe', '--wait', '--unit=' + unit,
     '--property=Type=exec', '--property=KillMode=control-group', '--property=TimeoutStopSec=2s',
