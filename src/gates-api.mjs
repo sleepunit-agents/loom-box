@@ -32,6 +32,12 @@ export async function runFor(env, caller, argv, store = loomStore(env), core = c
       throw e;
     }
   }
+  // A host verb (hostverbs.mjs, t-2096): a fixed step on loom's machine, for a body doing the owner's own work.
+  if (a === 'host') {
+    const h = await import('./hostverbs.mjs');
+    const r = b === 'result' ? h.hostResult(env, caller, rest, proof, await hostDeps(env)) : await h.hostRequest(env, caller, argv.slice(1), proof, await hostDeps(env));
+    return r.ok ? ok(`${JSON.stringify(r)}\n`) : no(r.reason, r.usage ? 2 : 1);
+  }
   if (a === 'grants' && b === 'list' && (rest.length === 0 || (rest.length === 1 && rest[0] === '--json'))) {
     try { return ok(`${JSON.stringify(grantsFor(store.get(GRANTS, KEY)?.doc, caller.agent))}\n`); }
     catch (e) { return no(e.message); }
@@ -63,7 +69,7 @@ export async function runFor(env, caller, argv, store = loomStore(env), core = c
     if (r.ok) await annotate(store, core, caller.agent, r.pid);
     return r.ok ? ok(`${r.message}\n`) : no(`propose-person: ${r.message}`);
   }
-  return no('the runtime answers a body: place --conversation cv-… | file --conversation cv-… --id ID --part N | relay --to A --say T [--why W] [--reply-to r-…] [--from discord:#x] [--approval a-…] [--conversation cv-…] | relays [--thread r-…] | grants list [--json] | gates people | gates propose --slug S --entry JSON [--why W] [--then-relay-say T --then-relay-via slack]', 2);
+  return no('the runtime answers a body: host <verb> … --conversation cv-… [--approval a-…] | host result hx-… --conversation cv-… | place --conversation cv-… | file --conversation cv-… --id ID --part N | relay --to A --say T [--why W] [--reply-to r-…] [--from discord:#x] [--approval a-…] [--conversation cv-…] | relays [--thread r-…] | grants list [--json] | gates people | gates propose --slug S --entry JSON [--why W] [--then-relay-say T --then-relay-via slack]', 2);
 }
 
 /**
@@ -83,4 +89,16 @@ export async function placeOf(env, cv, proof = {}, agent = undefined, caller = u
   if (!c || (agent !== undefined && c.agent !== agent) || !d.holdsRun(env, cv, proof, { caller })) return { ok: false, reason: `place: only the body holding ${cv} in its current run asks where it is` };
   const p = principalOf(env, c);
   return { ok: true, place: { conversation: c.conversation, agent: c.agent, venue: c.venue, place: c.place, ...(c.label !== undefined ? { label: c.label } : {}), members: c.bodyRules?.members ?? [], ...(c.bodyRules?.membersAt ? { membersAt: c.bodyRules.membersAt } : {}), principal: { for: p.for, owner: p.owner, ownerSpoke: c.actsFor?.owner === true, ...(p.unknown ? { unknown: true } : {}) } } };
+}
+
+/** What a host verb's caller check reads (hostverbs.mjs, ownerBody): the proof, whose work it is, and whose its house is. */
+async function hostDeps(env) {
+  const { heldConv } = await import('./delivery.mjs');
+  const { principalOf } = await import('./principal.mjs');
+  const { housePrincipal } = await import('./control.mjs');
+  const { load } = await import('./state.mjs');
+  return {
+    heldConv, principalOf,
+    housePrincipal: (id) => { const s = load(env); const h = s.houses?.[id]; return h ? housePrincipal(s, h, env) : null; },
+  };
 }

@@ -106,6 +106,11 @@
 //                      the relay MCP tool core offers an agent's session: {text, isError?}
 //   loom runtime relay --to b --say <text> [--why w] [--reply-to r-…] [--from discord:#x] [--approval a-…]   from a house
 //   loom runtime relays [--thread r-…]                  from a house: its agent's relays, sent and received
+// Host verbs (hostverbs.mjs, t-2096): a fixed step on loom's machine, for a body doing the owner's own work
+//   loom runtime host <verb> [args] [--approval a-…]     unit-status U | journal U [--since 2h] [--lines N] | read PATH |
+//                      art-chain-check | deploy-loom LABEL | pieces-update PIECE | restart UNIT (changes: an approval)
+//   loom runtime host result hx-…                       a long verb's result, for the conversation that asked
+//   loom runtime host-exec [--once]                      loom's machine: the executor (its own unit, no model)
 // A body's own place (gates-api.mjs, placeOf; t-1745): proved by its run key and session, in a house or on loom's machine
 //   loom runtime place                                   {conversation, agent, venue, place, label?, members, membersAt?, principal}
 // A file someone sent the body's conversation (files.mjs, t-1961): fetched by the venue's adapter, proved as `place` is
@@ -745,6 +750,28 @@ async function main(argv, env) {
       const dest = flag(rest, '--out') ?? first.name;
       writeFileSync(dest, data, { flag: 'wx', mode: 0o600 });
       return out({ path: realpathSync(dest), name: first.name, size: first.size, sha256: first.sha256 });
+    }
+    case 'host': {
+      // A host verb (hostverbs.mjs, t-2096): from a body, its own conversation proved as a relay proves it. In a house
+      // through the piece API; a body on loom's machine here. Only ever this body's own conversation.
+      const mine = ownConversation(env);
+      if (!mine) throw new Fail('loom runtime host: can\'t tell this body\'s own conversation (none mapped for its session, or none in its environment)', 2);
+      const named = flag(rest, '--conversation');
+      if (named !== undefined && named !== mine) throw new Fail(`host: --conversation is this body's own (${mine})`, 2);
+      const args = rest.filter((x, i) => !(x === '--piece' || rest[i - 1] === '--piece') && !(x === '--conversation' || rest[i - 1] === '--conversation'));
+      const argv = ['host', ...args, '--conversation', mine];
+      const proof = bodyProof(env, mine);
+      if (env.LOOM_URL && env.LOOM_TOKEN_FILE) return runAnswer(await untilSessionKnown(() => pieceCall(env, flag(rest, '--piece'))('run', { argv, ...proof })));
+      const { loadConv } = await import('./delivery.mjs');
+      const { runFor } = await import('./gates-api.mjs');
+      return runAnswer(await runFor(env, { kind: 'agent', agent: loadConv(env, mine)?.agent }, argv, undefined, undefined, undefined, proof));
+    }
+    case 'host-exec': {
+      // The host verbs' executor (hostverbs.mjs): its own user unit on loom's machine, with no model. Runs what the
+      // runtime spooled, nothing else.
+      const { hostExecLoop } = await import('./hostverbs.mjs');
+      await hostExecLoop(env, { once: rest.includes('--once') });
+      return;
     }
     case 'relays':
     case 'relay': {

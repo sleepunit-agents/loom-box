@@ -687,6 +687,57 @@ A box never reads loom's stores, and loom never reaches into a box. The box poll
 
 `<piece>` is the name loom runs it under: `box`, or `runtime` once it's installed by its new name. A box remembers the name it joined under (`piece` in its `box.json`), and one that joined before the rename keeps calling `/api/box/`, which its `piece:box/<id>` credential names.
 
+## Host verbs (t-2096)
+
+A body never gets a shell on loom's machine. A body doing its owner's own work asks for a **host verb** instead: a
+named step from a fixed table, with typed arguments, run by a separate executor that has no model
+(`src/hostverbs.mjs`; design: loom note `runtime/2026-11-10-t2049-phase3-local-bodies-off-loom`, step 3).
+
+```
+loom runtime host unit-status <unit>                 do    /usr/bin/systemctl --user status (loom-*, art-*, wake-rearm)
+loom runtime host journal <unit> [--since 2h] [--lines 200]   do    journalctl --user -u <unit>
+loom runtime host read <path>                        do    a runtime log (allocator-shadow.jsonl, allocator-readings.jsonl,
+                                                           host-exec/log.jsonl) or hosts/<your agent>.json
+loom runtime host art-chain-check --approval a-…     ask   ~/Art/bin/art-chain-check (a script a push can change)
+loom runtime host deploy-loom <label> --approval a-… ask   flock /tmp/deploy-loom.lock ~/Art/bin/deploy-loom <label>
+loom runtime host pieces-update <piece> --approval a-…  ask   loom pieces update <piece>
+loom runtime host restart <unit> --approval a-…      ask   loom-http, loom-http-local, loom-http-lan, loom-piece-*
+loom runtime host result hx-…                        a long verb's result
+loom runtime host-exec                               loom's machine: the executor (contrib/host-exec)
+```
+
+- **Who.** Only a household owner's agent (every owner it has is a household owner: a member's own agent is that
+  member's, and never touches loom's machine). The caller proves it holds its conversation in its current run (its run's key and harness session, as
+  `send` does), from the house holding that body. The conversation's principal is the owner, and so is the caller's
+  house (the owner's seat, or a job house doing the owner's work); a body on loom's machine only for a local
+  conversation. Anyone else is refused before anything else is read, the verb included.
+- **The tier.** Each verb's own: the fixed reads `do`; changes, and any script from a checkout that syncs by itself
+  (`art-chain-check`, `deploy-loom`), `ask`. With `LOOM_RUNTIME_HOST_RULES=1` (once the approvals piece has standing
+  rules for kind `host`, t-2104), the owner's rule for `<verb>:<arg>` (`approvals rule host …`) decides instead. An
+  unreadable answer is the verb's own tier. `ask`: an approval of kind `host` for exactly that target, which the
+  runtime spends once, for the owner (`approvals use … --as <the body> --on-behalf owner`); without one, the answer is
+  the `approvals request` line to file, and the body parks on it. `tell`: the FYI is filed first, and a tell that can't
+  be filed stops the verb. An approval offered for a verb that doesn't need one is refused, not spent.
+- **The spool.** Only after that is the request written to `delivery/host-exec/queue` (0600 in a 0700 dir). The
+  executor claims each by renaming it into `running/`, parses it again against the same table, runs the fixed argv
+  with no shell, system tools by absolute path, in its own process group (ended whole past its time limit), with a
+  PATH of node's dir and the system's only, and keeps the output's last 64 KB, every line through `redact.mjs`, in
+  `done/` (7 days, 200 results). Changes run one at a time; reads alongside. One executor at a time
+  (a kernel lock, `flock` on `executor.lock`, gone with the process however it ends). A verb past its time is a failure. A stop finishes what's running and begins nothing more. A request the executor was running when
+  it stopped is recorded as `lost` and never run again; one that waited more than 15 minutes for the executor (none
+  installed yet, or it was down) is recorded as `expired`, never run late. A tail cut from longer output starts at its
+  first whole line. A request file that isn't a private file of the executor's
+  user is dropped. The executor trusts the spool as the runtime trusts its own state: anything running as loom's user
+  on loom's machine could write it (a local body already has that machine's shell), so the owner's yes is checked by
+  the runtime before spooling, not again by the executor. `art-chain-check` and `deploy-loom` run what `~/Art/bin` holds when they run,
+  and that checkout follows its repo by itself: the owner's yes is for the step by name, not a pinned copy of the
+  script, which is why both ask. After `pieces-update runtime`, restart the executor's unit
+  to run the new code. Every step is a line in `host-exec/log.jsonl`, without output.
+- **Answers.** A body's call waits about 2 s; a longer verb answers with its id, and `host result` gives the result
+  to the same conversation's holder only (any other is told there's no such request).
+- **Why a separate executor.** A deploy or a `pieces-update runtime` restarts the process that asked; the executor is
+  its own user unit (`contrib/host-exec/loom-runtime-host-exec.service`), so the step isn't cut off with it.
+
 ## Threat model
 
 - **A box holds what it's given, while it's given it.** It only gets secrets for a house assigned to it, once, at claim time, and only the ones named in that agent's house config. That config lives on the control plane, so a box can't widen it. The secrets sit in the house's 0600 files until the house ends.
@@ -696,6 +747,9 @@ A box never reads loom's stores, and loom never reaches into a box. The box poll
 - **A body can't fetch secrets.** A house's token is an ordinary `agent:<name>` token. It reaches MCP and the CLI as that agent, and the secrets piece won't hand a value to a body. Only the box fetched them, for the house.
 - **A box only runs containers.** The agent's code runs inside its container, which is rootless podman with no host home, no box env and only its own dirs and secrets. The agent's Containerfile builds under podman too. So a house can't read the box's credential, the box's files, or (on loom's own machine) the household. Nested containers widen what the container may do inside its own user namespace, which is why the owner has to allow them per agent.
 - **One house per steering principal (t-1952).** A house's bodies are one agent, one uid, in one container, so inside a house a body's run key and session only keep that house's bodies apart, not walled off: a body that sets out to pose as a sibling in its house can read the sibling's key file and session id and set `CLAUDE_CODE_SESSION_ID` itself. So a house holds one principal's conversations only (the owner's; one person's; or one unknown conversation's, alone), and a body moves house when its conversation's principal does (Permissions, "One house per steering principal"). What a sibling can pose as is a conversation of the same principal, toward approvals and the clock the same principal it already acts for. And the runtime refuses `send`, `principal`, `place` and a relay's return address from any house but the one holding the conversation's body, so a key or session id carried out of its house (a guest's house to the owner's, or back) proves nothing. A send is checked against the house's agent token first: never another agent's. A harness whose runner reports no session (Codex today: each body is its own process, with its own `LOOM_BODY_KEY`) is checked by its key and its house.
+- **Host verbs are the one way from a house onto loom's machine.** Only the owner's own work, proved; a fixed table of
+  verbs with typed arguments; the owner's yes for each change (or his standing rule); no shell; bounded, redacted
+  output (Host verbs, above). The executor trusts its spool as it trusts the runtime's state: both are this user's.
 - **Revocation doesn't fail open.** A revoke that fails (loom's token file busy) is queued and retried on every box poll until it goes, and a revoked box's name can't be reused until its old credential is gone.
 - State on the control plane: `~/.config/loom-box/state.json` (0600, in a 0700 dir; `LOOM_BOX_HOME` moves it), and each service's saved state as its own gzipped tarball in `blobs/` beside it (up to 48 MB, moved in parts; only its size and hash are in state.json). On a box: `box.json` and `credential` (0600) in the same dir, and repo mirrors and house dirs under `~/.local/share/loom-box` (`LOOM_BOX_DATA`).
 
