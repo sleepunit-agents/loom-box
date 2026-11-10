@@ -96,7 +96,7 @@ test('the runners read their own records: a Claude session\'s transcript, a Code
   assert.deepEqual(xr.activity({ id: 'k1' }).map((c) => c.id), ['k1:item_1', 'k1:item_2']);
 });
 
-test('the tick posts a loom body\'s new and moved cards to core, and none for a slack body', async () => {
+test('the tick posts loom and bridge bodies\' new and moved cards to core', async () => {
   const w = world();
   const cards = [{ id: 't1', at: 'x', tool: 'Bash', summary: 'Ran the tests', state: 'running' }];
   w.runner.activity = () => cards;
@@ -104,15 +104,15 @@ test('the tick posts a loom body\'s new and moved cards to core, and none for a 
   await deliver(w.env, { source: 'loom', id: `comms:${thread}:aaaaaaaaaaaaaaaa`, agent: 'art', venue: 'loom', place: thread, from: { kind: 'person', slug: 'jonathan' }, kind: 'message', at: w.clock.now().toISOString(), text: 'go' }, w.o);
   await deliver(w.env, w.msg('dm:U1', 'hi'), w.o);
   await tick(w.env, w.o);
-  assert.equal(w.core.activityCalls.length, 1);
+  assert.equal(w.core.activityCalls.length, 2);
   assert.equal(w.core.activityCalls[0].conversation, cvOf('art', 'loom', thread));
   assert.equal(w.core.activityCalls[0].run, loadConv(w.env, cvOf('art', 'loom', thread)).run);
   await tick(w.env, w.o);
-  assert.equal(w.core.activityCalls.length, 1, 'nothing new, nothing sent');
+  assert.equal(w.core.activityCalls.length, 2, 'nothing new, nothing sent');
   cards[0] = { ...cards[0], state: 'done' };
   await tick(w.env, w.o);
-  assert.equal(w.core.activityCalls.length, 2);
-  assert.deepEqual(w.core.activityCalls[1].cards.map((c) => c.state), ['done']);
+  assert.equal(w.core.activityCalls.length, 4);
+  assert.deepEqual(w.core.activityCalls[2].cards.map((c) => c.state), ['done']);
 });
 
 test('a spawned job\'s body posts its steps to the job\'s own thread once it has one, so it can be watched (t-2043)', async () => {
@@ -130,4 +130,18 @@ test('a spawned job\'s body posts its steps to the job\'s own thread once it has
   assert.equal(sent.length, 1);
   assert.deepEqual(sent[0].cards.map((c) => [c.summary, c.state]), [['Ran the tests', 'running']]);
   assert.equal(sent[0].run, loadConv(w.env, r.handle).run);
+});
+
+
+test('a wake enables remote activity capture and posts live steps without a Comms thread', async () => {
+  const w = world();
+  const options = [];
+  const start = w.runner.start.bind(w.runner);
+  w.runner.start = (o) => { options.push(o); return start(o); };
+  w.runner.activity = () => [{ id: 'wake1', at: 'x', tool: 'Read', summary: 'Read a file', state: 'done' }];
+  const r = await deliver(w.env, w.msg('lane:watch', 'check the work', { venue: 'wake', kind: 'wake', from: { kind: 'schedule' } }), w.o);
+  await tick(w.env, w.o);
+  assert.equal(options[0].activity, true, 'the remote bodyhost must collect cards too');
+  assert.equal(w.core.activityCalls[0].conversation, r.conversation);
+  assert.deepEqual(w.core.activityCalls[0].cards.map((c) => c.summary), ['Read a file']);
 });
