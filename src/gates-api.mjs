@@ -19,7 +19,15 @@ export async function runFor(env, caller, argv, store = loomStore(env), core = c
     const r = await import('./relay.mjs');
     const args = argv.slice(1);
     const flag = (n) => { const i = args.indexOf(n); return i >= 0 ? args[i + 1] : undefined; };
-    if (a === 'relays') return ok(r.relaysOf(env, caller.agent, flag('--thread')));
+    if (a === 'relays') {
+      // A house sees only its own conversation's relays (t-2134), proved as a relay proves it; loom's machine, the agent's.
+      if (typeof caller.house !== 'string') return ok(r.relaysOf(env, caller.agent, flag('--thread')));
+      const cv = flag('--conversation');
+      const { heldConv } = await import('./delivery.mjs');
+      const held = /^cv-[0-9a-f]{12}$/.test(cv ?? '') && typeof proof.key === 'string' && proof.key ? heldConv(env, cv, proof, { caller }) : null;
+      if (!held || held.agent !== caller.agent) return no('relays: from a house, only its own conversation\'s, proved (`loom runtime relays` from the body\'s shell; if it says this right after the body started, its session isn\'t known yet: try again in a moment)');
+      return ok(r.relaysOf(env, caller.agent, flag('--thread'), cv));
+    }
     const bad = args.filter((x, i) => x.startsWith('--') && !['--to', '--say', '--why', '--reply-to', '--from', '--approval', '--conversation'].includes(x) && !(i > 0 && args[i - 1].startsWith('--')));
     if (bad.length) return no(`relay: no flag ${bad[0]} (it takes --to, --say, --why, --reply-to, --from, --approval, --conversation)`, 2);
     const t = { to: flag('--to'), say: flag('--say'), why: flag('--why'), reply_to: flag('--reply-to'), from: flag('--from'), approval: flag('--approval'), conversation: flag('--conversation'),
