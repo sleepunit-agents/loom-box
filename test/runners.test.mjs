@@ -673,3 +673,55 @@ test('a Claude job\'s last words are read as its transcript grows, never whole e
   fs.appendFileSync(file, '\n' + event('recovered').trimEnd());
   assert.equal(runner.final({}), 'recovered');
 });
+
+
+test('final uses a stable descriptor and restarts for replacement or shrink during a scan', async () => {
+  const fs = (await import('node:fs')).default;
+  const {syncBuiltinESMExports} = await import('node:module');
+  const h = harness();
+  const event = text => JSON.stringify({type:'assistant',message:{content:[{type:'text',text}]}}) + '\n';
+  for (const mode of ['replace','shrink']) {
+    const file = join(h.D, mode+'.jsonl');
+    writeFileSync(file,event('old')+' '.repeat(200));
+    const runner = new ClaudeRunner({readMax:{final:7}}); runner.transcriptOf = () => file;
+    const read = fs.readSync; let count=0;
+    fs.readSync = (...args) => {
+      const n = read(...args);
+      if (++count === 15) {
+        if(mode === 'replace') {writeFileSync(file+'.new',event('new'));fs.renameSync(file+'.new',file);}
+        else writeFileSync(file,event('new'));
+      }
+      return n;
+    };
+    syncBuiltinESMExports();
+    try {assert.equal(runner.final({}),'new', mode);}
+    finally {fs.readSync=read;syncBuiltinESMExports();}
+  }
+});
+
+test('final tiny configured slices still make progress through four-byte UTF-8', () => {
+  const h = harness(), file = join(h.D,'tiny.jsonl');
+  writeFileSync(file,JSON.stringify({type:'assistant',message:{content:[{type:'text',text:'界 🐟'}]}}));
+  const runner = new ClaudeRunner({readMax:{final:1}});runner.transcriptOf=()=>file;
+  assert.equal(runner.final({}),'界 🐟');
+  assert.equal(runner.readMax.final,4);
+});
+
+test('final drops oversized unfinished storage under a constrained heap', () => {
+  const script = `
+    import {writeFileSync,appendFileSync,mkdtempSync,rmSync} from 'node:fs';
+    import {tmpdir} from 'node:os';
+    import {join} from 'node:path';
+    import {ClaudeRunner} from ${JSON.stringify(new URL('../src/runners.mjs',import.meta.url).href)};
+    const dir=mkdtempSync(join(tmpdir(),'final-heap-')),file=join(dir,'stream');
+    try {
+      writeFileSync(file,'{"type":"user","padding":"');
+      const chunk='x'.repeat(1024*1024);
+      for(let i=0;i<192;i++) appendFileSync(file,chunk);
+      const r=new ClaudeRunner({readMax:{final:1024*1024}});r.transcriptOf=()=>file;
+      if(!r.final({}).includes('transcript line exceeded')) process.exitCode=1;
+    } finally {rmSync(dir,{recursive:true,force:true});}
+  `;
+  const result=spawnSync(process.execPath,['--max-old-space-size=128','--input-type=module','-e',script],{encoding:'utf8',timeout:30_000});
+  assert.equal(result.status,0,result.stderr);
+});
