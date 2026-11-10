@@ -775,7 +775,7 @@ export class HouseRunner {
       const h = this.host(agent, seat);
       let takes = !!h.house && houseTakes(this.env, h.house);
       // An older image than the agent's current build: drained, and the next body goes to a fresh house (t-1764).
-      if (takes && !/^j-h-[0-9]{1,9}$/.test(seat) && (this.drain(agent, h.house, seat) || (!fresh(h, now) && this.leaveDownBox(agent, h.house, seat, now)))) takes = false;
+      if (takes && !/^j-h-[0-9]{1,9}$/.test(seat) && (this.drain(agent, h.house, seat) || this.leaveForPreferred(agent, h.house, seat, now, !fresh(h, now)))) takes = false;
       else if (fresh(h, now) && takes) {
         // Handed out (its launch writes the request next): marked, so the cap's release never stops it in between.
         hostLocked(this.env, () => { const x = loadHost(this.env, agent, seat); if (x.house === h.house) { x.handedAt = now; writeJson(hostFile(this.env, agent, seat), x); } });
@@ -844,19 +844,26 @@ export class HouseRunner {
   }
 
   /**
-   * The agent's house is on a box that's gone quiet (no host report, the box unheard for PLACE_UP_MS) while another box
-   * of its preference is up and may run its body (t-2048): that house drains, as an outdated one does, and the next
-   * body gets a fresh house there. Its own bodies stay its (held, never written off: the box may come back).
+   * The agent's house isn't on the box its next body would go to (t-2048, t-2070): that house drains, as an outdated one
+   * does, and the next body gets a fresh house there. Either its box has gone quiet (no host report, the box unheard for
+   * PLACE_UP_MS) while another box of its preference is up and may run its body, or a box ahead of it in the agent's
+   * order is up and may (the order changed, or that box came back): a lower box takes no new bodies once a better one
+   * can. Its own bodies stay its (held, never written off: the box may come back), and it idles out the usual way.
    */
-  leaveDownBox(agent, house, seat, nowMs) {
+  leaveForPreferred(agent, house, seat, nowMs, quiet) {
     let s;
     try { s = load(this.env); } catch { return false; }
     const where = s.houses?.[house]?.box;
-    if (!where || boxUp(s.boxes?.[where], nowMs)) return false;
+    if (!where) return false;
     const at = bodyBox(s, agent, this.harness, this.env, nowMs);
     // Only to a box the owner listed for it: an agent with one primary keeps waiting for that box, as it always did.
-    if (!at.box || at.box === where || !boxUp(s.boxes?.[at.box], nowMs) || !preferenceOf(s, agent, this.env).includes(at.box)) return false;
-    return this.drain(agent, house, seat, `its box ${s.boxes?.[where]?.name ?? where} went quiet; new bodies go to ${s.boxes?.[at.box]?.name ?? at.box}`);
+    const pref = preferenceOf(s, agent, this.env);
+    if (!at.box || at.box === where || !boxUp(s.boxes?.[at.box], nowMs) || !pref.includes(at.box)) return false;
+    const name = (id) => s.boxes?.[id]?.name ?? id;
+    if (quiet && !boxUp(s.boxes?.[where], nowMs)) return this.drain(agent, house, seat, `its box ${name(where)} went quiet; new bodies go to ${name(at.box)}`);
+    const rank = (id) => { const i = pref.indexOf(id); return i < 0 ? Infinity : i; };
+    if (rank(at.box) < rank(where)) return this.drain(agent, house, seat, `${name(at.box)} is ahead of ${name(where)} in ${agent}'s boxes; new bodies go there`);
+    return false;
   }
 
   /** Reserve a stable request without handing any work to its host. The caller
