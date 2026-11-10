@@ -445,14 +445,20 @@ export function housePrincipal(s, h) {
     const m = /^p-([a-z0-9]+(?:-[a-z0-9]+)*)$/.exec(seat ?? '');
     if (m) return { person: m[1] };
     // A job's seat is the job's own house: whose that is (once, never a chain).
+    // The task house itself becomes the job's body host (taskhost.mjs, bootstrapTask): its own taskActsFor.
     const j = /^j-(h-[0-9]{1,9})$/.exec(seat ?? '');
     const job = j && s.houses?.[j[1]];
-    return job && !isHostHouse(job, s) && !job.service ? housePrincipal(s, job) : { unknown: true };
+    if (!job || job.service || (j[1] !== h.id && isHostHouse(job, s))) return { unknown: true };
+    return taskPrincipal(job.taskActsFor);
   }
   // A service is its own principal: people other than the owner may steer it (a chat bridge), and a body can ask for
   // one. It gets what's scoped to it by name (service:<name>), and what isn't scoped.
   if (h.service) return { service: h.service };
-  const p = h.taskActsFor;
+  return taskPrincipal(h.taskActsFor);
+}
+
+/** A task's taskActsFor as a principal: the owner's only when nobody else steered it, one person's, else unknown. */
+function taskPrincipal(p) {
   if (!p || typeof p !== 'object' || p.unknown !== false) return { unknown: true };
   const people = Array.isArray(p.people) ? p.people : null;
   if (!people) return { unknown: true };

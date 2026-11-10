@@ -660,7 +660,8 @@ steers stay as they were (dropping one would widen who gets a secret); `none` cl
 taken away, so one added back comes back scoped; one stored secret under two names must be scoped alike. Secrets are
 handed over when a house starts: houses already running keep what they had until they're stopped. The boundary is
 the house: a seat's house is shared by that principal's conversations, so a person let steer pond has pond's secrets
-in every conversation they steer.
+in every conversation they steer. A scope that names `service:<name>` trusts that service's code in the agent's repo:
+a body can ask for a service to start, and whoever can change the repo can change what the service runs.
 
 ## How it talks
 

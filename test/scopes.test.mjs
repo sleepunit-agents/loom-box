@@ -122,6 +122,12 @@ test('a job\'s seat is its house\'s; a body host that can\'t say whose is unknow
   assert.deepEqual(housePrincipal(s, host('j-h-8')), { unknown: true });
   assert.deepEqual(housePrincipal(s, host('j-h-9')), { unknown: true });
   assert.deepEqual(housePrincipal(s, host()), { unknown: true });
+  // The real shape: the task house itself becomes the job's body host, its seat naming itself (taskhost.mjs).
+  const self = { id: 'h-7', kind: 'body-host', seat: 'j-h-7', task: 'x', taskActsFor: { owner: true, people: [], unknown: false } };
+  assert.deepEqual(housePrincipal({ agents: {}, houses: { 'h-7': self } }, self), { owner: true });
+  // Another house's seat that is itself a body host: unknown.
+  const other = { id: 'h-9', kind: 'body-host', seat: 'j-h-7' };
+  assert.deepEqual(housePrincipal({ agents: {}, houses: { 'h-7': { ...self, seat: 'owner' }, 'h-9': other } }, other), { unknown: true });
 });
 
 test('a scope outlives its secret, two names for one secret are scoped alike, and a blank form keeps them', () => {
@@ -137,6 +143,9 @@ test('a scope outlives its secret, two names for one secret are scoped alike, an
   ok(call(owner, 'set-agent', { ...ART, secrets: twin, scopes: [...ART.scopes, 'gh-ro=owner'] }));
   // The page's form sends blank fields: nothing changes. Only none clears.
   ok(call(owner, 'set-agent', { ...ART, scopes: '', steers: '' }));
+  // Only the household owner sets them: not the agent, not an agent's owner.
+  assert.notEqual(call({ kind: 'agent', agent: 'art' }, 'set-agent', { ...ART, scopes: 'none' }).status, 200);
+  assert.notEqual(call({ kind: 'owner', agents: ['art'] }, 'set-agent', { ...ART, scopes: 'none' }).status, 200);
   assert.equal(load(env).agents.art.scopes['github-token'], 'owner');
   assert.deepEqual(load(env).agents.art.steers, { patrick: ['pond'] });
 });
