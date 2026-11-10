@@ -221,6 +221,35 @@ test('a card that can\'t be taken back is never reused for other houses; a No wa
   assert.notEqual(load(h.env).writeOffAsks[`art:${far}`].approval, second.approval);
 });
 
+test('a retry after a filing that may have landed files exactly the houses it first reserved', async () => {
+  const { askDarkBoxes } = await import('../src/dark-box.mjs');
+  const h = houseWorld();
+  const asked = [], states = {};
+  h.env.LOOM_RUNTIME_TEST_APPROVALS = { request: (target, x) => { asked.push(x.details); states['a-00000001'] = 'pending'; return 'a-00000001'; },
+    withdraw: (id) => { states[id] = 'withdrawn'; return true; }, state: (id) => states[id] ?? 'gone' };
+  const fx = { now: () => new Date(), mint: () => 'loom_' + 't'.repeat(31), revoke: () => {} };
+  assert.equal(api(h.env, fx, { caller: owner, path: 'add-box', body: { name: 'far', mayHost: '*' } }).status, 200);
+  const far = Object.entries(load(h.env).boxes).find(([, b]) => b.name === 'far')[0];
+  const last = new Date(Date.now() - WRITE_OFF_AFTER_MS - 60_000).toISOString();
+  const target = `art:${far}@${Math.floor(Date.parse(last) / 1000)}`;
+  update(h.env, (s) => {
+    s.boxes[far].lastSeen = last;
+    for (const id of ['h-1', 'h-2']) s.houses[id] = { id, agent: 'art', box: far, state: 'running' };
+    // A filing for h-1 timed out an hour ago (it may have landed): only its reservation is left.
+    s.writeOffAsks = { [`art:${far}`]: { at: new Date(Date.now() - 3_600_000).toISOString(), target, houses: ['h-1'] } };
+  });
+  const two = [{ conversation: 'cv-00000000000a', agent: 'art', body: 'claude:h-1-b0000001' }, { conversation: 'cv-00000000000b', agent: 'art', body: 'claude:h-2-b0000002' }];
+  await askDarkBoxes(h.env, { convs: two });
+  assert.match(asked[0], /houses there: h-1;/);
+  assert.deepEqual(load(h.env).writeOffAsks[`art:${far}`].houses, ['h-1']);
+  // With its id now, the change is taken up: taken back, then both asked about.
+  await askDarkBoxes(h.env, { convs: two });
+  assert.equal(states['a-00000001'], 'withdrawn');
+  await askDarkBoxes(h.env, { convs: two });
+  assert.match(asked.at(-1), /houses there: h-1, h-2;/);
+  assert.deepEqual(load(h.env).writeOffAsks[`art:${far}`].houses, ['h-1', 'h-2']);
+});
+
 test('a house written off in the middle of its offline collection retires as a loss, not held for a receipt', async () => {
   const { HouseRunner } = await import('../src/houserunner.mjs');
   const { SessionHistoryMissing } = await import('../src/sessions.mjs');

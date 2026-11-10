@@ -42,6 +42,7 @@ export function heldOnDarkBoxes(env, s, convs, nowMs) {
     const x = (out[key] ??= { agent: h.agent, box: h.box, target: targetOf(h.agent, h.box, s.boxes[h.box].lastSeen), houses: [], conversations: [] });
     if (!x.houses.includes(h.id)) x.houses.push(h.id);
     x.conversations.push(c.conversation);
+    ((x.byHouse ??= {})[h.id] ??= []).push(c.conversation);
   }
   for (const x of Object.values(out)) x.houses.sort();
   return out;
@@ -88,16 +89,20 @@ export async function askDarkBoxes(env, { convs, nowMs = Date.now(), warn = (m) 
     update(env, (w) => { if (w.writeOffAsks?.[key]?.at === a.at) delete w.writeOffAsks[key]; });
     if (a.approval) later.add(key);
   }
-  for (const [key, x] of Object.entries(held)) {
+  for (let [key, x] of Object.entries(held)) {
     if (later.has(key)) continue;
     const at = new Date(nowMs).toISOString();
     const mine = update(env, (st) => {
       const cur = st.writeOffAsks?.[key];
       if (cur && (cur.approval || nowMs - Date.parse(cur.at) < RETRY_MS)) return false;
-      (st.writeOffAsks ??= {})[key] = { at, target: x.target, houses: x.houses };
-      return true;
+      // A retry after a filing that may have landed files exactly what it first reserved: if approvals hands that card
+      // back, it lists the same houses as the record. A change in houses is taken up once it has an id (taken back first).
+      const houses = cur && cur.target === x.target && Array.isArray(cur.houses) ? cur.houses : x.houses;
+      (st.writeOffAsks ??= {})[key] = { at, target: x.target, houses };
+      return houses;
     });
     if (!mine) continue;
+    if (mine !== x.houses) x = { ...x, houses: mine, conversations: mine.flatMap((h) => x.byHouse?.[h] ?? []) };
     const name = String(boxNameOf(s, x.box)).normalize('NFKC').replace(/[\p{C}\p{Zl}\p{Zp}]/gu, ' ').replace(/[;:"“”]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 40);
     const n = x.conversations.length, mins = Math.floor((nowMs - Date.parse(s.boxes[x.box].lastSeen)) / 60_000);
     const work = n === 1 ? 'conversation' : `${n} conversations`;
