@@ -116,6 +116,8 @@ test('local clock inspection verifies a signed source statement and refuses bodi
   assert.deepEqual(inspectClockContinuation(clockEnv, query, w.o), grant);
   assert.throws(() => inspectClockContinuation(clockEnv, { ...query, statement: 'forged' }, w.o), /authenticated/);
   assert.throws(() => inspectClockContinuation(clockEnv, { ...query, agent: 'mark' }, w.o), /authenticated/);
+  // t-2137: from the clock's API, the caller's house goes with it; a statement shown to another house's body is no issuer.
+  assert.throws(() => inspectClockContinuation(clockEnv, { ...query, house: 'h-elsewhere' }, w.o), /authenticated/);
   assert.throws(() => inspectClockContinuation({ ...clockEnv, HOUSE_ID: 'body' }, query, w.o), /local clock/);
   assert.throws(() => inspectClockContinuation(clockEnv, { ...query, scheduledAt: grant.expiresAt }, w.o), /before its deadline/);
 });
