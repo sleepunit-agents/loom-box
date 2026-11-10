@@ -567,3 +567,23 @@ test('a house\'s fixed label naming a private file isn\'t kept (t-2109)', () => 
   assert.equal(stepParts({ id: 'x', tool: 'Read', summary: 's', state: 'done', fixed: 'Read .env' }).fixed, undefined);
   assert.equal(stepParts({ id: 'x', tool: 'Read', summary: 's', state: 'done', fixed: 'Read delivery.ts' }).fixed, 'Read delivery.ts');
 });
+
+test('a command that takes a secret in shows no command, only its label: logins, secrets stores, sudo -S, a private file written, a flag continued on the next line (t-2109)', () => {
+  const S = 'hunter2xyz';
+  for (const cmd of [`gh secret set FOO --body ${S}`, `echo ${S} | docker login -u me --password-stdin`, `echo '${S}' | sudo -S apt install x`,
+    `printf '%s' ${S} > ~/.config/gh/token`, `echo ${S} | tee -a .env`, `echo ${S} | gh auth login --with-token`, `kubectl create secret generic x --from-literal=k=${S}`,
+    `vault kv put secret/x v=${S}`]) {
+    assert.equal(commandLine(cmd), '', cmd);
+    const [c] = claudeCards([use('b', 'Bash', { command: cmd })]);
+    assert.ok(!JSON.stringify(c).includes(S), cmd);
+    assert.equal(c.detail, undefined, cmd);
+  }
+  // A flag and its value on two lines are read as one.
+  const two = commandLine(`mysql --password \\\n  ${S} db`);
+  assert.ok(!two.includes(S), two);
+  // A house's command that takes a secret in is dropped at the gate too.
+  assert.equal(stepParts({ id: 'h', tool: 'Bash', summary: 's', state: 'done', detail: `gh secret set FOO --body ${S}` }).detail, undefined);
+  // An ordinary command still shows whole.
+  assert.equal(commandLine('npm test -- deploy'), 'npm test -- deploy');
+  assert.equal(commandLine('ls > out.txt'), 'ls > out.txt');
+});

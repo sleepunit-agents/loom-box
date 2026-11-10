@@ -396,9 +396,29 @@ function unwrapShell(c) {
   return m ? m[2] : String(c ?? '');
 }
 
-/** A shell step's whole command, as its card's `detail`: shown text (redacted line by line), at most MAX_DETAIL. */
+/**
+ * A command that takes a secret in (t-2109): its words can hold one that redaction can't tell from any other word (a
+ * value piped to a login, given to a secrets store, or written into a private file). Its command isn't shown, only its
+ * label. Read on the command as written and on it as shown (where a private path reads PRIVATE_FILE).
+ */
+const SECRET_IN = /--password-stdin\b|--with-token\b|--token-stdin\b|\bsudo\b[^|;&\n]*\s-[A-Za-z]*S\b|\bgh\s+secret\s+set\b|\bgh\s+auth\s+login\b|\b(?:vault\s+(?:kv\s+)?(?:put|write)|kubectl\s+create\s+secret|docker\s+secret\s+create|secret-tool\s+store|pass\s+(?:insert|edit)|op\s+item\s+(?:create|edit)|aws\s+secretsmanager|gcloud\s+secrets|az\s+keyvault\s+secret\s+set|security\s+add-\w+-password|htpasswd|chpasswd|passwd)\b/i;
+const REDIRECT = /(?:>{1,2}|\btee\b(?:\s+-\w+)*)\s*(['"]?)([^\s'"|;&<>]+)\1/g;
+export function secretIn(command) {
+  const c = String(command ?? '');
+  if (SECRET_IN.test(c)) return true;
+  for (const m of c.matchAll(REDIRECT)) if (privateFile(m[2])) return true;
+  return new RegExp(`(?:>{1,2}|\\btee\\b)[^|;&\\n]*${PRIVATE_FILE}`).test(c);
+}
+
+/**
+ * A shell step's whole command, as its card's `detail`: shown text (redacted line by line, a line continued with `\`
+ * joined first so a secret on the next line is read with its flag), at most MAX_DETAIL; none for one that takes a
+ * secret in (secretIn). Worked out once for the process (worked).
+ */
 export function commandLine(command) {
-  return shownText(String(command ?? '').replace(SGR, ''), MAX_DETAIL);
+  const c = String(command ?? '').replace(/\\\r?\n[ \t]*/g, ' ');
+  if (secretIn(c)) return '';
+  return worked('cmd', c, () => { const d = shownText(c.replace(SGR, ''), MAX_DETAIL); return secretIn(d) ? '' : d; });
 }
 
 /** A diff (Claude Code's structuredPatch hunks) as shown text: `@@ -a,b +c,d @@` and its lines. */
@@ -706,7 +726,8 @@ const SHELL_TOOLS = new Set(['Bash', 'command_execution']);
 /** Whether a target fits what's made here for its tool: a shell step's command; a file tool's base name (no folder);
  * a search's `"pattern"` and where; nothing for any other tool (a private store's argument never shows). */
 function detailOk(tool, d) {
-  if (SHELL_TOOLS.has(tool)) return true;
+  // A house's command is read for a secret taken in as one made here is (secretIn).
+  if (SHELL_TOOLS.has(tool)) return !secretIn(d);
   if (FILE_TOOLS.has(tool)) return d.length <= 80 && !/[/\\\n]/.test(d) && fileName(d) === d;
   if (tool === 'Grep') return d.length <= 160 && /^"[^"\n]{1,60}"(?: in [^/\\\n]{1,80})?$/.test(d);
   return false;
