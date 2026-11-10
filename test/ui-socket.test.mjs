@@ -134,7 +134,7 @@ test('a stale socket file left by a dead service is replaced', async () => {
   assert.ok(b);
   const c = client(b.path);
   await c.ready;
-  assert.equal((await c.ask(JSON.stringify({ id: 7, op: 'manifest' }))).stdout, '{"b":1}\n');
+  assert.equal((await c.ask(JSON.stringify({ id: 7, op: 'manifest', version: VERSION }))).stdout, '{"b":1}\n');
   c.end();
   await b.close();
 });
@@ -206,10 +206,15 @@ test('since: an answer older than core\'s last move is computed again; an ask fo
   // Another version's ask: answered (core will refuse it) but not loom reading this socket.
   await c.ask(JSON.stringify({ id: 1, op: 'manifest', version: '/old/cli.mjs@1' }));
   assert.equal(await s.tick(), false);
+  assert.equal(n, 0);
+  t += 300;
+  // The first ask computes; one wanting newer within SINCE_MIN_MS gets the kept one; past it, a fresh one.
+  assert.equal((await c.ask(JSON.stringify({ id: 2, op: 'manifest', version: VERSION }))).stdout, '{"n":1}\n');
   t += 10;
-  const a = await c.ask(JSON.stringify({ id: 2, op: 'manifest', version: VERSION, since: t - 5 }));
-  assert.equal(a.stdout, '{"n":2}\n');
-  assert.equal((await c.ask(JSON.stringify({ id: 3, op: 'manifest', version: VERSION, since: t - 5 }))).stdout, '{"n":2}\n');
+  assert.equal((await c.ask(JSON.stringify({ id: 3, op: 'manifest', version: VERSION, since: t - 5 }))).stdout, '{"n":1}\n');
+  t += 300;
+  assert.equal((await c.ask(JSON.stringify({ id: 4, op: 'manifest', version: VERSION, since: t - 5 }))).stdout, '{"n":2}\n');
+  assert.equal((await c.ask(JSON.stringify({ id: 5, op: 'manifest', version: VERSION, since: t - 5 }))).stdout, '{"n":2}\n');
   assert.equal(await s.tick(), true);
   c.end();
   await s.close();

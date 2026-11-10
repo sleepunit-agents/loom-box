@@ -28,6 +28,8 @@ export const STALE_MS = 20_000;
 export const ACTIVE_MS = 120_000;
 /** A connection with nothing asked this long goes (core reconnects). */
 export const IDLE_MS = 10 * 60_000;
+/** However many asks want an answer newer than the kept one, at most one compute for them per this long. */
+export const SINCE_MIN_MS = 250;
 /** sun_path is 108 bytes on Linux; past this, no socket (loom keeps running `ui --json`). */
 const MAX_PATH = 100;
 
@@ -103,20 +105,23 @@ export async function serveManifest(env, { compute, changed, now = Date.now, log
     kept = next;
     return moved;
   };
+  let computedAt = -Infinity;   // when the last compute started (since-driven ones are at most one per SINCE_MIN_MS)
   const answer = (id, version, since) => {
-    // An ask for another version: core will run `ui --json` instead, so it isn't loom reading this socket (the
-    // heartbeat stays on).
+    // An ask for another version: core won't take the answer, so it's not computed (nor loom reading this socket).
+    if (version !== VERSION) return { id, ok: false, version: VERSION };
     try {
       // Also when nobody was asking: the kept answer wasn't being kept current, and the heartbeat may have told core of a
       // move since.
       const lapsed = !asked || now() - asked >= ACTIVE_MS;
-      if (!kept || lapsed || now() - kept.at >= STALE_MS || (Number.isSafeInteger(since) && since > kept.at)) fresh();
-      if (version === VERSION) asked = now();
+      const wants = Number.isSafeInteger(since) && kept && Math.min(since, now()) > kept.at && now() - computedAt >= SINCE_MIN_MS;
+      if (!kept || lapsed || now() - kept.at >= STALE_MS || wants) { computedAt = now(); fresh(); }
+      asked = now();
+      // Still older than core asked for (a since-driven compute ran just now): core runs `ui --json` for this one.
       return { id, ok: true, version: VERSION, at: kept.at, stdout: kept.stdout };
     } catch (e) {
       log(`manifest: ${e.message}`);
       asked = 0;
-      return { id, ok: false };
+      return { id, ok: false, version: VERSION };
     }
   };
 
