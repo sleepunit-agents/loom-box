@@ -80,7 +80,7 @@ import { spawn as nodeSpawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { AccountsError, accountsFrom, accountsOfRecord, stateAccounts } from './accounts.mjs';
 import { commitPreparedBody, endBody, readBody, resumeBody, startBody } from './bodies.mjs';
@@ -92,7 +92,7 @@ import { dropSession, packSession, restoreFiles, SessionSizeError, SessionHistor
 import { ageSealer } from './sealed.mjs';
 import { RulesError, gatesWords, policyOf, rulesFor, sameRules, tierOf } from './policy.mjs';
 import { gatesOf } from './gates.mjs';
-import { loomStore } from './store.mjs';
+import { keptReads, loomStore, storeSignature } from './store.mjs';
 import { namesFiles } from './briefs.mjs';
 import { AGENT_NAME, StateError, alive, withLock, load } from './state.mjs';
 import { RUNS_KEPT, causeOf, detectLoop, textHash } from './loops.mjs';
@@ -140,7 +140,6 @@ const RELAY_SAME_MS = 600_000;
 /** An approved DM not posted in this long is forgotten. */
 const OUTBOUND_MS = 3_600_000;
 /** An agent's gates, as delivery reads them, kept this long in a process. */
-const GATES_MS = 30_000;
 /**
  * A body that fails to start is the runtime's to try again, on its tick: after each of these waits (about 15 minutes
  * in all), then given up, with a `failed` note on the conversation and a notice for the owner. A source never polls.
@@ -548,14 +547,18 @@ export function pieceArgv(env, argv) {
 }
 
 let store;
-const storeOf = (env, o) => o.store ?? (store ??= loomStore(env));
-const gatesCache = new Map();
+// A long-lived delivery process asks for policy on each decision. Share reads
+// while the store's commit signature is unchanged, with the same 30 s ceiling
+// as the manifest reader. A permission write invalidates at the very next look.
+function storeOf(env, o) {
+  if (o.store) return o.store;
+  const key = JSON.stringify([resolve(env.LOOM_HOME || join(homedir(), '.config', 'loom')), pieceName(env), env.LOOM_BIN || 'loom']);
+  if (store?.key !== key) store = { key, value: keptReads(loomStore(env), { signature: () => storeSignature(env) }) };
+  return store.value;
+}
 function cachedGates(env, o, agent) {
-  const hit = gatesCache.get(agent);
-  if (hit && Date.now() - hit.at < GATES_MS) return hit.doc;
   const doc = gatesOf(storeOf(env, o), agent).doc;
   if (!doc || typeof doc !== 'object') throw new DeliveryError(`the runtime holds no gates for ${agent}`, 503);
-  gatesCache.set(agent, { at: Date.now(), doc });
   return doc;
 }
 
