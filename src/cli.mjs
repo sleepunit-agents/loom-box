@@ -165,6 +165,7 @@ import { bodyConversation, bodyKeyFor, bodySession, runBodyHost } from './bodyho
 import { runnerFor, usageDirOf } from './runners.mjs';
 import { capture as captureStatusline, keptReading, lineOf as statuslineText } from './statusline.mjs';
 import { applyUpgrade, carrySettings, loadCarried, recoverUpgrade } from './version.mjs';
+import { checkArgs } from './cli-args.mjs';
 import { gatesCli, grantsCli, policyCli } from './perms-cli.mjs';
 
 /**
@@ -276,6 +277,7 @@ function defaultAgent(env) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function main(argv, env) {
+  if (checkArgs(argv).help) { process.stdout.write(USAGE); return; }
   const [cmd, ...rest] = argv;
   const json = rest.includes('--json');
   switch (cmd) {
