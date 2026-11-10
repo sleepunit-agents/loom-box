@@ -482,6 +482,15 @@ export function bodySync(env, caller, body, o = {}) {
         (x.stop ??= {})[id] ??= { pack: true, at: now, ...(b.session ? { session: b.session } : {}) };
       }
     }
+    // A card's words (t-2109: a command, a diff, the body's own words, plan items) are sealed before they reach disk,
+    // as a final is: the record keeps only each card's base, its numbers and a sealed blob of the rest.
+    for (const b of Object.values(bodies)) if (Array.isArray(b.cards)) {
+      b.cards = b.cards.map(({ detail, body: words, items, ...rest }) => {
+        const w = { ...(detail ? { detail } : {}), ...(words ? { body: words } : {}), ...(items ? { items } : {}) };
+        if (!Object.keys(w).length) return rest;
+        try { return { ...rest, sealed: sealer.seal(Buffer.from(JSON.stringify(w))).toString('base64') }; } catch { return rest; }
+      });
+    }
     for (const b of Object.values(bodies)) if (typeof b.final === 'string') {
       // A host reports over its authenticated channel; words are sealed before they reach disk.
       try { b.finalSealed = sealer.seal(Buffer.from(b.final)).toString('base64'); } catch { /* retry next sync */ }
@@ -1243,7 +1252,13 @@ export class HouseRunner {
     return s ? this.sealer.open(Buffer.from(s, 'base64')).toString('utf-8') : null;
   }
   /** Its activity cards, as its host last reported them (only a Comms thread's body has any). */
-  activity(body) { return this.entry(body)?.cards ?? []; }
+  activity(body) {
+    // Its words opened again (sealed on disk, t-2109); a blob that won't open leaves the card without them.
+    return (this.entry(body)?.cards ?? []).map(({ sealed, ...c }) => {
+      if (typeof sealed !== 'string') return c;
+      try { return { ...c, ...JSON.parse(this.sealer.open(Buffer.from(sealed, 'base64')).toString('utf-8')) }; } catch { return c; }
+    });
+  }
   /** Its last sign of life, as its host last reported it (t-2109). */
   signOfLife(body) { return this.entry(body)?.alive ?? null; }
 

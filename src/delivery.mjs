@@ -1636,7 +1636,7 @@ function batches(cards) {
   const out = [];
   let cur = [], size = 0;
   for (const c of cards) {
-    const n = JSON.stringify(c).length + 1;
+    const n = Buffer.byteLength(JSON.stringify(c)) + 1; // bytes, as sent (UTF-8)
     if (cur.length && size + n > POST_MAX) { out.push(cur); cur = []; size = 0; }
     cur.push(c); size += n;
   }

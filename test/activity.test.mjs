@@ -307,7 +307,7 @@ test('every card goes through the one gate where the owner is alone too: no shel
   const { spawnCall } = await import('../src/spawn.mjs');
   const o = world();
   o.core.commsAnswer = (x) => (x.op === 'spawn' ? { ok: true, id: 'th:abcdefghij' } : { ok: true });
-  o.runner.activity = () => [{ id: 't1', at: 'x', tool: 'Bash', summary: 'Ran npm test', state: 'done', detail: 'npm test', body: 'OUTPUT', result: 'Loren says hi', bogus: 1 }];
+  o.runner.activity = () => [{ id: 't1', at: 'x', tool: 'Bash', summary: 'Ran npm test', fixed: 'Ran a command', state: 'done', detail: 'npm test', body: 'OUTPUT', result: 'Loren says hi', bogus: 1 }];
   const r = await spawnCall(o.env, { kind: 'owner' }, { agent: 'art', brief: 'x' }, o.o);
   await tick(o.env, o.o); await tick(o.env, o.o);
   const [card] = o.core.activityCalls.filter((a) => a.conversation === r.handle).flatMap((a) => a.cards);
@@ -371,13 +371,13 @@ test('large cards go in posts of at most 512 KB; a 413 is an older core\'s cap: 
   const { spawnCall } = await import('../src/spawn.mjs');
   const o = world();
   o.core.commsAnswer = (x) => (x.op === 'spawn' ? { ok: true, id: 'th:abcdefghij' } : { ok: true });
-  const big = (n) => ({ id: `e${n}`, at: 'x', tool: 'Edit', summary: `Edited f${n}.ts`, fixed: `Edited f${n}.ts`, state: 'done', detail: `f${n}.ts`, body: `+${'x'.repeat(1900)}\n`.repeat(15) });
+  const big = (n) => ({ id: `e${n}`, at: 'x', tool: 'Edit', summary: `Edited f${n}.ts`, fixed: `Edited f${n}.ts`, state: 'done', detail: `f${n}.ts`, body: `+${'界'.repeat(1900)}\n`.repeat(15) });
   o.runner.activity = () => Array.from({ length: 30 }, (_, i) => big(i));
   const r = await spawnCall(o.env, { kind: 'owner' }, { agent: 'art', brief: 'x' }, o.o);
   await tick(o.env, o.o); await tick(o.env, o.o);
   const calls = o.core.activityCalls.filter((a) => a.conversation === r.handle);
   assert.ok(calls.length >= 2, 'split');
-  assert.ok(calls.every((c) => JSON.stringify(c.cards).length <= 512 * 1024 + 100));
+  assert.ok(calls.every((c) => Buffer.byteLength(JSON.stringify(c.cards)) <= 512 * 1024 + 100), 'in bytes as sent');
   assert.equal(calls.flatMap((c) => c.cards).length, 30);
   const q = world();
   q.core.commsAnswer = o.core.commsAnswer;

@@ -20,7 +20,7 @@
 // shows only for a conversation that acts for the owner alone. A read shows its line count, never what it read; a shell
 // step's output is read only for its fixed phrases and never kept or sent (showing it on demand is its own task).
 import { createHash } from 'node:crypto';
-import { commandLabel, cutInput, cutTo, failWhy, fileName, GONE, INPUT_MAX, part, PRIVATE_FILE, privateFile, privateWords, redact, UNPRINTABLE, UNPRINTABLE_ONE } from './redact.mjs';
+import { commandLabel, cutInput, cutTo, failWhy, fileName, WHY_WORDS, GONE, INPUT_MAX, part, PRIVATE_FILE, privateFile, privateWords, redact, UNPRINTABLE, UNPRINTABLE_ONE } from './redact.mjs';
 
 
 
@@ -189,7 +189,7 @@ export function claudeSummary(name, input = {}) {
 // ─── A card's fixed label (t-2109): fixed words and safe parts only, set where the card is made ──────────────────────
 
 /** A file's base name as a fixed label may hold it: plain characters only, never a quote, a colon or a folder. */
-const safeName = (p) => { const n = fileName(p); return n !== GONE && n !== PRIVATE_FILE && /^[A-Za-z0-9._+-]{1,60}$/.test(n) ? n : null; };
+const safeName = (p) => { const n = fileName(p); return n !== GONE && n !== PRIVATE_FILE && /^[A-Za-z0-9._+-]{1,60}$/.test(n) && redact(n) === n ? n : null; };
 /** A person's or agent's name as a fixed label may hold it: a plain handle (`mark`, `loren-b`), else nothing. */
 const safeWho = (w) => (typeof w === 'string' && /^[a-z][a-z0-9]{0,30}(?:-[a-z0-9]{1,30}){0,3}$/.test(w) && redact(w) === w ? w : null);
 const planFixed = (items) => (Array.isArray(items) && items.length ? `Plan (${items.filter((x) => x.done).length}/${items.length})` : 'Updated its plan');
@@ -253,8 +253,7 @@ const fixedWhy = (label, why) => (why ? `${label} — ${why}` : label);
 /** The shapes a fixed label may take (a house's is checked against them): fixed words, a plain name, a count, an id. */
 const NAME = '[A-Za-z0-9._+-]{1,60}';
 /** failWhy's fixed phrases (redact.mjs WHY), the only words a failure adds to a fixed label. */
-const WHY_PHRASES = ['type errors', 'command not found', 'no such file', 'file not read first', 'text to replace not found', 'not allowed', 'timed out',
-  'merge conflict', 'push rejected', 'network error', 'not found (404)', 'not authorized', 'npm error', 'syntax error', 'Python error'];
+const WHY_PHRASES = WHY_WORDS;
 const WHY_TAIL = `(?:\\d{1,6} tests? failed|${WHY_PHRASES.map((w) => w.replace(/[()]/g, '\\$&')).join('|')})`;
 const FIXED_WORDS = [...new Set(['Ran a command', 'Stopped a background command', 'Searched files', 'Looked for files', 'Searched the web', 'Read a web page',
   'Started a helper', 'Messaged a helper', 'Messaged someone', 'Used a skill', 'Loaded more tools', 'Used a tool', 'Updated its plan', 'Changed files',
@@ -512,7 +511,8 @@ export function claudeCards(lines, prefix = '', parent = null) {
         const code = /^Exit code (\d+)/.exec(text)?.[1];
         const exit = code ? Number(code) : undefined;
         if (card.state === 'failed') { const why = failWhy({ exit, output: text }); card.summary = withWhy(card.summary, why); card.fixed = fixedWhy(card.fixed, why); }
-        if (Number.isInteger(exit)) card.exit = exit;
+        // An exit code only for a shell step: any other tool's result text (a file's contents) is never read for one.
+        if (Number.isInteger(exit) && SHELL_TOOLS.has(names.get(card.id))) card.exit = exit;
         // A line's toolUseResult is its one result's: with several results in one line, whose it is can't be told, so
         // none of them is read from it (no diff on the wrong card).
         const own = content.filter((x) => x?.type === 'tool_result').length === 1 ? l.toolUseResult : undefined;
@@ -616,7 +616,7 @@ export function cleanAlive(a) {
 export function stepParts(c, idOf = (x) => x) {
   const o = {};
   // Its fixed label, only in a shape made here (FIXED); else none (delivery then says "Did a step").
-  if (typeof c?.fixed === 'string' && c.fixed.length <= MAX_SUMMARY && FIXED.test(c.fixed)) o.fixed = c.fixed;
+  if (typeof c?.fixed === 'string' && c.fixed.length <= MAX_SUMMARY && FIXED.test(c.fixed) && redact(c.fixed) === c.fixed) o.fixed = c.fixed;
   const int = (v, lo, hi) => (Number.isInteger(v) && v >= lo && v <= hi ? v : null);
   const tool = String(c?.tool ?? '');
   // A target only of the shape made here for its tool (detailOk): a command; a file's base name; a search's pattern.

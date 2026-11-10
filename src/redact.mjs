@@ -435,6 +435,9 @@ const WHY = [
   [/Traceback \(most recent call last\)/, () => 'Python error'],
 ];
 
+/** failWhy's fixed phrases, for a fixed label's tail (activity.mjs FIXED): each WHY answer that isn't a count. */
+export const WHY_WORDS = Object.freeze(WHY.map(([, f]) => { try { return f(['', '2']); } catch { return null; } }).filter((w) => typeof w === 'string' && !/^\d/.test(w)));
+
 /** `exit 1: 3 tests failed`, `exit 127: command not found`, `no such file`, or null. */
 export function failWhy({ exit, output } = {}) {
   const tail = String(output ?? '').slice(-INPUT_MAX);

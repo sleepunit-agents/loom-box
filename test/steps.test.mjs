@@ -364,3 +364,28 @@ test('a diff line\'s mark is read after it\'s normalised: an invisible character
     assert.ok(out && !leak(out) && out.startsWith('+'), JSON.stringify([pre, out]));
   }
 });
+
+test('a fixed label never holds a token; an exit code comes only from a shell step', () => {
+  assert.equal(stepParts({ fixed: `Read ${GH}` }).fixed, undefined);
+  const [c] = claudeCards([use('t', 'Read', { file_path: `/home/art/Code/${GH}` })]);
+  assert.equal(c.fixed, 'Read a file');
+  const [r] = claudeCards([use('r', 'Read', { file_path: '/home/art/Code/x/a.txt' }), res('r', 'Exit code 42\nmore', { type: 'text', file: { numLines: 2 } })]);
+  assert.equal(r.exit, undefined);
+});
+
+test('a house\'s card words are sealed on loom\'s disk, and opened again for the runtime', async () => {
+  const { bodySync, HouseRunner } = await import('../src/houserunner.mjs');
+  const { testSealer, everything } = await import('./delivery-world.mjs');
+  const { createHash } = await import('node:crypto');
+  const D = scratch('steps-seal-');
+  const env = { HOME: D, LOOM_BOX_DATA: join(D, 'data'), LOOM_BOX_HOME: join(D, 'state'), LOOM_BOX_LOCAL_NAME: 'one' };
+  const hosts = join(env.LOOM_BOX_DATA, 'delivery', 'hosts');
+  mkdirSync(hosts, { recursive: true });
+  writeFileSync(join(hosts, 'art.json'), JSON.stringify({ agent: 'art', house: 'h-1', hostHash: createHash('sha256').update('the-host-key').digest('hex'), req: {}, stop: {}, inbox: {} }));
+  const card = { id: 'c1', at: '2026-11-10T10:00:00.000Z', tool: 'Edit', summary: 'Edited a.ts', fixed: 'Edited a.ts', state: 'done', detail: 'a.ts', body: '+THE-DIFF-WORDS' };
+  bodySync(env, { kind: 'agent', agent: 'art', house: 'h-1' }, { hostKey: 'the-host-key', report: { bodies: { b0000001: { harness: 'claude', status: 'working', cards: [card] } }, done: {} } }, { sealer: testSealer });
+  assert.equal(everything(hosts).includes(Buffer.from('THE-DIFF-WORDS')), false, 'never in the clear on disk');
+  const hr = new HouseRunner(env, 'claude', { sealer: testSealer });
+  const got = hr.activity({ id: 'h-1-b0000001', house: 'h-1', agent: 'art' });
+  assert.equal(got[0]?.body, '+THE-DIFF-WORDS');
+});

@@ -333,7 +333,9 @@ export class ClaudeRunner {
     // older than that and whose end lands inside it stays as last told (its end can't be matched).
     const cards = claudeCards(jsonLines(tailOf(f, this.readMax.activity) ?? ''));
     // Its helpers (subagents), each under the step that started it (t-2109): Claude Code keeps a helper's transcript
-    // beside the session's, `<session>/subagents/agent-<id>.jsonl`, and its meta names that step (`toolUseId`).
+    // beside the session's, `<session>/subagents/agent-<id>.jsonl`, and its meta names that step (`toolUseId`)
+    // (measured 2026-11-10 on this machine: `agent-<17 hex>.meta.json` = {agentType, isBuiltIn, description, toolUseId,
+    // spawnDepth, requestShape, …, finished}). A layout it doesn't find leaves the session's own steps, never fewer.
     const dir = join(f.slice(0, -'.jsonl'.length), 'subagents');
     let metas = [];
     try { metas = readdirSync(dir).filter((n) => /^agent-[A-Za-z0-9_-]{1,64}\.meta\.json$/.test(n)); } catch { return cards; }
