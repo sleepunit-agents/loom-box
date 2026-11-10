@@ -59,11 +59,52 @@ for (const harness of ['claude', 'codex']) test(`${harness} native history survi
   assert.throws(() => offlineNativeSession(snapshot, { harness, id, session: 'different-session' }), /different session/);
 });
 
-test('native history never replaces existing Claude data or a conflicting history link', () => {
+test('a house whose Claude and Codex history are already plain folders has them adopted into native history, losing nothing (t-2073)', () => {
   const w = world();
-  const file = join(w.home, '.claude/projects/existing.jsonl'); put(file, 'must survive');
-  assert.throws(() => runnerFor('claude', w.env), /existing native files/);
-  assert.equal(readFileSync(file, 'utf8'), 'must survive');
+  // The bad state: a CLI wrote its history before the host linked it, and native history already holds some.
+  put(join(w.home, '.claude/projects/p/a.jsonl'), 'only in the house');
+  put(join(w.home, '.claude/projects/p/same.jsonl'), 'the same bytes');
+  put(join(w.history, 'claude-projects/p/same.jsonl'), 'the same bytes');
+  put(join(w.home, '.claude/projects/p/clash.jsonl'), 'the house copy');
+  put(join(w.history, 'claude-projects/p/clash.jsonl'), 'the native history copy');
+  put(join(w.home, '.claude/jobs/aabbccdd/state.json'), 'job state');
+  put(join(w.home, '.codex/sessions/2026/11/09/rollout-x.jsonl'), 'codex rollout');
+  const claude = runnerFor('claude', w.env), codex = runnerFor('codex', w.env);
+  for (const link of ['.claude/projects', '.claude/jobs', '.codex/sessions']) assert.equal(lstatSync(join(w.home, link)).isSymbolicLink(), true, link);
+  assert.equal(readFileSync(join(w.history, 'claude-projects/p/a.jsonl'), 'utf8'), 'only in the house');
+  assert.equal(readFileSync(join(w.history, 'claude-projects/p/same.jsonl'), 'utf8'), 'the same bytes');
+  assert.equal(readFileSync(join(w.history, 'claude-jobs/aabbccdd/state.json'), 'utf8'), 'job state');
+  assert.equal(readFileSync(join(w.history, 'codex-sessions/2026/11/09/rollout-x.jsonl'), 'utf8'), 'codex rollout');
+  // A clash keeps native history's copy where it was and the house's beside it.
+  assert.equal(readFileSync(join(w.history, 'claude-projects/p/clash.jsonl'), 'utf8'), 'the native history copy');
+  const kept = readdirSync(join(w.history, 'claude-projects/p')).filter(f => f.startsWith('clash.jsonl.adopted-'));
+  assert.equal(kept.length, 1);
+  assert.equal(readFileSync(join(w.history, 'claude-projects/p', kept[0]), 'utf8'), 'the house copy');
+  assert.equal(readdirSync(join(w.history, 'claude-projects/p')).length, 4, 'nothing else, and nothing duplicated');
+  // Nothing is left behind beside the links, and a second start is a no-op.
+  assert.deepEqual(readdirSync(join(w.home, '.claude')).sort(), ['jobs', 'projects']);
+  assert.deepEqual(runnerFor('claude', w.env).roots, claude.roots);
+  assert.deepEqual(runnerFor('codex', w.env).roots, codex.roots);
+});
+
+test('two body starts adopting the same folder at once both start and lose nothing', async () => {
+  const w = world();
+  for (let i = 0; i < 50; i++) put(join(w.home, `.claude/projects/p/s${i}.jsonl`), `session ${i}`);
+  const { Worker } = await import('node:worker_threads');
+  const src = new URL('../src/runners.mjs', import.meta.url).href;
+  const start = () => new Promise((ok, bad) => {
+    const worker = new Worker(`import(${JSON.stringify(src)}).then(m => { m.runnerFor('claude', ${JSON.stringify(w.env)}); })`, { eval: true });
+    worker.on('error', bad); worker.on('exit', code => code ? bad(Error(`exit ${code}`)) : ok());
+  });
+  await Promise.all([start(), start(), start()]);
+  assert.equal(lstatSync(join(w.home, '.claude/projects')).isSymbolicLink(), true);
+  const got = readdirSync(join(w.history, 'claude-projects/p')).sort();
+  assert.equal(got.length, 50);
+  for (let i = 0; i < 50; i++) assert.equal(readFileSync(join(w.history, `claude-projects/p/s${i}.jsonl`), 'utf8'), `session ${i}`);
+  assert.deepEqual(readdirSync(join(w.home, '.claude')).sort(), ['jobs', 'projects']);
+});
+
+test('native history never replaces a conflicting history link', () => {
   const other = world(); mkdirSync(join(other.home, '.claude'));
   symlinkSync(other.home, join(other.home, '.claude/jobs'));
   assert.throws(() => runnerFor('claude', other.env), /existing directory link/);
