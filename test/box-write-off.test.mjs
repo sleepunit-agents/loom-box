@@ -178,6 +178,49 @@ test('the owner is asked once per agent and stretch of silence; his Allow writes
   assert.equal(load(h.env).writeOffAsks[`mark:${far}`], undefined);
 });
 
+test('a card that can\'t be taken back is never reused for other houses; a No waits, then asks again', async () => {
+  const { askDarkBoxes, writeOffAsk, DENIED_FOR } = await import('../src/dark-box.mjs');
+  const h = houseWorld();
+  const asked = [], states = {};
+  let canWithdraw = false;
+  h.env.LOOM_RUNTIME_TEST_APPROVALS = { request: (target) => { asked.push(target); const id = `a-0000000${asked.length}`; states[id] = 'pending'; return id; },
+    withdraw: (id) => { if (!canWithdraw) return false; states[id] = 'withdrawn'; return true; }, state: (id) => states[id] ?? 'gone' };
+  const fx = { now: () => new Date(), mint: () => 'loom_' + 't'.repeat(31), revoke: () => {} };
+  assert.equal(api(h.env, fx, { caller: owner, path: 'add-box', body: { name: 'far', mayHost: '*' } }).status, 200);
+  const far = Object.entries(load(h.env).boxes).find(([, b]) => b.name === 'far')[0];
+  update(h.env, (s) => {
+    s.boxes[far].lastSeen = new Date(Date.now() - WRITE_OFF_AFTER_MS - 60_000).toISOString();
+    for (const id of ['h-1', 'h-2']) s.houses[id] = { id, agent: 'art', box: far, state: 'running' };
+  });
+  const one = [{ conversation: 'cv-00000000000a', agent: 'art', body: 'claude:h-1-b0000001' }];
+  const two = [...one, { conversation: 'cv-00000000000b', agent: 'art', body: 'claude:h-2-b0000002' }];
+  await askDarkBoxes(h.env, { convs: one });
+  const first = load(h.env).writeOffAsks[`art:${far}`];
+  assert.deepEqual(first.houses, ['h-1']);
+  // h-2 goes quiet too, but the first card can't be taken back: it stays exactly as filed, and nothing new is filed.
+  await askDarkBoxes(h.env, { convs: two });
+  await askDarkBoxes(h.env, { convs: two });
+  assert.equal(asked.length, 1);
+  assert.deepEqual(load(h.env).writeOffAsks[`art:${far}`].houses, ['h-1']);
+  assert.equal(writeOffAsk(h.env, { agent: 'art', box: far, target: first.target, approval: first.approval }).ask.houses.join(), 'h-1');
+  // Taken back: then, on the next pass, a new card with both.
+  canWithdraw = true;
+  await askDarkBoxes(h.env, { convs: two });
+  assert.equal(asked.length, 1);
+  await askDarkBoxes(h.env, { convs: two });
+  const second = load(h.env).writeOffAsks[`art:${far}`];
+  assert.deepEqual(second.houses, ['h-1', 'h-2']);
+  assert.notEqual(second.approval, first.approval);
+  // He says No: it waits, then asks again after DENIED_FOR.
+  states[second.approval] = 'denied';
+  await askDarkBoxes(h.env, { convs: two });
+  await askDarkBoxes(h.env, { convs: two, nowMs: Date.now() + 3_600_000 });
+  assert.equal(load(h.env).writeOffAsks[`art:${far}`].approval, second.approval);
+  await askDarkBoxes(h.env, { convs: two, nowMs: Date.now() + DENIED_FOR + 1000 });
+  await askDarkBoxes(h.env, { convs: two, nowMs: Date.now() + DENIED_FOR + 2000 });
+  assert.notEqual(load(h.env).writeOffAsks[`art:${far}`].approval, second.approval);
+});
+
 test('a house written off in the middle of its offline collection retires as a loss, not held for a receipt', async () => {
   const { HouseRunner } = await import('../src/houserunner.mjs');
   const { SessionHistoryMissing } = await import('../src/sessions.mjs');

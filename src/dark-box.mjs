@@ -19,6 +19,8 @@ export const WRITE_OFF_TARGET = /^([a-z][a-z0-9-]{0,39}):([A-Za-z0-9][A-Za-z0-9.
 const RETRY_MS = 10 * 60_000;
 /** An approval in one of these can't be applied any more: the card is filed again while the work is still held. */
 const OVER = new Set(['expired', 'used', 'withdrawn', 'gone']);
+/** After a No, the same houses are asked about again after this, in case that box is gone for good. */
+export const DENIED_FOR = 12 * 3_600_000;
 
 const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 const runtimeAs = (agent) => JSON.stringify({ kind: 'agent', agent, house: 'loom\'s runtime' });
@@ -67,17 +69,24 @@ export async function askDarkBoxes(env, { convs, nowMs = Date.now(), warn = (m) 
   const later = new Set();
   for (const [key, a] of Object.entries(s.writeOffAsks ?? {})) {
     const x = held[key];
-    let drop = !x || a.applied || (a.target && x.target !== a.target);
-    if (!drop && a.approval) {
-      const st = await stateOf(env, x.agent, a.approval);
-      // Over (expired, used without being applied, withdrawn) or still waiting while more houses went quiet: asked anew.
-      // Over (expired, used without being applied, withdrawn), or its houses changed either way: asked anew.
-      const same = x.houses.length === (a.houses ?? []).length && x.houses.every((h) => a.houses.includes(h));
-      drop = OVER.has(st) || ((st === 'pending' || st === 'allowed') && !same);
+    const agent = key.split(':')[0];
+    const st = a.approval && !a.applied ? await stateOf(env, agent, a.approval) : null;
+    const same = !!x && x.houses.length === (a.houses ?? []).length && x.houses.every((h) => a.houses.includes(h));
+    // A No stands while the same houses wait: asked again after DENIED_FOR, or at once if more went quiet.
+    if (st === 'denied') {
+      a.deniedAt ??= nowMs;
+      if (a.deniedAt === nowMs) update(env, (w) => { if (w.writeOffAsks?.[key]?.at === a.at) w.writeOffAsks[key].deniedAt = a.deniedAt; });
     }
-    if (!drop) continue;
-    update(env, (st) => { if (st.writeOffAsks?.[key]?.at === a.at) delete st.writeOffAsks[key]; });
-    if (a.approval && !a.applied) { await withdraw(env, key.split(':')[0], a.approval, warn); later.add(key); }
+    const retire = !x || a.applied || (a.target && x.target !== a.target) || OVER.has(st)
+      || (['pending', 'allowed', 'denied'].includes(st) && !same) || (st === 'denied' && nowMs - a.deniedAt >= DENIED_FOR);
+    if (!retire) continue;
+    // A card that can still be answered is taken back first; only once that's done is its record let go, so a new filing
+    // can never be handed back this one with other houses on it. If it can't be taken back (an answered one can't), it
+    // stays as it was until it's over (an Allow on it still writes off exactly the houses it listed).
+    if (a.approval && !a.applied && (st === 'pending' || st === null) && !(await withdraw(env, agent, a.approval, warn))) { later.add(key); continue; }
+    if (a.approval && !a.applied && st === 'allowed') { later.add(key); continue; }
+    update(env, (w) => { if (w.writeOffAsks?.[key]?.at === a.at) delete w.writeOffAsks[key]; });
+    if (a.approval) later.add(key);
   }
   for (const [key, x] of Object.entries(held)) {
     if (later.has(key)) continue;
@@ -120,13 +129,16 @@ export async function askDarkBoxes(env, { convs, nowMs = Date.now(), warn = (m) 
   }
 }
 
+/** Take back a card it filed: true once it's withdrawn (or was already). */
 async function withdraw(env, agent, aid, warn) {
   try {
     const fx = approvalsFake(env);
-    if (fx) return void fx.withdraw?.(aid);
+    if (fx) return fx.withdraw?.(aid) !== false;
     const r = await approvalsRunAsync(env, ['withdraw', aid, '--as', runtimeAs(agent)]);
-    if (r.error || r.status !== 0) warn(`couldn't withdraw ${aid}: ${approvalsWhy(r).slice(-200)}`);
-  } catch (e) { warn(`couldn't withdraw ${aid}: ${e.message}`); }
+    if (!r.error && r.status === 0) return true;
+    warn(`couldn't withdraw ${aid}: ${approvalsWhy(r).slice(-200)}`);
+    return (await stateOf(env, agent, aid)) === 'withdrawn';
+  } catch (e) { warn(`couldn't withdraw ${aid}: ${e.message}`); return false; }
 }
 
 /** The ask a card is about, or why it can't be applied now (checked before the owner's yes is spent, and again by writeOffBox). */
@@ -161,7 +173,7 @@ export function writeOffApproved(env, effects, caller, fields, spend) {
   const spent = spend(env, id, WRITE_OFF_KIND, target, asker, { onBehalf: 'owner' });
   if (spent) return { ok: false, message: `Nothing changed: the approval couldn't be spent (${String(spent).slice(0, 200)}).`, page: '' };
   let r;
-  try { r = writeOffBox(env, effects, { name: m[2], agent: m[1], houses: ask.houses, lastSeen }); } catch (e) {
+  try { r = writeOffBox(env, effects, { name: m[2], agent: m[1], houses: ask.houses, lastSeen, heard: (h) => houseHeard(env, m[1], h, +(effects.now?.() ?? new Date())) }); } catch (e) {
     // Spent and not applied: the next pass sees it used and asks again while the work is still held.
     return { ok: false, message: `The approval was spent, but nothing was written off: ${String(e.message || e).slice(0, 200)}. You'll be asked again if it's still waiting.`, page: '' };
   }

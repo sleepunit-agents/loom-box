@@ -999,7 +999,7 @@ export const WRITE_OFF_AFTER_MS = 10 * 60_000;
  * list. If the box comes back it's told to stop each of them, and nothing they say is taken. Only a box silent for
  * WRITE_OFF_AFTER_MS, never loom's own; `agent`, when given, only its houses; `houses`, when given, are exactly the ones the owner was asked about.
  */
-export function writeOffBox(env, effects, { name, agent, houses: asked, lastSeen }) {
+export function writeOffBox(env, effects, { name, agent, houses: asked, lastSeen, heard }) {
   return update(env, (s) => {
     const id = resolveBox(s, name);
     const b = s.boxes[id];
@@ -1014,6 +1014,8 @@ export function writeOffBox(env, effects, { name, agent, houses: asked, lastSeen
       if (h.box !== id || !LIVE.has(h.state) || h.service) continue;
       if (agent !== undefined && h.agent !== agent) continue;
       if (want && !want.has(h.id)) continue;
+      // Checked again under the lock: a house whose own body host spoke since the card was answered is running.
+      if (heard?.(h.id)) continue;
       if (h.tokenLabel) revokeOrQueue(s, effects, h.tokenLabel);
       h.state = 'lost'; h.updated = now(effects); h.note = `written off: its box ${boxNameOf(s, id)} went dark`;
       h.writtenOff = { at: now(effects), box: id };
