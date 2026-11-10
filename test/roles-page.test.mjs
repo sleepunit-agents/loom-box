@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { act, page } from '../src/ui.mjs';
-import { readRoles, setModels } from '../src/models.mjs';
+import { readRoles, setModels, setRole } from '../src/models.mjs';
 import { scratch } from './scratch.mjs';
 
 function setup() {
@@ -36,7 +36,7 @@ test('the owner adds, changes and removes a role from the runtime page', () => {
 
   // The form the owner opened before that edit is stale now: refused, nothing changed.
   const stale = act(env, fx, { action: 'role-remove', fields: row.act.fields });
-  assert.equal(stale.ok, false); assert.match(stale.message, /changed since you opened/);
+  assert.equal(stale.ok, false); assert.match(stale.message, /changed since you opened/i);
   assert.equal(readRoles(env).roles.length, 1);
   const fresh = roles(env).blocks[0].rows.find((x) => x.label === 'coding');
   assert.equal(act(env, fx, { action: 'role-remove', fields: fresh.act.fields }).ok, true);
@@ -54,4 +54,15 @@ test('a bad role is refused with its reason, and only the household owner edits 
   assert.match(act(env, fx, { action: 'role-set', caller: loren, fields: { ...hidden, id: 'review', description: 'Review', models: 'opus' } }).message, /household owner/);
   assert.match(act({ ...env, LOOM_SCOPE: 'art' }, fx, { action: 'role-set', fields: { ...hidden, id: 'review', description: 'Review', models: 'opus' } }).message, /art's page/);
   assert.deepEqual(readRoles(env).roles, []);
+});
+
+test('saving from the page keeps what the form does not show (input, output, dossier)', () => {
+  const { env, fx } = setup();
+  setRole(env, { role: { id: 'review', description: 'Review code', models: ['opus'], input: 'a PR', output: 'findings', dossier: 'review' } });
+  const row = roles(env).blocks[0].rows.find((x) => x.label === 'review');
+  assert.equal(act(env, fx, { action: 'role-set', fields: { ...row.edit.hidden, description: 'Review a change', models: 'opus', failover: 'no' } }).ok, true);
+  const r = readRoles(env).roles[0];
+  assert.deepEqual([r.description, r.input, r.output, r.dossier], ['Review a change', 'a PR', 'findings', 'review']);
+  // The version is checked inside the write: an edit against an older one is refused there too.
+  assert.throws(() => setRole(env, { role: { id: 'x', description: 'x', models: ['opus'] }, expect: 0 }), /changed since/);
 });

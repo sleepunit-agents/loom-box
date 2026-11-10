@@ -1589,12 +1589,12 @@ export function act(env, effects, { action, fields: raw = {}, caller: c }, publi
       case 'login-cancel': { loginCancel(env, effects, fields); return { ok: true, message: 'Cancelled.', page: '' }; }
       case 'role-set': case 'role-remove': {
         const cur = rolesOf(load(env));
-        if (String(cur.version) !== String(fields.version ?? '')) return { ok: false, message: 'The roles changed since you opened this: open it again.', page: '' };
+        const expect = String(fields.version ?? '');
         const why = String(fields.why ?? '').trim() || undefined;
         const by = typeof OWNER.who === 'string' && /^[a-z0-9]+(-[a-z0-9]+)*$/.test(OWNER.who) ? OWNER.who : 'owner';
-        if (action === 'role-remove') { setRole(env, { remove: String(fields.id ?? ''), why, by }); return { ok: true, message: `Removed the ${fields.id} role.`, page: '' }; }
+        if (action === 'role-remove') { setRole(env, { remove: String(fields.id ?? ''), why, by, expect }); return { ok: true, message: `Removed the ${fields.id} role.`, page: '' }; }
         const role = roleFromFields(fields);
-        const r = setRole(env, { role, why, by });
+        const r = setRole(env, { role, why, by, expect, keep: true });
         const had = cur.roles.some((x) => x.id === role.id);
         return { ok: true, message: `${had ? 'Saved' : 'Added'} the ${role.id} role: ${andList(r.roles.find((x) => x.id === role.id)?.eligible ?? []) || 'no model fits it yet'}.`, page: '' };
       }

@@ -214,18 +214,22 @@ export function roleOf(s, id) {
 }
 
 /** The owner adds or replaces a role, or removes one; each edit is a new version, logged with who and why. */
-export function setRole(env, { role, remove, why, by = 'owner' }) {
+export function setRole(env, { role, remove, why, by = 'owner', expect, keep = false }) {
   if (why !== undefined && (typeof why !== 'string' || why.length > ROLE_TEXT)) fail(`why is at most ${ROLE_TEXT} characters`);
   return update(env, (s) => {
     const { list } = modelsOf(s);
     const cur = s.roles ?? { version: 0, list: [], log: [] };
+    // An edit made against a catalog the editor saw (the page's form): refused if it moved since, inside this write.
+    if (expect !== undefined && String(cur.version) !== String(expect)) fail('the roles changed since you opened this: open it again', 409);
     let next, what;
     if (remove !== undefined) {
       if (!cur.list.some((x) => x.id === remove)) fail(`no role ${JSON.stringify(remove)}`, 404);
       next = cur.list.filter((x) => x.id !== remove);
       what = `removed ${remove}`;
     } else {
-      const r = checkRole(list, role);
+      // keep: what the form doesn't show (input, output, dossier) stays as it was.
+      const prev = keep ? cur.list.find((x) => x.id === role?.id) : undefined;
+      const r = checkRole(list, prev ? { ...Object.fromEntries(['input', 'output', 'dossier'].filter((k) => prev[k] !== undefined).map((k) => [k, prev[k]])), ...role } : role);
       const had = cur.list.some((x) => x.id === r.id);
       if (!had && cur.list.length >= 64) fail('the catalog holds at most 64 roles');
       next = had ? cur.list.map((x) => (x.id === r.id ? r : x)) : [...cur.list, r];
