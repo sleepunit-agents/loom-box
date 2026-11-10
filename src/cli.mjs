@@ -432,7 +432,7 @@ async function main(argv, env) {
       for (const b of r.boxes) process.stdout.write(`box ${b.name}${b.id !== b.name ? ` [${b.id}]` : ''}${b.local ? ' (loom\'s own)' : ''}${b.revoked ? ' REVOKED' : ''}: ${b.facts.join(', ')}\n`);
       for (const v of r.services ?? []) process.stdout.write(`service ${v.service} on ${v.box}${v.moveTo ? ` → ${v.moveTo}` : ''}: ${v.want}, house ${v.house} ${v.state ?? ''}\n`);
       for (const v of r.remotes ?? []) if (v.want === 'up' || v.state !== 'stopped') process.stdout.write(`box session "${v.name}" in ${v.dir}: ${v.want}, ${v.state}${v.url ? ` ${v.url}` : ''}${v.error ? ` (${v.error})` : ''}\n`);
-      for (const h of r.houses) process.stdout.write(`${h.id} ${h.agent}${h.seat && h.seat !== 'owner' ? ` (for ${h.seat.startsWith('p-') ? h.seat.slice(2) : `one conversation, ${h.seat.slice(2)}`})` : ''} on ${h.box}: ${houseBadge(h)}  ${h.task.slice(0, 60)}\n`);
+      for (const h of r.houses) process.stdout.write(`${h.id} ${h.agent}${seatLabel(h.seat)} on ${h.box}: ${houseBadge(h)}  ${h.task.slice(0, 60)}\n`);
       return;
     }
     case 'join': {
@@ -886,6 +886,16 @@ async function main(argv, env) {
 }
 
 function out(v) { process.stdout.write(JSON.stringify(v) + '\n'); }
+
+/** Whose work a body host's house is, for `houses`: its conversation alone (t-2061), and whose. */
+function seatLabel(seat) {
+  if (typeof seat !== 'string' || seat === 'owner') return '';
+  const cv = /(cv-[0-9a-f]{12})$/.exec(seat)?.[1];
+  if (seat.startsWith('owner.')) return ` (${cv})`;
+  if (seat.startsWith('p-')) return ` (for ${seat.slice(2).replace(/\.cv-[0-9a-f]{12}$/, '')}${cv ? `, ${cv}` : ''})`;
+  if (seat.startsWith('u-')) return ` (for one conversation, ${cv})`;
+  return ` (${seat})`;
+}
 
 /** `--text -` or `--brief -` (or none): stdin. */
 async function textOf(args, name) {

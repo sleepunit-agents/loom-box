@@ -8,7 +8,7 @@ import { checkLoginExpiry } from './login-expiry.mjs';
 // It is not a scheduler. A house goes where it's told (a box), or to the one
 // permitted box that has what it needs, or to the agent's primary. If that
 // doesn't name exactly one box, it says why and starts nothing.
-import { OWNER_SEAT, SEAT, principalOf, seatCapProblem } from './principal.mjs';
+import { OWNER_SEAT, SEAT, isOwnerSeat, principalOf, seatCapProblem, seatPerson } from './principal.mjs';
 import { ownCommit } from './version.mjs';
 import { pieceName } from './piece.mjs';
 import { randomBytes } from 'node:crypto';
@@ -508,9 +508,9 @@ export function housePrincipal(s, h, env) {
   if (isHostHouse(h, s)) {
     // A body host from before seats were kept can't say: unknown.
     const seat = typeof h.seat === 'string' ? h.seat : null;
-    if (seat === OWNER_SEAT) return { owner: true };
-    const m = /^p-([a-z0-9]+(?:-[a-z0-9]+)*)$/.exec(seat ?? '');
-    if (m) return { person: m[1] };
+    if (seat !== null && isOwnerSeat(seat)) return { owner: true };
+    const person = seatPerson(seat);
+    if (person) return { person };
     // A job's seat is the job's own house: whose that is (once, never a chain).
     // The task house itself becomes the job's body host (taskhost.mjs, bootstrapTask): its own taskActsFor.
     const j = /^j-(h-[0-9]{1,9})$/.exec(seat ?? '');
@@ -575,7 +575,7 @@ export function up(env, effects, caller, { agent, box, needs, task, session, slo
   // Whose work a body host's house is for (t-1952; principal.mjs, seatOf): the owner's, a person's, or one unknown
   // conversation's. The runtime's own say, like its kind; shown on the house, for the owner's listing.
   const seat = hostHouse ? (own.seat === undefined ? OWNER_SEAT : own.seat) : null;
-  if (hostHouse && !(typeof seat === 'string' && SEAT.test(seat))) fail('a body host\'s seat is owner, p-<person> or u-<conversation>');
+  if (hostHouse && !(typeof seat === 'string' && SEAT.test(seat))) fail('a body host\'s seat is owner.<conversation>, p-<person>.<conversation> or u-<conversation>');
   let a;
   if (caller.kind === 'agent') {
     if (agent && agent !== caller.agent) fail(`this token is ${caller.agent}'s; it can only ask for its own house`, 403);

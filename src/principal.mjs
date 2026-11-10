@@ -19,10 +19,13 @@
 //      (`--wake`, loom's machine only). It's taken as the wake's message is queued, so a wake set by a body working
 //      for someone else stays theirs.
 //
-// Houses (t-1952): one per steering principal. A body runs in the house of whom its conversation acts for (seatOf):
-// the owner's work in the agent's one owner house, a person's in that person's own, an unknown principal's in a house
-// of that conversation alone. So a body can't read the run key or session of a conversation steered by someone else:
-// they're files in another container. A principal that changes moves the body (delivery.mjs, plan: reseat).
+// Houses (t-1952, t-2061): one per conversation. A body runs in a house of its conversation alone (seatOf), and the
+// seat says whose work it is: the owner's (`owner.cv-…`), one person's (`p-<person>.cv-…`), or an unknown principal's
+// (`u-cv-…`). So a body can't read the run key or session of any other conversation, nor plant hooks its sessions run:
+// they're in another container. Inside one house every body was root together (t-2061), so a house shared by a
+// principal's conversations let one of them pose as another. The bare `owner` and `p-<person>` seats are the shared
+// houses from before: still read on old records, never given to a new body. A principal that changes moves the body
+// (delivery.mjs, plan: reseat).
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -138,16 +141,26 @@ export function principalOf(env, c) {
 
 // ─── Seats: whose house a body runs in (t-1952) ────────────────────────────
 
-/** A house's seat: `owner`, `p-<person>` (one non-owner person's) or `u-<conversation>` (an unknown principal's). */
-export const SEAT = /^(owner|p-[a-z0-9]+(-[a-z0-9]+)*|u-cv-[0-9a-f]{12}|j-h-[0-9]{1,9})$/;
+/**
+ * A house's seat: `owner.cv-<12 hex>` (the owner's work in one conversation), `p-<person>.cv-<12 hex>` (one person's,
+ * in one conversation), `u-cv-<12 hex>` (an unknown principal's), or `j-h-<n>` (a task's job, its own house). The bare
+ * `owner` and `p-<person>` are the shared houses from before t-2061: read on old records, never given out.
+ */
+export const SEAT = /^(owner(\.cv-[0-9a-f]{12})?|p-[a-z0-9]+(-[a-z0-9]+)*(\.cv-[0-9a-f]{12})?|u-cv-[0-9a-f]{12}|j-h-[0-9]{1,9})$/;
 export const OWNER_SEAT = 'owner';
+/** Whether a seat is the owner's work (his conversation's own house, or the shared one from before). */
+export const isOwnerSeat = (seat) => seat === undefined || seat === null || seat === OWNER_SEAT || /^owner\.cv-[0-9a-f]{12}$/.test(seat);
+/** The person whose work a seat is (`p-<person>` or `p-<person>.cv-…`), or null. */
+export const seatPerson = (seat) => /^p-([a-z0-9]+(?:-[a-z0-9]+)*)(?:\.cv-[0-9a-f]{12})?$/.exec(seat ?? '')?.[1] ?? null;
+/** The conversation a seat's house is for alone, or null (a shared seat from before, a job's). */
+export const seatConversation = (seat) => /(?:^|\.|^u-)(cv-[0-9a-f]{12})$/.exec(seat ?? '')?.[1] ?? null;
 /**
  * A body host record's key (t-2092): its seat, and when its bodies need something of their box (a worker role's
  * `needs`, box facts like gpu:5090) a short hash of those needs, `<seat>~<hash>`. One seat's needs house is still that
  * seat's alone: the key only ever narrows the seat, never joins two. The seat cap counts seats, so a seat's needs
  * house and its plain one are one seat's.
  */
-export const HOST_KEY = /^(owner|p-[a-z0-9]+(-[a-z0-9]+)*|u-cv-[0-9a-f]{12}|j-h-[0-9]{1,9})(~[0-9a-f]{10})?$/;
+export const HOST_KEY = /^(owner(\.cv-[0-9a-f]{12})?|p-[a-z0-9]+(-[a-z0-9]+)*(\.cv-[0-9a-f]{12})?|u-cv-[0-9a-f]{12}|j-h-[0-9]{1,9})(~[0-9a-f]{10})?$/;
 export const needsKey = (needs) => {
   const n = [...new Set((Array.isArray(needs) ? needs : []).map(String))].sort();
   return n.length ? createHash('sha256').update(n.join('\n')).digest('hex').slice(0, 10) : '';
@@ -156,45 +169,58 @@ export const hostKeyOf = (seat, needs) => { const k = needsKey(needs); return k 
 export const seatOfKey = (key) => String(key ?? '').split('~')[0];
 
 /**
- * Whose house a conversation's body runs in, by its principal (principalOf): the owner's only when every voice was the
- * owner's; one non-owner person's, theirs; anything else (unknown, several people, nothing heard) is a house of this
- * conversation alone, never shared: two unknowns are no more one principal than two strangers are.
+ * Whose house a conversation's body runs in, by its principal (principalOf): always a house of this conversation
+ * alone (t-2061), never shared with another conversation, even the same principal's: inside a house every body is
+ * root, so a sibling could read another's key and session or plant hooks it runs. The seat names whose work it is:
+ * the owner's only when every voice was the owner's; one non-owner person's, theirs; anything else (unknown, several
+ * people, nothing heard) an unknown principal's.
  */
 export function seatOf(p, conversation) {
-  if (p?.owner === true) return OWNER_SEAT;
-  if (typeof p?.for === 'string' && PERSON.test(p.for) && p.for.length <= 40) return `p-${p.for}`;
-  if (!/^cv-[0-9a-f]{12}$/.test(conversation ?? '')) throw new Error('an unknown principal\'s seat is its conversation\'s');
+  if (!/^cv-[0-9a-f]{12}$/.test(conversation ?? '')) throw new Error('a seat is its conversation\'s');
+  if (p?.owner === true) return `owner.${conversation}`;
+  if (typeof p?.for === 'string' && PERSON.test(p.for) && p.for.length <= 40) return `p-${p.for}.${conversation}`;
   return `u-${conversation}`;
 }
 
 /**
- * Whether a conversation's own session (its slot) may follow it from seat `was` to seat `now`: resumed only in the
- * seat it began in, or moved from the owner's seat into this conversation's own unknown house (no one else's bodies
- * are there; a relay's answer into his thread lands that way). Never into a person's house (it runs their other
- * conversations, whose bodies could read the transcript), and never out of one: a session a person steered goes
- * nowhere but their house, so one person's context never reaches another's work, and the owner's house never
- * inherits a session someone else steered. Otherwise the session is dropped and a fresh body reads the digests.
+ * Whether a conversation's own session (its slot) may follow it from seat `was` to seat `now`: resumed in the seat it
+ * began in; moved from the owner's work into this conversation's own unknown house (no one else's bodies are there; a
+ * relay's answer into his thread lands that way); or from a shared house from before (t-2061) into this conversation's
+ * own house of the same principal. Never into another person's house, and never out of a person's to anyone else: a
+ * session a person steered goes nowhere but that person's, so one person's context never reaches another's work, and
+ * the owner's house never inherits a session someone else steered. Otherwise the session is dropped and a fresh body
+ * reads the digests.
  */
 export function carriesSession(was, now, conversation) {
   const w = was ?? OWNER_SEAT;
   const n = now ?? OWNER_SEAT;
-  return w === n || (w === OWNER_SEAT && n === `u-${conversation}`);
+  if (w === n) return true;
+  const own = /^cv-[0-9a-f]{12}$/.test(conversation ?? '') ? conversation : null;
+  if (!own) return false;
+  // The owner's work (his shared house from before, or this conversation's own) into this conversation's own houses.
+  if ((w === OWNER_SEAT || w === `owner.${own}`) && (n === `owner.${own}` || n === `u-${own}`)) return true;
+  // A person's shared house from before into this conversation's own house of that person.
+  const p = /^p-([a-z0-9]+(?:-[a-z0-9]+)*)$/.exec(w);
+  return !!p && n === `p-${p[1]}.${own}`;
 }
 
-/** The houses for seats other than the owner's, at work for an agent in state `s`, but `seat`'s own. */
+/** The houses for seats other than the owner's work, at work for an agent in state `s`, but `seat`'s own. */
 export function otherSeatHouses(s, agent, seat) {
   const LIVE = new Set(['wanted', 'starting', 'running', 'stopping']);
   const of = (h) => (typeof h?.seat === 'string' && SEAT.test(h.seat) ? h.seat : OWNER_SEAT);
   const host = (h) => h.kind === 'body-host' || /^loom-runtime body-host /.test(String(h.task ?? ''));
-  return Object.values(s?.houses ?? {}).filter((h) => h.agent === agent && !h.collection && LIVE.has(h.state) && host(h) && of(h) !== OWNER_SEAT && !/^j-h-[0-9]{1,9}$/.test(of(h)) && of(h) !== seat);
+  return Object.values(s?.houses ?? {}).filter((h) => h.agent === agent && !h.collection && LIVE.has(h.state) && host(h) && !isOwnerSeat(of(h)) && !/^j-h-[0-9]{1,9}$/.test(of(h)) && of(h) !== seat);
 }
 
 /** The cap on an agent's houses for other people (LOOM_RUNTIME_SEAT_HOUSES, default 4). */
 export const SEAT_HOUSES = 4;
 export const seatCap = (env) => { const v = setting(env ?? {}, 'SEAT_HOUSES'); const n = Number(v); return v !== undefined && Number.isInteger(n) && n >= 1 && n <= 64 ? n : SEAT_HOUSES; };
-/** Why a house for `seat` can't be had at the cap, or null. The owner's is never capped. */
+/**
+ * Why a house for `seat` can't be had at the cap, or null. The owner's work is never capped here: his conversations'
+ * houses are as many as his bodies, which the busy limit caps (delivery.mjs, BUSY_LIMIT), and each idles out with them.
+ */
 export function seatCapProblem(env, s, agent, seat) {
-  if (seat === OWNER_SEAT || /^j-h-[0-9]{1,9}$/.test(seat)) return null;
+  if (isOwnerSeat(seat) || /^j-h-[0-9]{1,9}$/.test(seat)) return null;
   // Counted by seat: a seat's draining house and its new one are one seat's.
   const seats = new Set(otherSeatHouses(s, agent, seat).map((h) => h.seat)).size;
   const cap = seatCap(env);

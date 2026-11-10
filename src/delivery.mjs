@@ -506,7 +506,7 @@ export function depsOf(env, o = {}) {
     // (LOOM_RUNTIME_LOCAL_BODIES). A test hands in a local (fake) runner.
     runner: o.runner ?? ((h, local) => (local
       ? (locals[h] ??= runnerFor(h, localRunnerEnv(env, localBodiesOf(env))))
-      : (houses[h] ??= new HouseRunner(env, h, { sealer: seal, now: o.now })))),
+      : (houses[h] ??= new HouseRunner(env, h, { sealer: seal, now: o.now, bindHouse: typeof core.bindHouse === 'function' ? (b) => core.bindHouse(b) : null })))),
     injectedRunner: typeof o.runner === 'function',
     sealer: seal,
     now: o.now ?? (() => new Date()),
@@ -2155,7 +2155,7 @@ async function executeOne(env, op, d, mem) {
     // A local conversation whose bodies the owner moved into his house (LOOM_RUNTIME_LOCAL_BODIES "where": "house",
     // t-2049): past the same owner's-work-only check as a body here (above), in the owner's seat, never anyone else's.
     const housed = !!c0.local && localBodiesOf(env)?.where === 'house';
-    if (housed) rules = { ...rules, seat: OWNER_SEAT };
+    if (housed) rules = { ...rules, seat: `owner.${c0.conversation}` };
     const was = op.slot?.rules ?? {};
     // ...and a session only follows the conversation into a house no one else's bodies would read it in (principal.mjs,
     // carriesSession): never into a person's house that runs their other conversations.
@@ -3378,9 +3378,11 @@ function holderProblem(env, d, c, { key, session }, does = 'speaks in it', calle
   const away = houseProblem(env, c, caller);
   if (away) return `only the body holding ${c.conversation} ${does} (${away})`;
   // Bound to the seat its rules were made for, too (t-1952): a body whose conversation has moved to another principal's
-  // house speaks no more there (it's being ended), unless it's the owner's body and the move only narrows it (a relay's
-  // answer waiting on its turn). Its principal it never asks once moved (bodyPrincipal).
-  if (seatMoved(env, c) && (does !== 'speaks in it' || (c.local ? OWNER_SEAT : c.bodyRules?.seat ?? OWNER_SEAT) !== OWNER_SEAT)) {
+  // house speaks no more there (it's being ended), unless it's the owner's body in a house of this conversation alone
+  // and the move only narrows it (a relay's answer waiting on its turn). Never from the shared owner house from before
+  // (t-2061): a sibling there could hold its key and session. Its principal it never asks once moved (bodyPrincipal).
+  const ownAlone = c.local || c.bodyRules?.seat === `owner.${c.conversation}`;
+  if (seatMoved(env, c) && (does !== 'speaks in it' || !ownAlone)) {
     return `only the body holding ${c.conversation} ${does} (its conversation has moved to another principal's house)`;
   }
   const own = sessionOf({ ...d, env }, c.body);
