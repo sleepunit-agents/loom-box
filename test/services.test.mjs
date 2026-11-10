@@ -270,3 +270,23 @@ test('a house starts, moves or stops a service only as the owner\'s own body, an
   // Loom's machine's own agent token (no house) is as before.
   ok(call(art, 'service-up', { name: 'slack' }));
 });
+
+test('a service its house file doesn\'t name stays down, and only the owner brings it back (t-2132)', () => {
+  update(env, (s) => {
+    s.houses['h-901'] = { id: 'h-901', agent: 'art', box: Object.keys(s.boxes)[0], kind: 'body-host', task: '(body host)', needs: [], state: 'running', seat: 'owner.cv-0123456789ab', created: new Date(clock).toISOString(), updated: new Date(clock).toISOString() };
+  });
+  const mine = { ...art, house: 'h-901' };
+  ok(call(owner, 'service-up', { agent: 'art', name: 'ghost' }));
+  const p = ok(call(box('one'), 'poll'));
+  const h = p.start.find((x) => x.service === 'ghost');
+  ok(call(box('one'), 'claim', { id: h.id }));
+  ok(call(box('one'), 'report', { id: h.id, state: 'failed', log: 'the box couldn\'t start it: the house file has no service ghost' }));
+  const v = ok(call(owner, 'list')).services.find((x) => x.name === 'ghost' || x.service === 'art/ghost');
+  assert.equal(v.want, 'down', 'no crash loop');
+  assert.equal(live().filter((x) => x.service === 'ghost').length, 0);
+  const r = call(mine, 'service-up', { name: 'ghost' });
+  assert.equal(r.status, 403);
+  assert.match(r.body.error, /isn't in its house file/);
+  ok(call(owner, 'service-up', { agent: 'art', name: 'ghost' }));
+  assert.equal(live().filter((x) => x.service === 'ghost').length, 1);
+});

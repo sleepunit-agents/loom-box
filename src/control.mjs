@@ -1164,8 +1164,9 @@ function assertMayRunServices(env, s, caller, key, { create = false } = {}) {
   if (caller.service !== undefined && caller.service !== null) fail('a service doesn\'t start, move or stop services', 403);
   if (caller.house === undefined || caller.house === null) return;
   const h = s.houses?.[caller.house];
-  if (!h || h.agent !== caller.agent || !LIVE.has(h.state) || housePrincipal(s, h, env)?.owner !== true) fail('only a body doing the owner\'s own work starts, moves or stops a service', 403);
+  if (!h || h.agent !== caller.agent || !['starting', 'running'].includes(h.state) || housePrincipal(s, h, env)?.owner !== true) fail('only a body doing the owner\'s own work starts, moves or stops a service', 403);
   if (create && !s.services?.[key]) fail(`${key} isn't a service yet: the owner brings a new one up on the Boxes page`, 403);
+  if (create && s.services[key].unnamed) fail(`${key} isn't in its house file (a box said so): the owner brings it back up once it is`, 403);
 }
 
 /** Bring a service up (on its box, or the agent's primary), or say where it already is. */
@@ -1178,7 +1179,7 @@ export function serviceUp(env, effects, caller, body) {
     const svc = s.services[key];
     if (svc?.want === 'up') return { service: key, box: svc.box, house: svc.house, state: s.houses[svc.house]?.state };
     const box = placeHouse(s, a, { box: body.box || svc?.box || undefined }, env, Date.parse(now(effects)));
-    // Its recent crashes stay: brought back up, a loop still shows as one.
+    // Its recent crashes stay: brought back up, a loop still shows as one. Not `unnamed`: only the owner gets here then.
     const next = { agent: a, name: body.name, box, want: 'up', restarts: 0, created: svc?.created ?? now(effects), ...(svc?.crashes?.length ? { crashes: svc.crashes } : {}) };
     s.services[key] = next;
     const id = startService(s, next, effects);
@@ -1298,11 +1299,19 @@ export function serviceRestart(env, effects, caller, body) {
   });
 }
 
+const UNNAMED = /the house file has no service [a-z0-9-]+/;
+
 /** When a service's house ends: move it, restart it (backing off), or leave it down. */
 function serviceHouseEnded(s, h, effects) {
   const svc = s.services?.[serviceKey(h.agent, h.service)];
   if (!svc || svc.house !== h.id) return;
   if (svc.want !== 'up') return;
+  // The box said the agent's house file names no such service (house.mjs specFor): it stays down, never a crash loop,
+  // and only the owner brings it back (t-2132).
+  if (h.state === 'failed' && UNNAMED.test(String(h.log ?? ''))) {
+    svc.want = 'down'; svc.unnamed = true; delete svc.moveTo;
+    return;
+  }
   if (svc.moveTo) {
     svc.box = svc.moveTo; delete svc.moveTo; svc.restarts = 0;
     startService(s, svc, effects);
