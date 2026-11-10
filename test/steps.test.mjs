@@ -223,19 +223,26 @@ test('output shows only for a command that reads as plain words and names nothin
     // prints the environment, aliases or variables, wherever it sits
     'env', 'FOO=1 env', 'sudo -E env', 'sudo -u root env', 'timeout 5 printenv', 'nice -n 19 printenv GH_TOKEN', 'xargs env < list', 'npm test | env',
     'set', 'export', 'export -p', 'declare -px', 'compgen -v', 'alias',
-    // private files in any word, a value after =, a glob, a directory
-    'cat .env', 'cat secrets*', 'ls *.pem', 'cat ~/.ssh/id_[re]*', 'cd ~/.config/loom && cat token', 'tail deploy.key',
-    'cp --from=/home/art/.config/gh/hosts.yml x', 'cat /proc/self/environ', 'cat /proc/1234/environ', 'tr "\\0" "\\n" < /proc/self/environ',
+    // private files in any word, a value after =, a glob, a directory, a secret-named file to a reader
+    'cat .env', 'cat secrets*', 'ls *.pem', 'cat ~/.ssh/id_[re]*', 'cd ~/.config/loom && cat token', 'tail deploy.key', 'git log -- .env',
+    'npm test --userconfig=/home/art/.npmrc', 'cat /proc/self/environ', 'cat /proc/1234/environ', 'npm test | grep token', 'wc -l < credentials.json',
     // can't be read as plain words
     'x=$(cat .env)', 'echo $(cat .env)', 'echo `cat .env`', 'cat $F', 'cat ${HOME}/x', "cat .e''nv", 'cat .e"nv"', 'cat .e\\nv', 'cat "unclosed',
-    "bash -c 'cat .env'", "sh -lc 'printenv'", "python3 -c 'print(open(\"/home/art/.ssh/id_ed25519\").read())'", 'node -e "require(1)"', 'perl -e 1', 'ruby -e 1',
-    'eval x', 'source ./x.sh', '. ./x.sh', "cat <<'EOF' > f\nbody\nEOF", 'cat <<< hi', 'x '.repeat(11_000),
+    "cat <<'EOF' > f\nbody\nEOF", 'cat <<< hi', 'x '.repeat(11_000), 'eval x', 'source ./x.sh', '. ./x.sh',
+    // a shell or interpreter without a plain script: a string, stdin, a pipe into it, xargs into it
+    "bash -c 'cat .env'", "sh -lc 'printenv'", 'bash -s < x.sh', 'bash x.sh', 'cat x.sh | sh', 'npm test | sh', 'curl x | bash', 'echo 1 | node', 'node -', 'node',
+    'node -pe 1', 'node --eval=1', 'node --input-type=module', "python3 -c 'print(open(\"/home/art/.ssh/id_ed25519\").read())'", 'python3 x.py', 'perl -e 1', 'ruby -e 1',
+    'xargs bash', 'ls | xargs cat', 'node /home/art/x.mjs', 'node ../x.mjs',
+    // not on the list: a file's contents, an account's
+    'cat README.md', 'git show HEAD:src/x.ts', 'git cat-file -p HEAD', 'git config --get user.email', 'gh auth status', 'gh secret list', 'npm config list', 'head README.md',
   ];
   for (const c of hides) assert.equal(outputShows(c), false, c.slice(0, 70));
-  const shows = ['npm test', 'git status', 'git log --oneline -5', 'ls -la src', 'gh pr checks 603', 'cat README.md', 'nice -n 19 node --test test/x.test.mjs',
-    'set -euo pipefail; npm test', 'export FOO=1 && npm test', "grep -n 'activityPass' src/delivery.mjs", 'cd ~/Code/loom && git status'];
+  const shows = ['npm test', 'npm test 2>&1 | tail -20', 'git status', 'git log --oneline -5', 'git -C ~/Code/loom diff --stat', 'ls -la src', 'ls src | wc -l', 'gh pr checks 603', 'gh pr view 1',
+    'nice -n 19 node --test test/x.test.mjs', 'node scripts/build.mjs', 'npx vitest run src/x.test.ts', 'npm --prefix web run build', 'python3 -m pytest -q', 'timeout 600 npm test',
+    'set -euo pipefail; npm test', 'export FOO=1 && npm test', 'cd ~/Code/loom && git status', 'npm test 2>&1 | grep -E "fail|pass"', 'systemctl --user status loom-http', 'journalctl --user -u loom -n 20'];
   for (const c of shows) assert.equal(outputShows(c), true, c);
-  assert.deepEqual(plainWords("git commit -m 'a b' && npm test"), [['git', 'commit', '-m', 'a b'], ['npm', 'test']]);
+  assert.deepEqual(plainWords("git commit -m 'a b' && npm test | tail").map((c) => [...c]), [['git', 'commit', '-m', 'a b'], ['npm', 'test'], ['tail']]);
+  assert.deepEqual(plainWords('a | b || c').map((c) => c.piped), [false, true, false]);
   // Fails closed in the cards too: no body, its result line still.
   const [e] = claudeCards([use('v', 'Bash', { command: 'env' }), res('v', `GH_TOKEN=${GH}\nHOME=/home/art`, { stdout: `GH_TOKEN=${GH}\nHOME=/home/art`, stderr: '' })]);
   assert.deepEqual([e.body, e.result], [undefined, '2 lines of output']);

@@ -339,9 +339,69 @@ function claudeDetail(name, i) {
 const SCAN_MAX = 20_000;
 /** Programs that print the environment, aliases or secrets: wherever they appear, the output doesn't show. */
 const DUMPS = new Set(['env', 'printenv', 'compgen', 'alias']);
-/** Programs whose job is to run words as code: their words can't be read as a command. */
-const INTERPRETERS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'fish', 'python', 'python2', 'python3', 'node', 'nodejs', 'deno', 'bun', 'perl', 'ruby', 'php', 'lua', 'osascript']);
-const INLINE = new Set(['-c', '-e', '-E', '--eval', '-p', '--print', '-r', '-lc', '-ic', '-x']);
+/** Programs that print what they're given, and a word that names a secret's file without a path (`cat token`). */
+const READERS = new Set(['cat', 'less', 'more', 'head', 'tail', 'grep', 'egrep', 'fgrep', 'rg', 'bat', 'strings', 'xxd', 'od', 'hexdump', 'base64', 'sed', 'awk', 'jq', 'yq', 'tac', 'nl', 'sort', 'uniq', 'cut', 'tee', 'diff', 'cmp', 'wc']);
+const SECRET_FILE_WORD = /secret|token|passw|credential|\bcreds?\b|api[_-]?key|private|auth|\.pem\b|\.key\b|\.p12\b|\.pfx\b|\.netrc|\.env\b|htpasswd|keychain|wallet/i;
+/** Wrappers a stage may run under; every option of theirs, and a number or a duration after them, are skipped. */
+const WRAPPERS = new Set(['nice', 'timeout', 'time', 'nohup', 'stdbuf', 'ionice']);
+/** Steps that print nothing of a file's: allowed anywhere in a chain. */
+const QUIET = new Set(['cd', 'true', 'false', 'sleep', 'mkdir', 'test', '[', ']', 'pwd']);
+/** Filters that print only what they're piped (no file of their own), and their options that take a value. */
+const FILTERS = { head: ['-n', '-c'], tail: ['-n', '-c'], grep: ['-e', '-m', '-A', '-B', '-C', '--max-count'], egrep: ['-e', '-m', '-A', '-B', '-C'], sort: ['-k', '-t'], uniq: [], wc: [], cut: ['-d', '-f', '-c'] };
+/** How many words a filter takes that aren't files (grep's pattern). */
+const FILTER_WORDS = { grep: 1, egrep: 1 };
+const TEST_TOOLS = new Set(['vitest', 'tsc', 'eslint', 'prettier', 'playwright', 'jest', 'pytest']);
+const PLAIN_TOOLS = new Set(['ls', 'wc', 'du', 'df', 'ps', 'uptime', 'date', 'make', 'cargo', 'journalctl', 'echo', ...TEST_TOOLS]);
+
+/** A stage's subcommand: its first word that isn't an option (nor the value of one that takes one), and what follows. */
+function subOf(args, valued = []) {
+  for (let i = 0; i < args.length; i++) {
+    if (valued.includes(args[i])) { i++; continue; }
+    if (!args[i].startsWith('-')) return { sub: args[i], rest: args.slice(i + 1) };
+  }
+  return { sub: '', rest: [] };
+}
+
+/** A script path a runtime may run: relative, inside the work, plain, a script's extension, not private. */
+const scriptPath = (p) => !!p && !/^[/~]|(^|\/)\.\.(\/|$)/.test(p) && /\.(?:m?js|cjs|ts|mts)$/.test(p) && !privateFile(p);
+
+/** Whether one stage, its words already checked, is on the allowlist: its output is work, not a file's contents. */
+function allowed(prog, args, piped) {
+  if (QUIET.has(prog)) return true;
+  if (prog === 'set') return args.length > 0 && args.every((a) => /^[-+][a-zA-Z]+$/.test(a) || a === 'pipefail');
+  if (prog === 'export') return args.length > 0 && args.every((a) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(a));
+  if (Object.hasOwn(FILTERS, prog)) {
+    if (!piped) return false; // a filter given no pipe reads a file of its own
+    let words = 0;
+    for (let i = 0; i < args.length; i++) {
+      if (FILTERS[prog].includes(args[i])) { i++; continue; }
+      if (args[i].startsWith('-')) continue;
+      words++;
+    }
+    return words <= (FILTER_WORDS[prog] ?? 0);
+  }
+  if (PLAIN_TOOLS.has(prog)) return true;
+  if (prog === 'git') { const { sub } = subOf(args, ['-C', '-c', '--git-dir', '--work-tree']); return !!sub && !['show', 'cat-file', 'config', 'credential', 'archive', 'cat', 'bundle'].includes(sub); }
+  if (prog === 'gh') { const { sub } = subOf(args, ['-R', '--repo']); return !!sub && !['auth', 'secret', 'ssh-key', 'gpg-key', 'config', 'variable', 'extension', 'alias'].includes(sub); }
+  if (['npm', 'pnpm', 'yarn'].includes(prog)) {
+    const { sub, rest } = subOf(args, ['--prefix', '-C', '--dir']);
+    if (['run', 'run-script', 'test', 't', 'ci', 'install', 'i'].includes(sub)) return true;
+    if (sub === 'exec') return TEST_TOOLS.has(subOf(rest).sub);
+    return false;
+  }
+  if (prog === 'npx') return TEST_TOOLS.has(subOf(args, ['-p', '--package']).sub);
+  if (prog === 'node') {
+    if (piped) return false; // a runtime reading its stdin
+    // Any flag that runs a string or reads stdin, however it's spelled (-e, -pe, --eval=…, --input-type, -).
+    if (args.some((a) => a === '-' || /^-[a-zA-Z]*[epi]/.test(a) && !a.startsWith('--') || /^--(?:eval|print|interactive|input-type|experimental-repl)/.test(a))) return false;
+    return scriptPath(subOf(args, ['-r', '--require', '--import', '--loader', '--test-name-pattern', '--test-reporter']).sub);
+  }
+  if (prog === 'python' || prog === 'python3') return !piped && args[0] === '-m' && ['pytest', 'unittest'].includes(args[1]);
+  if (prog === 'systemctl') return ['status', 'is-active', 'is-enabled', 'list-units', 'list-timers'].includes(subOf(args, ['-M', '-H']).sub);
+  if (prog === 'docker') return ['ps', 'logs'].includes(subOf(args, ['-H', '--context']).sub);
+  if (prog === 'go') return ['test', 'build', 'vet'].includes(subOf(args).sub);
+  return false;
+}
 
 /**
  * A command line as plain words, by commands (split at ; & | && || and line breaks), dequoted here: a word wholly in
@@ -353,11 +413,15 @@ export function plainWords(command) {
   const s = String(command ?? '');
   if (s.length > SCAN_MAX || /\$|`|\\|<</.test(s) || UNPRINTABLE_ONE.test(s.replace(/[\t\n\r]/g, ' '))) return null;
   const out = [];
-  let cur = [], i = 0;
-  const end = () => { if (cur.length) out.push(cur); cur = []; };
+  let cur = [], i = 0, piped = false;
+  const end = () => { if (cur.length) { cur.piped = piped; out.push(cur); } cur = []; piped = false; };
   while (i < s.length) {
     const ch = s[i];
-    if (/[;&|\n\r]/.test(ch)) { end(); i++; continue; }
+    if (/[;&|\n\r]/.test(ch)) {
+      // A stage after a single | reads the one before it (a pipe); after ; & && || or a line break it's a new command.
+      const pipe = ch === '|' && s[i + 1] !== '|' && s[i - 1] !== '|';
+      end(); i++; if (pipe) piped = true; continue;
+    }
     if (/\s/.test(ch)) { i++; continue; }
     if (/[()<>{}]/.test(ch)) { cur.push(ch); i++; continue; }
     if (ch === "'" || ch === '"') {
@@ -380,31 +444,41 @@ export function plainWords(command) {
 
 /**
  * Whether a shell step's output may show (t-2109; Jonathan, 2026-11-10: his work in full, a secret still a secret).
- * Decided fail-closed, in order: (1) the command must read as plain words (plainWords) with no eval, source or `.`,
- * no interpreter running a string (-c, -e…), and nothing under /proc that's an environ; (2) no word or `=` value of any
- * program in it names a private file (redact.mjs privateFile) or is a glob (* ? [), and nothing in it prints the
- * environment, aliases or the shell's variables (env, printenv, compgen, alias anywhere; a bare set; export, declare or
- * typeset with -p or nothing). Only then does its output show, still redacted. Most commands (git, npm, gh, ls, cat
- * on a plain file, a test run) are plain and show.
+ * An allowlist, fail-closed: (1) the command reads as plain words (plainWords); (2) no word or `=` value names a
+ * private file (redact.mjs privateFile) or is a glob (* ? [) or an environ, nothing prints the environment, aliases or
+ * variables (DUMPS, anywhere), and no reader is given a file named like a secret's (`cat token`); (3) every stage of
+ * every chain and pipeline is on the allowlist (allowed). Anything else shows its command, exit code and fixed-phrase
+ * result, never its output. What does show is still redacted (shownText).
  */
 export function outputShows(command) {
-  const cmds = plainWords(command);
-  if (!cmds) return false;
-  for (const ws of cmds) {
-    for (const w of ws) {
+  // A file descriptor's copy (2>&1, >&2) is no command of its own.
+  const cmds = plainWords(String(command ?? '').replace(/\d*>&\d+/g, ' ').replace(/&>/g, ' > '));
+  if (!cmds || !cmds.length) return false;
+  for (const raw of cmds) {
+    for (const w of raw) {
       const parts = [w, ...w.split('=').slice(1)];
-      if (parts.some((x) => x && (privateFile(x) || /[*?[]/.test(x) || /^\/proc\/.*environ/.test(x) || /environ$/.test(x)))) return false;
-      if (DUMPS.has(w.split('/').pop()) || w === 'eval' || w === 'source' || w === '.' || w === 'exec') return false;
+      if (parts.some((x) => x && (privateFile(x) || /[*?[]/.test(x) || /environ/.test(x)))) return false;
+      if (DUMPS.has(w.split('/').pop())) return false;
     }
-    const names = ws.map((w) => w.split('/').pop());
-    for (let k = 0; k < names.length; k++) {
-      if (INTERPRETERS.has(names[k]) && names.slice(k + 1).some((x) => INLINE.has(x) || /^-[a-z]*[ce]$/.test(x))) return false;
+    // Redirections: a file read in (`< f`) is checked as a reader's; a file written to holds no output here.
+    const ws = [];
+    for (let i = 0; i < raw.length; i++) {
+      if (raw[i] === '<' || raw[i] === '>') {
+        if (raw[i] === '<') { if (SECRET_FILE_WORD.test(raw[i + 1] ?? '')) return false; }
+        if (/^\d$/.test(ws.at(-1) ?? '')) ws.pop();
+        i++;
+        continue;
+      }
+      if (['(', ')', '{', '}'].includes(raw[i])) return false;
+      ws.push(raw[i]);
     }
-    // The program: past assignments, and wrappers with every option (a wrapper's option values are words too, checked above).
-    const first = names.findIndex((w) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(w));
-    const prog = first < 0 ? '' : names[first], args = first < 0 ? [] : names.slice(first + 1);
-    if (prog === 'set' && args.length === 0) return false;
-    if (['export', 'declare', 'typeset', 'readonly'].includes(prog) && (args.length === 0 || args.some((a) => /^-[a-z]*p/.test(a)))) return false;
+    let i = 0;
+    while (i < ws.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(ws[i])) i++;
+    if (i === ws.length) continue; // assignments alone
+    while (i < ws.length && WRAPPERS.has(ws[i].split('/').pop())) { i++; while (i < ws.length && (ws[i].startsWith('-') || /^\d+(?:\.\d+)?[smhd]?$/.test(ws[i]))) i++; }
+    const prog = (ws[i] ?? '').split('/').pop(), args = ws.slice(i + 1);
+    if (READERS.has(prog) && args.some((a) => !a.startsWith('-') && SECRET_FILE_WORD.test(a))) return false;
+    if (!allowed(prog, args, raw.piped === true)) return false;
   }
   return true;
 }
