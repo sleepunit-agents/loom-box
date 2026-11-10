@@ -16,6 +16,7 @@ import { preferenceOf, addBox, assertBoxOwner, resolveBox, isBoxOwner, boxLabelO
 import { LOGIN_HARNESSES } from './logins.mjs';
 import { ownCommit, swapCommand } from './version.mjs';
 import { stateAccounts } from './accounts.mjs';
+import { modelsOf, rolesOf, setRole } from './models.mjs';
 import { COMMS_VENUE, HARNESS_WORDS, conversationJobs, ownerModelChoice, answerLoop, deliveryNotices, listConvs, loadConv, loopAsks, readFallbacks, resetCardProblem, resetPrincipal, runtimeAs, whenWords, workingConversations, nonIdleAgents } from './delivery.mjs';
 import { loomStore } from './store.mjs';
 import { asks as gateAsks, answer as gateAnswer, gatesPage, mergePeople, status as gatesStatus, proposals as gateProposals, PROPOSALS as PROPOSALS_COLLECTION } from './gates.mjs';
@@ -949,6 +950,7 @@ function boxesPage(env, nowMs) {
   sections.push({ id: 'boxes', title: 'Boxes', blocks: [rows.length ? { type: 'panel', rows } : { type: 'text', tone: 'muted', text: 'No boxes yet: add one below.' }] });
 
   sections.push(loginsSection(env, s, live_boxes, nowMs, false));
+  sections.push(rolesSection(env));
 
   // Each agent's houses, services and sessions are its own (its Houses tab): here, a row each.
   if (agents.length) {
@@ -1128,6 +1130,55 @@ function loginsSection(env, s, boxes, nowMs, rows) {
     }) }] : [{ type: 'text', tone: 'muted', text: reported ? 'No account has reported its usage yet.' : 'No box has reported its harnesses yet.' }]),
     { type: 'text', tone: 'muted', text: 'Each box signs in to Claude and Codex itself, with its owner\'s own subscription: Log in, on its page, runs the CLI\'s own login on that box. loom never sees the login.' },
   ] };
+}
+
+/**
+ * Work roles (models.mjs, t-2036): the kinds of work an agent can hand off, each with the models eligible for it, the
+ * household owner's to add, change and remove here (`loom runtime roles set` does the same). The form carries the
+ * catalog's version: an edit made against an older catalog is refused, as the grants' rev is, so two editors never
+ * silently overwrite each other. A role never widens what an agent may use (an agent's allow still applies).
+ */
+function roleFields(list, r = null) {
+  const csv = (a) => (a ?? []).join(',');
+  return [
+    ...(r ? [] : [{ name: 'id', label: 'Name', kind: 'text', required: true, hint: 'Lowercase, like coding, review or light-task' }]),
+    { name: 'description', label: 'What it\'s for', kind: 'textarea', required: true, ...(r ? { value: r.description } : {}), hint: 'One or two sentences an agent reads to choose it' },
+    { name: 'models', label: 'Models', kind: 'checks', options: list.map((m) => ({ value: m.id, label: m.id, detail: `${m.family}, on ${HARNESS_WORDS[m.harness] ?? m.harness}` })), ...(r?.models?.length ? { value: csv(r.models) } : {}) },
+    { name: 'families', label: 'Or any model of', kind: 'text', ...(r?.families?.length ? { value: r.families.join(', ') } : {}), hint: 'Optional: anthropic, openai, google, mistral or local:<name>' },
+    { name: 'needs', label: 'Needs', kind: 'text', ...(r?.needs ? { value: r.needs } : {}), hint: 'Optional, e.g. a GPU, or a long context' },
+    { name: 'failover', label: 'If its model runs out', kind: 'choice', value: r?.failover ? 'yes' : 'no', options: [
+      { value: 'no', label: 'Wait for it', detail: 'The job keeps its model and waits for quota' },
+      { value: 'yes', label: 'Move once', detail: 'The job moves once to another eligible model with room' }] },
+    { name: 'why', label: 'Why', kind: 'text', hint: 'Optional: kept in the change log' },
+  ];
+}
+
+function rolesSection(env) {
+  let st, cat;
+  try { st = load(env); cat = rolesOf(st); } catch { return { id: 'roles', title: 'Work roles', blocks: [{ type: 'text', tone: 'muted', text: 'The roles can\'t be read just now.' }] }; }
+  const { list } = modelsOf(st);
+  const hidden = { version: String(cat.version) };
+  const rows = cat.roles.map((r) => ({ label: r.id, value: r.eligible.length ? r.eligible.join(', ') : 'No model in the list fits it',
+    detail: r.description, tone: r.eligible.length ? 'ok' : 'warn',
+    edit: { title: `Change ${r.id}`, action: 'role-set', submit: 'Save', hidden: { ...hidden, id: r.id }, fields: roleFields(list, r) },
+    act: { action: 'role-remove', label: 'Remove', fields: { ...hidden, id: r.id }, confirm: `Remove the ${r.id} role? A job already running keeps it; new jobs can't ask for it.` } }));
+  rows.push({ label: 'A role', value: 'Add a kind of work agents can hand off', tone: 'muted',
+    edit: { title: 'Add a role', action: 'role-set', submit: 'Add', hidden, fields: roleFields(list) } });
+  const last = cat.changed ? ` Last change: ${cat.changed.what}${cat.changed.why ? ` (${cat.changed.why})` : ''}, by ${cat.changed.by}.` : '';
+  return { id: 'roles', title: 'Work roles', blocks: [{ type: 'panel', rows },
+    { type: 'text', tone: 'muted', text: `Agents read these when they hand off a job, and the runtime picks a model from the role's. An agent's own model limits still apply.${last}` }] };
+}
+
+/** A role from the page's form fields, or a message saying what's wrong. */
+function roleFromFields(f) {
+  const list = (v) => String(v ?? '').split(',').map((x) => x.trim()).filter(Boolean);
+  const out = { id: String(f.id ?? '').trim(), description: String(f.description ?? '') };
+  const models = list(f.models), families = list(f.families);
+  if (models.length) out.models = models;
+  if (families.length) out.families = families;
+  if (String(f.needs ?? '').trim()) out.needs = String(f.needs);
+  out.failover = f.failover === 'yes';
+  return out;
 }
 
 /**
@@ -1536,6 +1587,17 @@ export function act(env, effects, { action, fields: raw = {}, caller: c }, publi
       case 'login-code': { loginCode(env, effects, fields); return { ok: true, message: 'Got it: the box is checking the code.', page: `login/${fields.id}` }; }
       case 'box-update-now': { const r = boxUpdateNow(env, effects, fields); return { ok: true, message: `${r.name} tries loom's runtime on its next poll.`, page: boxPath(env, fields.name) }; }
       case 'login-cancel': { loginCancel(env, effects, fields); return { ok: true, message: 'Cancelled.', page: '' }; }
+      case 'role-set': case 'role-remove': {
+        const cur = rolesOf(load(env));
+        if (String(cur.version) !== String(fields.version ?? '')) return { ok: false, message: 'The roles changed since you opened this: open it again.', page: '' };
+        const why = String(fields.why ?? '').trim() || undefined;
+        const by = typeof OWNER.who === 'string' && /^[a-z0-9]+(-[a-z0-9]+)*$/.test(OWNER.who) ? OWNER.who : 'owner';
+        if (action === 'role-remove') { setRole(env, { remove: String(fields.id ?? ''), why, by }); return { ok: true, message: `Removed the ${fields.id} role.`, page: '' }; }
+        const role = roleFromFields(fields);
+        const r = setRole(env, { role, why, by });
+        const had = cur.roles.some((x) => x.id === role.id);
+        return { ok: true, message: `${had ? 'Saved' : 'Added'} the ${role.id} role: ${andList(r.roles.find((x) => x.id === role.id)?.eligible ?? []) || 'no model fits it yet'}.`, page: '' };
+      }
       case 'model-choice': {
         const choice = ownerModelChoice(env, OWNER, fields);
         return { ok: true, message: `Saved ${who(choice.agent)}'s model preference. New turns use ${choice.effective === 'auto' ? 'Auto' : HARNESS_WORDS[choice.effective]} when available.`, page: '' };
