@@ -152,13 +152,29 @@ test('the owner is asked once per agent and stretch of silence; his Allow writes
   const markAid = load(h.env).writeOffAsks[`mark:${far}`].approval;
   states[markAid] = 'expired';
   await askDarkBoxes(h.env, { convs });
+  assert.equal(load(h.env).writeOffAsks[`mark:${far}`], undefined, 'refiled on the next pass, never beside the old one');
+  await askDarkBoxes(h.env, { convs });
   const again = load(h.env).writeOffAsks[`mark:${far}`].approval;
   assert.notEqual(again, markAid);
+  // One of its houses heard again: the card no longer says what an Allow would do, so it's taken back and asked anew.
+  update(h.env, (s) => { s.houses['h-15'] = { id: 'h-15', agent: 'mark', box: far, state: 'running' }; });
+  const convs2 = [...convs, { conversation: 'cv-00000000000f', agent: 'mark', body: 'claude:h-15-b0000006' }];
+  await askDarkBoxes(h.env, { convs: convs2 });
+  assert.ok(withdrawn.includes(again));
+  await askDarkBoxes(h.env, { convs: convs2 });
+  const grown = load(h.env).writeOffAsks[`mark:${far}`];
+  assert.deepEqual(grown.houses, ['h-15', 'h-9']);
+  writeFileSync(join(hosts, 'mark@p-dana.json'), JSON.stringify({ house: 'h-15', report: { at: Date.now(), house: 'h-15', bodies: {} } }));
+  await askDarkBoxes(h.env, { convs: convs2 });
+  assert.ok(withdrawn.includes(grown.approval), 'shrunk: taken back, not left to stall');
+  await askDarkBoxes(h.env, { convs: convs2 });
+  const shrunk = load(h.env).writeOffAsks[`mark:${far}`];
+  assert.deepEqual(shrunk.houses, ['h-9']);
   // The box comes back: its card is withdrawn, and that Allow no longer applies.
   update(h.env, (s) => { s.boxes[far].lastSeen = new Date().toISOString(); });
-  assert.match(writeOffAsk(h.env, { agent: 'mark', box: far, target: T('mark'), approval: again }).why, /heard from/);
-  await askDarkBoxes(h.env, { convs });
-  assert.ok(withdrawn.includes(again));
+  assert.match(writeOffAsk(h.env, { agent: 'mark', box: far, target: T('mark'), approval: shrunk.approval }).why, /heard from/);
+  await askDarkBoxes(h.env, { convs: convs2 });
+  assert.ok(withdrawn.includes(shrunk.approval));
   assert.equal(load(h.env).writeOffAsks[`mark:${far}`], undefined);
 });
 

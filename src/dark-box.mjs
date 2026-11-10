@@ -63,19 +63,24 @@ export async function askDarkBoxes(env, { convs, nowMs = Date.now(), warn = (m) 
   let s;
   try { s = load(env); } catch { return; }
   const held = heldOnDarkBoxes(env, s, convs, nowMs);
+  // A card taken back this pass is asked anew on the next one, once its withdraw has landed: never two cards at once.
+  const later = new Set();
   for (const [key, a] of Object.entries(s.writeOffAsks ?? {})) {
     const x = held[key];
     let drop = !x || a.applied || (a.target && x.target !== a.target);
     if (!drop && a.approval) {
       const st = await stateOf(env, x.agent, a.approval);
       // Over (expired, used without being applied, withdrawn) or still waiting while more houses went quiet: asked anew.
-      drop = OVER.has(st) || (st === 'pending' && x.houses.some((h) => !(a.houses ?? []).includes(h)));
+      // Over (expired, used without being applied, withdrawn), or its houses changed either way: asked anew.
+      const same = x.houses.length === (a.houses ?? []).length && x.houses.every((h) => a.houses.includes(h));
+      drop = OVER.has(st) || ((st === 'pending' || st === 'allowed') && !same);
     }
     if (!drop) continue;
     update(env, (st) => { if (st.writeOffAsks?.[key]?.at === a.at) delete st.writeOffAsks[key]; });
-    if (a.approval && !a.applied) withdraw(env, key.split(':')[0], a.approval, warn);
+    if (a.approval && !a.applied) { await withdraw(env, key.split(':')[0], a.approval, warn); later.add(key); }
   }
   for (const [key, x] of Object.entries(held)) {
+    if (later.has(key)) continue;
     const at = new Date(nowMs).toISOString();
     const mine = update(env, (st) => {
       const cur = st.writeOffAsks?.[key];
@@ -115,12 +120,12 @@ export async function askDarkBoxes(env, { convs, nowMs = Date.now(), warn = (m) 
   }
 }
 
-function withdraw(env, agent, aid, warn) {
+async function withdraw(env, agent, aid, warn) {
   try {
     const fx = approvalsFake(env);
     if (fx) return void fx.withdraw?.(aid);
-    approvalsRunAsync(env, ['withdraw', aid, '--as', runtimeAs(agent)])
-      .then((r) => { if (r.error || r.status !== 0) warn(`couldn't withdraw ${aid}: ${approvalsWhy(r).slice(-200)}`); });
+    const r = await approvalsRunAsync(env, ['withdraw', aid, '--as', runtimeAs(agent)]);
+    if (r.error || r.status !== 0) warn(`couldn't withdraw ${aid}: ${approvalsWhy(r).slice(-200)}`);
   } catch (e) { warn(`couldn't withdraw ${aid}: ${e.message}`); }
 }
 
