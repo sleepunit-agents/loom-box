@@ -71,10 +71,12 @@ export const FINALS_MAX = 300 * 1024;
  * beat, so many in one house could crowd out a packed part. A cut one says so. Below the cap, untouched.
  */
 export function fitFinals(report) {
+  // Measured as sent: JSON, where a control character takes 6 bytes.
+  const sent = (s) => Buffer.byteLength(JSON.stringify(s));
   const finals = Object.values(report.bodies ?? {}).filter((b) => typeof b.final === 'string');
-  if (finals.reduce((k, b) => k + Buffer.byteLength(b.final), 0) <= FINALS_MAX) return report;
-  const keep = Math.floor((FINALS_MAX / finals.length - 64) / 3); // UTF-16 units: at most 3 bytes each in UTF-8
-  for (const b of finals) if (Buffer.byteLength(b.final) > keep) {
+  if (finals.reduce((k, b) => k + sent(b.final), 0) <= FINALS_MAX) return report;
+  const keep = Math.floor((FINALS_MAX / finals.length - 64) / 6); // UTF-16 units: at most 6 bytes each, as JSON
+  for (const b of finals) if (sent(b.final) > FINALS_MAX / finals.length) {
     let t = b.final.slice(0, Math.max(0, keep));
     if (/[\ud800-\udbff]$/.test(t)) t = t.slice(0, -1);
     b.final = `${t}\n… (cut to fit: ${finals.length} finals in one report)`;

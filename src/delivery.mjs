@@ -1633,14 +1633,16 @@ export function shownCards(env, c, cards) {
   // A house's command line and its body's words pass the gate on shape alone, so a house could put anything there: that
   // is trusted for the owner alone only, where its body could already post the same text in its own thread as a message
   // (coordinator, 2026-11-10). Where anyone else is, only a fixed label goes, decided here, never by the house.
+  // Where someone else is, a parent is only one of these cards' ids (a house's own word otherwise could say anything).
+  const ids = new Set(cards.map((x) => x?.id));
   return cards.filter((x) => x && (x.tool !== 'text' || ownersAlone)).map((x) => {
     // Its words aren't even read where they won't go (a diff is worked out only when it's read).
     const { fixed, ...parts } = stepParts(x, undefined, { words: ownersAlone });
     if (ownersAlone) return { ...baseCard(x), ...parts };
     // Where someone else is: its fixed label (set where the card was made, never derived from its words), else "Did a
     // step"; no words of any kind (its label, command, diff, plan items); its state, result phrase, times and nesting.
-    const { detail: _d, body: _b, items: _i, ...plain } = parts;
-    return { ...baseCard(x), summary: fixed ?? 'Did a step', ...plain };
+    const { detail: _d, body: _b, items: _i, parent, ...plain } = parts;
+    return { ...baseCard(x), summary: fixed ?? 'Did a step', ...plain, ...(parent && ids.has(parent) ? { parent } : {}) };
   });
 }
 

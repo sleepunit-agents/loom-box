@@ -439,3 +439,13 @@ test('a job\'s own house is trusted for a step\'s command line and its own words
   assert.deepEqual(withPerson.map((x) => [x.tool, x.summary, x.detail, x.body]), [['Bash', 'Ran a command', undefined, undefined]]);
   assert.ok(!JSON.stringify(withPerson).includes('HOUSE-'), 'where someone else is: fixed labels only');
 });
+
+test('where someone else is, a parent is only one of the cards\' own ids (t-2109)', async () => {
+  const { shownCards } = await import('../src/delivery.mjs');
+  const w = world();
+  const cards = [{ id: 'a', at: 'x', tool: 'Agent', summary: 's', fixed: 'Ran a command', state: 'done' },
+    { id: 'b', at: 'x', tool: 'Bash', summary: 's', state: 'done', parent: 'a' },
+    { id: 'c', at: 'x', tool: 'Bash', summary: 's', state: 'done', parent: 'Loren-wants-rent' }];
+  const shown = shownCards(w.env, { agent: 'art' }, cards);
+  assert.deepEqual(shown.map((x) => x.parent), [undefined, 'a', undefined]);
+});

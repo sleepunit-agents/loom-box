@@ -543,3 +543,27 @@ test('a PGP private key block goes whole too (t-2109)', async () => {
   const key = ['-----BEGIN PGP PRIVATE KEY BLOCK-----', '', 'lQOYBF0abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUV', 'ZieSrY/uAZd804E8', '=Ab3x', '-----END PGP PRIVATE KEY BLOCK-----'];
   for (const out of [diffText(key.map((l) => `+${l}`).join('\n')), shownText(key.join('\n'))]) for (const bit of ['ZieSrY', '=Ab3x', 'lQOYBF0']) assert.ok(!out.includes(bit), bit);
 });
+
+test('finals are measured as sent (JSON): finals of control characters still fit (t-2109)', async () => {
+  const { REPORT_MAX, FINALS_MAX, fitCards, packedParts } = await import('../src/bodyhost.mjs');
+  const bodies = Object.fromEntries(Array.from({ length: 3 }, (_, i) => [`b000000${i}`, { status: 'idle', final: '\x1b'.repeat(40_000), cards: [] }]));
+  const report = { bodies, done: {}, packed: packedParts(new Map([['b9', { parts: ['p'.repeat(360 * 1024)], next: 0, since: 0 }]]), false) };
+  assert.ok(Buffer.byteLength(JSON.stringify(report)) > 1024 * 1024);
+  fitCards(report, REPORT_MAX);
+  assert.ok(Buffer.byteLength(JSON.stringify(report)) <= REPORT_MAX);
+  assert.ok(Object.values(report.bodies).reduce((k, b) => k + Buffer.byteLength(JSON.stringify(b.final)), 0) <= FINALS_MAX);
+});
+
+test('a diff is worked out once for the process, not again each pass (t-2109)', () => {
+  const big = Array.from({ length: 3000 }, (_, i) => `line ${i} ${'y'.repeat(40)}`);
+  const lines = [use('w1', 'Write', { file_path: '/home/art/Code/x/a.txt', content: big.join('\n') }), { type: 'user', timestamp: '2026-11-10T10:00:05.000Z', toolUseResult: { type: 'create', content: big.join('\n') }, message: { content: [{ type: 'tool_result', tool_use_id: 'w1', content: 'ok' }] } }];
+  const first = stepParts(claudeCards(lines)[0]);
+  const t0 = process.hrtime.bigint();
+  for (let k = 0; k < 20; k++) assert.equal(stepParts(claudeCards(lines)[0]).body, first.body);
+  assert.ok(Number(process.hrtime.bigint() - t0) / 1e6 < 200, 'twenty passes from what was made once');
+});
+
+test('a house\'s fixed label naming a private file isn\'t kept (t-2109)', () => {
+  assert.equal(stepParts({ id: 'x', tool: 'Read', summary: 's', state: 'done', fixed: 'Read .env' }).fixed, undefined);
+  assert.equal(stepParts({ id: 'x', tool: 'Read', summary: 's', state: 'done', fixed: 'Read delivery.ts' }).fixed, 'Read delivery.ts');
+});

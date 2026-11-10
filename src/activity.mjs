@@ -488,10 +488,10 @@ function claudeResult(name, r, text, failed, exit, input = {}) {
       return { result: shellResult({ exit, output, failed }) };
     }
     case 'Read': { const n = count(u.file?.numLines); return n === null ? {} : { result: `Read ${plural(n, 'line')}` }; }
-    case 'Edit': case 'MultiEdit': { const p = patchLine(u.structuredPatch); return p ? { result: p, ...(shows ? { body: () => patchText(u.structuredPatch) } : {}) } : {}; }
+    case 'Edit': case 'MultiEdit': { const p = patchLine(u.structuredPatch); return p ? { result: p, ...(shows ? { body: () => worked('patch', JSON.stringify(u.structuredPatch), () => patchText(u.structuredPatch)) } : {}) } : {}; }
     case 'Write': {
-      if (u.type === 'create' && typeof u.content === 'string') return { result: `Wrote ${plural(u.content.split('\n').length, 'line')}`, ...(shows ? { body: () => diffText(u.content.split('\n').map((l) => `+${l}`).join('\n')) } : {}) };
-      const p = patchLine(u.structuredPatch); return p ? { result: p, ...(shows ? { body: () => patchText(u.structuredPatch) } : {}) } : {};
+      if (u.type === 'create' && typeof u.content === 'string') return { result: `Wrote ${plural(u.content.split('\n').length, 'line')}`, ...(shows ? { body: () => worked('write', u.content, () => diffText(u.content.split('\n').map((l) => `+${l}`).join('\n'))) } : {}) };
+      const p = patchLine(u.structuredPatch); return p ? { result: p, ...(shows ? { body: () => worked('patch', JSON.stringify(u.structuredPatch), () => patchText(u.structuredPatch)) } : {}) } : {};
     }
     case 'Grep': { const f = count(u.numFiles), n = count(u.numLines); return n !== null && u.mode === 'content' ? { result: `Found ${plural(n, 'line')}` } : f !== null ? { result: `Found ${plural(f, 'file')}` } : {}; }
     case 'Glob': { const f = count(u.numFiles); return f === null ? {} : { result: `Found ${plural(f, 'file')}` }; }
@@ -505,6 +505,21 @@ function claudeResult(name, r, text, failed, exit, input = {}) {
  * newest few are ever kept or sent, so their diffs and words are worked out, redacted line by line, for those only.
  * An empty one reads as none.
  */
+/**
+ * Text worked out once (t-2109): a diff or words shown are made again from the same input every pass (a transcript is
+ * read whole each time), so what was made is kept for the process by its input's hash, the newest WORKED_MAX of them.
+ */
+const WORKED = new Map();
+const WORKED_MAX = 600;
+function worked(kind, input, make) {
+  const k = `${kind}:${createHash('sha256').update(String(input)).digest('hex')}`;
+  if (WORKED.has(k)) { const v = WORKED.get(k); WORKED.delete(k); WORKED.set(k, v); return v; }
+  const v = make();
+  WORKED.set(k, v);
+  if (WORKED.size > WORKED_MAX) WORKED.delete(WORKED.keys().next().value);
+  return v;
+}
+
 function lazyBody(card, make) {
   let made = false, v;
   Object.defineProperty(card, 'body', { enumerable: true, configurable: true,
@@ -530,7 +545,7 @@ export function claudeCards(lines, prefix = '', parent = null) {
         const label = part('text', firstLine(c.text), MAX_SUMMARY);
         if (label === GONE) return;
         const card = { id, at: cardTime(l.timestamp), tool: 'text', summary: clean(label), fixed: 'Wrote its words', state: 'done', ...(parent ? { parent } : {}) };
-        cards.set(id, lazyBody(card, () => shownText(c.text.replace(SGR, ''), MAX_TEXT)));
+        cards.set(id, lazyBody(card, () => worked('text', c.text, () => shownText(c.text.replace(SGR, ''), MAX_TEXT))));
       });
       for (const c of content) {
         if (c?.type !== 'tool_use' || typeof c.id !== 'string') continue;
@@ -662,7 +677,9 @@ export function cleanAlive(a) {
 export function stepParts(c, idOf = (x) => x, { words = true } = {}) {
   const o = {};
   // Its fixed label, only in a shape made here (FIXED); else none (delivery then says "Did a step").
-  if (typeof c?.fixed === 'string' && c.fixed.length <= MAX_SUMMARY && FIXED.test(c.fixed) && redact(c.fixed) === c.fixed) o.fixed = c.fixed;
+  // A file it names isn't a private one (a house's label could say `Read .env`; one made here never does).
+  const named = typeof c?.fixed === 'string' ? /^(?:Read|Edited|Wrote|Changed) (\S+)/.exec(c.fixed)?.[1] : undefined;
+  if (typeof c?.fixed === 'string' && c.fixed.length <= MAX_SUMMARY && FIXED.test(c.fixed) && redact(c.fixed) === c.fixed && !(named && privateFile(named))) o.fixed = c.fixed;
   const int = (v, lo, hi) => (Number.isInteger(v) && v >= lo && v <= hi ? v : null);
   const tool = String(c?.tool ?? '');
   // A target only of the shape made here for its tool (detailOk): a command; a file's base name; a search's pattern.
@@ -670,7 +687,7 @@ export function stepParts(c, idOf = (x) => x, { words = true } = {}) {
   // A body only where one is made here (bodyAllowed): the body's words, or a diff of a file whose shown name is plain
   // and not private. Never a shell step's output, never a read's.
   // Read only where it may go: its words wanted, and its tool's (a lazy body is worked out only then).
-  if (words && bodyAllowed(tool, o.detail) && typeof c?.body === 'string' && c.body) { const t = tool === 'text' ? shownText(c.body, MAX_TEXT) : diffText(c.body); if (t) o.body = t; }
+  if (words && bodyAllowed(tool, o.detail) && typeof c?.body === 'string' && c.body) { const t = tool === 'text' ? worked('gate-text', c.body, () => shownText(c.body, MAX_TEXT)) : worked('gate-diff', c.body, () => diffText(c.body)); if (t) o.body = t; }
   // A result is one of the fixed phrases made here (shellResult, claudeResult, codexCards), never a house's prose.
   if (typeof c?.result === 'string' && RESULT.test(c.result) && redact(c.result) === c.result) o.result = c.result;
   const exit = int(c?.exit, -999_999, 999_999); if (exit !== null) o.exit = exit;
