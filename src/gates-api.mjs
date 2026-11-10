@@ -25,7 +25,7 @@ export async function runFor(env, caller, argv, store = loomStore(env), core = c
       const cv = flag('--conversation');
       const { heldConv } = await import('./delivery.mjs');
       const held = /^cv-[0-9a-f]{12}$/.test(cv ?? '') && typeof proof.key === 'string' && proof.key ? heldConv(env, cv, proof, { caller }) : null;
-      if (!held || held.agent !== caller.agent) return no('relays: from a house, only its own conversation\'s, proved (`loom runtime relays` from the body\'s shell)');
+      if (!held || held.agent !== caller.agent) return no('relays: from a house, only its own conversation\'s, proved (`loom runtime relays` from the body\'s shell; if it says this right after the body started, its session isn\'t known yet: try again in a moment)');
       return ok(r.relaysOf(env, caller.agent, flag('--thread'), cv));
     }
     const bad = args.filter((x, i) => x.startsWith('--') && !['--to', '--say', '--why', '--reply-to', '--from', '--approval', '--conversation'].includes(x) && !(i > 0 && args[i - 1].startsWith('--')));

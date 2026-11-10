@@ -784,6 +784,9 @@ describe('relays and answers held to the house holding the conversation (t-2134)
     assert.match(reply.text, /Only the house holding the conversation .* answers into the asker's/);
     assert.equal(delivered.at(-1).venue, 'relay');
     assert.notEqual(w.core.turns.at(-1)?.conversation, origin.conversation);
+    // Nor from loom's machine (no house) when the reached conversation's body runs in a house.
+    const local = await relay(w.env, { agent: 'mark' }, { to: 'art', say: 'looks good from loom\'s machine', reply_to: id }, d);
+    assert.match(local.text, /Only the house holding the conversation/);
     // From the house that holds it: returned to the asker's conversation.
     const back = await relay(w.env, { agent: 'mark', house: 'h-mark' }, { to: 'art', say: 'looks good', reply_to: id }, d);
     assert.match(back.text, new RegExp(`Returned to ${origin.conversation}`));

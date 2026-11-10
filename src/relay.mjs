@@ -286,15 +286,16 @@ export async function relay(env, caller, args, d = depsOf(env), proof = {}) {
 }
 
 /**
- * Whether `caller` answers relay `original` from where it was delivered: a caller in a house only when that house runs
- * the body of the conversation the relay reached (houseProblem); one on loom's machine (no house) as before. A relay
- * with no recorded conversation (an older one, or one whose delivery failed) is answered by no house.
+ * Whether `caller` answers relay `original` from where it was delivered: only from where the body of the conversation
+ * the relay reached runs (houseProblem): its house, or loom's machine for a local one. A relay with no recorded
+ * conversation (an older one, or one whose delivery failed) is answered into the relay conversation.
  */
 function answeringHouse(env, caller, original) {
   if (!original) return false;
-  if (typeof caller?.house !== 'string') return true;
   const c = original.conversation ? loadConv(env, original.conversation) : null;
-  return !!c && c.agent === caller.agent && !houseProblem(env, c, caller);
+  // houseProblem holds a caller in no house (loom's machine) to a conversation whose body runs there too, and a house to
+  // its own; a moved seat's old house never answers for it (heldConv's rule, t-2061).
+  return !!c && c.agent === caller?.agent && !houseProblem(env, c, caller) && !seatMoved(env, c);
 }
 
 export function depsOf(env) {
@@ -340,7 +341,12 @@ export async function relayTool(env, argv, input, d) {
 export function relaysOf(env, agent, thread, conversation) {
   let rows = readRelays(env).filter((r) => r.from === agent || r.to === agent);
   // From a house (t-2134): only the relays its own conversation asked or was reached by, never the agent's others.
-  if (conversation !== undefined) rows = rows.filter((r) => (r.from === agent && r.origin === conversation) || (r.to === agent && r.conversation === conversation));
+  if (conversation !== undefined) {
+    // What it asked, what reached it, and what it answered to what reached it (an answer from a relay conversation
+    // has no origin of its own: its reply_to's conversation says where it was said).
+    const reached = new Set(rows.filter((r) => r.to === agent && r.conversation === conversation).map((r) => r.id));
+    rows = rows.filter((r) => (r.from === agent && (r.origin === conversation || (!r.origin && reached.has(r.reply_to)))) || reached.has(r.id));
+  }
   if (thread) rows = rows.filter((r) => (r.thread ?? r.id) === thread);
   if (!rows.length) return `${agent} has no relays\n`;
   return rows.slice(-50).map((r) => `${r.id} ${new Date(r.at).toISOString().slice(5, 16).replace('T', ' ')} ${r.from} -> ${r.to}${r.reply_to ? ` re ${r.reply_to}` : ''}${r.why ? `: ${r.why}` : ''}${r.origin && r.from === agent ? ` [from ${r.origin}${r.origin_run ? ` ${r.origin_run}` : ''}]` : ''}${r.reply_to && r.conversation && r.to === agent ? ` [to ${r.conversation}]` : ''}\n`).join('');
