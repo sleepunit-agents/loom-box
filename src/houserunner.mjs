@@ -602,7 +602,9 @@ export function nativeCollectionExchange(env, { agent, house, plan, requiredHost
     const collection = x.offlineCollection;
     if (collection.plan !== plan) fail('native collection plan changed');
     const transferDir = key => partDir(env, agent, house, 'nc-' + createHash('sha256').update(plan + '\0' + key).digest('hex').slice(0, 40));
-    const result = () => ({ plan, complete: collection.complete === true, entries: collection.entries.map(e => ({ ...e, received: !!collection.done[e.key] })) });
+    // Given up on (t-2079): a box that waited past its limit records what it couldn't save as lost; the house finishes.
+    const incomplete = () => Object.values(collection.done).some(d => d.reason === 'collection-timeout');
+    const result = () => ({ plan, complete: collection.complete === true, ...(incomplete() ? { incomplete: 'collection-timeout' } : {}), entries: collection.entries.map(e => ({ ...e, received: !!collection.done[e.key] })) });
     if (q.phase === 'plan') return result();
     if (q.phase === 'finish') {
       if (collection.entries.some(e => !collection.done[e.key])) fail('native session collection has not been acknowledged');
@@ -619,7 +621,7 @@ export function nativeCollectionExchange(env, { agent, house, plan, requiredHost
     const entry = collection.entries.find(e => e.key === q.key);
     if (!entry) fail('native collection entry belongs to another plan');
     if (q.phase === 'loss') {
-      if (q.reason !== 'missing-history' || !validPendingInbox(q.pending ?? null)) fail('invalid native history-loss receipt');
+      if (!['missing-history', 'collection-timeout'].includes(q.reason) || !validPendingInbox(q.pending ?? null)) fail('invalid native history-loss receipt');
       if (entry.transfer) fail('an existing native transfer cannot be replaced by a loss receipt');
       const pending = q.pending ?? null, prior = collection.done[entry.key];
       if (prior) {
@@ -659,7 +661,7 @@ export function nativeCollectionExchange(env, { agent, house, plan, requiredHost
         x.report ??= { bodies: {}, done: {}, caps: [] }; x.report.bodies ??= {};
         x.report.bodies[entry.bodyId] = { ...(x.report.bodies[entry.bodyId] ?? {}), harness: entry.harness, status: 'ended', feedable: false };
       }
-      collection.done[entry.key] = { lost: true, pending, ...(consumed ? { consumed: true } : {}), ...(entry.bodyId ? { bodyId: entry.bodyId } : {}), ...(entry.session ? { session: entry.session } : {}) };
+      collection.done[entry.key] = { lost: true, pending, ...(q.reason !== 'missing-history' ? { reason: q.reason } : {}), ...(consumed ? { consumed: true } : {}), ...(entry.bodyId ? { bodyId: entry.bodyId } : {}), ...(entry.session ? { session: entry.session } : {}) };
       writeJson(hostFile(env, agent, seat), h);
       return { plan, received: true };
     }

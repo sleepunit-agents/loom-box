@@ -27,13 +27,23 @@ import { sessionsBusy } from './busy.mjs';
 import { bootInfo, SAMPLE_MS, unitSampler } from './watch.mjs';
 import { sampleHealth } from './health.mjs';
 import { harnessStatus, LOGIN_HARNESSES, loginDir, pruneLoginDir, startLogin, sweepCliContainers } from './logins.mjs';
-import { collectNativeHistory } from './native-collection-client.mjs';
+import { COLLECTION_TIMEOUT, collectNativeHistory } from './native-collection-client.mjs';
 
 /** How often a box asks its harness CLIs whether they're logged in (and at once after a login). */
 export const STATUS_MS = 5 * 60_000;
 
 export const POLL_MS = 15_000;
 const STOP_GRACE_MS = 30_000;
+/**
+ * How long a stopped house's native-history collection may keep failing before the box finishes it incomplete
+ * (t-2079): what was saved is kept, what wasn't is recorded as lost, and the house ends instead of holding its bodies,
+ * and their spawn slots, for hours. LOOM_BOX_COLLECTION_GIVE_UP_S, default 10 minutes.
+ */
+export const COLLECTION_GIVE_UP_MS = 10 * 60_000;
+export function collectionGiveUpOf(env) {
+  const n = Number(env.LOOM_BOX_COLLECTION_GIVE_UP_S);
+  return env.LOOM_BOX_COLLECTION_GIVE_UP_S !== undefined && env.LOOM_BOX_COLLECTION_GIVE_UP_S !== '' && Number.isFinite(n) && n >= 0 ? n * 1000 : COLLECTION_GIVE_UP_MS;
+}
 const LOG_TAIL = 4000;
 
 export class BoxError extends Error {}
@@ -461,7 +471,7 @@ function rootless(env) {
 export function runner(env, client, { loomUrl, labels = [], log = (m) => process.stderr.write(`loom-box: ${m}\n`), hasSocket = (p) => existsSync(p), hasCdi = () => CDI_SPECS.some((p) => existsSync(p)), upgrade = maybeUpgrade,
   status = (agents, force) => harnessStatus(env, { agents, force }), login = (h, o) => startLogin(env, h, o), codexUsage = () => null, clock = () => Date.now(), secureChannel = true,
   sweep = () => sweepCliContainers(env), runtime = () => ({ commit: ownCommit(), piece: ownPiece() }),
-  buildOf = (c) => buildNow(env, c), houseImage = (id) => imageOf(env, id), sampleUnits: unitsImpl = undefined, bootInfo: bootImpl = undefined, sampleHealth: healthImpl = undefined, reportOnly = undefined }) {
+  buildOf = (c) => buildNow(env, c), houseImage = (id) => imageOf(env, id), sampleUnits: unitsImpl = undefined, bootInfo: bootImpl = undefined, sampleHealth: healthImpl = undefined, reportOnly = undefined, collectionGiveUpMs = collectionGiveUpOf(env) }) {
   const houses = new Map(); // id -> { child, dir, stopAt? }
   // This runner, as the control plane tells it from one before it: a login handed to another run is one a restart
   // dropped (control.mjs, settleLogins).
@@ -716,9 +726,25 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
         else {
           const seen = physical(d.id);
           if (!['gone', 'stopped'].includes(seen.state)) throw Error('native history still has a possible physical writer');
-          receipt = await collectNativeHistory({ client, id: d.id, root: pathJoin(e.dir, 'native'), snapshot: pathJoin(e.dir, 'native-snapshot'), physical: seen.state });
+          // Its container gone and its collection failing past the limit (t-2079): finished incomplete, not held forever.
+          if (!Number.isSafeInteger(d.collectionSince)) { d.collectionSince = clock(); keepEnding(e); }
+          const late = clock() - d.collectionSince >= collectionGiveUpMs;
+          const args = { client, id: d.id, root: pathJoin(e.dir, 'native'), snapshot: pathJoin(e.dir, 'native-snapshot'), physical: seen.state };
+          try { receipt = await collectNativeHistory(args); }
+          catch (error) {
+            if (!late) throw error;
+            log(`${d.id}: native history collection still failing after ${Math.round((clock() - d.collectionSince) / 60_000)} min (${error.message}); finishing it incomplete`);
+            receipt = await collectNativeHistory({ ...args, incomplete: COLLECTION_TIMEOUT });
+            d.nativeIncomplete = true;
+          }
         }
         if (receipt?.complete !== true) throw Error('native collection was not acknowledged');
+        // What couldn't be sent stays on this box, out of cleanup's way: given up on is not deleted.
+        if (d.nativeIncomplete && existsSync(pathJoin(e.dir, 'native'))) {
+          const kept = pathJoin(e.dir, `native-unsaved-${clock()}`);
+          renameSync(pathJoin(e.dir, 'native'), kept);
+          log(`${d.id}: its unsaved native history is kept at ${kept}`);
+        }
         d.nativeUploaded = true; keepEnding(e);
       }
       if (!d.uploaded) {
