@@ -182,16 +182,30 @@ export function boards(env, nowS = Date.now() / 1000, adapters = adapterStatuses
   return mergeAdapters(out, adapters, nowS);
 }
 
-export function adapterStatuses(env) {
-  const out = {};
+/**
+ * How long one read of the adapters' status serves (t-2065). Each read is `loom <venue> status --json`: two node
+ * processes per adapter, and every manifest, Now page and delivery-loop watch asked again, several a second with
+ * pages open. It's display only (which bridges show live), never who may do what.
+ */
+export const ADAPTER_STATUS_MS = 15_000;
+const adapterFile = (env) => join(dataDir(env), 'adapter-status.json');
+
+export function adapterStatuses(env, nowMs = Date.now()) {
   const home = env.LOOM_HOME || join(env.XDG_CONFIG_HOME || join(env.HOME || homedir(), '.config'), 'loom');
-  for (const venue of ['discord', 'slack']) {
-    if (!existsSync(join(home, 'pieces', venue, 'piece.json'))) continue;
+  const venues = ['discord', 'slack'].filter((v) => existsSync(join(home, 'pieces', v, 'piece.json')));
+  if (!venues.length) return {};
+  const key = venues.join(',');
+  const had = readJson(adapterFile(env));
+  if (had && had.key === key && typeof had.at === 'number' && nowMs - had.at >= 0 && nowMs - had.at < ADAPTER_STATUS_MS
+    && had.out && typeof had.out === 'object' && !Array.isArray(had.out)) return had.out;
+  const out = {};
+  for (const venue of venues) {
     try {
       const d = JSON.parse(execFileSync(env.LOOM_BIN || 'loom', [venue, 'status', '--json'], { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] }));
       if (d.mode === 'live' && Array.isArray(d.agents)) out[venue] = d;
     } catch { /* Missing or unavailable: the old board remains authoritative. */ }
   }
+  try { ensureDir(dataDir(env)); writePrivate(adapterFile(env), JSON.stringify({ at: nowMs, key, out })); } catch { /* asked again next time */ }
   return out;
 }
 
