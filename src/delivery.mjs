@@ -1596,8 +1596,8 @@ async function activityPass(env, c, d) {
   });
   const nowMs = (() => { try { return d.now().getTime(); } catch { return Date.now(); } })();
   const { out, next } = changedCards(cards, c.cardsSent ?? {});
-  // A thread core said is gone (409) is told nothing, for a while (it may be unarchived): its cards are marked told.
-  if (held(c, 'noThread', nowMs)) { if (out.length) saveSent(env, c, next, null); return; }
+  // A thread core said is gone (409) is told nothing for a while (it may be unarchived): its cards wait, untold.
+  if (held(c, 'noThread', nowMs)) return;
   let alive = null;
   try { alive = cleanAlive(r.signOfLife?.(body)); } catch { /* it can't say */ }
   const old = held(c, 'oldCore', nowMs);

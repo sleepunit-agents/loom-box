@@ -252,11 +252,15 @@ const fixedWhy = (label, why) => (why ? `${label} — ${why}` : label);
 
 /** The shapes a fixed label may take (a house's is checked against them): fixed words, a plain name, a count, an id. */
 const NAME = '[A-Za-z0-9._+-]{1,60}';
+/** failWhy's fixed phrases (redact.mjs WHY), the only words a failure adds to a fixed label. */
+const WHY_PHRASES = ['type errors', 'command not found', 'no such file', 'file not read first', 'text to replace not found', 'not allowed', 'timed out',
+  'merge conflict', 'push rejected', 'network error', 'not found (404)', 'not authorized', 'npm error', 'syntax error', 'Python error'];
+const WHY_TAIL = `(?:\\d{1,6} tests? failed|${WHY_PHRASES.map((w) => w.replace(/[()]/g, '\\$&')).join('|')})`;
 const FIXED_WORDS = [...new Set(['Ran a command', 'Stopped a background command', 'Searched files', 'Looked for files', 'Searched the web', 'Read a web page',
   'Started a helper', 'Messaged a helper', 'Messaged someone', 'Used a skill', 'Loaded more tools', 'Used a tool', 'Updated its plan', 'Changed files',
   'Read a file', 'Edited a file', 'Wrote a file', 'Did a step', 'Wrote its words', 'Used a task tool', 'Used a GitHub tool', ...Object.values(LOOM_TOOLS), ...PRIVATE.map(([, w]) => w)])];
 const esc = (w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-export const FIXED = new RegExp(`^(?:${FIXED_WORDS.map(esc).join('|')}|(?:Read|Edited|Wrote|Changed) ${NAME}|Changed \\d{1,6} files?|Plan \\(\\d{1,4}/\\d{1,4}\\)|Messaged [a-z][a-z0-9]{0,30}(?:-[a-z0-9]{1,30}){0,3}|Used a task tool t-\\d{1,9}|Used a GitHub tool #\\d{1,9})(?: — (?:exit -?\\d{1,6}(?:: [a-z0-9 ()]{1,40})?|[a-z0-9 ()]{1,40}))?$`);
+export const FIXED = new RegExp(`^(?:${FIXED_WORDS.map(esc).join('|')}|(?:Read|Edited|Wrote|Changed) ${NAME}|Changed \\d{1,6} files?|Plan \\(\\d{1,4}/\\d{1,4}\\)|Messaged [a-z][a-z0-9]{0,30}(?:-[a-z0-9]{1,30}){0,3}|Used a task tool t-\\d{1,9}|Used a GitHub tool #\\d{1,9})(?: — (?:exit -?\\d{1,6}(?:: ${WHY_TAIL})?|${WHY_TAIL}))?$`);
 
 /** A glob's last part, through the gate; checked whole first, so a secret with a / in it never shows its tail. */
 function lastPart(g) {
@@ -301,11 +305,9 @@ const CONTROL = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g;
  * and redacted, a private path named. Its colours are kept only when redaction left that text as it was; else it's the
  * redacted text, without them. Nothing is taken out after redaction runs.
  */
-function shownTextLine(line) {
-  // Terminal codes but colour go whole; then, outside colour codes, every unprintable character but a tab (the one
-  // list, redact.mjs UNPRINTABLE: controls, format and invisible characters, line and paragraph separators, lone
-  // surrogates, private and unassigned code points).
-  const norm = String(line)
+/** A line with every terminal code but a short colour gone whole, and every other unprintable character but a tab. */
+function normLine(line) {
+  return String(line)
     // OSC (a title, a link) to its end; any CSI (ECMA-48: parameters, intermediates, a final byte) but a colour of at
     // most 30 parameter characters; any other escape with its intermediates and final byte (ESC ( B, ESC 7, ESC =).
     .replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\|$)/g, '')
@@ -314,6 +316,10 @@ function shownTextLine(line) {
     .split(/(\x1b\[[0-9;]{0,30}m)/)
     .map((seg, i) => (i % 2 ? seg : seg.replace(UNPRINTABLE, (m) => m.replace(/[^\t]/gu, ''))))
     .join('');
+}
+
+function shownTextLine(line) {
+  const norm = normLine(line);
   const plain = norm.replace(SGR, '');
   // A line past INPUT_MAX is cut at a word, before redaction, and says so.
   const cut = plain.length > INPUT_MAX ? cutInput(plain) : plain;
@@ -340,7 +346,8 @@ function capLines(lines, max) {
  * redact and `-print(…)` isn't read as a `-p` flag; a hunk header as itself; at most MAX_BODY.
  */
 export function diffText(text) {
-  return capLines(String(text ?? '').slice(0, 2_000_000).split('\n').map((l) => (/^[-+ ]/.test(l) ? `${l[0]}${shownTextLine(l.slice(1))}` : shownTextLine(l))), MAX_BODY);
+  // Its mark is read after the line is normalised, so nothing invisible before it can hide it.
+  return capLines(String(text ?? '').slice(0, 2_000_000).split('\n').map(normLine).map((l) => (/^[-+ ]/.test(l) ? `${l[0]}${shownTextLine(l.slice(1))}` : shownTextLine(l))), MAX_BODY);
 }
 
 /**

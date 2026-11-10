@@ -336,7 +336,7 @@ export class ClaudeRunner {
     // beside the session's, `<session>/subagents/agent-<id>.jsonl`, and its meta names that step (`toolUseId`).
     const dir = join(f.slice(0, -'.jsonl'.length), 'subagents');
     let metas = [];
-    try { metas = readdirSync(dir).filter((n) => /^agent-[A-Za-z0-9]{1,40}\.meta\.json$/.test(n)); } catch { return cards; }
+    try { metas = readdirSync(dir).filter((n) => /^agent-[A-Za-z0-9_-]{1,64}\.meta\.json$/.test(n)); } catch { return cards; }
     const helpers = metas.map((n) => { try { return { n, t: statSync(join(dir, n)).mtimeMs }; } catch { return null; } }).filter(Boolean).sort((a, b) => b.t - a.t).slice(0, 20);
     for (const { n } of helpers) {
       const agent = n.slice('agent-'.length, -'.meta.json'.length);

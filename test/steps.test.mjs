@@ -93,7 +93,7 @@ test('a helper\'s steps nest under the step that started it (Claude Code\'s suba
   writeFileSync(join(proj, session, 'subagents', 'agent-abc123.jsonl'), [l(use('toolu_B', 'Bash', { command: 'ls' })), l(res('toolu_B', 'a', { stdout: 'a', stderr: '' }))].join('\n'));
   // A helper whose step isn't in what was read stands on its own, never dropped.
   writeFileSync(join(proj, session, 'subagents', 'agent-zzz.meta.json'), l({ toolUseId: 'toolu_OTHER' }));
-  writeFileSync(join(proj, session, 'subagents', 'agent-zzz.jsonl'), l(use('toolu_C', 'Bash', { command: 'pwd' })));
+  writeFileSync(join(proj, session, 'subagents', 'agent-zzz.jsonl'), l(use('toolu_C', 'Bash', { command: 'pwd' }, '2026-11-10T10:00:09.000Z')));
   const r = new ClaudeRunner({ projectsDir: join(root, 'projects'), jobsDir: join(root, 'jobs') });
   const cards = r.activity({ id: 'b', slot: { harness: 'claude', session } });
   assert.deepEqual(cards.map((c) => [c.id, c.tool, c.result, c.parent]), [['toolu_A', 'Agent', '1 tool use', undefined], ['abc123:toolu_B', 'Bash', '1 line of output', 'toolu_A'], ['zzz:toolu_C', 'Bash', undefined, undefined]]);
@@ -149,9 +149,13 @@ test('tests counts from node, jest, vitest and pytest', () => {
   assert.equal(testsLine('nothing here'), null);
 });
 
-test('a result or body that moves is sent again', () => {
-  const a = changed([{ id: 'x', tool: 'Bash', summary: 's', state: 'done', at: 'x', body: 'a' }], {});
-  assert.equal(changed([{ id: 'x', tool: 'Bash', summary: 's', state: 'done', at: 'x', body: 'b' }], a.next).out.length, 1);
+test('any part that moves is sent again: its label, fixed label, target, result, body, exit, end, plan items, parent', () => {
+  const base = { id: 'x', tool: 'Bash', summary: 's', fixed: 'Ran a command', state: 'done', at: 'x', detail: 'd', result: 'no output', body: 'a', exit: 0, end: '2026-11-10T10:00:00.000Z', items: [{ text: 'a', state: 'now' }], parent: 'p' };
+  const a = changed([base], {});
+  for (const [k, v] of Object.entries({ summary: 's2', fixed: 'Ran a command — exit 1', detail: 'd2', result: '1 line of output', body: 'b', exit: 1, end: '2026-11-10T10:00:01.000Z', items: [{ text: 'a', state: 'done' }], parent: 'q' })) {
+    assert.equal(changed([{ ...base, [k]: v }], a.next).out.length, 1, k);
+  }
+  assert.equal(changed([base], a.next).out.length, 0);
 });
 
 test('a private file\'s contents never show: an edit of .env, a write of a key, loom\'s stores show counts only', () => {
@@ -348,8 +352,15 @@ test('every card carries a fixed label made where it\'s made: fixed words, a pla
   const [f] = claudeCards([use('ff', 'Bash', { command: 'npm test', description: 'Loren\'s tests' }), res('ff', 'Exit code 1\nℹ fail 3', undefined, true)]);
   assert.equal(f.fixed, 'Ran a command — exit 1: 3 tests failed');
   // A house's fixed label is kept only in a shape made here.
-  for (const bad of ['Messaged mark: "Loren wants rent"', 'Searched for "x"', 'Read notes/loren.md', 'Ran a command — Loren', 'Plan (1/2): Reply to Loren']) assert.equal(stepParts({ fixed: bad }).fixed, undefined, bad);
-  for (const ok of ['Messaged mark', 'Read a.ts', 'Plan (1/2)', 'Ran a command — exit 2: no such file', 'Searched memory']) assert.equal(stepParts({ fixed: ok }).fixed, ok);
+  for (const bad of ['Messaged mark: "Loren wants rent"', 'Searched for "x"', 'Read notes/loren.md', 'Ran a command — Loren', 'Ran a command — exit 2: Loren is here', 'Plan (1/2): Reply to Loren']) assert.equal(stepParts({ fixed: bad }).fixed, undefined, bad);
+  for (const ok of ['Messaged mark', 'Read a.ts', 'Plan (1/2)', 'Ran a command — exit 2: no such file', 'Ran a command — Python error', 'Ran a command — exit 1: 3 tests failed', 'Searched memory']) assert.equal(stepParts({ fixed: ok }).fixed, ok);
   const [x] = codexCards([{ type: 'item.completed', item: { id: 'i', type: 'mcp_tool_call', tool: 'relay', arguments: { to: 'loren', say: 'rent?' }, status: 'completed' } }], 'b:');
   assert.equal(x.fixed, 'Messaged loren');
+});
+
+test('a diff line\'s mark is read after it\'s normalised: an invisible character before it can\'t make a secret look like a flag', () => {
+  for (const pre of ['​', '­', '\x00', '﻿']) {
+    const out = stepParts({ tool: 'Edit', detail: 'a.ts', body: `${pre}+FOO=${GH}` }).body;
+    assert.ok(out && !leak(out) && out.startsWith('+'), JSON.stringify([pre, out]));
+  }
 });

@@ -21,6 +21,8 @@ test('a Claude transcript: tool_use makes a running card, its result done or fai
     ['Read', 'Read delivery.ts', 'done'],
     ['Grep', 'Searched for "deliverAsOwner" in src', 'running'],
   ]);
+  // Each carries its fixed label, made where it's made (t-2109): fixed words and a plain base name, never its words.
+  assert.deepEqual(cards.map((c) => c.fixed), ['Ran a command', 'Wrote its words', 'Read delivery.ts', 'Searched files']);
   // Its own words between steps are a text card (t-2109; delivery shows them only for the owner alone); thinking never.
   assert.equal(cards[1].body, 'Thinking aloud: the secret plan is here.');
   const all = JSON.stringify(cards);
@@ -43,6 +45,7 @@ test('a Codex run: item.started makes a card, item.completed finishes it; failed
     ['b1:item_2', 'command_execution', 'Ran ls — exit 2: no such file', 'failed'], // a raw command names no file
   ]);
   assert.ok(!cards.some((c) => c.summary.includes('cannot access')), 'never the output in a label');
+  assert.deepEqual(cards.map((c) => c.fixed), ['Ran a command', 'Ran a command — exit 2: no such file']);
   assert.deepEqual(cards.map((c) => [c.detail, c.exit, c.result, c.body]), [
     ['echo hi', 0, '1 line of output', undefined],
     ['ls /nonexistent-dir', 2, 'exit 2', undefined],
@@ -384,4 +387,23 @@ test('large cards go in posts of at most 512 KB; a 413 is an older core\'s cap: 
   await tick(q.env, q.o); await tick(q.env, q.o);
   const qc = q.core.activityCalls.filter((a) => a.conversation === r2.handle);
   assert.deepEqual(qc.at(-1).cards, [{ id: 'e1', at: 'x', tool: 'Edit', summary: 'Edited f1.ts', state: 'done' }]);
+});
+
+test('cards made while a thread was held as gone wait untold, and go once the hold is over (t-2109)', async () => {
+  const { spawnCall } = await import('../src/spawn.mjs');
+  const o = world();
+  o.core.commsAnswer = (x) => (x.op === 'spawn' ? { ok: true, id: 'th:abcdefghij' } : { ok: true });
+  const cards = [{ id: 't1', at: 'x', tool: 'Bash', summary: 's', state: 'done' }];
+  o.runner.activity = () => cards;
+  let gone = true;
+  o.core.activity = async (x) => { o.core.activityCalls.push(x); if (gone) throw Object.assign(new Error('core refused comms/activity: conflict: that conversation has no live thread'), { status: 409 }); return { ok: true }; };
+  const r = await spawnCall(o.env, { kind: 'owner' }, { agent: 'art', brief: 'x' }, o.o);
+  await tick(o.env, o.o); await tick(o.env, o.o);
+  cards.push({ id: 't2', at: 'x', tool: 'Bash', summary: 's2', state: 'done' });
+  await tick(o.env, o.o);
+  gone = false;
+  o.clock.advance(11 * 60_000);
+  await tick(o.env, o.o);
+  const sent = o.core.activityCalls.filter((a) => a.conversation === r.handle);
+  assert.deepEqual(sent.at(-1).cards.map((c) => c.id), ['t2'], 'the card made during the hold is told after it');
 });
