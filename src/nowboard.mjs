@@ -72,8 +72,13 @@ function defaultAgent(env) {
  * "art"). An agent owner (an owner caller with an `agents` list, loom docs/specs/owners.md) reaches only an agent of
  * theirs, named as `agent`: never the default agent's or another member's.
  */
-function boardOf(env, caller, want) {
-  if (caller?.kind === 'agent' && AGENT_NAME.test(caller.agent ?? '')) return caller.agent;
+function boardOf(env, caller, want, { write = false } = {}) {
+  if (caller?.kind === 'agent' && AGENT_NAME.test(caller.agent ?? '')) {
+    // A bridge writes its board: a service's house (or one on loom's machine, in no house). A body's house doesn't, so
+    // no conversation's body can say who a bridge is talking with (t-2135). Reading its counts (`now talking`) is any's.
+    if (write && typeof caller.house === 'string' && !caller.service) throw new NowError('the board is written by the agent\'s bridges (a service\'s house), not a body\'s house', 403);
+    return caller.agent;
+  }
   if (caller?.kind === 'owner' && Array.isArray(caller.agents)) {
     if (typeof want === 'string' && AGENT_NAME.test(want) && caller.agents.includes(want)) return want;
     throw new NowError('an agent owner reaches only their own agents\' boards: name one of them (agent)', 403);
@@ -107,7 +112,7 @@ export function talking(dir, nowS = Date.now() / 1000) {
 /** The inbox's three calls. `path` is what follows /api/<runtime>/. */
 export function inbox(env, caller, path, body, nowMs = Date.now()) {
   const b = body && typeof body === 'object' && !Array.isArray(body) ? body : {};
-  const dir = ensureDir(boardDir(env, boardOf(env, caller, b.agent)));
+  const dir = ensureDir(boardDir(env, boardOf(env, caller, b.agent, { write: true })));
   if (path === 'now/snapshot') {
     if (!BRIDGE.test(b.bridge ?? '') || !b.snap || typeof b.snap !== 'object' || Array.isArray(b.snap)) throw new NowError('snapshot is {bridge, snap}: a plain bridge name and an object');
     const text = JSON.stringify(b.snap);

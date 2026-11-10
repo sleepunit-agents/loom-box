@@ -266,6 +266,15 @@ function houseView(h, { seat = false } = {}) {
   return { ...rest, task: h.job && !seat ? `Task ${h.id}` : shownTask(rest.task), ...(seat && st !== undefined ? { seat: st } : {}) };
 }
 
+/**
+ * Another house as a house sees it (t-2135): that it's there, where and how it's doing, never its task, log or note, so
+ * one conversation's body learns nothing of the agent's other conversations' work.
+ */
+function houseBrief(h) {
+  const { id, agent, box, state, service, slot, created, updated } = h;
+  return { id, agent, box, state, ...(service ? { service } : {}), ...(slot ? { slot } : {}), created, updated };
+}
+
 // ------------------------------------------------------------- the owner's
 
 export function addBox(env, effects, { name, mayHost: mh, labels }) {
@@ -625,6 +634,10 @@ export function down(env, effects, caller, { id }) {
       const mine = s.houses[caller.house];
       const seatOf = (x) => (typeof x?.seat === 'string' ? x.seat : OWNER_SEAT);
       if (!mine || !isHostHouse(mine, s) || seatOf(mine) !== seatOf(h)) fail(`no house ${id}`, 404);
+    } else if (caller.kind === 'agent' && typeof caller.house === 'string' && h.id !== caller.house && h.taskFromHouse !== caller.house) {
+      // Any other house, from a house: only itself, or a task it started (t-2135). Another conversation's house is no
+      // house to it, neither stopped nor shown.
+      fail(`no house ${id}`, 404);
     }
     if (h.service && LIVE.has(h.state)) fail(`${id} is the ${h.service} service's house: take the service down (service-down) or move it`, 409);
     if (TERMINAL.has(h.state)) return houseView(h);
@@ -647,7 +660,7 @@ export function list(env, caller) {
     .slice(0, 50)
     // Whose work each body host's house is for (t-1952) is the owner's to read: a body in one of them never learns who
     // steers its agent's other conversations, nor their ids.
-    .map((h) => houseView(h, { seat: caller.kind === 'owner' }));
+    .map((h) => (caller.kind === 'agent' && typeof caller.house === 'string' && h.id !== caller.house && h.taskFromHouse !== caller.house ? houseBrief(h) : houseView(h, { seat: caller.kind === 'owner' })));
   // Boxes are the household's: its owner sees them all, with their grants; anyone else, the live ones that may host their agents.
   const mine = caller.kind === 'agent' ? [caller.agent] : Array.isArray(caller.agents) ? caller.agents : null;
   const boxes = Object.entries(s.boxes)
@@ -658,7 +671,8 @@ export function list(env, caller) {
   const services = Object.entries(s.services ?? {})
     .filter(([, v]) => sees(caller, v.agent))
     .map(([key, v]) => ({ service: key, agent: v.agent, name: v.name, box: v.box, want: v.want, moveTo: v.moveTo ?? null, house: v.house, state: s.houses[v.house]?.state ?? null, restarts: v.restarts ?? 0, ...(v.unnamed ? { unnamed: true } : {}), stateSaved: s.serviceState?.[key]?.at ?? null }));
-  const sessions = Object.entries(s.remotes ?? {}).filter(([a]) => sees(caller, a))
+  // Box sessions are the owner's and loom's machine's to see, never a body's in a house (t-2135).
+  const sessions = Object.entries(s.remotes ?? {}).filter(([a]) => sees(caller, a) && !(caller.kind === 'agent' && typeof caller.house === 'string'))
     .map(([a, r]) => remoteView(a, r));
   return { boxes, houses, services, remotes: sessions, ...(primary ? { primary } : {}) };
 }

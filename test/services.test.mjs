@@ -300,3 +300,41 @@ test('a running service that prints the box\'s words is a crash, never taken dow
   const v = ok(call(owner, 'list')).services[0];
   assert.equal(v.unnamed, undefined);
 });
+
+test('a house sees its own house whole and the agent\'s others only as there, never their tasks (t-2135)', () => {
+  update(env, (s) => {
+    const base = { agent: 'art', box: Object.keys(s.boxes)[0], needs: [], state: 'running', created: new Date(clock).toISOString(), updated: new Date(clock).toISOString() };
+    s.houses['h-911'] = { ...base, id: 'h-911', task: 'my own task', log: 'mine' };
+    s.houses['h-912'] = { ...base, id: 'h-912', task: 'Loren\'s secret plan', log: 'their log', note: 'their note' };
+  });
+  const seen = ok(call({ ...art, house: 'h-911' }, 'list')).houses;
+  assert.equal(seen.find((h) => h.id === 'h-911').task, 'my own task');
+  const other = seen.find((h) => h.id === 'h-912');
+  assert.deepEqual(Object.keys(other).sort(), ['agent', 'box', 'created', 'id', 'state', 'updated']);
+  assert.ok(!JSON.stringify(seen).includes('secret plan'));
+  // Loom's machine (no house) and the owner: as before.
+  assert.equal(ok(call(art, 'list')).houses.find((h) => h.id === 'h-912').task, 'Loren\'s secret plan');
+  assert.equal(ok(call(owner, 'list')).houses.find((h) => h.id === 'h-912').task, 'Loren\'s secret plan');
+});
+
+test('from a house, down reaches only itself or a task it started: another\'s is no house (t-2135)', () => {
+  update(env, (s) => {
+    const base = { agent: 'art', box: Object.keys(s.boxes)[0], needs: [], created: new Date(clock).toISOString(), updated: new Date(clock).toISOString() };
+    s.houses['h-921'] = { ...base, id: 'h-921', task: 'mine', state: 'running' };
+    s.houses['h-922'] = { ...base, id: 'h-922', task: 'Loren\'s secret plan', log: 'their log', state: 'running' };
+    s.houses['h-923'] = { ...base, id: 'h-923', task: 'done work', state: 'exited' };
+    s.houses['h-924'] = { ...base, id: 'h-924', task: 'my sub-task', state: 'running', taskFromHouse: 'h-921' };
+  });
+  const me = { ...art, house: 'h-921' };
+  for (const id of ['h-922', 'h-923']) {
+    const r = call(me, 'down', { id });
+    assert.equal(r.status, 404, id);
+    assert.ok(!JSON.stringify(r.body).includes('secret') && !JSON.stringify(r.body).includes('done work'));
+  }
+  assert.equal(load(env).houses['h-922'].state, 'running', 'never stopped');
+  assert.equal(ok(call(me, 'down', { id: 'h-924' })).state, 'stopping');
+  assert.equal(ok(call(me, 'down', { id: 'h-921' })).state, 'stopping');
+  assert.deepEqual(ok(call(me, 'list')).remotes, []);
+  // A task it started, it sees whole (its task, its note), as it may stop it.
+  assert.equal(ok(call(me, 'list')).houses.find((h) => h.id === 'h-924').task, 'my sub-task');
+});
