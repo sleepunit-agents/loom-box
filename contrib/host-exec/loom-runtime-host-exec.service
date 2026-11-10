@@ -1,0 +1,23 @@
+# The host verbs' executor (src/hostverbs.mjs, t-2096): a user unit on loom's machine, beside loom-http. It has no
+# model: it runs only what the runtime spooled into ~/.local/share/loom-box/delivery/host-exec/queue, and only verbs
+# from the fixed table. Install (on loom's machine, as the user loom runs as):
+#   cp loom-runtime-host-exec.service ~/.config/systemd/user/ && systemctl --user daemon-reload
+#   systemctl --user enable --now loom-runtime-host-exec.service
+# Through `loom runtime`, so it gets the runtime piece's own settings (LOOM_BOX_DATA: the same spool the piece writes).
+[Unit]
+Description=loom runtime host verbs executor (no model)
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/loom runtime host-exec
+Environment=PATH=%h/.local/share/mise/installs/node/24.18.1/bin:%h/.local/bin:%h/Art/bin:/usr/bin:/bin
+Restart=on-failure
+RestartSec=5
+# A stop waits for a running change (a deploy) to finish, up to this.
+TimeoutStopSec=1900
+KillMode=mixed
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target
