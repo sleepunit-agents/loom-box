@@ -412,7 +412,7 @@ export function secretIn(command) {
   // Each part of a pipe or list on its own, with linear tests only: sudo reading its password from stdin; a write
   // into a file shown as private.
   for (const part of c.split(/[|;&\n]/)) {
-    if (/\bsudo\b/.test(part) && /\s-[A-Za-z]*S\b/.test(part)) return true;
+    if (/\bsudo\b/i.test(part) && /\s-[A-Za-z]*S\b/i.test(part)) return true;
     if (/>|\btee\b/.test(part) && part.includes(PRIVATE_FILE)) return true;
   }
   return false;
