@@ -795,7 +795,7 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
     if (e.stopAt && !e.stopAck) { e.pendingExit = [h, dir, secretNames, code, signal, acknowledged]; return; }
     if (!acknowledged && !e.stopAck) {
       const seen = physical(h.id);
-      if (seen.state === 'running') { adopt(h.id, h, secretNames); return; }
+      if (seen.state === 'running') { await adopt(h.id, h, secretNames); return; }
       if (seen.state === 'unknown') { e.pendingExit = [h, dir, secretNames, code, signal]; return; }
       if (seen.state === 'stopped') code = seen.code;
     }
@@ -812,10 +812,10 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
   }
 
   /** Reattach observation without restarting a live container or its native work. */
-  function adopt(id, h = { id }, secretNames = secretNamesOf(id)) {
+  async function adopt(id, h = { id }, secretNames = secretNamesOf(id)) {
     const old = houses.get(id);
     const dir = pathJoin(dataDir(env), 'houses', id);
-    const child = observeHouse(podman(env), containerName(id), { stdio: ['ignore', 'pipe', 'ignore'],
+    const child = await observeHouse(podman(env), containerName(id), { stdio: ['ignore', 'pipe', 'ignore'],
       env: { PATH: env.PATH, HOME: env.HOME, ...(env.XDG_RUNTIME_DIR ? { XDG_RUNTIME_DIR: env.XDG_RUNTIME_DIR } : {}) },
     });
     let out = '';
@@ -971,16 +971,17 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
   let waitsReaped = false;
   async function reconcile(want) {
     const active = new Set(want.active ?? []);
+    const root = pathJoin(dataDir(env), 'houses');
+    // Historical receipts are ownership evidence even after a house is terminal.
+    const receipts = !collectionsScanned && existsSync(root) ? readdirSync(root).filter(n => /^h-[0-9]+$/.test(n)) : [];
     if (!waitsReaped) {
-      reapWaits(new Set([...active].map(containerName)));
+      reapWaits(new Set([...active, ...receipts].map(containerName)));
       waitsReaped = true;
     }
     // A completion can land while this poll is in flight. Keep its tombstone until a later poll observes the terminal state.
     for (const id of recentlyCollected) if (!active.has(id)) recentlyCollected.delete(id);
     // An acknowledged physical exit may still owe state or a terminal report after a runner restart.
-    const root = pathJoin(dataDir(env), 'houses');
-    // Discover old receipts once per runner. New receipts are already owned in houses; scanning every historical log on each poll adds avoidable I/O.
-    const receipts = !collectionsScanned && existsSync(root) ? readdirSync(root).filter(n => /^h-[0-9]+$/.test(n)) : [];
+    // Discover old receipts once per runner; new receipts are already owned in houses.
     collectionsScanned = true;
     for (const id of receipts) {
       if (houses.has(id)) continue;
@@ -1008,7 +1009,7 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
     for (const id of active) {
       if (houses.has(id) || recentlyCollected.has(id)) continue;
       const seen = physical(id), h = { id, ...(want.activeInfo?.[id] ?? {}) };
-      if (seen.state === 'running') { unknownContainers.delete(id); adopt(id, h); continue; }
+      if (seen.state === 'running') { unknownContainers.delete(id); await adopt(id, h); continue; }
       if (seen.state === 'unknown') {
         if (!unknownContainers.has(id)) log(`${id}: container inspection is unknown; preserving its state and retrying`);
         unknownContainers.add(id); continue;

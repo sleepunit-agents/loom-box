@@ -357,12 +357,17 @@ test('a box that restarts while a house is still running watches it again, not b
       const r=runner(${JSON.stringify(env)}, {call:async p=>p==='poll'?{active:[${JSON.stringify(s.house)},'h-99999']}:{}},
         {loomUrl:'http://loom.test/mcp',log:()=>{},sweep:()=>[],status:()=>null,sampleHealth:()=>null,bootInfo:()=>null,sampleUnits:()=>null});
       await r.tick();
-      console.log(JSON.stringify([...r.houses.values()].map(e=>e.child.pid)));
+      const {readFileSync}=await import('node:fs');
+      const guards=[...r.houses.values()].map(e=>e.child.pid);
+      const waits=()=>guards.flatMap(pid=>readFileSync('/proc/'+pid+'/task/'+pid+'/children','utf8').trim().split(/\\s+/).filter(Boolean).map(Number));
+      for(let n=0;waits().length<2&&n<200;n++)await new Promise(r=>setTimeout(r,10));
+      if(waits().length!==2)throw Error('missing actual waits');
+      console.log(JSON.stringify([...guards,...waits()]));
       await r.endStarts(); process.exit(0);
     `], {stdio:['ignore','pipe','inherit']});
     let watcherPids=''; childRuntime.stdout.on('data',d=>watcherPids+=d);
     await once(childRuntime,'exit');
-    const pids=JSON.parse(watcherPids.trim()); assert.equal(pids.length,2);
+    const pids=JSON.parse(watcherPids.trim()); assert.equal(pids.length,4);
     for(const pid of pids) {
       assert.ok(pid>0);
       await until(()=>{try {return /^State:\s+Z/m.test(readFileSync(`/proc/${pid}/status`,'utf8'));}catch(e){if(e.code==='ENOENT')return true;throw e;}});
@@ -938,11 +943,13 @@ test('native history provisioning cannot be overridden by house environment or s
   assert.throws(() => parseHouseFile(JSON.stringify({ ...HOUSE, secrets: { history: { env: 'LOOM_RUNTIME_NATIVE_HISTORY' } } })), /can't be its variable/);
 });
 
-test('startup sweeps only assigned house waits once per runtime', async () => {
+test('startup sweeps assigned and historical house waits once per runtime', async () => {
+  mkdirSync(join(env.LOOM_BOX_DATA,'houses','h-800'),{recursive:true});
+  mkdirSync(join(env.LOOM_BOX_DATA,'houses','not-a-house'),{recursive:true});
   const calls=[];
   const box=runner(env,{async call(p){if(p==='poll')return {active:['h-811','h-812']};return {};}},
     {loomUrl:'http://loom.test/mcp',log:()=>{},sweep:()=>[],status:()=>null,
       reapWaits:names=>calls.push([...names]),sampleHealth:()=>null,bootInfo:()=>null,sampleUnits:()=>null});
   await box.tick(); await box.tick();
-  assert.deepEqual(calls,[['loom-house-h-811','loom-house-h-812']]);
+  assert.deepEqual(calls,[['loom-house-h-811','loom-house-h-812','loom-house-h-800']]);
 });

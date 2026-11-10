@@ -4,7 +4,7 @@ import { once } from 'node:events';
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, symlinkSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { observeHouse, reapHouseWaits } from '../src/house-watchers.mjs';
+import { observeHouse, observationReplaced, reapHouseWaits } from '../src/house-watchers.mjs';
 
 const options = { stdio: 'ignore' };
 // Node ignores argv after -e's script, so it stands in for a long-lived wait.
@@ -13,20 +13,40 @@ const command = join(dir, 'podman');
 writeFileSync(command, '#!/bin/sh\nexec sleep 300\n', { mode: 0o755 });
 
 test('repeated adoption keeps exactly one live wait for each house', async () => {
-  const other = observeHouse(command, 'house-other', options);
-  let previous;
+  const other = await observeHouse(command, 'house-other', options);
+  let previous, previousWait;
+  const childPid = child => { try { return Number(readFileSync(`/proc/${child.pid}/task/${child.pid}/children`,'utf8').trim()); } catch { return 0; } };
+  const alive = pid => { try { return !/^State:\s+[ZX]/m.test(readFileSync(`/proc/${pid}/status`,'utf8')); } catch { return false; } };
+  const until = async f => { for(let n=0;n<200;n++){if(f())return;await new Promise(r=>setTimeout(r,10));}throw Error('timed out'); };
   try {
     for (let n = 0; n < 8; n++) {
-      const next = observeHouse(command, 'house-one', options);
-      await once(next, 'spawn');
+      let next;
+      if (previous) {
+        process.kill(previous.pid,'SIGSTOP');
+        let replacementStarted=false;
+        const replacing=observeHouse(command,'house-one',options).then(child=>{replacementStarted=true;return child;});
+        await new Promise(r=>setTimeout(r,30));
+        assert.equal(replacementStarted,false,'replacement waits for stopped guardian');
+        assert.ok(alive(previousWait),'previous wait remains sole observer until guardian resumes');
+        process.kill(previous.pid,'SIGCONT');
+        next=await replacing;
+        assert.equal(alive(previousWait),false,'actual previous wait is gone before replacement starts');
+      } else next = await observeHouse(command, 'house-one', options);
+      if(!next.pid)await once(next, 'spawn');
       const group = pid => readFileSync(`/proc/${pid}/stat`,'utf8').split(') ').pop().split(' ')[2];
       assert.equal(group(next.pid), group(process.pid), 'observer is not detached');
-      if (previous) { if (previous.exitCode === null && previous.signalCode === null) await once(previous, 'exit'); assert.equal(previous.signalCode, 'SIGKILL'); }
+      if (previous) { assert.equal(observationReplaced(previous),true); if (previous.exitCode === null && previous.signalCode === null) await once(previous, 'exit'); assert.equal(previous.signalCode, 'SIGKILL'); }
+      if(previousWait) await until(()=>!alive(previousWait));
+      await until(()=>childPid(next)>0);
+      previousWait=childPid(next);
+      assert.ok(alive(previousWait),'actual wait is live');
+      await until(()=>childPid(other)>0);
+      assert.ok(alive(childPid(other)),'other house wait survives replacement');
       previous = next;
       assert.equal(other.signalCode, null);
       assert.equal(next.signalCode, null);
     }
-  } finally { previous?.kill('SIGKILL'); other.kill('SIGKILL'); }
+  } finally { if(previous)try{process.kill(previous.pid,'SIGCONT');}catch{} previous?.kill('SIGKILL'); other.kill('SIGKILL'); }
 });
 
 test('orphan sweep requires exact executable, argv, parent and assigned house', () => {
@@ -38,11 +58,21 @@ test('orphan sweep requires exact executable, argv, parent and assigned house', 
   add(12,98,['podman','wait','ours']); add(13,1,['podman','wait','theirs']);
   add(14,1,['podman','stop','ours']); add(15,1,['podman','wait','ours','theirs']);
   add(16,1,['podman','wait','ours'],process.execPath);
+  add(24,1,['podman','wait','','ours']);
   add(17,1,['podman','wait','ours-extra']);
   mkdirSync(join(proc,'97')); writeFileSync(join(proc,'97','comm'),'tini\n');
   mkdirSync(join(proc,'96')); writeFileSync(join(proc,'96','comm'),'dumb-init\n');
+  const marked = (id, value) => writeFileSync(join(proc,String(id),'environ'),`LOOM_WAIT_OWNER=${value}\0`);
+  add(20,98,['podman','wait','ours']); marked(20,'500:123');
+  add(21,98,['podman','wait','ours']); marked(21,'501:123');
+  mkdirSync(join(proc,'501')); writeFileSync(join(proc,'501','stat'),'501 (custom runtime) S '+Array(18).fill('0').join(' ')+' 123');
+  add(22,98,['podman','wait','ours']); marked(22,'501:122');
+  add(25,98,['podman','wait','ours']); marked(25,'502:123');
+  mkdirSync(join(proc,'502')); writeFileSync(join(proc,'502','stat'),'502 (zombie runtime) Z '+Array(18).fill('0').join(' ')+' 123');
+  add(26,1,['podman','wait','ours']); marked(26,'');
+  add(23,98,['podman','wait','ours']); marked(23,'invalid');
   add(18,97,['podman','wait','ours']); add(19,96,['podman','wait','ours']);
-  const expected=[[10,'SIGKILL'],[11,'SIGKILL'],[18,'SIGKILL'],[19,'SIGKILL']];
+  const expected=[[10,'SIGKILL'],[11,'SIGKILL'],[18,'SIGKILL'],[19,'SIGKILL'],[20,'SIGKILL'],[22,'SIGKILL'],[25,'SIGKILL']];
   const killed=[]; reapHouseWaits(command,new Set(['ours']),proc,(pid,sig)=>killed.push([pid,sig]));
   assert.deepEqual(killed,expected);
   killed.length = 0;
@@ -55,5 +85,8 @@ test('orphan sweep requires exact executable, argv, parent and assigned house', 
   killed.length=0;
   reapHouseWaits('podman',new Set(['ours']),proc,(pid,sig)=>killed.push([pid,sig]),[nonexec,directory,dir].join(':'));
   assert.deepEqual(killed,expected, 'skips non-executable files and directories');
+  killed.length=0;
+  reapHouseWaits(command,new Set(['ours']),proc,(pid,sig)=>killed.push([pid,sig]),dir,new Set([12,13,14,15,16,17,21,23,24,26]));
+  assert.deepEqual(killed,[...expected.slice(0,2),[12,'SIGKILL'],...expected.slice(2)],'explicit legacy PID still requires executable/name/argv and preserves marked live owners');
   rmSync(proc,{recursive:true});
 });
