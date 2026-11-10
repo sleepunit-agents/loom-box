@@ -31,7 +31,11 @@ target, bound child run and enqueue-time harness annotation (`on`, when switched
 It never borrows the source holder's key. All payload fields stay stable across
 retries, even if the source changes holder or the child switches harness.
 
-Only core's adapter is enabled: other adapters lack the required idempotency
+Only core's adapter is enabled. A spawn's conversation (venue `spawn`) is core's
+too: its report goes to the spawn's own Comms thread (`spawn.thread` on the
+runtime's record of the grant's source, never the payload), with the same post,
+reconcile and stable-ref contract; while that thread isn't open yet the row waits
+for the next tick, bounded by its deadline (t-2004). Other adapters lack the required idempotency
 contract and stop without executing their send command; an attempted row retains an indeterminate disposition. Core's
 companion PR675 binds ref to agent/place/text/run/normalized on in one transaction
 with the encrypted reply. An exact retry returns the original sequence; another

@@ -214,3 +214,44 @@ test("a sibling conversation's key with this body's own session issues nothing f
   const grant = continuationCall(w.env, { action: 'issue', conversation: b.conversation, key: keyOf(b), session: ownSession }, w.o);
   assert.match(grant.handle, /^cont-/);
 });
+
+test("a spawn's continuation report lands in the spawn's own Comms thread through core (t-2004)", async () => {
+  const { handOverWake, tick } = await import('../src/delivery.mjs');
+  const w = world();
+  w.env.LOOM_HOME = join(w.env.HOME, 'loom');
+  mkdirSync(w.env.LOOM_HOME, { recursive: true });
+  writeFileSync(join(w.env.LOOM_HOME, 'household.json'), JSON.stringify({ members: [{ person: 'jonathan', agents: '*' }] }));
+  const source = await deliver(w.env, w.msg('spawn-source', 'owner', { source: 'loom', venue: 'loom', from: { kind: 'person', slug: 'jonathan' } }), w.o);
+  // The source as a spawn's conversation: venue spawn, its place the spawn's id, its Comms thread not opened yet.
+  const write = (c) => writeFileSync(join(deliveryDir(w.env), 'conversations', `${c.conversation}.json`), JSON.stringify(c));
+  const s0 = loadConv(w.env, source.conversation);
+  write({ ...s0, venue: 'spawn', place: 'sp-0123456789abcdef01234567', spawn: { depth: 1, principal: { owner: true } } });
+  const args = (cv) => { const c = loadConv(w.env, cv); return { conversation: cv, key: w.runner.envs[c.body.split(':')[1]].LOOM_BODY_KEY, session: w.sessionFor(cv) }; };
+  const grant = continuationCall(w.env, { ...args(source.conversation), action: 'issue' }, w.o);
+  const firing = w.msg('wake:w-abcdef', 'follow up', { source: 'clock', venue: 'wake', id: 'w-abcdef', kind: 'wake', from: { kind: 'schedule' }, continuation: { handle: grant.handle, expiresAt: grant.expiresAt, wake: 'w-abcdef' } });
+  handOverWake(w.env, { agent: 'art', place: firing.place, id: firing.id, for: 'owner' });
+  const child = await deliver(w.env, firing, w.o);
+  const q = { ...args(child.conversation), handle: grant.handle, id: 'final' };
+  const enqueued = continuationCall(w.env, { ...q, action: 'enqueue', text: 'spawn follow-up report' }, w.o);
+  const calls = [];
+  // No `spawn` venue in the registry, as live: only core carries it.
+  const o = { ...w.o, venues: async () => ({ loom: { adapter: 'core', kind: 'live' }, wake: { kind: 'scheduled' } }), core: { ...w.o.core, comms: async (p) => { calls.push(p); return { ok: true, id: '7' }; } } };
+  // Thread not open yet: nothing posted, the row still waits (not refused).
+  await tick(w.env, o);
+  assert.equal(calls.filter((p) => p.ref === enqueued.ref).length, 0);
+  assert.equal(continuationCall(w.env, { ...q, action: 'status' }, w.o).state, 'pending');
+  const s1 = loadConv(w.env, source.conversation);
+  write({ ...s1, spawn: { ...s1.spawn, thread: 'th:abcdefghij' } });
+  w.clock.advance(3600001);
+  await tick(w.env, o);
+  const sent = calls.filter((p) => p.ref === enqueued.ref);
+  assert.equal(sent.length, 1);
+  assert.deepEqual(sent[0], { op: 'post', place: 'th:abcdefghij', agent: 'art', ref: enqueued.ref, text: 'spawn follow-up report', run: loadConv(w.env, child.conversation).run, expiresAt: grant.expiresAt });
+  assert.equal(continuationCall(w.env, { ...q, action: 'status' }, w.o).state, 'delivered');
+  // A registry venue named spawn with its own send never runs it: still only core, or nothing.
+  continuationCall(w.env, { ...q, action: 'enqueue', id: 'other', text: 'second' }, w.o);
+  w.clock.advance(3600001);
+  await tick(w.env, { ...o, venues: async () => ({ spawn: { kind: 'live', send: ['must-not-run'] } }) });
+  assert.equal(continuationCall(w.env, { ...q, action: 'status', id: 'other' }, w.o).state, 'indeterminate');
+  assert.equal(calls.filter((p) => p.ref?.startsWith('continuation-')).length, 1);
+});

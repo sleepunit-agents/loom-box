@@ -3409,6 +3409,29 @@ export function continuationSnapshot(env, conversation) {
     resetPending: !!c.resetPending, target: { venue: c.venue, place: c.place } };
 }
 
+/**
+ * Where core keeps a continuation's report (t-2004): {place}, or why not ({permanent, reason}, or {wait} to try again).
+ * A core-adapted venue's own place (a Comms thread). A spawn's conversation is core's too: its Comms thread
+ * (spawnComms opens it, `spawn.thread` on the record), which takes the same post and reconcile, with the same stable-ref
+ * deduplication. The thread is read from the runtime's own record of the grant's source conversation, never from the
+ * payload, and only while that record is still the spawn the grant was sealed for (its venue and place).
+ */
+const SPAWN_THREAD = /^th:[a-z2-7]{10}$/;
+async function continuationPlace(env, d, p, contract) {
+  // A registry outage is transient; venueOf intentionally swallows that
+  // distinction for ordinary sends, so do not use it for durable reports.
+  const venue = (await d.venues())?.[p.target.venue];
+  if (coreAdapted(venue)) return { place: p.target.place };
+  if (p.target.venue === 'spawn' && !venue?.send) {
+    const c = loadConv(env, p.conversation);
+    if (!c?.spawn || c.agent !== p.agent || c.venue !== 'spawn' || c.place !== p.target.place) return { permanent: true, reason: 'the spawn this continuation reports to is gone' };
+    // Not opened yet (core was away when spawnComms ran): the next tick tries again; the deadline still bounds it.
+    if (!SPAWN_THREAD.test(c.spawn.thread ?? '')) return { wait: true, reason: 'the spawn\'s Comms thread isn\'t open yet' };
+    return { place: c.spawn.thread };
+  }
+  return { permanent: true, reason: `continuation destination has no core ${contract} contract` };
+}
+
 // Only core currently promises transactional stable-ref deduplication. Resolve
 // the registry afresh, but never rebuild payload fields from a newer body/run.
 export async function drainContinuations(env, o = {}) {
@@ -3422,16 +3445,14 @@ export async function drainContinuations(env, o = {}) {
   } catch { /* the env's policy still applies to this tick */ }
   const outbox = continuationsOf(env, d, o, o.service === true);
   await outbox.drain({ current: (cv) => continuationSnapshot(env, cv), reconcile: async (p) => {
-    const venue = (await d.venues())?.[p.target.venue];
-    if (!coreAdapted(venue)) return { permanent: true, reason: 'continuation destination has no core reconciliation contract' };
-    return d.core.comms({ op: 'reconcile', place: p.target.place, agent: p.agent, ref: p.ref,
+    const at = await continuationPlace(env, d, p, 'reconciliation');
+    if (!at.place) return at;
+    return d.core.comms({ op: 'reconcile', place: at.place, agent: p.agent, ref: p.ref,
       text: p.text, run: p.run, expiresAt: p.expiresAt, ...(p.on ? { on: p.on } : {}) });
   }, post: async (p) => {
-    // A registry outage is transient; venueOf intentionally swallows that
-    // distinction for ordinary sends, so do not use it for durable reports.
-    const venue = (await d.venues())?.[p.target.venue];
-    if (!coreAdapted(venue)) return { permanent: true, reason: 'continuation destination has no core idempotency contract' };
-    const answer = await d.core.comms({ op: 'post', place: p.target.place, agent: p.agent, ref: p.ref,
+    const at = await continuationPlace(env, d, p, 'idempotency');
+    if (!at.place) return at;
+    const answer = await d.core.comms({ op: 'post', place: at.place, agent: p.agent, ref: p.ref,
       text: p.text, run: p.run, expiresAt: p.expiresAt, ...(p.on ? { on: p.on } : {}) });
     return answer?.ok === true && typeof answer.id === 'string' && answer.id.length > 0 ? { ok: true, posted: true } : answer;
   } });
