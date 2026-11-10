@@ -42,7 +42,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { keptReading } from './statusline.mjs';
 import { claudeActionNow, codexActionNow } from './ticker.mjs';
-import { claudeCards, codexCards } from './activity.mjs';
+import { claudeCards, claudeTokens, codexCards } from './activity.mjs';
 import { CRED_FILE, lastRateLimit, lastRefusal, refusedUntil, tailOf } from './logins.mjs';
 // A ticker observation never scans an unbounded conversation history. Missing starts mean generic Working.
 const tickerLines = p => (tailOf(p, 1024 * 1024) ?? '').split('\n').flatMap(l => { try { return [JSON.parse(l)]; } catch { return []; } });
@@ -309,13 +309,52 @@ export class ClaudeRunner {
   }
 
   activity(body) {
+    const f = this.transcriptOf(body);
+    if (!f) return [];
+    const cards = claudeCards(lines(f));
+    // Its helpers (subagents), each under the step that started it (t-2109): Claude Code keeps a helper's transcript
+    // beside the session's, `<session>/subagents/agent-<id>.jsonl`, and its meta names that step (`toolUseId`).
+    const dir = join(f.slice(0, -'.jsonl'.length), 'subagents');
+    let metas = [];
+    try { metas = readdirSync(dir).filter((n) => /^agent-[A-Za-z0-9]{1,40}\.meta\.json$/.test(n)); } catch { return cards; }
+    const helpers = metas.map((n) => { try { return { n, t: statSync(join(dir, n)).mtimeMs }; } catch { return null; } }).filter(Boolean).sort((a, b) => b.t - a.t).slice(0, 20);
+    for (const { n } of helpers) {
+      const agent = n.slice('agent-'.length, -'.meta.json'.length);
+      let meta;
+      try { meta = JSON.parse(readFileSync(join(dir, n), 'utf-8')); } catch { continue; }
+      const parent = typeof meta?.toolUseId === 'string' && cards.some((c) => c.id === meta.toolUseId) ? meta.toolUseId : null;
+      if (!parent) continue;
+      cards.push(...claudeCards(lines(join(dir, `agent-${agent}.jsonl`)), `${agent}:`, parent));
+    }
+    return cards;
+  }
+
+  /** Its session's transcript, when it has one. */
+  transcriptOf(body) {
     const session = this.slotOf(body)?.session;
-    if (typeof session !== 'string' || !SESSION.test(session)) return [];
+    if (typeof session !== 'string' || !SESSION.test(session)) return null;
     for (const p of dirs(this.roots.projects)) {
       const f = join(this.roots.projects, p, `${session}.jsonl`);
-      if (existsSync(f)) return claudeCards(lines(f));
+      if (existsSync(f)) return f;
     }
-    return [];
+    return null;
+  }
+
+  /**
+   * Its last sign of life (t-2109): when its transcript was last written, and how many tokens it has written so far
+   * (each assistant message's output_tokens once), read again only when the file moved.
+   */
+  alive(body) {
+    const f = this.transcriptOf(body);
+    if (!f) return null;
+    let st;
+    try { st = statSync(f); } catch { return null; }
+    const memo = (this.aliveMemo ??= new Map()).get(f);
+    if (memo && memo.size === st.size && memo.mtimeMs === st.mtimeMs) return memo.alive;
+    const alive = { at: new Date(st.mtimeMs).toISOString(), ...(() => { const t = claudeTokens(lines(f)); return t === null ? {} : { tokens: t }; })() };
+    this.aliveMemo.set(f, { size: st.size, mtimeMs: st.mtimeMs, alive });
+    if (this.aliveMemo.size > 64) this.aliveMemo.delete(this.aliveMemo.keys().next().value);
+    return alive;
   }
 
   end(body, env) {
@@ -640,6 +679,11 @@ export class CodexRunner {
   tickerAction(body) { return codexActionNow(tickerLines(join(this.runsDir, body.id, 'events.jsonl'))); }
 
   activity(body) { return codexCards(this.events(body.id), `${body.id}:`); }
+
+  /** Its last sign of life (t-2109): when its events were last written. Codex says its tokens only at a turn's end. */
+  alive(body) {
+    try { return { at: new Date(statSync(join(this.runsDir, body.id, 'events.jsonl')).mtimeMs).toISOString() }; } catch { return null; }
+  }
 
   events(id) {
     try {

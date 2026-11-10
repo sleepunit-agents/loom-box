@@ -45,7 +45,7 @@ import { RunnerError } from './runners.mjs';
 import { MAX_SESSION_BYTES, safeRel, SessionSizeError, SessionHistoryMissing } from './sessions.mjs';
 import { validPendingInbox } from './native-inbox.mjs';
 import { GONE, part, redact, UNPRINTABLE_ONE } from './redact.mjs';
-import { cardTime } from './activity.mjs';
+import { cardTime, cleanAlive, stepParts } from './activity.mjs';
 import { ageSealer } from './sealed.mjs';
 import { AGENT_NAME, StateError, load, update, withLock } from './state.mjs';
 import { HOST_KEY, OWNER_SEAT, SEAT, hostKeyOf, isOwnerSeat, seatCapProblem, seatConversation, seatOfKey } from './principal.mjs';
@@ -368,6 +368,8 @@ export const hostTask = (env, bootKey) => `loom-runtime body-host --piece ${piec
  * one only reuses an id in its own thread, which it already writes whole.
  */
 const RENAMED = 'h:';
+/** A card's id as it may leave the house boundary: itself, or RENAMED and 16 hex of its hash (cleanCards, below). */
+const cardId = (raw) => (redact(raw) === raw && !raw.startsWith(RENAMED) ? raw : `${RENAMED}${createHash('sha256').update(raw).digest('hex').slice(0, 16)}`);
 
 /** A host's activity cards, as core takes them (loom src/comms.ts postActivity): anything else is left out. */
 export function cleanCards(cards) {
@@ -385,10 +387,10 @@ export function cleanCards(cards) {
     // 24-hex body id), and redact() would take it for a secret: so one it would change is renamed to `h:` (hashed) and
     // the first 16 hex of the id's sha256, the same step every time, never the id itself (t-2109: dropping them dropped
     // every house body's steps). An id that already starts `h:` is renamed too, so a house can't name a renamed one.
-    const id = redact(c.id) === c.id && !c.id.startsWith(RENAMED) ? c.id : `${RENAMED}${createHash('sha256').update(c.id).digest('hex').slice(0, 16)}`;
+    const id = cardId(c.id);
     const summary = part('text', c.summary, 120);
     if (summary === GONE || summary.length > 120 || UNPRINTABLE_ONE.test(summary)) return [];
-    return [{ id, at: cardTime(c.at), tool: c.tool, summary, state: c.state }];
+    return [{ id, at: cardTime(c.at), tool: c.tool, summary, state: c.state, ...stepParts(c, cardId) }];
   });
 }
 
@@ -405,6 +407,7 @@ function cleanReport(r) {
       pending: Array.isArray(b.pending) ? b.pending.filter((k) => typeof k === 'string' && k.length <= 64).slice(0, 64) : [],
       // A Comms thread's body's tool steps (activity.mjs), checked here as core will check them.
       ...(Array.isArray(b.cards) ? { cards: cleanCards(b.cards) } : {}),
+      ...(cleanAlive(b.alive) ? { alive: cleanAlive(b.alive) } : {}),
       ...(typeof b.final === 'string' ? { final: b.final.slice(0, 40000) } : {}),
       // How its turn went, once over (runners.mjs, turn): a host before t-1763 says nothing.
       ...(b.turn && typeof b.turn === 'object' ? { turn: { failed: b.turn.failed === true, worked: typeof b.turn.worked === 'boolean' ? b.turn.worked : null, ...(typeof b.turn.error === 'string' && b.turn.error ? { error: b.turn.error.slice(0, 200) } : {}),
@@ -1241,6 +1244,8 @@ export class HouseRunner {
   }
   /** Its activity cards, as its host last reported them (only a Comms thread's body has any). */
   activity(body) { return this.entry(body)?.cards ?? []; }
+  /** Its last sign of life, as its host last reported it (t-2109). */
+  alive(body) { return this.entry(body)?.alive ?? null; }
 
   feed(body, message) {
     const e = this.entry(body);

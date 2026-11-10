@@ -217,13 +217,15 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
       const turn = status === 'idle' || status === 'ended' ? b.turn : null;
       // A Comms thread's body: its tool steps, the newest 100, read from its harness's own record (activity.mjs).
       const cards = b.activity ? (() => { try { return (r.activity?.({ id, ...(b.slot ? { slot: b.slot } : {}) }) ?? []).slice(-100); } catch { return []; } })() : null;
+      // And its last sign of life (t-2109): when its record last moved, its tokens so far.
+      const alive = b.activity ? (() => { try { return r.alive?.({ id, ...(b.slot ? { slot: b.slot } : {}) }) ?? null; } catch { return null; } })() : null;
       let final;
       if (status === 'idle' || status === 'ended') {
         try { final = r.final?.({ id, ...(b.slot ? { slot: b.slot } : {}) })?.slice(0, 40000); } catch { /* retry next sync */ }
       }
       let tickerAction;
       if (status === 'working') { try { tickerAction = r.tickerAction?.({ id, ...(b.slot ? { slot: b.slot } : {}) }); } catch { /* unavailable */ } }
-      bodies[id] = { ...(tickerAction ? { tickerAction, tickerObservedAt: new Date(now()).toISOString() } : {}), harness: b.harness, status, ...(slot?.session ? { session: slot.session } : {}), feedable: !!r.inbox, pending, ...(turn ? { turn } : {}), ...(typeof final === 'string' ? { final } : {}), ...(cards ? { cards } : {}) };
+      bodies[id] = { ...(tickerAction ? { tickerAction, tickerObservedAt: new Date(now()).toISOString() } : {}), harness: b.harness, status, ...(slot?.session ? { session: slot.session } : {}), feedable: !!r.inbox, pending, ...(turn ? { turn } : {}), ...(typeof final === 'string' ? { final } : {}), ...(cards ? { cards } : {}), ...(alive ? { alive } : {}) };
     }
     await reportUsage(turnsOver);
     const packed = {};

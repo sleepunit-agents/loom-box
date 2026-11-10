@@ -10,7 +10,7 @@
 //
 //   GET  /api/loom/venues              → {venues: [{name, label, kind, piece, send?: [argv], adapter?: 'core', orphaned?}]}  (loom#424, comms.md)
 //   POST /api/loom/comms/adapter       {op: post|describe|status, place, agent, …}: venue loom's adapter (comms.md)
-//   POST /api/loom/comms/activity      {conversation, run, cards}: a loom thread's tool cards (comms.md, section 3)
+//   POST /api/loom/comms/activity      {conversation, run, cards, alive?}: a thread's tool cards and its body's last sign of life (comms.md, section 3)
 //                                      the venues registry, as core keeps it (conversations.md, "Venues"; agent-runtime.md,
 //                                      "Outbound"). A piece reads only its own store, so the runtime asks core, never the
 //                                      other pieces' files; a venue's send runs as core answered its argv.

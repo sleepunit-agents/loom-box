@@ -312,7 +312,7 @@ export function cutTo(s, n) {
 }
 
 /** Any word of `s` that names a private file (privateFile) shows as PRIVATE_FILE: in a description, a pattern. */
-const privateWords = (s) => s.split(/(\s+)/).map((w) => (/[/.\\]/.test(w) && privateFile(w) ? PRIVATE_FILE : w)).join('');
+export const privateWords = (s) => s.split(/(\s+)/).map((w) => (/[/.\\]/.test(w) && privateFile(w) ? PRIVATE_FILE : w)).join('');
 
 /**
  * The one gate (t-1944): a variable part of a label, as it may be shown, or GONE. It's redacted; on one printable line;

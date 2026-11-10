@@ -101,7 +101,7 @@ import { CODEX_WONT, codexDeny, nativeRecoveryConfiguration, nativeRunnerConfigu
 import { cancelReservedLaunch, launchAttempt, launchWorkerAlive, launchWorkerIdentity, readLaunch, recoverLaunchReceipt, reserveLaunch } from './launch-journal.mjs';
 import { launchInjectedNative, observeNativeLaunch, superviseNativeLaunch } from './native-launch.mjs';
 import { raiseAlert } from './alerthook.mjs';
-import { changed as changedCards } from './activity.mjs';
+import { baseCard, changed as changedCards, cleanAlive } from './activity.mjs';
 import { keepKey, keepSession, keyFile } from './bodyhost.mjs';
 import { spawnCap } from './spawn.mjs';
 import { continuationOutbox } from './continuation-outbox.mjs';
@@ -1576,16 +1576,38 @@ async function activityPass(env, c, d) {
   let rec, r;
   try { rec = readBody(env, c.body); r = d.runner(rec.harness, rec.local); } catch { return; }
   if (typeof r.activity !== 'function') return;
-  const cards = r.activity(bodyOf(c.body, rec)) ?? [];
+  const body = bodyOf(c.body, rec);
+  // The body's own words between steps only where it works for the owner alone (t-2109): never where someone else is
+  // in the conversation, whose words its own might carry.
+  const ownersAlone = c.actsFor?.owner === true && !(c.actsFor.people?.length) && !c.actsFor.unknown;
+  const cards = (r.activity(body) ?? []).filter((x) => x.tool !== 'text' || ownersAlone);
   const { out, next } = changedCards(cards, c.cardsSent ?? {});
-  if (!out.length) return;
-  // Refused for good (no live thread, or a card core won't take): they're marked told, so they aren't sent again.
-  try { await d.core.activity({ conversation: c.conversation, run: c.run, cards: out }); } catch (e) {
+  let alive = null;
+  try { alive = cleanAlive(r.alive?.(body)); } catch { /* it can't say */ }
+  // Its last sign of life goes when it moved, at most every ALIVE_MS, with cards or alone (core's working line).
+  const sendAlive = alive && alive.at !== c.aliveSent?.at && (!out.length ? Date.now() - (c.aliveSent?.told ?? 0) >= ALIVE_MS : true) && !oldCore.has(c.conversation);
+  if (!out.length && !sendAlive) return;
+  const post = (cs, a) => d.core.activity({ conversation: c.conversation, run: c.run, cards: cs, ...(a ? { alive: a } : {}) });
+  // Refused for good (no live thread, or a card core won't take): they're marked told, so they aren't sent again. A core
+  // from before t-2109 refuses the further parts (400): it's told the plain cards, and no alive, until restart.
+  try { await post(out, sendAlive ? alive : null); } catch (e) {
     if (e?.status !== 409 && e?.status !== 400) throw e;
-    d.warn(`${c.conversation}: core took none of ${out.length} activity cards (${e.message}); they're not sent again`);
+    let told = false;
+    if (e.status === 400) {
+      oldCore.add(c.conversation);
+      const plain = out.filter((x) => x.tool !== 'text').map(baseCard);
+      try { if (plain.length) { await post(plain, null); told = true; } } catch (e2) { if (e2?.status !== 409 && e2?.status !== 400) throw e2; }
+    }
+    if (!told && out.length) d.warn(`${c.conversation}: core took none of ${out.length} activity cards (${e.message}); they're not sent again`);
   }
-  locked(env, () => { const x = loadConv(env, c.conversation); if (x && x.body === c.body) { x.cardsSent = next; saveConv(env, x); } });
+  locked(env, () => {
+    const x = loadConv(env, c.conversation);
+    if (x && x.body === c.body) { x.cardsSent = next; if (sendAlive) x.aliveSent = { at: alive.at, told: Date.now() }; saveConv(env, x); }
+  });
 }
+/** At most how often a body's sign of life alone is told (t-2109), and the conversations whose core refused it. */
+const ALIVE_MS = 20_000;
+const oldCore = new Set();
 
 const newRun = () => `run-${randomBytes(6).toString('hex')}`;
 

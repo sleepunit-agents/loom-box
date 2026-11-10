@@ -9,15 +9,30 @@
 // (`Ran gh pr checks 603`); a file by its base name; a search by its pattern; a message by who it went to; a tool this
 // table doesn't know as "Used a tool". Every variable part passes redact.mjs `part` (the gate), and every finished label
 // `finish` (redacted whole, one line, at most 120). A failed step adds why, from fixed phrases only
-// (`exit 1: 3 tests failed`). Never a tool's output, a file's contents, a whole command line or an environment value.
-// Text and thinking make no card.
+// (`exit 1: 3 tests failed`). Never a tool's output, a file's contents, a whole command line or an environment value
+// in a label.
+// A card may also carry, for the owner's Watching view (t-2109; Jonathan, 2026-11-10: work done for him is shown in
+// full, only other people's words are kept out): `detail`, the step's whole command or target; `result`, one line of
+// fixed phrases (`Read 120 lines`, `3 additions, 1 removal`, `12 passed, 1 failed`, `exit 1`); `body`, a shell step's
+// whole output or an edit's diff, each line redacted (shownText), ANSI colours kept, at most MAX_BODY; `exit`; `limit`,
+// the step's own timeout in seconds; `end`, when it finished; `parent`, the helper (subagent) it ran under; and for a
+// plan, `items`, its checklist. The body's own words between steps are a `text` card (tool `text`), which delivery
+// shows only for a conversation that acts for the owner alone. A read shows its line count, never what it read.
 import { createHash } from 'node:crypto';
-import { commandLabel, cutTo, failWhy, fileName, GONE, part, PRIVATE_FILE, privateFile, redact, UNPRINTABLE, UNPRINTABLE_ONE } from './redact.mjs';
+import { commandLabel, cutTo, failWhy, fileName, GONE, INPUT_MAX, part, PRIVATE_FILE, privateFile, privateWords, redact, UNPRINTABLE, UNPRINTABLE_ONE } from './redact.mjs';
+
+const INVISIBLE_CH = /[\p{Cf}\u034f\u115f\u1160\u17b4\u17b5\u180b-\u180f\u2800\u3164\ufe00-\ufe0f\uffa0\u{E0100}-\u{E01EF}]/gu;
 
 export { UNPRINTABLE, UNPRINTABLE_ONE };
 
 export const MAX_SUMMARY = 120;
 export const MAX_CARDS = 50;
+/** A card's `detail` (a whole command), its `body` (output, a diff, its words) at most, in UTF-16 units; plan items. */
+export const MAX_DETAIL = 4000;
+export const MAX_BODY = 32_000;
+/** The body's own words between steps, at most. */
+export const MAX_TEXT = 8_000;
+export const MAX_ITEMS = 20;
 
 /**
  * loom's tools in fixed words. Those that read or write a private store (memory, people, notes, knowledge, threads,
@@ -75,6 +90,13 @@ function hostOf(u) {
     const host = new URL(r).hostname || null;
     return host && new URL(s).hostname === host && redact(host) === host ? host : null;
   } catch { return null; }
+}
+
+/** A plan's checklist: each item through the gate, `done`, `now` (the one it's on) or `todo`; at most MAX_ITEMS. */
+function planItems(items) {
+  if (!Array.isArray(items)) return [];
+  const now = items.find((x) => x.now) ?? items.find((x) => !x.done);
+  return items.slice(0, MAX_ITEMS).map((x) => ({ text: (() => { const t = txt(x.text, 100); return t === GONE ? 'an item' : t; })(), state: x.done ? 'done' : x === now ? 'now' : 'todo' }));
 }
 
 /** A plan's (TodoWrite's or Codex's todo list's) line: `Plan (2/5): Running the tests`. */
@@ -194,17 +216,172 @@ const toolName = (n) => (TOOL.test(String(n)) && redact(String(n)) === String(n)
 /** A card's time: an ISO time as the transcript wrote it, else now. */
 export const cardTime = (t) => (typeof t === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/.test(t) ? t : new Date().toISOString());
 
+// ─── Claude Code's look: a step's target, its result line, a few lines of a shell step's output (t-2109) ──────────
+
+/** ANSI colour (SGR) codes: kept in a shown text for a terminal's look; every other control goes. */
+const SGR = /\x1b\[[0-9;]{0,30}m/g;
+const CONTROL = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g;
+
+/** One line of shown text: redacted (with its colours set aside, so a code inside a token can't hide it), a private
+ * path named, its colours kept only when redaction left it as it was; cut to INPUT_MAX. */
+function shownTextLine(line) {
+  // Terminal codes other than colour go whole: a title (OSC), a cursor move or erase (CSI), a lone escape.
+  const raw = String(line).replace(/\r$/, '').replace(/\x1b\][^\x07\x1b]{0,2000}(?:\x07|\x1b\\)?/g, '').replace(/\x1b\[[0-9;?]{0,30}[A-Za-ln-z]/g, '').replace(INVISIBLE_CH, '');
+  const plain = raw.replace(SGR, '');
+  const r = privateWords(redact(plain));
+  const keep = r === plain ? raw : r;
+  const cut = keep.length > INPUT_MAX ? `${cutTo(keep.replace(SGR, ''), INPUT_MAX)}` : keep;
+  return cut.replace(/\x1b(?!\[[0-9;]{0,30}m)/g, '').replace(CONTROL, (c) => (c === '\x1b' || c === '\t' ? c : ''));
+}
+
+/**
+ * Text as the owner's view shows it (t-2109): a key block taken out whole, then each line through shownTextLine; at
+ * most `max`, its head and tail kept around a line saying how many weren't. '' for none.
+ */
+export function shownText(text, max = MAX_BODY) {
+  const t = String(text ?? '').slice(0, 2_000_000).replace(/-----BEGIN [A-Z ]{0,40}PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]{0,40}PRIVATE KEY-----|$)/g, GONE);
+  const lines = t.split('\n').map(shownTextLine);
+  while (lines.length && !lines.at(-1).trim()) lines.pop();
+  while (lines.length && !lines[0].trim()) lines.shift();
+  const all = lines.join('\n');
+  if (all.length <= max) return all;
+  const head = [], tail = [];
+  let h = 0, k = 0;
+  for (const l of lines) { if (h + l.length + 1 > max / 2) break; head.push(l); h += l.length + 1; }
+  for (let i = lines.length - 1; i >= head.length; i--) { if (k + lines[i].length + 1 > max / 2 - 40) break; tail.unshift(lines[i]); k += lines[i].length + 1; }
+  return [...head, `… ${lines.length - head.length - tail.length} lines not kept …`, ...tail].join('\n');
+}
+
+/** A shell command as Codex runs it (`/usr/bin/bash -lc '…'`), unwrapped to what the body wrote. */
+function unwrapShell(c) {
+  const m = /^(?:\/usr)?(?:\/bin\/)?(?:ba|z)?sh\s+-l?c\s+(['"])([\s\S]*)\1\s*$/.exec(String(c ?? '').trim());
+  return m ? m[2] : String(c ?? '');
+}
+
+/** A shell step's whole command, as its card's `detail`: shown text (redacted line by line), at most MAX_DETAIL. */
+export function commandLine(command) {
+  return shownText(command, MAX_DETAIL).replace(SGR, '');
+}
+
+/** A diff (Claude Code's structuredPatch hunks) as shown text: `@@ -a,b +c,d @@` and its lines. */
+function patchText(patch) {
+  if (!Array.isArray(patch)) return '';
+  const out = [];
+  for (const h of patch.slice(0, 200)) {
+    if (!h || typeof h !== 'object') continue;
+    const n = (v) => (Number.isInteger(v) && v >= 0 ? v : 0);
+    out.push(`@@ -${n(h.oldStart)},${n(h.oldLines)} +${n(h.newStart)},${n(h.newLines)} @@`);
+    for (const l of Array.isArray(h.lines) ? h.lines : []) if (typeof l === 'string') out.push(l);
+  }
+  return shownText(out.join('\n'));
+}
+
+const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+const count = (n) => (Number.isInteger(n) && n >= 0 && n < 1e9 ? n : null);
+
+/** A test run's counts in fixed words, from its output (node --test, vitest, jest, pytest): `12 passed, 1 failed`. */
+export function testsLine(output) {
+  const t = String(output ?? '').slice(-20_000);
+  let pass = null, fail = null;
+  const node = /^[#ℹ] pass (\d{1,6})\s*$/m.exec(t), nodeF = /^[#ℹ] fail (\d{1,6})\s*$/m.exec(t);
+  if (node) { pass = Number(node[1]); fail = nodeF ? Number(nodeF[1]) : 0; }
+  const jest = /\bTests:\s{1,10}(?:(\d{1,6}) failed,\s*)?(?:\d{1,6} \w+,\s*)*?(\d{1,6}) passed/.exec(t);
+  if (pass === null && jest) { pass = Number(jest[2]); fail = jest[1] ? Number(jest[1]) : 0; }
+  const vitest = /\bTests\s{1,10}(?:(\d{1,6}) failed \|\s*)?(\d{1,6}) passed/.exec(t);
+  if (pass === null && vitest) { pass = Number(vitest[2]); fail = vitest[1] ? Number(vitest[1]) : 0; }
+  const py = /=+ (?:(\d{1,6}) failed, )?(\d{1,6}) passed(?:, (\d{1,6}) failed)?/.exec(t);
+  if (pass === null && py) { pass = Number(py[2]); fail = Number(py[1] ?? py[3] ?? 0); }
+  if (pass === null) return null;
+  return fail ? `${pass} passed, ${fail} failed` : `${plural(pass, 'test')} passed`;
+}
+
+/** A shell step's result line: its exit code when it failed, a test run's counts, or how much it printed. */
+function shellResult({ exit, output, failed }) {
+  const tests = testsLine(output);
+  const lines = String(output ?? '').split('\n').filter((l) => l.trim()).length;
+  const code = Number.isInteger(exit) && exit !== 0 && Math.abs(exit) < 1e6 ? `exit ${exit}` : failed ? 'failed' : null;
+  return [code, tests ?? (code ? null : lines ? plural(lines, 'line') + ' of output' : 'no output')].filter(Boolean).join(': ');
+}
+
+/** A patch's (Claude Code's structuredPatch) counts: `3 additions, 1 removal`. */
+function patchLine(patch) {
+  if (!Array.isArray(patch)) return null;
+  let add = 0, rm = 0;
+  for (const h of patch) for (const l of Array.isArray(h?.lines) ? h.lines : []) { if (typeof l !== 'string') continue; if (l.startsWith('+')) add++; else if (l.startsWith('-')) rm++; }
+  return `${plural(add, 'addition')}, ${plural(rm, 'removal')}`;
+}
+
+/** A Claude tool's target, for `Tool(target)`: a shell step's command, a file's shown name, a search's pattern. */
+function claudeDetail(name, i) {
+  switch (name) {
+    case 'Bash': return commandLine(i.command);
+    case 'Read': case 'Edit': case 'MultiEdit': case 'Write': return fileName(i.file_path) === GONE ? '' : fileName(i.file_path);
+    case 'NotebookEdit': return fileName(i.notebook_path) === GONE ? '' : fileName(i.notebook_path);
+    case 'Grep': { const p = txt(i.pattern, 60); return p === GONE ? '' : `"${p}"${i.path && fileName(i.path) !== GONE ? ` in ${fileName(i.path)}` : ''}`; }
+    case 'Glob': return privateGlob(i.pattern) ? PRIVATE_FILE : (lastPart(i.pattern) === GONE ? '' : lastPart(i.pattern));
+    default: return '';
+  }
+}
+
+/** A shell step's own timeout, in seconds (Claude Code's Bash: `timeout` ms, 2 minutes when unset; none in the background). */
+function claudeLimit(name, i) {
+  if (name !== 'Bash' || i.run_in_background === true) return null;
+  const ms = Number(i.timeout);
+  return Math.min(86_400, Math.max(1, Math.ceil((Number.isFinite(ms) && ms > 0 ? ms : 120_000) / 1000)));
+}
+
+/** A finished Claude step's result line and its body (a shell step's output, an edit's diff): from its `toolUseResult`. */
+function claudeResult(name, r, text, failed, exit) {
+  const u = r && typeof r === 'object' ? r : {};
+  switch (name) {
+    case 'Bash': {
+      const output = typeof u.stdout === 'string' || typeof u.stderr === 'string' ? [u.stdout, u.stderr].filter(Boolean).join('\n') : text;
+      const body = shownText(output);
+      return { result: shellResult({ exit, output, failed }), ...(body ? { body } : {}) };
+    }
+    case 'Read': { const n = count(u.file?.numLines); return n === null ? {} : { result: `Read ${plural(n, 'line')}` }; }
+    case 'Edit': case 'MultiEdit': { const p = patchLine(u.structuredPatch), body = patchText(u.structuredPatch); return p ? { result: p, ...(body ? { body } : {}) } : {}; }
+    case 'Write': {
+      if (u.type === 'create' && typeof u.content === 'string') { const body = shownText(u.content.split('\n').map((l) => `+${l}`).join('\n')); return { result: `Wrote ${plural(u.content.split('\n').length, 'line')}`, ...(body ? { body } : {}) }; }
+      const p = patchLine(u.structuredPatch), body = patchText(u.structuredPatch); return p ? { result: p, ...(body ? { body } : {}) } : {};
+    }
+    case 'Grep': { const f = count(u.numFiles), n = count(u.numLines); return n !== null && u.mode === 'content' ? { result: `Found ${plural(n, 'line')}` } : f !== null ? { result: `Found ${plural(f, 'file')}` } : {}; }
+    case 'Glob': { const f = count(u.numFiles); return f === null ? {} : { result: `Found ${plural(f, 'file')}` }; }
+    case 'Task': case 'Agent': { const n = count(u.totalToolUseCount); return n === null ? {} : { result: `${plural(n, 'tool use')}` }; }
+    default: return {};
+  }
+}
+
 /** The cards in a Claude transcript's lines (parsed JSON objects), in order; `prefix` keeps ids unique per thread. */
-export function claudeCards(lines, prefix = '') {
-  const cards = new Map();
+export function claudeCards(lines, prefix = '', parent = null) {
+  const cards = new Map(), names = new Map();
   for (const l of lines) {
     const content = l?.message?.content;
     if (!Array.isArray(content)) continue;
     if (l.type === 'assistant') {
+      // The body's own words between steps (t-2109): a `text` card, its first line the label and the whole the body.
+      // Thinking never. Delivery keeps them only for a conversation that acts for the owner alone.
+      const mid = typeof l.message?.id === 'string' ? l.message.id : typeof l.uuid === 'string' ? l.uuid : null;
+      content.forEach((c, n) => {
+        if (c?.type !== 'text' || typeof c.text !== 'string' || !c.text.trim() || !mid) return;
+        const id = `${prefix}${mid}:${n}`.slice(0, 80);
+        const body = shownText(c.text, MAX_TEXT).replace(SGR, '');
+        const label = part('text', firstLine(c.text), MAX_SUMMARY);
+        if (!body || label === GONE) return;
+        cards.set(id, { id, at: cardTime(l.timestamp), tool: 'text', summary: clean(label), state: 'done', body, ...(parent ? { parent } : {}) });
+      });
       for (const c of content) {
         if (c?.type !== 'tool_use' || typeof c.id !== 'string') continue;
         const id = `${prefix}${c.id}`.slice(0, 80);
-        if (!cards.has(id)) cards.set(id, { id, at: cardTime(l.timestamp), tool: toolName(c.name), summary: claudeSummary(String(c.name ?? ''), c.input) || 'Used a tool', state: 'running' });
+        if (cards.has(id)) continue;
+        const name = String(c.name ?? ''), input = c.input && typeof c.input === 'object' ? c.input : {};
+        const card = { id, at: cardTime(l.timestamp), tool: toolName(c.name), summary: claudeSummary(name, input) || 'Used a tool', state: 'running', ...(parent ? { parent } : {}) };
+        const detail = claudeDetail(name, input), limit = claudeLimit(name, input);
+        if (detail) card.detail = detail;
+        if (limit) card.limit = limit;
+        if (name === 'TodoWrite') card.items = planItems((Array.isArray(input.todos) ? input.todos : []).map((t) => ({ text: t?.status === 'in_progress' ? (t.activeForm || t.content) : t?.content, done: t?.status === 'completed', now: t?.status === 'in_progress' })));
+        names.set(id, name);
+        cards.set(id, card);
       }
     } else if (l.type === 'user') {
       for (const c of content) {
@@ -212,12 +389,16 @@ export function claudeCards(lines, prefix = '') {
         const card = cards.get(`${prefix}${c.tool_use_id}`.slice(0, 80));
         if (!card || card.state !== 'running') continue; // one result per call: a repeated line changes nothing
         card.state = c.is_error === true ? 'failed' : 'done';
-        if (card.state === 'failed') {
-          // Claude Code's Bash result starts "Exit code N" on a failure; the rest is only matched, never shown.
-          const text = resultText(c);
-          const exit = /^Exit code (\d+)/.exec(text)?.[1];
-          card.summary = withWhy(card.summary, failWhy({ exit: exit ? Number(exit) : undefined, output: text }));
-        }
+        const text = resultText(c);
+        // Claude Code's Bash result starts "Exit code N" on a failure.
+        const code = /^Exit code (\d+)/.exec(text)?.[1];
+        const exit = code ? Number(code) : undefined;
+        if (card.state === 'failed') card.summary = withWhy(card.summary, failWhy({ exit, output: text }));
+        if (Number.isInteger(exit)) card.exit = exit;
+        const { result, body } = claudeResult(names.get(card.id), l.toolUseResult, text, card.state === 'failed', exit);
+        if (result) card.result = clean(redact(result));
+        if (body) card.body = body;
+        if (typeof l.timestamp === 'string') card.end = cardTime(l.timestamp);
       }
     }
   }
@@ -261,18 +442,74 @@ export function codexCards(events, prefix = '') {
     if (!card) continue;
     const label = codexSummary(item); // once per event: a plan moves on item.updated, a step's label on completion
     if (!card.summary) card.summary = label;
+    if (!card.detail) {
+      const detail = item.type === 'command_execution' ? commandLine(unwrapShell(item.command))
+        : item.type === 'file_change' && Array.isArray(item.changes) && item.changes.length && fileName(item.changes[0]?.path) !== GONE ? fileName(item.changes[0]?.path) : '';
+      if (detail) card.detail = detail;
+    }
     // A plan changes as the turn goes (item.updated): it's never a running step, only the latest plan.
-    if (item.type === 'todo_list') { card.summary = label; continue; }
+    if (item.type === 'todo_list') { card.summary = label; card.items = planItems((Array.isArray(item.items) ? item.items : []).map((t) => ({ text: t?.text, done: t?.completed === true }))); continue; }
     if (e.type === 'item.completed') {
       card.state = item.status === 'failed' || (item.type === 'command_execution' && Number.isInteger(item.exit_code) && item.exit_code !== 0) ? 'failed' : 'done';
       card.summary = card.state === 'failed' ? withWhy(label, codexWhy(item)) : label;
+      if (item.type === 'command_execution') {
+        if (Number.isInteger(item.exit_code) && Math.abs(item.exit_code) < 1e6) card.exit = item.exit_code;
+        card.result = clean(redact(shellResult({ exit: item.exit_code, output: item.aggregated_output, failed: card.state === 'failed' })));
+        const body = shownText(item.aggregated_output);
+        if (body) card.body = body;
+      } else if (item.type === 'file_change' && Array.isArray(item.changes)) card.result = `${plural(item.changes.length, 'file')} changed`;
     }
   }
   return [...cards.values()];
 }
 
+/** How many tokens a Claude session has written: each assistant message's output_tokens, once per message; null for none. */
+export function claudeTokens(lines) {
+  const seen = new Map();
+  for (const l of lines) {
+    const id = l?.message?.id, n = l?.message?.usage?.output_tokens;
+    if (l?.type === 'assistant' && typeof id === 'string' && Number.isInteger(n) && n >= 0) seen.set(id, Math.max(seen.get(id) ?? 0, n));
+  }
+  if (!seen.size) return null;
+  let t = 0;
+  for (const n of seen.values()) t += n;
+  return Math.min(t, 1e12);
+}
+
+/** A body's last sign of life as core takes it: an ISO time, and its tokens so far when it says; null when neither. */
+export function cleanAlive(a) {
+  if (!a || typeof a !== 'object' || typeof a.at !== 'string' || !Number.isFinite(Date.parse(a.at)) || cardTime(a.at) !== a.at) return null;
+  return { at: a.at, ...(Number.isInteger(a.tokens) && a.tokens >= 0 && a.tokens <= 1e12 ? { tokens: a.tokens } : {}) };
+}
+
+/**
+ * A card's further parts (t-2109), as core takes them, each through the gate again: from a house's word (houserunner
+ * cleanCards) as from our own. A part that isn't its shape is left out, never the card. `detail` shown text of at most
+ * MAX_DETAIL without colours, `body` shown text of at most MAX_BODY, `result` one printable line of at most
+ * MAX_SUMMARY, `items` at most MAX_ITEMS of {text (100), state done|now|todo}, `end` an ISO time, `parent` an id (as
+ * the caller makes it), `exit` and `limit` whole numbers in range.
+ */
+export function stepParts(c, idOf = (x) => x) {
+  const o = {};
+  const int = (v, lo, hi) => (Number.isInteger(v) && v >= lo && v <= hi ? v : null);
+  if (typeof c?.detail === 'string' && c.detail) { const d = shownText(c.detail, MAX_DETAIL).replace(SGR, ''); if (d) o.detail = d; }
+  if (typeof c?.body === 'string' && c.body) { const t = shownText(c.body, MAX_BODY); if (t) o.body = t; }
+  if (typeof c?.result === 'string' && c.result) { const r = part('text', c.result, MAX_SUMMARY); if (r !== GONE && !UNPRINTABLE_ONE.test(r)) o.result = r; }
+  const exit = int(c?.exit, -999_999, 999_999); if (exit !== null) o.exit = exit;
+  const limit = int(c?.limit, 1, 86_400); if (limit !== null) o.limit = limit;
+  if (typeof c?.end === 'string' && cardTime(c.end) === c.end) o.end = c.end;
+  if (typeof c?.parent === 'string' && /^[A-Za-z0-9_.:\-]{1,80}$/.test(c.parent)) { const p = idOf(c.parent); if (p) o.parent = p; }
+  if (Array.isArray(c?.items) && c.items.length) {
+    o.items = c.items.slice(0, MAX_ITEMS).map((x) => { const t = typeof x?.text === 'string' ? part('text', x.text, 100) : GONE; return { text: t === GONE ? 'an item' : t, state: ['done', 'now', 'todo'].includes(x?.state) ? x.state : 'todo' }; });
+  }
+  return o;
+}
+
+/** Only a card's base fields, as a core from before t-2109 takes them. */
+export const baseCard = (c) => ({ id: c.id, at: c.at, tool: c.tool, summary: c.summary, state: c.state });
+
 /** What the record keeps of a card: its state and a short hash of its label (never the label itself). */
-const mark = (c) => `${c.state}:${createHash('sha256').update(String(c.summary)).digest('hex').slice(0, 8)}`;
+const mark = (c) => `${c.state}:${createHash('sha256').update(JSON.stringify([c.summary, c.detail, c.result, c.body, c.exit, c.end, c.items, c.parent])).digest('hex').slice(0, 8)}`;
 
 /**
  * What to post of `cards` given what was posted (`sent`: id → its mark): the new ones and those whose state or label

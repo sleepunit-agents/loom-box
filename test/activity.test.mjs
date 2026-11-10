@@ -13,7 +13,7 @@ import { scratch } from './scratch.mjs';
 
 const read = (f) => readFileSync(join(here, 'fixtures', f), 'utf-8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
 
-test('a Claude transcript: tool_use makes a running card, its result done or failed; text and thinking make none', () => {
+test('a Claude transcript: tool_use makes a running card, its result done or failed; thinking makes none', () => {
   const cards = claudeCards(read('claude-transcript.jsonl'));
   assert.deepEqual(cards.map((c) => [c.tool, c.summary, c.state]), [
     ['Bash', 'Run the test suite', 'failed'],
@@ -21,7 +21,14 @@ test('a Claude transcript: tool_use makes a running card, its result done or fai
     ['Grep', 'Searched for "deliverAsOwner" in src', 'running'],
   ]);
   const all = JSON.stringify(cards);
-  for (const never of ['s3cr3t', 'npm test', 'OUTPUT-THAT-MUST-NOT-SHOW', 'secret plan', 'private reasoning', '/home/art']) assert.ok(!all.includes(never), never);
+  for (const never of ['s3cr3t', 'secret plan', 'private reasoning', '/home/art']) assert.ok(!all.includes(never), never);
+  // A label is never a command line or output (t-1944); the owner's Watching view gets the whole command and a shell
+  // step's output, redacted, in their own fields (t-2109). A read's contents never, anywhere.
+  for (const c of cards) for (const never of ['npm test', 'OUTPUT-THAT-MUST-NOT-SHOW']) assert.ok(!c.summary.includes(never), never);
+  assert.equal(cards[0].detail, 'export TOKEN=…; npm test');
+  assert.deepEqual([cards[0].result, cards[0].body, cards[0].limit], ['failed', 'OUTPUT-THAT-MUST-NOT-SHOW', 120]);
+  assert.ok(!JSON.stringify(cards[1]).includes('OUTPUT-THAT-MUST-NOT-SHOW'), 'a file read never shows what it read');
+  assert.equal(cards[1].detail, 'delivery.ts');
 });
 
 test('a Codex run: item.started makes a card, item.completed finishes it; failed stays failed; messages make none', () => {
@@ -30,7 +37,11 @@ test('a Codex run: item.started makes a card, item.completed finishes it; failed
     ['b1:item_1', 'command_execution', 'Ran a command', 'done'], // echo says nothing of what it's for
     ['b1:item_2', 'command_execution', 'Ran ls — exit 2: no such file', 'failed'], // a raw command names no file
   ]);
-  assert.ok(!JSON.stringify(cards).includes('cannot access'), 'never the output');
+  assert.ok(!cards.some((c) => c.summary.includes('cannot access')), 'never the output in a label');
+  assert.deepEqual(cards.map((c) => [c.detail, c.exit, c.result, c.body]), [
+    ['echo hi', 0, '1 line of output', 'hi'],
+    ['ls /nonexistent-dir', 2, 'exit 2', "ls: cannot access '/nonexistent-dir': No such file or directory"],
+  ]);
 });
 
 test('Codex\'s other tool items: an MCP call in words, a file change by its path, a search by its words; never a result, a diff or reasoning', () => {
@@ -144,4 +155,37 @@ test('a wake enables remote activity capture and posts live steps without a Comm
   assert.equal(options[0].activity, true, 'the remote bodyhost must collect cards too');
   assert.equal(w.core.activityCalls[0].conversation, r.conversation);
   assert.deepEqual(w.core.activityCalls[0].cards.map((c) => c.summary), ['Read a file']);
+});
+
+test('the body\'s own words go only where it works for the owner alone; its sign of life goes with them; an older core gets plain cards (t-2109)', async () => {
+  const w = world();
+  w.core.commsAnswer = (b) => (b.op === 'spawn' ? { ok: true, id: 'th:abcdefghij' } : { ok: true });
+  const cards = [{ id: 'w1', at: 'x', tool: 'text', summary: 'Found it.', state: 'done', body: 'Found it.' }, { id: 't1', at: 'x', tool: 'Bash', summary: 'Ran the tests', state: 'done', body: 'ok', result: '1 line of output' }];
+  w.runner.activity = () => cards;
+  w.runner.alive = () => ({ at: '2026-11-10T10:00:00.000Z', tokens: 4100 });
+  const { spawnCall } = await import('../src/spawn.mjs');
+  const r = await spawnCall(w.env, { kind: 'owner' }, { agent: 'art', brief: 'Run the tests' }, w.o);
+  await tick(w.env, w.o); await tick(w.env, w.o);
+  const [sent] = w.core.activityCalls.filter((a) => a.conversation === r.handle);
+  assert.deepEqual(sent.cards.map((c) => c.tool), ['text', 'Bash'], 'a spawn acts for the owner alone: its words show');
+  assert.deepEqual(sent.alive, { at: '2026-11-10T10:00:00.000Z', tokens: 4100 });
+  // A bridge conversation with someone in it: its words never, its steps still.
+  const b = world();
+  b.runner.activity = () => cards;
+  await deliver(b.env, b.msg('dm:U1', 'hi'), b.o);
+  await tick(b.env, b.o);
+  assert.ok(b.core.activityCalls.length >= 1);
+  for (const call of b.core.activityCalls) assert.ok(!call.cards.some((c) => c.tool === 'text'), 'no words where someone else is');
+  // A core from before t-2109 refuses the further parts: told the plain cards again, without them.
+  const o = world();
+  o.core.commsAnswer = (x) => (x.op === 'spawn' ? { ok: true, id: 'th:abcdefghij' } : { ok: true });
+  o.runner.activity = () => cards;
+  o.runner.alive = () => ({ at: '2026-11-10T10:00:00.000Z' });
+  o.core.activity = async (x) => { o.core.activityCalls.push(x); if (x.alive || x.cards.some((c) => Object.keys(c).some((k) => !['id', 'at', 'tool', 'summary', 'state'].includes(k)))) throw Object.assign(new Error('bad-input: card 0 has unknown keys'), { status: 400 }); return { ok: true }; };
+  const r2 = await spawnCall(o.env, { kind: 'owner' }, { agent: 'art', brief: 'x' }, o.o);
+  await tick(o.env, o.o); await tick(o.env, o.o);
+  const calls = o.core.activityCalls.filter((a) => a.conversation === r2.handle);
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[1].cards, [{ id: 't1', at: 'x', tool: 'Bash', summary: 'Ran the tests', state: 'done' }]);
+  assert.equal(calls[1].alive, undefined);
 });
