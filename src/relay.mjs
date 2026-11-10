@@ -279,9 +279,10 @@ export async function relay(env, caller, args, d = depsOf(env), proof = {}) {
     no(`relay: it didn't reach ${to} (${String(e.message ?? e).slice(0, 200)})${approval ? `; approval ${approval} was spent, so ask the owner again` : ''}`);
   }
   const { say: _words, ...kept } = entry;
-  d.append({ ...kept, conversation: out?.conversation ?? null });
+  // An answer said where the request reached (answeringHouse): kept, so that conversation's house lists it (relaysOf).
+  d.append({ ...kept, conversation: out?.conversation ?? null, ...(original && answeringHouse(env, caller, original) ? { answered_in: original.conversation } : {}) });
   const body = out?.body === 'failed' ? `, but its body didn't start (${out.reason ?? 'no reason given'}); the runtime tries again` : out?.body === 'queued' ? ': it waits for a body of theirs' : '';
-  const routing = returnTo ? ` Returned to ${out?.conversation ?? returnTo.conversation}.` : original?.origin && !answeringHouse(env, caller, original) ? ` Only the house holding the conversation ${replyTo} reached answers into the asker's; delivered to the relay conversation instead.` : original?.origin ? ` ${original.origin} ${now - original.at < RETURN_MS ? 'is no longer kept' : 'asked over 6 hours ago'}; delivered to the relay conversation instead.` : origin ? ` Replies return to ${origin.conversation}.` : originId !== undefined || caller.house ? ` Replies will use the relay conversation: ${originId !== undefined ? `${originId} couldn't be confirmed as the one asking (another conversation of yours is at work, or it isn't; from a house body's shell, \`loom runtime relay\` proves its own)` : 'no single conversation of yours is at work (name yours with conversation)'}.` : '';
+  const routing = returnTo ? ` Returned to ${out?.conversation ?? returnTo.conversation}.` : original?.origin && !answeringHouse(env, caller, original) ? ` Only where the body of the conversation ${replyTo} reached runs does an answer go into the asker's; delivered to the relay conversation instead.` : original?.origin ? ` ${original.origin} ${now - original.at < RETURN_MS ? 'is no longer kept' : 'asked over 6 hours ago'}; delivered to the relay conversation instead.` : origin ? ` Replies return to ${origin.conversation}.` : originId !== undefined || caller.house ? ` Replies will use the relay conversation: ${originId !== undefined ? `${originId} couldn't be confirmed as the one asking (another conversation of yours is at work, or it isn't; from a house body's shell, \`loom runtime relay\` proves its own)` : 'no single conversation of yours is at work (name yours with conversation)'}.` : '';
   return { text: `${entry.id}: ${to} has it${body}.${routing}` };
 }
 
@@ -342,10 +343,10 @@ export function relaysOf(env, agent, thread, conversation) {
   let rows = readRelays(env).filter((r) => r.from === agent || r.to === agent);
   // From a house (t-2134): only the relays its own conversation asked or was reached by, never the agent's others.
   if (conversation !== undefined) {
-    // What it asked, what reached it, and what it answered to what reached it (an answer from a relay conversation
-    // has no origin of its own: its reply_to's conversation says where it was said).
+    // What it asked, what reached it, and what it answered from there (answered_in: an answer from a relay
+    // conversation has no origin of its own).
     const reached = new Set(rows.filter((r) => r.to === agent && r.conversation === conversation).map((r) => r.id));
-    rows = rows.filter((r) => (r.from === agent && (r.origin === conversation || (!r.origin && reached.has(r.reply_to)))) || reached.has(r.id));
+    rows = rows.filter((r) => (r.from === agent && (r.origin === conversation || r.answered_in === conversation)) || reached.has(r.id));
   }
   if (thread) rows = rows.filter((r) => (r.thread ?? r.id) === thread);
   if (!rows.length) return `${agent} has no relays\n`;
