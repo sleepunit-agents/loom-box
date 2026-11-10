@@ -107,7 +107,7 @@ export async function taskStatus(env, caller, o = {}) {
   // issued for the job's own principal, is let go once its body here is gone (it's fed nothing more here: delivery moves
   // it at its turn's end), rather than kept up until that conversation ends.
   if (!jobSeated(env, c)) {
-    if (typeof c.body === 'string' && c.body.startsWith(`${c.body.split(':')[0]}:${h.id}-`)) return { done: false };
+    if (c.starting || (typeof c.body === 'string' && c.body.startsWith(`${c.body.split(':')[0]}:${h.id}-`))) return { done: false };
     return { done: true, ok: false, reason: 'someone other than whom the task was for joined its conversation; it goes on in its own house' };
   }
   if (c.control?.state === 'held' && !c.body && !c.starting) return { done: true, ok: false, cancelled: true, reason: 'the task was cancelled after its session was collected' };
