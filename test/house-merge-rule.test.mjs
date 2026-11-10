@@ -132,3 +132,18 @@ test('a body left in the shared house from before t-2061 gets no statement, says
   assert.equal(os.r.body.owner, true);
   assert.equal(ruleCheck(w, caller, os.r.body.statement).for, '?');
 });
+
+test('a body that runs in no house, asking from no house (--house -), is still its conversation\'s', { skip }, async () => {
+  const w = world();
+  household(w.env);
+  // No houses: the runner reports none, as a body on a houseless runner's record names none.
+  await deliver(w.env, w.msg('dm:J', 'merge loom 680', { from: { kind: 'person', slug: 'jonathan' } }), w.o);
+  const J = cvOf('art', 'slack', 'dm:J');
+  const c = loadConv(w.env, J);
+  const caller = { kind: 'agent', agent: 'art' };
+  const st = await api(w.env, fx, { caller, path: 'principal', body: { conversation: J, key: w.runner.envs[c.body.split(':')[1]].LOOM_BODY_KEY, session: w.sessionFor(J) } });
+  assert.equal(st.status, 200, JSON.stringify(st.body));
+  assert.deepEqual(ruleCheck(w, caller, st.body.statement), { tier: 'do', for: 'owner', scope: 'github:sleepunit-agents/*' });
+  // From a house, though, that statement is no one's: its body runs in none.
+  assert.equal(ruleCheck(w, { ...caller, house: 'h-5' }, st.body.statement).for, '?');
+});
