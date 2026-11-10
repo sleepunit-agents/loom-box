@@ -266,6 +266,15 @@ function houseView(h, { seat = false } = {}) {
   return { ...rest, task: h.job && !seat ? `Task ${h.id}` : shownTask(rest.task), ...(seat && st !== undefined ? { seat: st } : {}) };
 }
 
+/**
+ * Another house as a house sees it (t-2135): that it's there, where and how it's doing, never its task, log or note, so
+ * one conversation's body learns nothing of the agent's other conversations' work.
+ */
+function houseBrief(h) {
+  const { id, agent, box, state, service, slot, created, updated } = h;
+  return { id, agent, box, state, ...(service ? { service } : {}), ...(slot ? { slot } : {}), created, updated };
+}
+
 // ------------------------------------------------------------- the owner's
 
 export function addBox(env, effects, { name, mayHost: mh, labels }) {
@@ -647,7 +656,7 @@ export function list(env, caller) {
     .slice(0, 50)
     // Whose work each body host's house is for (t-1952) is the owner's to read: a body in one of them never learns who
     // steers its agent's other conversations, nor their ids.
-    .map((h) => houseView(h, { seat: caller.kind === 'owner' }));
+    .map((h) => (caller.kind === 'agent' && typeof caller.house === 'string' && h.id !== caller.house ? houseBrief(h) : houseView(h, { seat: caller.kind === 'owner' })));
   // Boxes are the household's: its owner sees them all, with their grants; anyone else, the live ones that may host their agents.
   const mine = caller.kind === 'agent' ? [caller.agent] : Array.isArray(caller.agents) ? caller.agents : null;
   const boxes = Object.entries(s.boxes)

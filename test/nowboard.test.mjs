@@ -269,3 +269,16 @@ echo "$1" >> '${calls}'; exit 1
   assert.deepEqual(adapterStatuses(env, t0 + 10 * ADAPTER_STATUS_MS + 1), {});
   assert.equal(n(), 8);
 });
+
+test('a body\'s house never writes the board, only a bridge\'s; it still reads the counts (t-2135)', async () => {
+  const env = world();
+  const body = { kind: 'agent', agent: 'art', house: 'h-31' };
+  for (const [path, b] of [['now/snapshot', { bridge: 'discord', snap: snap(1) }], ['now/event', { record: { bridge: 'discord', kind: 'did' } }]]) {
+    const r = await api(env, fx, { caller: body, path, body: b });
+    assert.equal(r.status, 403, path);
+    assert.match(r.body.error, /a service's house/);
+  }
+  assert.equal((await api(env, fx, { caller: { ...body, service: 'discord' }, path: 'now/snapshot', body: { bridge: 'discord', snap: snap(1) } })).status, 200);
+  assert.equal((await api(env, fx, { caller: { kind: 'agent', agent: 'art' }, path: 'now/event', body: { record: { bridge: 'discord', kind: 'did' } } })).status, 200, 'loom\'s machine, in no house');
+  assert.equal((await runFor(env, body, ['now', 'talking'])).exit, 0);
+});

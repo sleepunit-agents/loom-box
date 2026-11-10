@@ -299,4 +299,18 @@ test('a running service that prints the box\'s words is a crash, never taken dow
   assert.equal(svc().want, 'up');
   const v = ok(call(owner, 'list')).services[0];
   assert.equal(v.unnamed, undefined);
+test('a house sees its own house whole and the agent\'s others only as there, never their tasks (t-2135)', () => {
+  update(env, (s) => {
+    const base = { agent: 'art', box: Object.keys(s.boxes)[0], needs: [], state: 'running', created: new Date(clock).toISOString(), updated: new Date(clock).toISOString() };
+    s.houses['h-911'] = { ...base, id: 'h-911', task: 'my own task', log: 'mine' };
+    s.houses['h-912'] = { ...base, id: 'h-912', task: 'Loren\'s secret plan', log: 'their log', note: 'their note' };
+  });
+  const seen = ok(call({ ...art, house: 'h-911' }, 'list')).houses;
+  assert.equal(seen.find((h) => h.id === 'h-911').task, 'my own task');
+  const other = seen.find((h) => h.id === 'h-912');
+  assert.deepEqual(Object.keys(other).sort(), ['agent', 'box', 'created', 'id', 'state', 'updated']);
+  assert.ok(!JSON.stringify(seen).includes('secret plan'));
+  // Loom's machine (no house) and the owner: as before.
+  assert.equal(ok(call(art, 'list')).houses.find((h) => h.id === 'h-912').task, 'Loren\'s secret plan');
+  assert.equal(ok(call(owner, 'list')).houses.find((h) => h.id === 'h-912').task, 'Loren\'s secret plan');
 });
