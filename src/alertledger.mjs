@@ -70,9 +70,22 @@ const fenceWord = () => randomBytes(6).toString('hex');
 const fenced = (head, lines) => { const f = fenceWord(); return [head, DATA_NOTE, `<<<alert data ${f}`, ...lines, `alert data ${f}>>>`].join('\n'); };
 /** The most of one alert `show` hands back: well inside the host verbs' output bound, so its header is never cut. */
 const SHOW_MAX = 32 * 1024;
-/** The most lines a report lists (the newest), so it stays well inside the output bound and its fence's opening is kept. */
-const LINES_MAX = 100;
-const newest = (lines, what) => (lines.length > LINES_MAX ? [`… ${lines.length - LINES_MAX} older ${what} left out`, ...lines.slice(-LINES_MAX)] : lines);
+/**
+ * The lines a report lists, the last ones kept, within LINES_BYTES (bytes, what the output bound counts): so it stays
+ * well inside the host verbs' 64 KB and its fence's opening is never cut away, whatever the lines hold.
+ */
+const LINES_BYTES = 24 * 1024;
+function within(lines, what, budget = LINES_BYTES) {
+  const kept = [];
+  let used = 0;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const n = Buffer.byteLength(lines[i]) + 1;
+    if (used + n > budget) break;
+    kept.unshift(lines[i]);
+    used += n;
+  }
+  return kept.length < lines.length ? [`… ${lines.length - kept.length} ${what} left out`, ...kept] : kept;
+}
 
 /** `show <al-id>`: the alert as raised, its facts and detail fenced as data. {exit, out}. */
 export function show(art, id) {
@@ -100,17 +113,20 @@ export function verdictsReport(art, source, days, nowMs = Date.now()) {
   const cutoff = nowMs / 1000 - days * 86400;
   const vs = readEntries(art).filter((e) => e.kind === 'verdict' && e.source === source && Number(e.ts) > cutoff);
   if (!vs.length) return `no verdicts for ${source} in the last ${days} days`;
-  const out = [];
-  for (const e of vs.slice(-10)) out.push(`- ${ct(e.ts)} ${VERDICTS.includes(e.verdict) ? e.verdict : '?'}: ${str(e.cause).slice(0, CAUSE_MAX)} — ${str(e.msg).slice(0, WHY_MAX)}`);
+  const recent = [];
+  for (const e of vs.slice(-10)) recent.push(`- ${ct(e.ts)} ${VERDICTS.includes(e.verdict) ? e.verdict : '?'}: ${str(e.cause).slice(0, CAUSE_MAX)} — ${str(e.msg).slice(0, WHY_MAX)}`);
   const fa = new Map();
   for (const e of vs) if (e.verdict === 'false-alarm') { const k = causeKey(e.cause); fa.set(k, [...(fa.get(k) ?? []), e]); }
   const counts = [];
+  const causes = [];
   for (const [cause, es] of [...fa.entries()].sort((a, b) => b[1].length - a[1].length)) {
-    out.push(`false alarms, cause ${JSON.stringify(cause.slice(0, CAUSE_MAX))}: ${es.length}`);
+    causes.push(`false alarms, cause ${JSON.stringify(cause.slice(0, CAUSE_MAX))}: ${es.length}`);
     if (es.length >= TUNE_AFTER) counts.push(`TUNE THIS ALERT: ${es.length} false alarms with the same cause; change the alert, or propose the change`);
   }
   // The counts are the runtime's own words, outside the fence; the causes and reasons are the triages', inside it.
-  return [fenced(`${vs.length} verdict(s) for ${source} in the last ${days} days:`, newest(out, 'lines')), ...counts.slice(0, 5)].join('\n');
+  // Each part within its own share: the newest verdicts, and the most frequent causes first (the rest left out).
+  const top = within([...causes].reverse(), 'less frequent causes', LINES_BYTES / 2).reverse();
+  return [fenced(`${vs.length} verdict(s) for ${source} in the last ${days} days:`, [...within(recent, 'older verdicts', LINES_BYTES / 2), ...top]), ...counts.slice(0, 5)].join('\n');
 }
 
 /** `peek [--hours N]`: recent entries grouped by kind and source, so a flapping unit reads as one line. */
@@ -129,7 +145,7 @@ export function peek(art, hours, nowMs = Date.now()) {
     if (msg.length > 160) msg = `${msg.slice(0, 157)}...`;
     return `- [${g.kind.slice(0, 40)}] ${g.source.slice(0, 64)} — ${when} — ${msg}`;
   });
-  return lines.length ? fenced(`What the ledger holds from the last ${hours} hours, by kind and source:`, newest(lines, 'groups')) : `nothing in the last ${hours} hours`;
+  return lines.length ? fenced(`What the ledger holds from the last ${hours} hours, by kind and source:`, within(lines, 'older groups')) : `nothing in the last ${hours} hours`;
 }
 
 /**

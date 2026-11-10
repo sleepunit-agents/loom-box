@@ -385,6 +385,16 @@ test('the alert ledger: show, verdicts, peek and a verdict, in-process, never th
   const many = (await run('alert-peek', [])).output;
   assert.match(many, /^What the ledger holds [^]*<<<alert data [0-9a-f]{12}\n… \d+ older groups left out\n/);
   assert.match(many, /s-299 /);
+  // Wide characters count as bytes: the fence's opening survives three-byte lines too.
+  for (let i = 0; i < 150; i++) appendFileSync(led, `${JSON.stringify({ ts: now, kind: '\u4e00'.repeat(40), source: '\u4e00'.repeat(64) + i, msg: '\u4e00'.repeat(160) })}\n`);
+  assert.match((await run('alert-peek', [])).output, /^What the ledger holds [^]*<<<alert data [0-9a-f]{12}\n… \d+ older groups left out\n/);
+  for (let i = 0; i < 120; i++) {
+    appendFileSync(led, `${JSON.stringify({ ts: now, kind: 'alert', source: 'unit-loom-http', id: `al-${(0x10000000 + i).toString(16)}`, msg: 'm' })}\n`);
+    appendFileSync(led, `${JSON.stringify({ ts: now, kind: 'verdict', source: 'unit-loom-http', verdict: 'false-alarm', cause: `\u4e00${i} `.repeat(40).slice(0, 200), msg: '\u4e00'.repeat(500), alert: `al-${(0x10000000 + i).toString(16)}` })}\n`);
+  }
+  const wide = (await run('alert-verdicts', ['unit-loom-http'])).output;
+  assert.match(wide, /^\d+ verdict\(s\) for unit-loom-http [^]*<<<alert data [0-9a-f]{12}\n… \d+ older verdicts left out\n/);
+  assert.match(wide, /false alarms, cause "planned restart": 2\n[^]*… \d+ less frequent causes left out\nalert data [0-9a-f]{12}>>>\nTUNE THIS ALERT: 2/, 'the most frequent cause kept first');
   // A long alert is cut inside its fence, so the fence's opening always reaches the body.
   alert('al-0011aadd', { detail: 'y'.repeat(200_000) });
   const long = await run('alert-show', ['al-0011aadd']);
