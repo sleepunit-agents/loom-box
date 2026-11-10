@@ -151,7 +151,8 @@ import { addBox, api, down, list, remoteDown, remoteUp, endDrill, revokeBox, pre
 import { watchOf } from './watch.mjs';
 import { healthWords } from './health.mjs';
 import { realEffects } from './effects.mjs';
-import { act, houseBadge, manifest, page } from './ui.mjs';
+import { act, houseBadge, keepStoreReads, manifest, page } from './ui.mjs';
+import { serveManifest } from './ui-socket.mjs';
 import { askToJoin, BoxError, joinLoom, loadConfig, packState, POLL_MS, remoteClient, restoreState, runner, runMode } from './box.mjs';
 import { load as loadState, localBoxName, renameLocal, stateDir } from './state.mjs';
 import { exportPart, importPart } from './bundle.mjs';
@@ -957,10 +958,14 @@ async function delivery(rest, env, json) {
   if (sub === 'run') {
     const every = Number(flag(rest, '--every')) || 5000;
     let watched = 0;
+    // The manifest from here, over a local socket, instead of a `ui --json` process each time loom asks (ui-socket.mjs).
+    keepStoreReads(env);
+    const sock = rest.includes('--once') ? null : await serveManifest(env, { compute: () => JSON.stringify(manifest(env)) + '\n', changed: () => coreFrom(env, { timeoutMs: 2000 }).changed() });
     for (;;) {
       // The service's own tick: the only one whose settings become the continuation policy (delivery.mjs).
       try { await tick(env, { service: true }); } catch (err) { process.stderr.write(`loom-runtime deliver: tick: ${err.message}\n`); }
-      await tellAtWork(env);
+      // While loom reads the manifest from the socket, the socket says when it moved; else the heartbeat does.
+      if (!(sock && await sock.tick())) await tellAtWork(env);
       // The bridges' outages, noted even while nothing reads the manifest (loom down for a deploy): each half minute.
       if (Date.now() - watched >= WATCH_EVERY_MS) { watched = Date.now(); try { watchBridges(env); } catch (err) { process.stderr.write(`loom-runtime deliver: bridge watch: ${err.message}\n`); } }
       // The day's review, once it's due (review.mjs): started detached, so the tick never waits on it.
