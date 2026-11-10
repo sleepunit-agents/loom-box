@@ -737,7 +737,8 @@ A box with an agent's conversations on it that's silent 10 minutes gets the owne
 --agent <a> [--house h-…]… [--for 15m]` (at most 60 minutes; it ends by itself, or with `loom runtime drill end <box>`).
 For that agent only, placement takes the box as long silent, so its warm house there drains and new bodies go to the
 next box that's up; the named houses, and only they, go on a write-off card that starts "Drill:". An Allow writes them
-off, and the box, still polling, is told to stop them at once.
+off, and the box, still polling, is told to stop them on its next poll (seconds: until then the old body may overlap the
+new one, which is what the rehearsal tests).
 
 ## Spawned jobs
 

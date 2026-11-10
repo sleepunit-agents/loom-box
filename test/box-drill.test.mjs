@@ -150,16 +150,23 @@ test('a drill\'s card says it\'s a drill and names only its houses; his Allow wr
   assert.ok(polled.stop.includes('h-7'));
   assert.ok(!polled.stop.includes('h-11'));
   assert.deepEqual(withdrawn, []);
-  // A drill ended before he answers: the card no longer applies, and is taken back.
+  // A second drill (another start) is another stretch of silence: the first card's Allow is refused for it, and a
+  // drill ended before he answers takes its card back.
+  const firstTarget = target;
   update(h.env, (s) => { s.houses['h-15'] = { id: 'h-15', agent: 'art', box: far, state: 'running' }; });
   writeFileSync(join(hosts, 'art@p-d.json'), JSON.stringify({ house: 'h-15', report: { at: Date.now(), house: 'h-15', bodies: {} } }));
   const convs2 = [...convs, { conversation: 'cv-00000000000f', agent: 'art', body: 'claude:h-15-b0000006' }];
   await askDarkBoxes(h.env, { convs: convs2 });
-  setDrill(h.env, hfx, { name: 'far', agent: 'art', houses: ['h-15'] });
+  setDrill(h.env, { ...hfx, now: () => new Date(Date.now() - 5000) }, { name: 'far', agent: 'art', houses: ['h-15'] });
   await askDarkBoxes(h.env, { convs: convs2 });
   await askDarkBoxes(h.env, { convs: convs2 });
   const second = load(h.env).writeOffAsks[`art:${far}`];
   assert.deepEqual(second.houses, ['h-15']);
+  assert.notEqual(second.target, firstTarget);
+  states[second.approval] = 'allowed';
+  assert.equal(writeOffApproved(h.env, hfx, owner, { id: aid, agent: 'art', target: firstTarget }, spend).ok, false, 'the first drill\'s Allow');
+  assert.equal(spent.length, 1);
+  states[second.approval] = 'pending';
   endDrill(h.env, hfx, { name: 'far' });
   assert.match(writeOffAsk(h.env, { agent: 'art', box: far, target: second.target, approval: second.approval }).why, /heard from/);
   await askDarkBoxes(h.env, { convs: convs2 });

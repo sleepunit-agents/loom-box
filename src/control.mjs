@@ -137,7 +137,8 @@ export const DRILL_DEFAULT_MS = 15 * 60_000;
 export function drillOf(b, nowMs = Date.now(), agent) {
   const d = b?.drill;
   if (!d || b.local || !(Date.parse(d.until) > nowMs)) return null;
-  return agent === undefined || d.agent === agent ? d : null;
+  // Never without its agent: a drill is one agent's, and no other agent's decision may see it.
+  return d.agent === agent ? d : null;
 }
 
 /** When the box was last heard, as the runtime decides by it for `agent`: a drill's held time while it runs. */
