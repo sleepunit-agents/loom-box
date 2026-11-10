@@ -568,15 +568,15 @@ for (const gate of ['control', 'retiring', 'paused']) test(`vouch cleanup respec
   assert.equal(loadConv(w.env, cv).queue.length, 1);
 });
 
-test('a denied conversation refuses later local wakes without asking or retrying them', async () => {
+test('a denied conversation finishes later local wakes without asking or starting them', async () => {
   const { w, ap, lwake } = setup();
   const cv = cvOf('art', 'wake', 'wake:w-denied');
   await deliver(w.env, lwake('wake:w-denied', 'first', '-'), w.o);
   ap.check = async () => 'denied';
   await drain(w.env, cv, depsOf(w.env, w.o));
   const r = await deliver(w.env, lwake('wake:w-denied', 'second', '-'), w.o);
-  assert.equal(r.status, 403);
-  assert.match(r.error, /vouch was denied/);
+  assert.equal(r.body, 'failed');
+  assert.match(r.reason, /not run: nobody vouched/);
   assert.equal(ap.filed.length, 1);
   assert.equal(loadConv(w.env, cv).queue.length, 0);
   assert.deepEqual(deliveryNotices(w.env, w.clock.now().getTime()), []);
@@ -596,4 +596,31 @@ test('pending and unreadable vouch checks are limited to once a minute across dr
   await drain(w.env, cv, d);
   assert.equal(checks, 2);
   assert.equal(loadConv(w.env, cv).queue.length, 1);
+});
+
+for (const state of ['expired', 'denied']) test(`${state} vouch finishes all local schedule wakes queued behind it`, async () => {
+  const { w, ap, lwake } = setup();
+  const cv = cvOf('art', 'wake', 'wake:w-many');
+  await deliver(w.env, lwake('wake:w-many', 'first', '-'), w.o);
+  await deliver(w.env, lwake('wake:w-many', 'second', '-'), w.o);
+  assert.equal(loadConv(w.env, cv).queue.length, 2);
+  ap.check = async () => state;
+  await drain(w.env, cv, depsOf(w.env, w.o));
+  assert.equal(loadConv(w.env, cv).queue.length, 0);
+  assert.deepEqual(conversationJobs(w.env, depsOf(w.env, w.o)), []);
+  assert.deepEqual(deliveryNotices(w.env, w.clock.now().getTime()), []);
+});
+
+test('redelivery of the denied original returns its recorded not-run outcome', async () => {
+  const { w, ap, lwake } = setup();
+  const m = lwake('wake:w-replay', 'bench', '-');
+  await deliver(w.env, m, w.o);
+  const cv = cvOf('art', 'wake', 'wake:w-replay');
+  ap.check = async () => 'denied';
+  await drain(w.env, cv, depsOf(w.env, w.o));
+  const again = await deliver(w.env, m, w.o);
+  assert.equal(again.body, 'failed');
+  assert.match(again.reason, /not run: nobody vouched/);
+  assert.equal(loadConv(w.env, cv).queue.length, 0);
+  assert.equal(ap.filed.length, 1);
 });

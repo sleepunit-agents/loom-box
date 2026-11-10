@@ -254,7 +254,6 @@ export function localBodiesOf(env) {
   const from = typeof v.from === 'string' && PIECE.test(v.from) ? v.from : 'clock';
   return { agents, cwd: v.cwd, from, ...(typeof v.claude === 'string' && v.claude ? { claude: v.claude } : {}), args, ...(typeof v.path === 'string' && v.path ? { path: v.path } : {}), ...(v.codex === true ? { codex: true } : {}), where: v.where === 'house' ? 'house' : 'here' };
 }
-const deniedVouch = 'not run: this conversation\'s ownership vouch was denied';
 const mismatch = (place, local) => `forbidden: ${place}'s bodies run ${local ? "on loom's machine" : 'in a house'}, and this wake's would not`;
 
 /** The runner settings a local body's harness takes: the owner's claude and its args. */
@@ -728,7 +727,6 @@ async function deliverOnce(env, raw, o) {
   if (m.kind === 'wake') {
     const prior = listConvs(env).find((c) => c.agent === m.agent && c.venue === m.venue && c.place === m.place);
     if (prior && !!prior.local !== local) return { status: 403, error: mismatch(m.place, prior.local) };
-    if (local && prior?.resetAsk?.denied) return { status: 403, error: deniedVouch };
   }
   const key = deliveryKey(m);
   const now = () => d.now().getTime();
@@ -804,7 +802,6 @@ async function deliverOnce(env, raw, o) {
       // Where its bodies run is the conversation's for good: a wake of the other kind, raced past the look above,
       // stops here (its turn stands, no body hears it).
       if (m.kind === 'wake' && !!c.local !== local) return mismatch(m.place, c.local);
-      if (local && c.resetAsk?.denied) return deniedVouch;
       if (m.label !== undefined) c.label = m.label;
       // A retry after a crash may find its message already queued (or already answered): never twice. Who steered it
       // (principal.mjs, t-1943) is noted as it joins, before any body hears it: a wake takes what the clock handed over
@@ -1211,7 +1208,7 @@ function plan(env, cv, d, mem) {
   }
   // A local conversation its owner is being asked about (t-1975): what it holds waits for his answer, never down the
   // retry ladder to failure, so the messages his card lists are still there when his Allow counts them.
-  // The drain quietly finishes listed local wakes when the card expires or is denied; unreadable cards still wait.
+  // The drain quietly finishes held local wakes when the card expires or is denied; unreadable cards still wait.
   if (c.local && c.resetAsk && !c.body && now - Date.parse(c.resetAsk.at) < 24 * 3600_000 && localForeign(env, c)) return wait(`its owner is asked on loom's page whether it's his${c.resetAsk.approval ? ` (${c.resetAsk.approval})` : ''}`);
   const take = () => { const q = c.queue; c.queue = []; delete c.waiting; return q; };
   // What a start or resume takes off the queue is kept with its marker until it's done: a process that dies holding it
@@ -1315,7 +1312,7 @@ function plan(env, cv, d, mem) {
   return begin({ type: 'start', msgs: take() });
 }
 
-/** A local wake held for a vouch is finished quietly when that card is denied or expires.
+/** Local schedule wakes held for a vouch are finished quietly when that card is denied or expires.
  * Read outside the lock; recheck the exact card and queue under it so an Allow/reset or a concurrent start wins.
  * This never grants authority, spends a card, or discards a person's later message. Unreadable is still waiting.
  */
@@ -1324,12 +1321,12 @@ async function finishUnvouchedWake(env, cv, d) {
   if (!c?.local || c.venue !== 'wake' || c.body || c.starting || c.retiring || c.control || c.paused || !c.resetAsk?.approval || !c.queue?.length) return;
   const aid = c.resetAsk.approval;
   if (!/^a-[0-9a-f]{8}$/.test(aid)) return;
-  const listedWake = x => c.resetAsk.queued?.includes(x.key) && x.kind === 'wake' && x.local && x.from?.kind === 'schedule';
-  if (!c.queue.some(listedWake)) return;
+  const heldWake = x => x.kind === 'wake' && x.local && x.from?.kind === 'schedule' && !isNote(x);
+  if (!c.queue.some(heldWake)) return;
   const fx = approvalsFake(env);
-  if (fx && typeof fx.check !== 'function') return;
+  if (!c.resetAsk.denied && fx && typeof fx.check !== 'function') return;
   const checkedAt = d.now().getTime();
-  const reserved = locked(env, () => {
+  const reserved = c.resetAsk.denied || locked(env, () => {
     const cur = loadConv(env, cv);
     if (cur?.resetAsk?.approval !== aid || checkedAt - (cur.resetAsk.checkedAt ?? 0) < 60_000) return false;
     cur.resetAsk.checkedAt = checkedAt;
@@ -1339,7 +1336,8 @@ async function finishUnvouchedWake(env, cv, d) {
   if (!reserved) return;
   let state;
   try {
-    if (fx) state = await fx.check?.(aid);
+    if (c.resetAsk.denied) state = 'denied';
+    else if (fx) state = await fx.check?.(aid);
     else {
       const r = await approvalsRunAsync(env, ['check', aid, '--as', runtimeAs(c.agent)]);
       if (!r.error && r.status === 0) state = r.stdout.trim();
@@ -1349,16 +1347,15 @@ async function finishUnvouchedWake(env, cv, d) {
   locked(env, () => {
     const cur = loadConv(env, cv);
     if (!cur?.local || cur.venue !== 'wake' || cur.body || cur.starting || cur.retiring || cur.control || cur.paused || cur.resetAsk?.approval !== aid) return;
-    const shown = new Set(cur.resetAsk.queued ?? []);
-    const drop = (cur.queue ?? []).filter(x => shown.has(x.key) && x.kind === 'wake' && x.local && x.from?.kind === 'schedule');
+    const drop = (cur.queue ?? []).filter(heldWake);
     if (!drop.length) return;
     outcome(cur, drop.map(x => x.key), { body: 'failed', reason: `not run: nobody vouched for it (vouch ${state})` }, d.now().getTime());
     const keys = new Set(drop.map(x => x.key));
     cur.queue = cur.queue.filter(x => !keys.has(x.key));
     if (state === 'denied') cur.resetAsk.denied = true;
+    else delete cur.resetAsk;
     if (cur.queue.every(isNote)) {
       delete cur.waiting;
-      if (state === 'expired') delete cur.resetAsk;
       delete cur.retryAt; delete cur.startFails; delete cur.retryReason; delete cur.startStatus;
     }
     saveConv(env, cur);
