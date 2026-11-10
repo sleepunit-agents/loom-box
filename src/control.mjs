@@ -8,7 +8,7 @@ import { checkLoginExpiry } from './login-expiry.mjs';
 // It is not a scheduler. A house goes where it's told (a box), or to the one
 // permitted box that has what it needs, or to the agent's primary. If that
 // doesn't name exactly one box, it says why and starts nothing.
-import { OWNER_SEAT, SEAT, seatCapProblem } from './principal.mjs';
+import { OWNER_SEAT, SEAT, principalOf, seatCapProblem } from './principal.mjs';
 import { ownCommit } from './version.mjs';
 import { pieceName } from './piece.mjs';
 import { randomBytes } from 'node:crypto';
@@ -359,8 +359,9 @@ export function setAgent(env, effects, { agent, repo, houseFile, nested, gpu, br
   if (typeof lg === 'string') lg = reset ? undefined : lg === 'none' ? [] : lg.split(/[\s,]+/).filter(Boolean);
   if (lg !== undefined && (!Array.isArray(lg) || !lg.every((x) => LOGIN_NAMES.includes(x)))) fail(`logins is a list of ${LOGIN_NAMES.join(', ')} (or empty for none)`);
   // Blank (the page's form, an untouched field) is not given: only none clears (t-1963).
-  const sc = scopes === undefined || scopes === '' ? undefined : parseScopes(scopes);
-  const st = steers === undefined || steers === '' ? undefined : parseSteers(steers);
+  const blank = (v) => v === undefined || v === null || v === '' || (Array.isArray(v) && !v.length) || (typeof v === 'object' && !Array.isArray(v) && !Object.keys(v).length);
+  const sc = blank(scopes) ? undefined : parseScopes(scopes);
+  const st = blank(steers) ? undefined : parseSteers(steers);
   return update(env, (s) => {
     const keep = lg !== undefined ? [...new Set(lg)] : reset ? undefined : s.agents[a]?.logins;
     // Another repo, house file or branch: the image its next house builds isn't known any more (until a box says).
@@ -373,9 +374,16 @@ export function setAgent(env, effects, { agent, repo, houseFile, nested, gpu, br
     const has = (k) => (k.startsWith('tailnet:') ? tn.some((g) => `tailnet:${g.name}` === k) : Object.hasOwn(sec, k));
     if (sc) for (const k of Object.keys(sc)) if (!has(k) && !Object.hasOwn(was?.scopes ?? {}, k)) fail(`${k} has a scope, and ${a}'s houses don't get it: a secret by the name a house sees, or tailnet:<name>`);
     // One stored secret under two names is one secret: both names scoped alike, or the other name hands it out.
-    for (const [n, from] of Object.entries(sec)) {
-      const twin = Object.entries(sec).find(([m, f]) => m !== n && f === from && scoped[m] !== scoped[n]);
+    // A scoped name renamed is the same secret too: its old store, now under another name, keeps the scope.
+    const stores = [...Object.entries(sec), ...Object.keys(scoped).filter((k) => !k.startsWith('tailnet:') && !Object.hasOwn(sec, k) && Object.hasOwn(was?.secrets ?? {}, k)).map((k) => [k, was.secrets[k]])];
+    for (const [n, from] of stores) {
+      const twin = stores.find(([m, f]) => m !== n && f === from && scoped[m] !== scoped[n]);
       if (twin) fail(`${n} and ${twin[0]} are the same secret (${from}): scope both alike`);
+    }
+    // And one tailscaled socket under two names is one tailnet.
+    for (const g of tn) {
+      const twin = tn.find((x) => x.name !== g.name && x.socket === g.socket && scoped[`tailnet:${x.name}`] !== scoped[`tailnet:${g.name}`]);
+      if (twin) fail(`tailnets ${g.name} and ${twin.name} are the same socket: scope both alike`);
     }
     const steering = st ?? was?.steers ?? {};
     s.agents[a] = { repo: r, houseFile: file, nested: nest, gpu: gp, branch: br, repoSecret: rs, secrets: sec, ports: pt, tailnets: tn, ...(keep !== undefined ? { logins: keep } : {}),
@@ -437,7 +445,7 @@ function parseSteers(v) {
  * (owner, p-<person>, u-<conversation>); a task house's taskActsFor (the owner's only when nobody else steered it, one
  * person's when only they did); a service house the owner's. Anything else, or a record that can't say: unknown.
  */
-export function housePrincipal(s, h) {
+export function housePrincipal(s, h, env) {
   if (isHostHouse(h, s)) {
     // A body host from before seats were kept can't say: unknown.
     const seat = typeof h.seat === 'string' ? h.seat : null;
@@ -449,21 +457,23 @@ export function housePrincipal(s, h) {
     const j = /^j-(h-[0-9]{1,9})$/.exec(seat ?? '');
     const job = j && s.houses?.[j[1]];
     if (!job || job.service || (j[1] !== h.id && isHostHouse(job, s))) return { unknown: true };
-    return taskPrincipal(job.taskActsFor);
+    return taskPrincipal(env, h.agent, job.taskActsFor);
   }
   // A service is its own principal: people other than the owner may steer it (a chat bridge), and a body can ask for
   // one. It gets what's scoped to it by name (service:<name>), and what isn't scoped.
   if (h.service) return { service: h.service };
-  return taskPrincipal(h.taskActsFor);
+  return taskPrincipal(env, h.agent, h.taskActsFor);
 }
 
-/** A task's taskActsFor as a principal: the owner's only when nobody else steered it, one person's, else unknown. */
-function taskPrincipal(p) {
-  if (!p || typeof p !== 'object' || p.unknown !== false) return { unknown: true };
-  const people = Array.isArray(p.people) ? p.people : null;
-  if (!people) return { unknown: true };
-  if (p.owner === true && people.length === 0) return { owner: true };
-  if (p.owner !== true && people.length === 1 && SCOPE.test(String(people[0]))) return { person: people[0] };
+/**
+ * A task's taskActsFor as a principal, read now by the runtime's own rule (principal.mjs, principalOf): the owner's only
+ * when nobody else steered it and whoever spoke as owner still is one, one person's, else unknown.
+ */
+function taskPrincipal(env, agent, p) {
+  if (!p || typeof p !== 'object' || p.unknown !== false || !Array.isArray(p.people)) return { unknown: true };
+  const v = principalOf(env ?? {}, { agent, actsFor: p });
+  if (v.owner === true && !v.people.length) return { owner: true };
+  if (v.owner !== true && typeof v.for === 'string' && SCOPE.test(v.for) && v.people.length === 1) return { person: v.for };
   return { unknown: true };
 }
 
@@ -760,7 +770,7 @@ export function claim(env, effects, caller, { id, nativeHistory }) {
       const secrets = {};
       // Whose work this house is for, and what's scoped away from it (t-1963): never issued, and named to the box so
       // its house starts without them rather than not at all.
-      const p = housePrincipal(s, h);
+      const p = housePrincipal(s, h, env);
       const withheld = { secrets: [], tailnets: [] };
       for (const [as, from] of Object.entries(a.secrets || {})) {
         // A mapping from before the brokers went (sub:<provider>): nothing is issued; the house file's logins say

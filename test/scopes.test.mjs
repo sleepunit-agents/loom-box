@@ -3,6 +3,7 @@
 // loom can't name, only what isn't scoped. Withheld things are named to the box, which starts the house without them.
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { api, claim, housePrincipal, inScope, up } from '../src/control.mjs';
 import { load } from '../src/state.mjs';
@@ -27,6 +28,9 @@ beforeEach(() => {
   env = { HOME: scratch('loom-box-scopes-'), LOOM_BOX_LOCAL_NAME: 'one' };
   env.LOOM_BOX_HOME = join(env.HOME, 'state');
   env.XDG_RUNTIME_DIR = join(env.HOME, 'run');
+  // The household: Jonathan owns everything; nobody else owns art (a former co-owner is a person like any other).
+  mkdirSync(join(env.HOME, '.config', 'loom'), { recursive: true });
+  writeFileSync(join(env.HOME, '.config', 'loom', 'household.json'), JSON.stringify({ members: [{ person: 'jonathan', agents: '*' }] }));
   let n = 0;
   fx = { now: () => new Date('2026-11-09T03:00:00Z'), mint: () => `loom_${'t'.repeat(30)}${n++}`, revoke: () => {}, secret: (name) => `value-of-${name}` };
   ok(call(owner, 'set-agent', ART));
@@ -59,11 +63,13 @@ test('the owner\'s seat gets everything; a person\'s, their project\'s; an unkno
 
 test('a task house is whose its taskActsFor says, and a record that can\'t say is unknown', () => {
   const s = { agents: {}, houses: {} };
-  const task = (actsFor) => housePrincipal(s, { task: 'x', taskActsFor: actsFor });
+  const task = (actsFor) => housePrincipal(s, { task: 'x', taskActsFor: actsFor }, env);
   assert.deepEqual(task({ owner: true, people: [], unknown: false }), { owner: true });
   assert.deepEqual(task({ owner: false, people: ['patrick'], unknown: false }), { person: 'patrick' });
-  // The owner and someone else, two people, anything unplaced, or nothing kept: not the owner's.
-  for (const p of [{ owner: true, people: ['patrick'], unknown: false }, { owner: false, people: ['a', 'b'], unknown: false },
+  // The owner and Patrick both spoke: Patrick's, by the runtime's own rule (principalOf), never the owner's.
+  assert.deepEqual(task({ owner: true, people: ['patrick'], unknown: false }), { person: 'patrick' });
+  // Two people, anything unplaced, or nothing kept: unknown.
+  for (const p of [{ owner: false, people: ['a', 'b'], unknown: false },
     { owner: true, people: [], unknown: true }, { owner: true, people: [] }, undefined, { owner: false, people: [], unknown: false }]) {
     assert.deepEqual(task(p), { unknown: true }, JSON.stringify(p));
   }
@@ -103,7 +109,7 @@ test('a service is its own principal: only what\'s scoped to it by name, and a b
   // and what the owner scoped to that service by name.
   ok(call(owner, 'set-agent', { ...ART, scopes: ['github-token=owner+service:jobs', 'discord-token=owner', 'pond-dev-service-token=pond+service:jobs', 'tailnet:fleet=pond'] }));
   const s = load(env);
-  assert.deepEqual(housePrincipal(s, { service: 'discord', task: null }), { service: 'discord' });
+  assert.deepEqual(housePrincipal(s, { service: 'discord', task: null }, env), { service: 'discord' });
   const a = s.agents.art;
   assert.equal(inScope(a, { service: 'jobs' }, a.scopes['github-token']), true);
   assert.equal(inScope(a, { service: 'discord' }, a.scopes['github-token']), false);
@@ -118,16 +124,16 @@ test('a job\'s seat is its house\'s; a body host that can\'t say whose is unknow
   const s = { agents: {}, houses: { 'h-7': { id: 'h-7', task: 'x', taskActsFor: { owner: true, people: [], unknown: false } },
     'h-8': { id: 'h-8', task: 'x', taskActsFor: { owner: false, people: [], unknown: true } } } };
   const host = (seat) => ({ kind: 'body-host', ...(seat ? { seat } : {}) });
-  assert.deepEqual(housePrincipal(s, host('j-h-7')), { owner: true });
-  assert.deepEqual(housePrincipal(s, host('j-h-8')), { unknown: true });
-  assert.deepEqual(housePrincipal(s, host('j-h-9')), { unknown: true });
-  assert.deepEqual(housePrincipal(s, host()), { unknown: true });
+  assert.deepEqual(housePrincipal(s, host('j-h-7'), env), { owner: true });
+  assert.deepEqual(housePrincipal(s, host('j-h-8'), env), { unknown: true });
+  assert.deepEqual(housePrincipal(s, host('j-h-9'), env), { unknown: true });
+  assert.deepEqual(housePrincipal(s, host(), env), { unknown: true });
   // The real shape: the task house itself becomes the job's body host, its seat naming itself (taskhost.mjs).
   const self = { id: 'h-7', kind: 'body-host', seat: 'j-h-7', task: 'x', taskActsFor: { owner: true, people: [], unknown: false } };
-  assert.deepEqual(housePrincipal({ agents: {}, houses: { 'h-7': self } }, self), { owner: true });
+  assert.deepEqual(housePrincipal({ agents: {}, houses: { 'h-7': self } }, self, env), { owner: true });
   // Another house's seat that is itself a body host: unknown.
   const other = { id: 'h-9', kind: 'body-host', seat: 'j-h-7' };
-  assert.deepEqual(housePrincipal({ agents: {}, houses: { 'h-7': { ...self, seat: 'owner' }, 'h-9': other } }, other), { unknown: true });
+  assert.deepEqual(housePrincipal({ agents: {}, houses: { 'h-7': { ...self, seat: 'owner' }, 'h-9': other } }, other, env), { unknown: true });
 });
 
 test('a scope outlives its secret, two names for one secret are scoped alike, and a blank form keeps them', () => {
@@ -148,6 +154,28 @@ test('a scope outlives its secret, two names for one secret are scoped alike, an
   assert.notEqual(call({ kind: 'owner', agents: ['art'] }, 'set-agent', { ...ART, scopes: 'none' }).status, 200);
   assert.equal(load(env).agents.art.scopes['github-token'], 'owner');
   assert.deepEqual(load(env).agents.art.steers, { patrick: ['pond'] });
+});
+
+test('a task is read by today\'s owners: a former co-owner\'s words are a person\'s', () => {
+  const s = { agents: {}, houses: {} };
+  const task = (actsFor) => housePrincipal(s, { agent: 'art', task: 'x', taskActsFor: actsFor }, env);
+  assert.deepEqual(task({ owner: true, owners: ['jonathan'], people: [], unknown: false }), { owner: true });
+  assert.deepEqual(task({ owner: true, owners: ['mark'], people: [], unknown: false }), { person: 'mark' });
+  assert.deepEqual(task({ owner: true, owners: ['mark', 'jonathan'], people: [], unknown: false }), { person: 'mark' });
+});
+
+test('nothing silently drops a scope: null or empty from the API, a rename, a second name for a tailnet', () => {
+  for (const v of [null, [], {}]) {
+    ok(call(owner, 'set-agent', { ...ART, scopes: v, steers: v }));
+    assert.equal(load(env).agents.art.scopes['github-token'], 'owner', JSON.stringify(v));
+    assert.deepEqual(load(env).agents.art.steers, { patrick: ['pond'] });
+  }
+  // github-token renamed github: the same store, so the scope must come along.
+  const { 'github-token': gh, ...rest } = ART.secrets;
+  assert.equal(call(owner, 'set-agent', { ...ART, secrets: { ...rest, github: gh }, scopes: undefined }).status, 400);
+  ok(call(owner, 'set-agent', { ...ART, secrets: { ...rest, github: gh }, scopes: [...ART.scopes, 'github=owner'] }));
+  // Two tailnet names on one socket: scoped alike, or refused.
+  assert.equal(call(owner, 'set-agent', { ...ART, tailnets: [...ART.tailnets, 'fleet2=/run/tailscale-fleet/tailscaled.sock'], scopes: undefined }).status, 400);
 });
 
 test('the box starts a house without what was withheld, and only that', () => {

@@ -1368,7 +1368,7 @@ function agentForm(agent, c) {
     { name: 'branch', label: 'Branch', kind: 'text', value: c?.branch ?? '' },
     { name: 'repo_secret', label: 'Repo secret', kind: 'text', value: c?.repoSecret ?? '', hint: 'A secrets-store name, for a private repo over https' },
     { name: 'secrets', label: 'Secrets', kind: 'text', value: Object.entries(c?.secrets || {}).map(([k, v]) => `${k}=${v}`).join(', '), hint: 'name-in-house=store-name, comma separated' },
-    // t-1963: who gets what. Empty clears them all, so every house gets every secret and tailnet again.
+    // t-1963: who gets what. Blank keeps them as they are; none clears them.
     { name: 'scopes', label: 'Only for', kind: 'text', value: Object.entries(c?.scopes || {}).map(([k, v]) => `${k}=${v}`).join(', '), hint: 'secret=owner (only your own work), secret=pond or tailnet:fleet=pond (your work and that of people you let steer pond), +service:discord for that service too; comma separated. Left blank, nothing changes; none clears them' },
     { name: 'steers', label: 'Who steers which project', kind: 'text', value: Object.entries(c?.steers || {}).map(([k, v]) => `${k}=${v.join('+')}`).join(', '), hint: 'person=project, like patrick=pond: their work gets that project\'s secrets and tailnets. Left blank, nothing changes; none clears them' },
   ].map((f) => (f.value === '' ? (({ value: _v, ...r }) => r)(f) : f)) };
