@@ -3243,13 +3243,14 @@ export function continuationSnapshot(env, conversation) {
 // the registry afresh, but never rebuild payload fields from a newer body/run.
 export async function drainContinuations(env, o = {}) {
   const d = depsOf(env, o);
-  // The service's tick: its settings are the policy (above), kept where a body's own process reads them.
-  try {
+  // The service's tick (`deliver run`, o.service): its settings are the policy (above), kept where a body's own process
+  // reads them. Any other tick (a body's `deliver tick`) reads the file, never writes it.
+  if (o.service === true) try {
     const want = JSON.stringify(envPolicy(env));
     let have = null; try { have = readFileSync(policyFile(env), 'utf8'); } catch { /* none yet */ }
     if (have !== want) { const tmp = `${policyFile(env)}.${process.pid}.tmp`; writeFileSync(tmp, want, { mode: 0o600 }); renameSync(tmp, policyFile(env)); }
   } catch { /* the env's policy still applies to this tick */ }
-  const outbox = continuationsOf(env, d, o, true);
+  const outbox = continuationsOf(env, d, o, o.service === true);
   await outbox.drain({ current: (cv) => continuationSnapshot(env, cv), reconcile: async (p) => {
     const venue = (await d.venues())?.[p.target.venue];
     if (!coreAdapted(venue)) return { permanent: true, reason: 'continuation destination has no core reconciliation contract' };

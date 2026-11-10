@@ -881,7 +881,8 @@ async function delivery(rest, env, json) {
     const every = Number(flag(rest, '--every')) || 5000;
     let watched = 0;
     for (;;) {
-      try { await tick(env); } catch (err) { process.stderr.write(`loom-runtime deliver: tick: ${err.message}\n`); }
+      // The service's own tick: the only one whose settings become the continuation policy (delivery.mjs).
+      try { await tick(env, { service: true }); } catch (err) { process.stderr.write(`loom-runtime deliver: tick: ${err.message}\n`); }
       await tellAtWork(env);
       // The bridges' outages, noted even while nothing reads the manifest (loom down for a deploy): each half minute.
       if (Date.now() - watched >= WATCH_EVERY_MS) { watched = Date.now(); try { watchBridges(env); } catch (err) { process.stderr.write(`loom-runtime deliver: bridge watch: ${err.message}\n`); } }

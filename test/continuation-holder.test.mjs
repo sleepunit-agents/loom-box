@@ -170,8 +170,9 @@ test("once the runtime's tick has run, its policy is the one used: a body's own 
   const args = { action: 'issue', conversation: c.conversation, key: w.runner.envs[c.body.split(':')[1]].LOOM_BODY_KEY, session: w.sessionFor(c.conversation) };
   const { continuationLifetimeMs: _, ...o } = w.o;
   const now = w.o.now().getTime();
-  await drainContinuations({ ...w.env, LOOM_RUNTIME_CONTINUATION_DAYS: '3' }, o); // the service's settings
+  await drainContinuations({ ...w.env, LOOM_RUNTIME_CONTINUATION_DAYS: '3' }, { ...o, service: true }); // the service's settings
+  await drainContinuations({ ...w.env, LOOM_RUNTIME_CONTINUATION_DAYS: '30' }, o); // a body's own tick writes nothing
   assert.equal(continuationCall({ ...w.env, LOOM_RUNTIME_CONTINUATION_DAYS: '30' }, args, o).expiresAt, now + 3 * 86400000);
-  await drainContinuations({ ...w.env, LOOM_RUNTIME_CONTINUATION_DAYS: 'week' }, o); // misconfigured service: fails closed
+  await drainContinuations({ ...w.env, LOOM_RUNTIME_CONTINUATION_DAYS: 'week' }, { ...o, service: true }); // misconfigured service: fails closed
   assert.throws(() => continuationCall({ ...w.env, LOOM_RUNTIME_CONTINUATION_DAYS: '7' }, args, o), /policy is not configured/);
 });
