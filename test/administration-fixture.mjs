@@ -2,6 +2,13 @@
 // assertion fails; never enumerate or reset production administration units.
 import { spawnSync } from 'node:child_process';
 import { administrationUnit } from '../src/administration-supervisor.mjs';
+// The systemd suite starts real transient units, so it runs only on a throwaway host (CI's runner), never on a
+// machine whose own manager is watched: fixture units failing on loom's machine raised ten unit alerts with triage
+// wakes (2026-11-09). Ordinary runs use the process fixture and never start a unit.
+export const realSupervisor = process.env.LOOM_ADMIN_TEST_SUPERVISOR === 'systemd';
+if (realSupervisor && process.env.CI !== 'true') {
+  throw Error('LOOM_ADMIN_TEST_SUPERVISOR=systemd starts real units; it runs only where CI=true, on a disposable host');
+}
 const fixtures = new Set();
 export function trackAdministrationFixture(root, id) {
   fixtures.add(() => administrationUnit(root, id(), true));

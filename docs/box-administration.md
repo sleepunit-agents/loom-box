@@ -162,9 +162,12 @@ environment allowlist, without broker credentials or valid native body keys.
 Owner permission context comes from the authenticated scope; non-owner
 commands carry an unproved context instead of defaulting to owner permissions.
 
-Default tests cover refusal and a direct-process fixture. On a supported host,
-`npm run test:administration-supervisor` exercises real user/system units and
-the normal loop. Verified boundaries include worker/gate SIGKILL, descendant
+Default tests cover refusal and a direct-process fixture, and never start a
+systemd unit, even on a host with a working manager. `npm run
+test:administration-supervisor` exercises real user/system units and the normal
+loop; it refuses to run unless `CI=true`, so it never starts units on a machine
+whose manager is watched (fixture units failing on loom's machine raised ten
+alerts, 2026-11-09). Verified boundaries include worker/gate SIGKILL, descendant
 cleanup, actual running lease expiry after worker death, lost and mismatched
 acknowledgements, stale-claim cancellation, and normal runner/root provisioning.
 The normal-loop restart test verifies two upload attempts and exactly one
