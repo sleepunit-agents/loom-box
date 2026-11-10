@@ -375,7 +375,10 @@ export function setAgent(env, effects, { agent, repo, houseFile, nested, gpu, br
     if (sc) for (const k of Object.keys(sc)) if (!has(k) && !Object.hasOwn(was?.scopes ?? {}, k)) fail(`${k} has a scope, and ${a}'s houses don't get it: a secret by the name a house sees, or tailnet:<name>`);
     // One stored secret under two names is one secret: both names scoped alike, or the other name hands it out.
     // A scoped name renamed is the same secret too: its old store, now under another name, keeps the scope.
-    const stores = [...Object.entries(sec), ...Object.keys(scoped).filter((k) => !k.startsWith('tailnet:') && !Object.hasOwn(sec, k) && Object.hasOwn(was?.secrets ?? {}, k)).map((k) => [k, was.secrets[k]])];
+    // Each scope remembers the store it was for (scopeStores), so a rename over several saves still finds it.
+    const storeOf = (k) => (Object.hasOwn(sec, k) ? sec[k] : was?.scopeStores?.[k] ?? was?.secrets?.[k]);
+    const scopeStores = Object.fromEntries(Object.keys(scoped).filter((k) => !k.startsWith('tailnet:') && typeof storeOf(k) === 'string').map((k) => [k, storeOf(k)]));
+    const stores = [...Object.entries(sec), ...Object.entries(scopeStores).filter(([k]) => !Object.hasOwn(sec, k))];
     for (const [n, from] of stores) {
       const twin = stores.find(([m, f]) => m !== n && f === from && scoped[m] !== scoped[n]);
       if (twin) fail(`${n} and ${twin[0]} are the same secret (${from}): scope both alike`);
@@ -387,7 +390,7 @@ export function setAgent(env, effects, { agent, repo, houseFile, nested, gpu, br
     }
     const steering = st ?? was?.steers ?? {};
     s.agents[a] = { repo: r, houseFile: file, nested: nest, gpu: gp, branch: br, repoSecret: rs, secrets: sec, ports: pt, tailnets: tn, ...(keep !== undefined ? { logins: keep } : {}),
-      ...(Object.keys(scoped).length ? { scopes: scoped } : {}), ...(Object.keys(steering).length ? { steers: steering } : {}) };
+      ...(Object.keys(scoped).length ? { scopes: scoped, scopeStores } : {}), ...(Object.keys(steering).length ? { steers: steering } : {}) };
     return { agent: a, ...s.agents[a] };
   });
 }

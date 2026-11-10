@@ -174,6 +174,10 @@ test('nothing silently drops a scope: null or empty from the API, a rename, a se
   const { 'github-token': gh, ...rest } = ART.secrets;
   assert.equal(call(owner, 'set-agent', { ...ART, secrets: { ...rest, github: gh }, scopes: undefined }).status, 400);
   ok(call(owner, 'set-agent', { ...ART, secrets: { ...rest, github: gh }, scopes: [...ART.scopes, 'github=owner'] }));
+  // Over two saves: taken away, then added back under another name. Still the same secret, still refused unscoped.
+  ok(call(owner, 'set-agent', { ...ART, scopes: undefined }));
+  ok(call(owner, 'set-agent', { ...ART, secrets: rest, scopes: undefined }));
+  assert.equal(call(owner, 'set-agent', { ...ART, secrets: { ...rest, gh2: gh }, scopes: undefined }).status, 400);
   // Two tailnet names on one socket: scoped alike, or refused.
   assert.equal(call(owner, 'set-agent', { ...ART, tailnets: [...ART.tailnets, 'fleet2=/run/tailscale-fleet/tailscaled.sock'], scopes: undefined }).status, 400);
 });
