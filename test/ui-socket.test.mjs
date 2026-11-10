@@ -184,3 +184,14 @@ test('storeSignature moves with the store files and is empty without them', () =
   writeFileSync(join(h, 'commons', 'stores', 'runtime.db-wal'), 'ab');
   assert.notEqual(storeSignature(env), a);
 });
+
+test('keptReads keeps nothing read while a write landed (the signature moved during the read)', () => {
+  const st = memStore();
+  let sig = 's1';
+  let reads = 0;
+  const racing = { piece: 'runtime', list: (c, p) => { reads++; sig = `s${reads + 1}`; return st.list(c, p); }, get: () => null, put: () => 1, del: () => {} };
+  const k = keptReads(racing, { signature: () => sig, now: () => 0 });
+  k.list('gate-proposals');
+  k.list('gate-proposals');
+  assert.equal(reads, 2);
+});
