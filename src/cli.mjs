@@ -63,7 +63,7 @@
 //                                                                        at once; a failed post comes back through its inbox
 //   loom runtime principal [--conversation <cv>]                       on whose behalf this body acts (t-1943): {for, owner,
 //                                                                        people, statement}; the statement is what a piece checks
-//   loom runtime principal --verify < statement                        loom's machine: a statement checked (and still true), {ok, agent, for, owner, …}
+//   loom runtime principal --verify [--house h-N] < statement          loom's machine: a statement checked (and still true, and from its body's house), {ok, agent, for, owner, …}
 //   loom runtime principal --reset --conversation <cv>                 loom's machine, the owner's: what it heard before is set aside
 //   loom runtime principal --wake --agent a --place p --id <delivery id> --for owner|<slug>|-   loom's machine (the clock): who that firing wake is for
 //   loom runtime deliver tick [--conversation <cv>] | deliver run [--every <ms>] | deliver list [--json]
@@ -617,7 +617,10 @@ async function main(argv, env) {
         return;
       }
       if (rest.includes('--verify')) {
-        const r = verifyStatement(env, (await readStdin()).trim());
+        // --house: the house the piece API says the call came from; the statement holds only from its body's (t-2136).
+        const house = rest.includes('--house') ? flag(rest, '--house') : undefined;
+        if (house !== undefined && !/^[A-Za-z0-9._-]{1,64}$/.test(house ?? '')) throw new Fail('principal --verify --house <the caller\'s house id>');
+        const r = verifyStatement(env, (await readStdin()).trim(), Date.now(), { house });
         out(r);
         if (!r.ok) process.exitCode = 1;
         return;

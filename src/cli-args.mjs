@@ -15,7 +15,7 @@ export const commandFlags = {
   deliver: 'conversation= stdin ref= every= once json', review: 'limit= introspect= scheduled day= json',
   continuation: 'conversation= handle= id= text= piece=', send: 'conversation= person= via= text= piece=',
   spawn: 'house= service= agent= brief= prefer= role= failover title= timeout= text=',
-  principal: 'inspect-continuation= agent= scheduled-at= verify reset wake conversation= place= for= id= origin-conversation= piece=',
+  principal: 'inspect-continuation= agent= scheduled-at= verify house= reset wake conversation= place= for= id= origin-conversation= piece=',
   'task-host': 'brief-stdin', 'session-host': '', 'body-host': 'piece= host-key= beats=',
   models: 'json agent= venue= venue-kind= prefer= suppose-out=', roles: 'json why=',
   grants: 'json dry-run force paths=', trace: 'agent= house= service= json thread= run= conversation= piece=',

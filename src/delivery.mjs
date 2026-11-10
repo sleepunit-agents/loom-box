@@ -3787,11 +3787,18 @@ export function resetPrincipal(env, conversation, { agent, approval } = {}) {
  * own caller (`agent` must be the calling agent; a statement is a bearer's for its 5 minutes). Its conversation's principal now must be the one it states: a statement minted before someone else spoke
  * there is stale, and refused.
  */
-export function verifyStatement(env, statement, nowMs = Date.now()) {
+export function verifyStatement(env, statement, nowMs = Date.now(), { house } = {}) {
   const v = verify(deliveryDir(env), statement, nowMs);
   if (!v.ok) return v;
   const c = loadConv(env, v.conversation);
   if (!c || c.agent !== v.agent) return { ok: false, reason: 'this runtime has no record of its conversation' };
+  // From the house the call came from (`--house`, the piece API's caller, t-2136): only when that house runs its
+  // conversation's body. A statement is a bearer word for 5 minutes, so one another conversation's body was shown (a
+  // relay's text, a task comment) never speaks for it from there. Houses are one conversation's alone (t-2061).
+  if (house !== undefined) {
+    const away = houseProblem(env, c, { kind: 'agent', agent: c.agent, house });
+    if (away) return { ok: false, reason: `not from the house of its conversation's body (${away})` };
+  }
   const now = principalOf(env, c);
   if (now.for !== v.for || now.owner !== v.owner) return { ok: false, reason: 'its conversation has heard from someone since: ask for a new one' };
   // Who it names is who the conversation has heard now (several people can grow while `for` stays null).

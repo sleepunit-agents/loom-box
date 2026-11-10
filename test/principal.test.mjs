@@ -317,6 +317,17 @@ test('piece-call sends approvals and the clock the runtime\'s statement and neve
     ]);
     // The runtime's CLI tells the body's conversation itself (its house's session map, t-2053), never piece-call from env.
     assert.equal(readFileSync(join(D, 'asked'), 'utf-8'), 'principal\nprincipal\n');
+    // A runtime that refuses (a body left in the shared house from before t-2061): no statement, and it says why
+    // (t-2136), so a body reading "ask, for ?" knows it isn't the rules. Nothing it typed stands in.
+    const refuses = join(D, 'refuses');
+    writeFileSync(join(D, 'refusal'), JSON.stringify({ ok: false, reason: 'only the body holding cv-0123456789ab asks on whose behalf it acts (its conversation has moved to another principal\'s house)' }));
+    writeFileSync(refuses, `#!/bin/sh\ncat '${join(D, 'refusal')}'\nexit 1\n`, { mode: 0o755 });
+    seen.length = 0;
+    const r = await pieceCall({ ...env, PIECE_CALL_RUNTIME: refuses }, ['approvals', 'rule', 'merge', 'x', '--principal', 'typed.owner']);
+    assert.deepEqual(seen.map((s) => s.argv), [['rule', 'merge', 'x']]);
+    assert.match(r.stderr, /^piece-call: no statement of whom this body works for \(only the body holding cv-0123456789ab .*moved to another principal's house\)\), so the piece treats it as someone loom can't name\n$/);
+    // Out of a body there's nothing to prove, and nothing said.
+    assert.equal((await pieceCall({ ...env, PIECE_CALL_RUNTIME: refuses, LOOM_BODY_CONVERSATION: '' }, ['approvals', 'list'])).stderr, '');
   } finally { server.close(); }
 });
 

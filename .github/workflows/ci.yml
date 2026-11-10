@@ -25,6 +25,14 @@ jobs:
           path: .loom
       - run: npm ci --ignore-scripts --no-audit --no-fund && npx tsc
         working-directory: .loom
+      # The approvals piece at main, so a house body's merge-rule check runs end to end against this runtime's statement
+      # (house-merge-rule.test) instead of being skipped.
+      - uses: actions/checkout@v4
+        with:
+          repository: sleepunit-agents/loom-approvals
+          ref: main
+          path: .loom-approvals
       - run: npm test
         env:
           LOOM_DIST: ${{ github.workspace }}/.loom/dist
+          LOOM_APPROVALS: ${{ github.workspace }}/.loom-approvals/bin/approvals
