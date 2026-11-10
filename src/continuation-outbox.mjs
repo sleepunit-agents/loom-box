@@ -262,6 +262,13 @@ export function continuationOutbox({ dir, sealer, now = Date.now, lifetimeMs = n
           else if (row.reconciliation && result?.ok && result.state === 'not-accepted') { r.state = 'expired'; r.reason = 'core fenced acceptance and found no accepted report'; }
           // Core's thread tombstone refuses every later post: nothing can land there again.
           else if (row.reconciliation && result?.ok && result.state === 'deleted') { r.state = 'withdrawn'; r.reason = 'the destination thread was deleted'; }
+          // The destination isn't there yet (a spawn's Comms thread not opened, t-2004): nothing reached core, so this
+          // wasn't an attempt (a row that expires waiting reads expired, not indeterminate). Its own backoff.
+          else if (result?.wait === true && !result?.ok) {
+            if (row.reconciliation) r.reconciles = Math.max(0, (r.reconciles ?? 1) - 1); else r.attempts = Math.max(0, r.attempts - 1);
+            r.waits = (r.waits ?? 0) + 1;
+            r.next = now() + Math.min(3600000, 5000 * 2 ** Math.min(r.waits, 12));
+          }
           else if (result?.permanent) { r.state = 'indeterminate'; r.reason = String(result.reason ?? 'destination refused report').slice(0, 300); }
           // An accepted/pending response alone never means delivered.
           save(id, r);

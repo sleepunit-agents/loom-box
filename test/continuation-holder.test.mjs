@@ -239,7 +239,7 @@ test("a spawn's continuation report lands in the spawn's own Comms thread throug
   // Thread not open yet: nothing posted, the row still waits (not refused).
   await tick(w.env, o);
   assert.equal(calls.filter((p) => p.ref === enqueued.ref).length, 0);
-  assert.equal(continuationCall(w.env, { ...q, action: 'status' }, w.o).state, 'pending');
+  assert.deepEqual([continuationCall(w.env, { ...q, action: 'status' }, w.o).state, continuationCall(w.env, { ...q, action: 'status' }, w.o).attempts], ['pending', 0], 'a wait is not an attempt');
   const s1 = loadConv(w.env, source.conversation);
   write({ ...s1, spawn: { ...s1.spawn, thread: 'th:abcdefghij' } });
   w.clock.advance(3600001);
@@ -254,4 +254,57 @@ test("a spawn's continuation report lands in the spawn's own Comms thread throug
   await tick(w.env, { ...o, venues: async () => ({ spawn: { kind: 'live', send: ['must-not-run'] } }) });
   assert.equal(continuationCall(w.env, { ...q, action: 'status', id: 'other' }, w.o).state, 'indeterminate');
   assert.equal(calls.filter((p) => p.ref?.startsWith('continuation-')).length, 1);
+});
+
+test("a spawn's report whose thread never opens expires as never attempted (t-2004)", async () => {
+  const { handOverWake, tick } = await import('../src/delivery.mjs');
+  const w = world();
+  w.env.LOOM_HOME = join(w.env.HOME, 'loom');
+  mkdirSync(w.env.LOOM_HOME, { recursive: true });
+  writeFileSync(join(w.env.LOOM_HOME, 'household.json'), JSON.stringify({ members: [{ person: 'jonathan', agents: '*' }] }));
+  const source = await deliver(w.env, w.msg('spawn-never', 'owner', { source: 'loom', venue: 'loom', from: { kind: 'person', slug: 'jonathan' } }), w.o);
+  const write = (c) => writeFileSync(join(deliveryDir(w.env), 'conversations', `${c.conversation}.json`), JSON.stringify(c));
+  write({ ...loadConv(w.env, source.conversation), venue: 'spawn', place: 'sp-89abcdef0123456789abcdef', spawn: { depth: 1, principal: { owner: true }, thread: 'th:NOT-VALID' } });
+  const args = (cv) => { const c = loadConv(w.env, cv); return { conversation: cv, key: w.runner.envs[c.body.split(':')[1]].LOOM_BODY_KEY, session: w.sessionFor(cv) }; };
+  const grant = continuationCall(w.env, { ...args(source.conversation), action: 'issue' }, w.o);
+  const firing = w.msg('wake:w-abcdef', 'follow up', { source: 'clock', venue: 'wake', id: 'w-abcdef', kind: 'wake', from: { kind: 'schedule' }, continuation: { handle: grant.handle, expiresAt: grant.expiresAt, wake: 'w-abcdef' } });
+  handOverWake(w.env, { agent: 'art', place: firing.place, id: firing.id, for: 'owner' });
+  const child = await deliver(w.env, firing, w.o);
+  const q = { ...args(child.conversation), handle: grant.handle, id: 'final' };
+  continuationCall(w.env, { ...q, action: 'enqueue', text: 'never lands' }, w.o);
+  const calls = [];
+  const o = { ...w.o, venues: async () => ({ loom: { adapter: 'core', kind: 'live' } }), core: { ...w.o.core, comms: async (p) => { calls.push(p); return { ok: true, id: '7' }; } } };
+  // A malformed thread on the record is no thread: it waits, several ticks, and posts nothing.
+  for (let i = 0; i < 4; i++) { await tick(w.env, o); w.clock.advance(3600001); }
+  assert.equal(calls.filter((p) => p.ref?.startsWith('continuation-')).length, 0);
+  w.clock.advance(w.o.continuationLifetimeMs);
+  await tick(w.env, o);
+  const st = continuationCall(w.env, { ...q, action: 'status' }, w.o);
+  assert.deepEqual([st.state, st.attempts], ['expired', 0]);
+});
+
+test("a spawn's report goes only to that spawn: a record no longer the sealed spawn is refused (t-2004)", async () => {
+  const { handOverWake, tick } = await import('../src/delivery.mjs');
+  const w = world();
+  w.env.LOOM_HOME = join(w.env.HOME, 'loom');
+  mkdirSync(w.env.LOOM_HOME, { recursive: true });
+  writeFileSync(join(w.env.LOOM_HOME, 'household.json'), JSON.stringify({ members: [{ person: 'jonathan', agents: '*' }] }));
+  const source = await deliver(w.env, w.msg('spawn-moved', 'owner', { source: 'loom', venue: 'loom', from: { kind: 'person', slug: 'jonathan' } }), w.o);
+  const write = (c) => writeFileSync(join(deliveryDir(w.env), 'conversations', `${c.conversation}.json`), JSON.stringify(c));
+  write({ ...loadConv(w.env, source.conversation), venue: 'spawn', place: 'sp-111111111111111111111111', spawn: { depth: 1, principal: { owner: true }, thread: 'th:abcdefghij' } });
+  const args = (cv) => { const c = loadConv(w.env, cv); return { conversation: cv, key: w.runner.envs[c.body.split(':')[1]].LOOM_BODY_KEY, session: w.sessionFor(cv) }; };
+  const grant = continuationCall(w.env, { ...args(source.conversation), action: 'issue' }, w.o);
+  const firing = w.msg('wake:w-abcdef', 'follow up', { source: 'clock', venue: 'wake', id: 'w-abcdef', kind: 'wake', from: { kind: 'schedule' }, continuation: { handle: grant.handle, expiresAt: grant.expiresAt, wake: 'w-abcdef' } });
+  handOverWake(w.env, { agent: 'art', place: firing.place, id: firing.id, for: 'owner' });
+  const child = await deliver(w.env, firing, w.o);
+  const q = { ...args(child.conversation), handle: grant.handle, id: 'final' };
+  continuationCall(w.env, { ...q, action: 'enqueue', text: 'only to the sealed spawn' }, w.o);
+  const calls = [];
+  const o = { ...w.o, venues: async () => ({ loom: { adapter: 'core', kind: 'live' } }), core: { ...w.o.core, comms: async (p) => { calls.push(p); return { ok: true, id: '7' }; } } };
+  // Its record now names another place (and another thread): nothing goes anywhere.
+  write({ ...loadConv(w.env, source.conversation), place: 'sp-222222222222222222222222', spawn: { ...loadConv(w.env, source.conversation).spawn, thread: 'th:zzzzzzzzzz' } });
+  await tick(w.env, o);
+  assert.equal(calls.filter((p) => p.ref?.startsWith('continuation-')).length, 0);
+  // The runtime's snapshot check fences it first: the source isn't the conversation the grant was sealed for.
+  assert.throws(() => continuationCall(w.env, { ...q, action: 'status' }, w.o), /reset or changed/);
 });
