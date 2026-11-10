@@ -293,7 +293,7 @@ export function stoppingHosts(env) {
     return { house: h.id, agent: h.agent, conversations: found ? houseRec(found.h, h.id)?.quiescing?.conversations ?? [] : [] };
   });
 }
-const belongsToHouse = (c, house) => ['claude', 'codex'].some(h => c.body?.startsWith(`${h}:${house}-`));
+const belongsToHouse = (c, house) => ['claude', 'codex', 'agy'].some(h => c.body?.startsWith(`${h}:${house}-`));
 
 /** A house a body may still be handed to: asked for, starting or running. One stopping (or gone) never is, however fresh its host's last report. */
 const TAKES = new Set(['wanted', 'starting', 'running']);
@@ -346,7 +346,7 @@ function cleanReport(r) {
   for (const [id, b] of Object.entries(r?.bodies ?? {}).slice(0, 64)) {
     if (!BODY_ID.test(id) || !b || typeof b !== 'object') continue;
     bodies[id] = {
-      harness: ['claude', 'codex'].includes(b.harness) ? b.harness : 'unknown',
+      harness: ['claude', 'codex', 'agy'].includes(b.harness) ? b.harness : 'unknown',
       status: ['working', 'idle', 'ended', 'unknown'].includes(b.status) ? b.status : 'unknown',
       ...(typeof b.session === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{3,127}$/.test(b.session) ? { session: b.session } : {}),
       ...(ACTIONS.has(b.tickerAction) && Number.isFinite(Date.parse(b.tickerObservedAt)) ? { tickerAction: b.tickerAction, tickerObservedAt: b.tickerObservedAt } : {}),
@@ -555,7 +555,7 @@ export function nativeCollectionExchange(env, { agent, house, plan, requiredHost
     if (!x.offlineCollection) {
       const entries = new Map();
       const addBody = (id, harness, session, attempt) => {
-        if (!BODY_ID.test(id ?? '') || !['claude', 'codex'].includes(harness)) fail('native collection has an invalid body identity');
+        if (!BODY_ID.test(id ?? '') || !['claude', 'codex', 'agy'].includes(harness)) fail('native collection has an invalid body identity');
         const key = `body:${id}`, old = entries.get(key);
         if (old && (old.harness !== harness || old.session && session && old.session !== session)) fail('native collection identities conflict');
         const entry = old ?? { key, bodyId: id, harness, attempts: [] };

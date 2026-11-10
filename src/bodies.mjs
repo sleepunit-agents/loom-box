@@ -26,7 +26,7 @@ import { StateError } from './state.mjs';
 const COMMS_VENUE = 'loom';
 
 const MAX_BRIEF = 200_000;
-const REF = /^(claude|codex):([A-Za-z0-9-]{4,64})$/;
+const REF = /^(claude|codex|agy):([A-Za-z0-9-]{4,64})$/;
 
 const dir = (env) => join(env.LOOM_BOX_DATA || join(env.HOME || homedir(), '.local', 'share', 'loom-box'), 'bodies');
 const file = (env, ref) => join(dir(env), `${ref.replace(':', '-')}.json`);
@@ -120,7 +120,7 @@ export async function resumeBody(env, { body: ref, slot, agent, venue, venueKind
     slot = d.runner(rec.harness, rec.local).slotOf({ id: ref.split(':')[1], ...rec }) ?? rec.slot;
     if (!slot) fail(`${ref} has no slot yet: its harness hasn't said which session it is`, 409);
   }
-  if (!slot || !['claude', 'codex'].includes(slot.harness) || typeof slot.session !== 'string' || !slot.session) fail('resume takes a body, or a slot {harness, session}');
+  if (!slot || !['claude', 'codex', 'agy'].includes(slot.harness) || typeof slot.session !== 'string' || !slot.session) fail('resume takes a body, or a slot {harness, session}');
   const who = rec?.agent ?? agent;
   const where = rec?.venue ?? venue;
   // A resume keeps the slot's harness; its model is chosen again, among that harness's (quota may have moved).

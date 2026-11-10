@@ -23,7 +23,7 @@ export function launchAttempt(conversation, operation) {
 export function readLaunch(env, id) {
   try {
     const r = JSON.parse(readFileSync(file(env, id), 'utf8'));
-    if (r?.v !== 1 || r.id !== id || !['claude', 'codex'].includes(r.harness) || !ID.test(r.intentHash ?? '') ||
+    if (r?.v !== 1 || r.id !== id || !['claude', 'codex', 'agy'].includes(r.harness) || !ID.test(r.intentHash ?? '') ||
         !/^[0-9a-f]{24}$/.test(r.token ?? '') || !['reserved', 'admitted', 'ready', 'refused'].includes(r.state)) fail('invalid native launch journal; admission remains held');
     return r;
   }
@@ -40,7 +40,7 @@ function save(env, record) {
 /** No text, run key or native credentials in this journal; hash a sealed intent. */
 export function reserveLaunch(env, { id, harness, intentHash }) {
   checked(id);
-  if (!['claude', 'codex'].includes(harness) || !ID.test(intentHash ?? '')) fail('a launch needs its harness and immutable intent hash');
+  if (!['claude', 'codex', 'agy'].includes(harness) || !ID.test(intentHash ?? '')) fail('a launch needs its harness and immutable intent hash');
   return locked(env, () => {
     const old = readLaunch(env, id);
     if (old) {
@@ -103,7 +103,7 @@ export function cancelReservedLaunch(env, id) {
 
 /** The worker commits a native identity before returning it to its registrar. */
 export function completeLaunch(env, id, body, { inputConfirmed = false } = {}) {
-  if (!body || !BODY.test(body.id ?? '') || !['claude', 'codex'].includes(body.harness)) fail('invalid native launch receipt');
+  if (!body || !BODY.test(body.id ?? '') || !['claude', 'codex', 'agy'].includes(body.harness)) fail('invalid native launch receipt');
   if (body.slot !== undefined && (!body.slot || body.slot.harness !== body.harness || !BODY.test(body.slot.session ?? ''))) fail('invalid native continuation receipt');
   // Only the receipt fields, never arbitrary caller data (brief/env/key).
   const receipt = { id: body.id, harness: body.harness,
@@ -139,7 +139,7 @@ export function refuseLaunch(env, id, reason) {
 /** Internal native observer commits an adapter-recovered identity. It has no
  * permission to reset/relaunch the attempt, and conflicting receipts refuse. */
 export function recoverLaunchReceipt(env, id, body) {
-  if (!body || !BODY.test(body.id ?? '') || !['claude', 'codex'].includes(body.harness) ||
+  if (!body || !BODY.test(body.id ?? '') || !['claude', 'codex', 'agy'].includes(body.harness) ||
       (body.slot !== undefined && (!body.slot || body.slot.harness !== body.harness || !BODY.test(body.slot.session ?? '')))) fail('invalid recovered native receipt');
   const receipt = { id: body.id, harness: body.harness, ...(body.slot ? { slot: { harness: body.harness, session: body.slot.session } } : {}) };
   return locked(env, () => {

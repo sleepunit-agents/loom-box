@@ -65,7 +65,7 @@ export async function runTerminal({ call, id, input = process.stdin, output = pr
       if (line === '/status') { const q = await command('status'); show(q); say(JSON.stringify({ working: q.working, queued: q.queued, control: q.control, state: q.state })); return; }
       if (line === '/model' || line.startsWith('/model ')) {
         const harness = line.slice(6).trim();
-        if (harness && !['auto', 'claude', 'codex'].includes(harness)) throw Error('/model auto|claude|codex');
+        if (harness && !['auto', 'claude', 'codex', 'agy'].includes(harness)) throw Error('/model auto|claude|codex');
         say(JSON.stringify(await command('model', harness ? { harness } : {}))); return;
       }
       if (line === '/shell') {

@@ -34,3 +34,16 @@ export function observation(action, observedAt, now = Date.now()) {
   if (!ACTIONS.has(action) || !Number.isFinite(at) || at > now || now - at >= 30000) return null;
   return { action, observedAt: new Date(at).toISOString(), expiresAt: new Date(at + 30000).toISOString() };
 }
+
+export function agyActionNow(events) {
+  const pending = new Map();
+  const words = { run_command: 'Running a command', view_file: 'Reading a file', write_to_file: 'Writing a file', replace_file_content: 'Editing a file', multi_replace_file_content: 'Editing a file', grep_search: 'Searching files', find_by_name: 'Searching files' };
+  for (const e of events) {
+    if (e.event === 'result') pending.clear();
+    const s = e.event === 'step_update' ? e.step_update : null;
+    if (s?.step_type !== 'tool') continue;
+    if (s.state === 'DONE') pending.delete(s.step_index);
+    if (s.state === 'ACTIVE') pending.set(s.step_index, words[s.tool_name] ?? 'Using a tool');
+  }
+  return [...pending.values()].at(-1) ?? 'Working';
+}

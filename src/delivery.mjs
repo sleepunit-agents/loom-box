@@ -321,7 +321,7 @@ async function giveUp(env, c, reason, tries, d) {
 // ─── Out of quota (t-1907) ──────────────────────────────────────────────────
 
 /** A harness in words, for the owner and the thread. */
-export const HARNESS_WORDS = { claude: 'Claude', codex: 'Codex' };
+export const HARNESS_WORDS = { claude: 'Claude', codex: 'Codex', agy: 'Antigravity' };
 const harnessWords = (h) => HARNESS_WORDS[h] ?? cap(h);
 /** Each agent answering on another harness than its preferred one: {agent: {from, to, since, until?, account?, why}}. */
 const fallbacksFile = (env) => join(deliveryDir(env), 'fallbacks.json');
@@ -462,7 +462,7 @@ export function windowMs(env, venue, kind) {
  * (ANTHROPIC_*, OPENAI_*, CLAUDE_*, CODEX_*). LOOM_RUNTIME_BODY_ENV names more, comma-separated, never one of those.
  */
 const BODY_ENV = /^(PATH|HOME|USER|LOGNAME|SHELL|LANG|LANGUAGE|LC_[A-Z_]+|TERM|COLORTERM|TZ|TMPDIR)$/;
-const NEVER = /^(LOOM_|ANTHROPIC_|OPENAI_|CLAUDE|CODEX_|GEMINI_|GOOGLE_|MISTRAL_|AWS_|GH_|GITHUB_)/;
+const NEVER = /^(LOOM_|ANTHROPIC_|OPENAI_|CLAUDE|CODEX_|AGY_|ANTIGRAVITY_|GEMINI_|GOOGLE_|MISTRAL_|AWS_|GH_|GITHUB_)/;
 export const BODY_KEY = 'LOOM_BODY_KEY';
 /** Which conversation a body's run key speaks in: its house's host keeps the key by it (bodyhost.mjs, keyFile). */
 export const BODY_CONVERSATION = 'LOOM_BODY_CONVERSATION';
@@ -892,7 +892,7 @@ function statusOf(env, c, d) {
   } catch { return 'unknown'; }
 }
 
-const HOUSE_BODY = /^(?:claude|codex):(h-[0-9]{1,9})-/;
+const HOUSE_BODY = /^(?:claude|codex|agy):(h-[0-9]{1,9})-/;
 const HOUSE_OVER = new Set(['stopping', 'done', 'failed', 'stopped', 'lost']);
 /**
  * Whether a body's house is on its way out or gone (t-2079): draining, stopping, saving its history, ended, or not on
@@ -2921,7 +2921,7 @@ export async function tick(env, o = {}, only, mem = new Map()) {
   const housesStopping = stoppingHosts(env);
   if (housesStopping.length) locked(env, () => {
     for (const c of listConvs(env)) {
-      const h = housesStopping.find(h => h.agent === c.agent && (h.conversations.includes(c.conversation) || ['claude', 'codex'].some(kind => c.body?.startsWith(`${kind}:${h.house}-`))));
+      const h = housesStopping.find(h => h.agent === c.agent && (h.conversations.includes(c.conversation) || ['claude', 'codex', 'agy'].some(kind => c.body?.startsWith(`${kind}:${h.house}-`))));
       if (h && !c.control) { c.control = { id: randomBytes(12).toString('hex'), at: d.now().toISOString(), state: c.body || c.starting ? 'pending' : 'held', house: h.house }; saveConv(env, c); }
     }
   });

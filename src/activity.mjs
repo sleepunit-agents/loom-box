@@ -290,3 +290,19 @@ export function changed(cards, sent = {}) {
   if (keys.length > 400) for (const k of keys.slice(0, keys.length - 400)) delete next[k];
   return { out, next };
 }
+
+/** agy tool updates only; reuse the label/redaction gate, never tool output. */
+export function agyCards(events, prefix = '') {
+  const cards = new Map();
+  const names = { run_command: 'Bash', view_file: 'Read', write_to_file: 'Write', replace_file_content: 'Edit', multi_replace_file_content: 'Edit', grep_search: 'Grep', find_by_name: 'Glob' };
+  for (const e of events) {
+    const s = e.event === 'step_update' ? e.step_update : null;
+    if (s?.step_type !== 'tool' || !Number.isSafeInteger(s.step_index) || !['ACTIVE', 'DONE'].includes(s.state)) continue;
+    const p = s.tool_info?.parameters ?? {}, tool = s.tool_name ?? s.tool_info?.name ?? 'tool';
+    const input = { command: p.CommandLine, file_path: p.AbsolutePath ?? p.TargetFile, pattern: p.Query ?? p.Pattern };
+    const id = `${prefix}${s.step_index}`;
+    cards.set(id, { id, tool: toolName(tool), summary: claudeSummary(names[tool] ?? tool, names[tool] ? input : p),
+      state: s.state === 'ACTIVE' ? 'running' : s.tool_info?.error ? 'failed' : 'done', at: cardTime(e.timestamp) });
+  }
+  return [...cards.values()].slice(-MAX_CARDS);
+}

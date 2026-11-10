@@ -1293,7 +1293,7 @@ function modelChoiceBlocks(env, agent, caller) {
   return [{ type: 'form', action: 'model-choice', submit: 'Save model', hidden: { agent },
     note: 'Used for new turns. If this model has no quota, another available model can answer.',
     fields: [{ name: 'harness', label: 'Model', kind: 'segmented', value: choice.agentChoice,
-      options: [{ value: 'auto', label: 'Auto' }, { value: 'claude', label: 'Claude' }, { value: 'codex', label: 'Codex' }] }] }];
+      options: [{ value: 'auto', label: 'Auto' }, { value: 'claude', label: 'Claude' }, { value: 'codex', label: 'Codex' }, { value: 'agy', label: 'Antigravity' }] }] }];
 }
 
 function agentTabPage(env, agent, caller, nowMs) {

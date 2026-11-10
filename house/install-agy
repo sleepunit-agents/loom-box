@@ -1,0 +1,7 @@
+#!/bin/sh
+# Optional house-kit step. Installs the official binary only; never signs in.
+set -eu
+installer=$(mktemp)
+trap 'rm -f "$installer"' EXIT HUP INT TERM
+curl -fsSL https://antigravity.google/cli/install.sh -o "$installer"
+bash "$installer" --dir "${HOME:?}/.local/bin"
