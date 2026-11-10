@@ -198,7 +198,10 @@ export function continuationOutbox({ dir, sealer, now = Date.now, lifetimeMs = n
     // current returns runtime-owned snapshots, not body input. Recheck both sides
     // immediately before every attempt. A different current source run is fine;
     // a different child run, reset or principal never is.
-    async drain({ current, post, reconcile }) {
+    // `placeOf(source)` (optional, sync): where a post for this source goes, or null when it isn't there yet. Settled
+    // once, under the lock, before any attempt is counted, and kept on the row (`place`), so a reconcile asks about the
+    // very place a post may have reached, whatever becomes of the source's record later (t-2004).
+    async drain({ current, post, reconcile, placeOf }) {
       for (const name of readdirSync(dir).filter((n) => /^report-[0-9a-f]{64}\.sealed$/.test(n))) {
         const id = name.slice(0, -7);
         let row;
@@ -232,10 +235,21 @@ export function continuationOutbox({ dir, sealer, now = Date.now, lifetimeMs = n
           }
           const reconciliation = recovering || r.state === 'indeterminate';
           if (reconciliation && !reconcile) return null;
+          if (!reconciliation && r.place === undefined && placeOf) {
+            const at = placeOf(g.source);
+            // Not there yet (a spawn's Comms thread not opened): no attempt, nothing sent; its own backoff, under the
+            // deadline above, so a row that never finds its place expires as never attempted.
+            if (typeof at !== 'string' || !at) {
+              r.waits = (r.waits ?? 0) + 1;
+              r.next = time + Math.min(3600000, 5000 * 2 ** Math.min(r.waits, 12));
+              save(id, r); return null;
+            }
+            r.place = at;
+          }
           if (!reconciliation) r.attempts += 1; else r.reconciles = (r.reconciles ?? 0) + 1;
           r.next = now() + Math.min(3600000, (reconciliation ? 5000 : 1000) * 2 ** Math.min(reconciliation ? r.reconciles : r.attempts, 12));
           save(id, r);
-          return { ...r, reconciliation, target: g.source.target, agent: g.source.agent, conversation: g.source.conversation };
+          return { ...r, reconciliation, target: g.source.target, agent: g.source.agent, conversation: g.source.conversation, place: r.place };
         }); } catch (e) {
           if (e instanceof StateError) throw e;
           // Said once, then set aside in unreadable/ (kept, never deleted: a restored key may open it). While anything
@@ -246,7 +260,7 @@ export function continuationOutbox({ dir, sealer, now = Date.now, lifetimeMs = n
         }
         if (!row) continue;
         let result;
-        try { result = await (row.reconciliation ? reconcile : post)({ ref: row.ref, text: row.text, target: row.target, agent: row.agent, conversation: row.conversation, run: row.child.run, on: row.on ?? null, expiresAt: row.expiresAt }); }
+        try { result = await (row.reconciliation ? reconcile : post)({ ref: row.ref, text: row.text, target: row.target, agent: row.agent, conversation: row.conversation, place: row.place, run: row.child.run, on: row.on ?? null, expiresAt: row.expiresAt }); }
         catch (e) {
           // Transport loss, throttling and request timeout can recover. A payload
           // conflict or other permanent client refusal cannot recover by replay.

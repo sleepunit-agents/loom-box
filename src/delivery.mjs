@@ -3409,6 +3409,30 @@ export function continuationSnapshot(env, conversation) {
     resetPending: !!c.resetPending, target: { venue: c.venue, place: c.place } };
 }
 
+/**
+ * Where core keeps a continuation's report (t-2004). A core-adapted venue's own place (a Comms thread). A spawn's
+ * conversation is core's too: its Comms thread (spawnComms opens it, `spawn.thread` on the record), which takes the same
+ * post and reconcile, with the same stable-ref deduplication. spawnPlace reads it from the runtime's own record of the
+ * grant's source, never the payload, and only while that record is still the spawn the grant was sealed for; the
+ * outbox settles it once, before any attempt, and keeps it on the row (`place`), so a reconcile never needs the record.
+ */
+const SPAWN_THREAD = /^th:[a-z2-7]{10}$/;
+export function spawnPlace(env, source) {
+  if (source?.target?.venue !== 'spawn') return source?.target?.place ?? null;
+  const c = loadConv(env, source.conversation);
+  if (!c?.spawn || c.agent !== source.agent || c.venue !== 'spawn' || c.place !== source.target.place) return null;
+  return SPAWN_THREAD.test(c.spawn.thread ?? '') ? c.spawn.thread : null;
+}
+async function continuationPlace(d, p, contract) {
+  // A registry outage is transient; venueOf intentionally swallows that
+  // distinction for ordinary sends, so do not use it for durable reports.
+  const venue = (await d.venues())?.[p.target.venue];
+  if (coreAdapted(venue)) return { place: p.target.place };
+  // Only the place the outbox settled from the runtime's record (spawnPlace): a row without one never reached core.
+  if (p.target.venue === 'spawn' && !venue?.send && SPAWN_THREAD.test(p.place ?? '')) return { place: p.place };
+  return { permanent: true, reason: `continuation destination has no core ${contract} contract` };
+}
+
 // Only core currently promises transactional stable-ref deduplication. Resolve
 // the registry afresh, but never rebuild payload fields from a newer body/run.
 export async function drainContinuations(env, o = {}) {
@@ -3421,17 +3445,15 @@ export async function drainContinuations(env, o = {}) {
     if (have !== want) { const tmp = `${policyFile(env)}.${process.pid}.tmp`; writeFileSync(tmp, want, { mode: 0o600 }); renameSync(tmp, policyFile(env)); }
   } catch { /* the env's policy still applies to this tick */ }
   const outbox = continuationsOf(env, d, o, o.service === true);
-  await outbox.drain({ current: (cv) => continuationSnapshot(env, cv), reconcile: async (p) => {
-    const venue = (await d.venues())?.[p.target.venue];
-    if (!coreAdapted(venue)) return { permanent: true, reason: 'continuation destination has no core reconciliation contract' };
-    return d.core.comms({ op: 'reconcile', place: p.target.place, agent: p.agent, ref: p.ref,
+  await outbox.drain({ current: (cv) => continuationSnapshot(env, cv), placeOf: (source) => spawnPlace(env, source), reconcile: async (p) => {
+    const at = await continuationPlace(d, p, 'reconciliation');
+    if (!at.place) return at;
+    return d.core.comms({ op: 'reconcile', place: at.place, agent: p.agent, ref: p.ref,
       text: p.text, run: p.run, expiresAt: p.expiresAt, ...(p.on ? { on: p.on } : {}) });
   }, post: async (p) => {
-    // A registry outage is transient; venueOf intentionally swallows that
-    // distinction for ordinary sends, so do not use it for durable reports.
-    const venue = (await d.venues())?.[p.target.venue];
-    if (!coreAdapted(venue)) return { permanent: true, reason: 'continuation destination has no core idempotency contract' };
-    const answer = await d.core.comms({ op: 'post', place: p.target.place, agent: p.agent, ref: p.ref,
+    const at = await continuationPlace(d, p, 'idempotency');
+    if (!at.place) return at;
+    const answer = await d.core.comms({ op: 'post', place: at.place, agent: p.agent, ref: p.ref,
       text: p.text, run: p.run, expiresAt: p.expiresAt, ...(p.on ? { on: p.on } : {}) });
     return answer?.ok === true && typeof answer.id === 'string' && answer.id.length > 0 ? { ok: true, posted: true } : answer;
   } });
