@@ -642,6 +642,27 @@ RUN sh /home/<agent>/.local/share/loom-runtime/house/install-tools
 
 It writes `piece-call`, `loom-runtime` (node by its full path), and `taskstore`/`loom-tasks`, `wake` and `approvals` (loom's tasks, clock and approvals pieces, through `piece-call` as the house's own token) into `~/.local/bin`, and `/etc/profile.d/loom-house.sh`. That last one matters for Codex, which runs every command in a login shell: Debian's `/etc/profile` resets PATH to the system dirs, so without it a Codex body finds no `loom`, no `node` and none of the wrappers. The profile file puts back the image's PATH and reads `~/.house-env`, which the entrypoint writes for later shells. `install-tools --pieces` rewrites only the piece wrappers, for a house that links its own over them at start.
 
+### Scopes: who gets which secret and tailnet (t-1963, t-1964)
+
+An agent's secrets and tailnets go to every house of it unless the owner scopes them, on the agent's Houses tab ("Only
+for", "Who steers which project") or `loom runtime agent <agent> … --scope github-token=owner+service:discord --scope
+pond-dev-service-token=pond --scope tailnet:fleet=pond --steer patrick=pond`. A scope is one or more of, joined by `+`:
+`owner` (the owner's own work), a project's slug (the owner's work, and that of the people he lets steer that
+project), `service:<name>` (that service's houses). Whose work a house is for is the runtime's word: a body host's seat
+(owner, `p-<person>`, `u-<conversation>`, t-1952; a job's `j-h-<n>` is that house's), a task house's `taskActsFor` (the
+owner's only when nobody else steered it), a service house is its own (people other than the owner may steer a chat
+bridge, and a body can ask for one). "The owner" is whom the runtime counts as the agent's owner (owners.mjs): a
+co-owner's word counts as the owner's here as it does everywhere else.
+
+A claim never issues what's scoped away, and names it (`withheld`) so the box starts the house without it, saying so in
+its log; anything else the house file wants and doesn't get still fails the house. Not given or blank, scopes and
+steers stay as they were (dropping one would widen who gets a secret); `none` clears. A scope stays with a secret
+taken away, so one added back comes back scoped; one stored secret under two names must be scoped alike. Secrets are
+handed over when a house starts: houses already running keep what they had until they're stopped. The boundary is
+the house: a seat's house is shared by that principal's conversations, so a person let steer pond has pond's secrets
+in every conversation they steer. A scope that names `service:<name>` trusts that service's code in the agent's repo:
+a body can ask for a service to start, and whoever can change the repo can change what the service runs.
+
 ## How it talks
 
 A box never reads loom's stores, and loom never reaches into a box. The box polls `POST /api/<piece>/<call>` (loom's piece API, docs/extensions.md "The API") with its **box credential**, a loom token with the role `piece:<piece>/<id>` (the box's id is loom's; its name is only a label). That credential reaches this piece's API and nothing else in loom: no MCP, no CLI, no page.
