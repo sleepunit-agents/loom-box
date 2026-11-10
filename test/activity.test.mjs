@@ -407,3 +407,34 @@ test('cards made while a thread was held as gone wait untold, and go once the ho
   const sent = o.core.activityCalls.filter((a) => a.conversation === r.handle);
   assert.deepEqual(sent.at(-1).cards.map((c) => c.id), ['t2'], 'the card made during the hold is told after it');
 });
+
+test('a job\'s own house is trusted for a step\'s command line and its own words only where the conversation is the owner\'s alone; else fixed labels only (t-2109, coordinator 2026-11-10)', async () => {
+  const { spawnCall } = await import('../src/spawn.mjs');
+  const { bodySync, HouseRunner } = await import('../src/houserunner.mjs');
+  const { testSealer } = await import('./delivery-world.mjs');
+  const { createHash } = await import('node:crypto');
+  // Whatever a house says in a command line or its words passes on shape alone: a body could post it as a message too.
+  const cards = [{ id: 'c1', at: '2026-11-10T10:00:00.000Z', tool: 'Bash', summary: 'Ran a command', fixed: 'Ran a command', state: 'done', detail: 'echo HOUSE-COMMAND-WORDS' },
+    { id: 'w1', at: '2026-11-10T10:00:01.000Z', tool: 'text', summary: 'HOUSE-OWN-WORDS', fixed: 'Wrote its words', state: 'done', body: 'HOUSE-OWN-WORDS' }];
+  const run = async (person) => {
+    const o = world();
+    o.core.commsAnswer = (x) => (x.op === 'spawn' ? { ok: true, id: 'th:abcdefghij' } : { ok: true });
+    const hosts = join(o.env.LOOM_BOX_DATA, 'delivery', 'hosts');
+    mkdirSync(hosts, { recursive: true });
+    writeFileSync(join(hosts, 'art.json'), JSON.stringify({ agent: 'art', house: 'h-1', hostHash: createHash('sha256').update('the-host-key').digest('hex'), req: {}, stop: {}, inbox: {} }));
+    bodySync(o.env, { kind: 'agent', agent: 'art', house: 'h-1' }, { hostKey: 'the-host-key', report: { bodies: { b0000001: { harness: 'claude', status: 'working', cards }, }, done: {} } }, { sealer: testSealer });
+    const hr = new HouseRunner(o.env, 'claude', { sealer: testSealer });
+    o.runner.activity = () => hr.activity({ id: 'h-1-b0000001', house: 'h-1', agent: 'art' });
+    const r = await spawnCall(o.env, { kind: 'owner' }, { agent: 'art', brief: 'x' }, o.o);
+    if (person) { const c = loadConv(o.env, r.handle); c.actsFor = { ...c.actsFor, owner: true, people: ['loren'], unknown: false }; saveConv(o.env, c); }
+    await tick(o.env, o.o); await tick(o.env, o.o);
+    return o.core.activityCalls.filter((a) => a.conversation === r.handle).flatMap((a) => a.cards);
+  };
+  const alone = await run(false);
+  assert.deepEqual(alone.map((x) => [x.tool, x.summary, x.detail, x.body]), [
+    ['Bash', 'Ran a command', 'echo HOUSE-COMMAND-WORDS', undefined],
+    ['text', 'HOUSE-OWN-WORDS', undefined, 'HOUSE-OWN-WORDS']]);
+  const withPerson = await run(true);
+  assert.deepEqual(withPerson.map((x) => [x.tool, x.summary, x.detail, x.body]), [['Bash', 'Ran a command', undefined, undefined]]);
+  assert.ok(!JSON.stringify(withPerson).includes('HOUSE-'), 'where someone else is: fixed labels only');
+});

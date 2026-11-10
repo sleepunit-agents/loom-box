@@ -1586,6 +1586,9 @@ async function activityPass(env, c, d) {
   // Every card through the one gate (activity.mjs stepParts), made here or reported by a house. Where someone else is
   // in the conversation, a step's words (its command, output, diff, plan items) don't go either: theirs could be in
   // them. Its label, tool, state, result line and times do (Jonathan, 2026-11-10: other people summarized).
+  // A house's command line and its body's words pass the gate on shape alone, so a house could put anything there: that
+  // is trusted for the owner alone only, where its body could already post the same text in its own thread as a message
+  // (coordinator, 2026-11-10). Where anyone else is, only a fixed label goes, decided here, never by the house.
   const cards = (r.activity(body) ?? []).filter((x) => x && (x.tool !== 'text' || ownersAlone)).map((x) => {
     const { fixed, ...parts } = stepParts(x);
     if (ownersAlone) return { ...baseCard(x), ...parts };
