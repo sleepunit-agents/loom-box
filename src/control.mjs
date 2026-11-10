@@ -115,15 +115,38 @@ export const factsOf = (b) => [...(b.facts || []), ...(b.labels || [])];
 export const mayHost = (box, agent, members) => !box.revoked && (box.mayHost === '*' || (Array.isArray(box.mayHost) && box.mayHost.includes(agent)))
   && ownersAllow(box, agent, members);
 
-/** The agent's primary: what the owner set, if that box is still usable, else the control plane's own box. */
-export function primaryOf(s, agent, env) {
-  const p = s.primaries[agent];
-  if (p && s.boxes[p] && mayHost(s.boxes[p], agent, membersOf(env))) return p;
-  return localBoxName(env);
+/** How long a box may go unheard before placement passes it by (a box polls every 15 s: eight missed polls). */
+export const PLACE_UP_MS = 2 * 60_000;
+
+/** Whether placement counts a box as up: loom's own always; another heard from in PLACE_UP_MS, hosting, not revoked. */
+export const boxUp = (b, nowMs = Date.now()) => !!b && !b.revoked && !b.reportOnly
+  && (!!b.local || (!!b.lastSeen && nowMs - Date.parse(b.lastSeen) <= PLACE_UP_MS));
+
+/** The owner's ordered box preference for an agent, as set (box ids, first first): [] when none is set. A primary set
+ * before the list (t-2048) is a list of one. */
+export const preferenceList = (s, agent) => {
+  const p = s.primaries?.[agent];
+  return Array.isArray(p) ? p.filter((x) => typeof x === 'string') : typeof p === 'string' && p ? [p] : [];
+};
+
+/** An agent's preference, the boxes in it that may still host it, in order; loom's own box when none of them may. */
+export function preferenceOf(s, agent, env) {
+  const members = membersOf(env);
+  const list = preferenceList(s, agent).filter((id) => s.boxes[id] && mayHost(s.boxes[id], agent, members));
+  return list.length ? list : [localBoxName(env)];
+}
+
+/**
+ * The agent's primary: the first box of its preference that's up (t-2048: art one, then wunder, then loom), else the
+ * first of them (it waits for that box), else the control plane's own box.
+ */
+export function primaryOf(s, agent, env, nowMs = Date.now()) {
+  const pref = preferenceOf(s, agent, env);
+  return pref.find((id) => boxUp(s.boxes[id] ?? { local: true }, nowMs)) ?? pref[0];
 }
 
 /** Where a house goes, or a StateError saying why nowhere. */
-export function placeHouse(s, agent, { box, needs = [] }, env) {
+export function placeHouse(s, agent, { box, needs = [] }, env, nowMs = Date.now()) {
   const members = membersOf(env);
   const permitted = Object.entries(s.boxes).filter(([, b]) => mayHost(b, agent, members)).map(([n]) => n);
   if (box) {
@@ -142,12 +165,15 @@ export function placeHouse(s, agent, { box, needs = [] }, env) {
         ? `no box that may host ${agent} has ${nowhere.join(', ')}`
         : `no one box that may host ${agent} has all of ${needs.join(', ')}`, 409);
     }
-    const primary = primaryOf(s, agent, env);
+    // The first box of its preference that has it and is up; then its primary as before.
+    const preferred = preferenceOf(s, agent, env).find((id) => fits.includes(id) && boxUp(s.boxes[id], nowMs));
+    if (preferred) return preferred;
+    const primary = primaryOf(s, agent, env, nowMs);
     if (fits.includes(primary)) return primary;
     if (fits.length > 1) fail(`several boxes have ${needs.join(', ')}: ${fits.map((id) => boxLabelOf(s, id)).join(', ')}. Name one`, 409);
     return fits[0];
   }
-  const primary = primaryOf(s, agent, env);
+  const primary = primaryOf(s, agent, env, nowMs);
   // The fallback primary is loom's own box: refused too when it isn't the agent's owner's.
   if (!mayHost(s.boxes[primary] ?? { mayHost: '*' }, agent, members)) fail(`no box of ${agent}'s owner may host it: name one, or have a box lent to ${agent}`, 409);
   return primary;
@@ -226,7 +252,10 @@ export function revokeBox(env, effects, { name }) {
       if (h.tokenLabel) revokeOrQueue(s, effects, h.tokenLabel);
       h.state = 'lost'; h.updated = now(effects); h.note = 'its box was revoked';
     }
-    for (const [agent, p] of Object.entries(s.primaries)) if (p === id) delete s.primaries[agent];
+    for (const [agent, p] of Object.entries(s.primaries)) {
+      if (p === id) delete s.primaries[agent];
+      else if (Array.isArray(p) && p.includes(id)) { const left = p.filter((x) => x !== id); if (left.length) s.primaries[agent] = left.length === 1 ? left[0] : left; else delete s.primaries[agent]; }
+    }
     return { box: id, name: boxNameOf(s, id), revoked: true };
   });
 }
@@ -251,16 +280,32 @@ export function setBoxWatch(env, effects, { name, alwaysOn, reportOnly }) {
   });
 }
 
-export function setPrimary(env, effects, { agent, box }) {
+/** The most boxes an agent's preference names. */
+export const MAX_PREFERENCE = 8;
+
+/**
+ * An agent's boxes, in the order it prefers them (t-2048): `boxes` (a list, or text "one, wunder, loom"), or `box` (one,
+ * as before). Placement takes the first that's up and may host it (primaryOf, placement.mjs bodyBox). None, or just
+ * loom's own box, clears it: the agent runs on loom's own box.
+ */
+export function setPrimary(env, effects, { agent, box, boxes }) {
   const a = str(agent, 'an agent', 40);
   if (!AGENT_NAME.test(a)) fail('an agent name is lowercase letters, digits and dashes');
+  const asked = (boxes !== undefined ? (Array.isArray(boxes) ? boxes : String(boxes).split(/[\s,]+/)) : [box])
+    .map((x) => (typeof x === 'string' ? x.trim() : x)).filter(Boolean);
+  if (asked.some((x) => typeof x !== 'string')) fail('a box is named by text');
+  if (asked.length > MAX_PREFERENCE) fail(`an agent prefers ${MAX_PREFERENCE} boxes at most`);
   return update(env, (s) => {
-    if (!box || box === localBoxName(env)) { delete s.primaries[a]; return { agent: a, primary: localBoxName(env) }; }
-    const id = resolveBox(s, box);
-    if (s.boxes[id].local) { delete s.primaries[a]; return { agent: a, primary: id }; }
-    if (!mayHost(s.boxes[id], a, membersOf(env))) fail(`${boxNameOf(s, id)} isn't a box that may host ${a}`, 409);
-    s.primaries[a] = id;
-    return { agent: a, primary: id };
+    const local = localBoxName(env);
+    const ids = asked.map((x) => (x === local ? local : resolveBox(s, x)));
+    if (new Set(ids).size !== ids.length) fail('a box is named twice', 400);
+    for (const id of ids) if (!s.boxes[id]?.local && !mayHost(s.boxes[id], a, membersOf(env))) fail(`${boxNameOf(s, id)} isn't a box that may host ${a}`, 409);
+    if (!ids.length || (ids.length === 1 && (ids[0] === local || s.boxes[ids[0]]?.local))) {
+      delete s.primaries[a];
+      return { agent: a, primary: local, boxes: [local] };
+    }
+    s.primaries[a] = ids.length === 1 ? ids[0] : ids;
+    return { agent: a, primary: ids[0], boxes: ids };
   });
 }
 
@@ -379,7 +424,7 @@ export function up(env, effects, caller, { agent, box, needs, task, session, slo
     // At most the cap of houses for other people (t-1952), counted in this same write: never two past it at once.
     const full = hostHouse ? seatCapProblem(env, s, a, seat) : null;
     if (full) throw Object.assign(new StateError(full, 409), { seatFull: true });
-    const where = placeHouse(s, a, { box: box || undefined, needs: n }, env);
+    const where = placeHouse(s, a, { box: box || undefined, needs: n }, env, Date.parse(now(effects)));
     const id = nextHouseId(s);
     const at = now(effects);
     s.houses[id] = { id, agent: a, box: where, task: t, needs: n, state: 'wanted', created: at, updated: at, by: actor(caller), ...(sess ? { session: true } : {}), ...(sl ? { slot: sl } : {}), ...(hostHouse ? { kind: 'body-host', seat } : { ...(own.taskSource ? { taskSource: own.taskSource } : {}), ...(caller.kind === 'agent' && caller.house ? { taskFromHouse: caller.house } : {}), taskActsFor: own.actsFor ?? (caller.kind === 'owner' ? { owner: true, people: [], unknown: false } : { owner: false, people: [], unknown: true }) }) };
@@ -914,7 +959,7 @@ export function serviceUp(env, effects, caller, body) {
     s.services ??= {};
     const svc = s.services[key];
     if (svc?.want === 'up') return { service: key, box: svc.box, house: svc.house, state: s.houses[svc.house]?.state };
-    const box = placeHouse(s, a, { box: body.box || svc?.box || undefined }, env);
+    const box = placeHouse(s, a, { box: body.box || svc?.box || undefined }, env, Date.parse(now(effects)));
     // Its recent crashes stay: brought back up, a loop still shows as one.
     const next = { agent: a, name: body.name, box, want: 'up', restarts: 0, created: svc?.created ?? now(effects), ...(svc?.crashes?.length ? { crashes: svc.crashes } : {}) };
     s.services[key] = next;
@@ -1097,7 +1142,7 @@ export function remoteUp(env, effects, { agent, box, dir }) {
     if (!s.agents[agent]) fail(`${agent} has no house yet: the owner sets its repo on the Boxes page`, 409);
     s.remotes ??= {};
     const prev = s.remotes[agent];
-    const b = placeHouse(s, agent, { box: box || prev?.box || undefined }, env);
+    const b = placeHouse(s, agent, { box: box || prev?.box || undefined }, env, Date.parse(now(effects)));
     if (prev?.want === 'up' && prev.box !== b) fail(`${agent}'s box session is up on ${prev.box}: take it down first`, 409);
     if (prev?.want === 'up') return remoteView(agent, prev);
     const d = dir || (prev?.box === b ? prev.dir : undefined);

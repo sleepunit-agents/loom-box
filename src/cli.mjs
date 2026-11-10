@@ -5,7 +5,7 @@
 //
 // Boxes are pets: machines enrolled once and kept (wunder, the 5090 box, a
 // laptop). Houses are cattle: an agent's container on a box, built from the
-// agent's repo for a task and thrown away. Nothing picks a box by itself.
+// agent's repo for a task and thrown away. An agent's boxes are in the order its owner set: the first that's up.
 //
 // On loom's own machine (the control plane, and its first box):
 //   loom runtime add <name> [--may-host a,b] [--labels x,y]   enroll a box; prints its credential once
@@ -16,7 +16,7 @@
 //                  [--logins claude,codex|none|default]       which of a box's logins its houses may have
 //                                                         how its house is made (--port: one it may publish;
 //                                                         --tailnet: a box tailscaled.sock it may use, by name)
-//   loom runtime primary <agent> [<box>]                       an agent's primary (default: this machine)
+//   loom runtime primary <agent> [<box>...]                    its boxes in order: the first that's up (default: this machine)
 //   loom runtime rename-local                                  after renaming this machine: its box takes the new name
 //   loom runtime health [<box>] [--json]                       each box's last health sample and what's wrong now
 //   loom runtime always-on <box> on|off                        silent 10 minutes is an alert (loom's own and report-only boxes always are)
@@ -333,7 +333,7 @@ async function main(argv, env) {
       }
       return;
     }
-    case 'primary': { const [agent, box] = positional(rest); out(setPrimary(env, realEffects(env), { agent, box })); return; }
+    case 'primary': { const [agent, ...boxes] = positional(rest); out(setPrimary(env, realEffects(env), { agent, boxes })); return; }
     case 'up': {
       let task = flag(rest, '--task');
       if (task === '-' || task === undefined) task = await readStdin();

@@ -80,7 +80,7 @@ export function renameLocal(env = process.env) {
       if (v.box === from) v.box = to;
       if (v.moveTo === from) v.moveTo = to;
     }
-    for (const [a, b] of Object.entries(s.primaries)) if (b === from) s.primaries[a] = to;
+    for (const [a, b] of Object.entries(s.primaries)) s.primaries[a] = Array.isArray(b) ? b.map((x) => (x === from ? to : x)) : b === from ? to : b;
     for (const v of Object.values(s.serviceState ?? {})) if (v.box === from) v.box = to;
     return { box: to, was: from, renamed: true };
   }, { renaming: true });

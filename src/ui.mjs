@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import { BOX_NAME, StateError, load, localBoxName, stateDir } from './state.mjs';
 import { sessionsBusy } from './busy.mjs';
 import { allowJoin, blockAllJoins, blockJoin, pendingJoins } from './enroll.mjs';
-import { addBox, assertBoxOwner, resolveBox, isBoxOwner, boxLabelOf, boxOfCall, boxUpdateNow, loginOver, factsOf, lendBox, list, loginCancel, loginCode, loginStart, loginView, primaryOf, remoteDown, remoteUp, revokeBox, shownTask, serviceDown, serviceMove, serviceRestart, serviceUp, setAgent, isHostHouse, setBoxOwner, setMayHost, setBoxWatch, setPrimary, up, down, LIVE } from './control.mjs';
+import { preferenceOf, addBox, assertBoxOwner, resolveBox, isBoxOwner, boxLabelOf, boxOfCall, boxUpdateNow, loginOver, factsOf, lendBox, list, loginCancel, loginCode, loginStart, loginView, primaryOf, remoteDown, remoteUp, revokeBox, shownTask, serviceDown, serviceMove, serviceRestart, serviceUp, setAgent, isHostHouse, setBoxOwner, setMayHost, setBoxWatch, setPrimary, up, down, LIVE } from './control.mjs';
 import { LOGIN_HARNESSES } from './logins.mjs';
 import { ownCommit, swapCommand } from './version.mjs';
 import { stateAccounts } from './accounts.mjs';
@@ -24,6 +24,15 @@ import { relayNotices } from './relay.mjs';
 import { adapterStatuses, nowAgentPage, nowManifest, nowPage } from './nowboard.mjs';
 import { boxPagePath, checkDark, watchAsks, watchNotices, watchOf, watchRows } from './watch.mjs';
 import { coreFrom } from './core.mjs';
+
+/** Where an agent runs, for its row (t-2048): the boxes its houses are up on, and its order when it has one. */
+function whereRuns(s, a, live, env, nowMs) {
+  const on = [...new Set(live.filter((h) => h.agent === a && h.state === 'running').map((h) => h.box))];
+  const pref = preferenceOf(s, a, env);
+  const order = pref.length > 1 ? ` · prefers ${pref.map((id) => boxLabelOf(s, id)).join(', then ')}` : '';
+  if (on.length) return `Running on ${on.map((id) => boxLabelOf(s, id)).join(', ')}${order}`;
+  return `Next on ${boxLabelOf(s, primaryOf(s, a, env, nowMs))}${order}`;
+}
 
 /**
  * The runtime's own store (the grants, the gates), when it runs as loom's piece: loom names it (LOOM_PIECE_NAME).
@@ -947,7 +956,7 @@ function boxesPage(env, nowMs) {
       const svc = view.services.filter((v) => v.agent === a && v.want === 'up');
       const down = svc.filter((v) => v.state === 'failed' || v.state === 'lost');
       return { label: who(a), agent: a, page: `agent:${a}`, value: `${plural(n, 'house')} up · ${plural(svc.length, 'service')}`,
-        detail: down.length ? `${andList(down.map((v) => v.name))} ${down.length === 1 ? 'is' : 'are'} down` : `Primary box: ${boxLabelOf(s, primaryOf(s, a, env))}`, tone: down.length ? 'bad' : n ? 'ok' : 'muted' };
+        detail: down.length ? `${andList(down.map((v) => v.name))} ${down.length === 1 ? 'is' : 'are'} down` : whereRuns(s, a, live, env, nowMs), tone: down.length ? 'bad' : n ? 'ok' : 'muted' };
     }) }] });
   }
 
@@ -1292,14 +1301,18 @@ function agentTabPage(env, agent, caller, nowMs) {
     ] } }] }] });
   if (!own) {
     const c = s.agents[agent];
-    const primary = primaryOf(s, agent, env);
+    const primary = primaryOf(s, agent, env, nowMs);
+    const pref = preferenceOf(s, agent, env);
     const boxOpts = live_boxes.map((b) => ({ value: b.id, label: b.label }));
     const secrets = Object.entries(c.secrets || {});
     const repo = String(c.repo ?? '').replace(/^https:\/\/github\.com\//, '').replace(/\.git$/, '');
     sections.push({ id: `agent-${agent}`, title: 'Its house', side: true, blocks: [{ type: 'panel', rows: [
-      { label: 'Primary box', value: nameOf(primary), ...(boxOpts.length >= 2 && boxOpts.length <= 5
-        ? { choice: { action: 'set-primary', name: 'box', value: primary, options: boxOpts, fields: { agent } } }
-        : boxOpts.length > 5 ? { edit: { title: 'Primary box', action: 'set-primary', submit: 'Set', hidden: { agent }, fields: [{ name: 'box', label: 'Primary', kind: 'choice', value: primary, options: boxOpts }] } } : {}) },
+      // Its boxes in order (t-2048): bodies and houses go to the first that's up and may host it.
+      { label: 'Boxes, in order', value: pref.map(nameOf).join(', then '),
+        detail: pref.length > 1 && primary !== pref[0] ? `${nameOf(pref[0])} is down: it runs on ${nameOf(primary)} for now` : `Runs on ${nameOf(primary)}; the next box takes over when it's down`,
+        ...(boxOpts.length >= 2 ? { edit: { title: `${who(agent)}'s boxes, in order`, action: 'set-primary', submit: 'Save', hidden: { agent },
+          fields: ['first', 'second', 'third'].map((name, i) => ({ name, label: i ? 'Then' : 'First', kind: 'choice', value: pref[i] ?? '',
+            options: [...(i ? [{ value: '', label: 'None' }] : []), ...boxOpts] })) } } : {}) },
       { label: 'Repo', value: repo || 'none', detail: `${c.houseFile || 'house/house.json'}${c.branch ? ` on ${c.branch}` : ''}`, sheet: { title: `${who(agent)}'s house`, blocks: [{ type: 'kv', items: houseFacts(c) }] } },
       { label: 'Nested containers', value: c.nested ? 'Allowed' : 'Not allowed', toggle: { action: 'agent-flag', on: !!c.nested, fields: { agent, flag: 'nested' } } },
       { label: 'GPU', value: c.gpu ? 'Allowed' : 'Not allowed', toggle: { action: 'agent-flag', on: !!c.gpu, fields: { agent, flag: 'gpu' } } },
@@ -1521,7 +1534,11 @@ export function act(env, effects, { action, fields: raw = {}, caller: c }, publi
         const choice = ownerModelChoice(env, OWNER, fields);
         return { ok: true, message: `Saved ${who(choice.agent)}'s model preference. New turns use ${choice.effective === 'auto' ? 'Auto' : HARNESS_WORDS[choice.effective]} when available.`, page: '' };
       }
-      case 'set-primary': { const r = setPrimary(env, effects, fields); return { ok: true, message: `${r.agent}'s primary is ${label(r.primary)}.`, page: '' }; }
+      case 'set-primary': {
+        const ordered = ['first', 'second', 'third'].some((k) => k in fields);
+        const r = setPrimary(env, effects, { agent: fields.agent, ...(ordered ? { boxes: [fields.first, fields.second, fields.third].filter(Boolean) } : { box: fields.box }) });
+        return { ok: true, message: `${r.agent} runs on ${r.boxes.map(label).join(', then ')}: the first that's up.`, page: '' };
+      }
       case 'set-agent': { const r = setAgent(env, effects, fields); return { ok: true, message: `Saved ${r.agent}'s house.`, page: '' }; }
       case 'up': {
         const r = up(env, effects, OWNER, { agent: fields.agent, box: fields.box, needs: fields.needs, task: fields.task });
