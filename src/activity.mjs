@@ -73,7 +73,7 @@ export function clean(s, n = MAX_SUMMARY) {
 }
 
 /** A finished label: redacted as a whole once more, on one printable line, at most MAX_SUMMARY. */
-const finish = (s) => clean(redact(s));
+const finish = (s) => clean(redact(normLine(s).replace(SGR, '')));
 /** A text part of a label (a pattern, a query, a first line), through the gate, cut to `n`. */
 const txt = (s, n) => part('text', s, n);
 const firstLine = (s) => String(s ?? '').split('\n').map((l) => l.trim()).find(Boolean) ?? '';
@@ -467,8 +467,11 @@ export function testsLine(output) {
   if (pass === null && jest) { pass = Number(jest[2]); fail = jest[1] ? Number(jest[1]) : 0; }
   const vitest = /\bTests\s{1,10}(?:(\d{1,6}) failed \|\s*)?(\d{1,6}) passed/.exec(t);
   if (pass === null && vitest) { pass = Number(vitest[2]); fail = vitest[1] ? Number(vitest[1]) : 0; }
-  const py = /=+ (?:(\d{1,6}) failed, )?(\d{1,6}) passed(?:, (\d{1,6}) failed)?/.exec(t);
-  if (pass === null && py) { pass = Number(py[2]); fail = Number(py[1] ?? py[3] ?? 0); }
+  const py = /=+ ([^=\n]*)=+/.exec(t);
+  if (pass === null && py) {
+    const counts = [...py[1].matchAll(/\b(\d{1,6}) (passed|failed)\b/g)];
+    if (counts.length) { pass = Number(counts.find(x => x[2] === 'passed')?.[1] ?? 0); fail = Number(counts.find(x => x[2] === 'failed')?.[1] ?? 0); }
+  }
   if (pass === null) return null;
   return fail ? `${pass} passed, ${fail} failed` : `${plural(pass, 'test')} passed`;
 }

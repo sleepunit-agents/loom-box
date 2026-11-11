@@ -159,6 +159,7 @@ test('tests counts from node, jest, vitest and pytest', () => {
   assert.equal(testsLine('Tests:       1 failed, 12 passed, 13 total'), '12 passed, 1 failed');
   assert.equal(testsLine('      Tests  2 failed | 40 passed (42)'), '40 passed, 2 failed');
   assert.equal(testsLine('==== 5 passed, 1 failed in 0.12s ===='), '5 passed, 1 failed');
+  for(const summary of ['==== 5 passed, 2 skipped, 1 failed in 0.12s ====', '==== 1 failed, 2 skipped, 5 passed in 0.12s ====']) assert.equal(testsLine(summary),'5 passed, 1 failed');
   assert.equal(testsLine('nothing here'), null);
 });
 
@@ -769,4 +770,14 @@ test('helper discovery considers only the first 500 directory entries, including
     assert.ok(cards.some(c=>c.id.startsWith('inside:')));
     assert.ok(!cards.some(c=>c.id.startsWith('outside:')));
   }finally{fs.readdirSync=read;syncBuiltinESMExports();}
+});
+
+
+test('Codex commentary normalizes split tokens before redacting the complete card', () => {
+  for(const control of ['\x1b[0m','\x1b(B','\u200b']) {
+    const text=GH.slice(0,12)+control+GH.slice(12);
+    const [card]=codexCards([{type:'item.completed',item:{id:'split-token',type:'agent_message',text}}]);
+    const out=JSON.stringify(card);
+    assert.ok(!out.includes(GH.slice(0,12)) && !out.includes(GH.slice(12)),out);
+  }
 });
