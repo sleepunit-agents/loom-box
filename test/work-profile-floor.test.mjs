@@ -58,6 +58,7 @@ test('invalid transport actually launches minimal, prints a problem, and filters
   n.runner.start({ brief: 'start', cwd: root, env: { HOME: root, LOOM_BODY_PROFILE: '{broken', PRIVATE_KEY: 'canary' } });
   const got = n.captured();
   assert.match(got.input, /JOB PROFILE PROBLEM: invalid transported/);
+  assert.equal(got.input.match(/JOB PROFILE PROBLEM/g).length, 1);
   assert.equal(got.args[got.args.indexOf('--tools') + 1], '');
   assert.deepEqual(JSON.parse(readFileSync(got.args[got.args.indexOf('--mcp-config') + 1])).mcpServers, {});
   assert.equal(got.env.PRIVATE_KEY, undefined);

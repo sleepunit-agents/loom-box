@@ -448,7 +448,7 @@ test('a body is asked of the runtime: it picks the model, starts it through the 
   const b = await startBody(env, { agent: 'art', brief: 'the wake', venue: 'wake', place: 'schedule:reflect', deny:['mcp__github'] }, o);
   assert.deepEqual([b.body, b.model, b.harness, b.family, b.kind, b.account], ['codex:x0000000', 'gpt', 'codex', 'openai', 'scheduled', 'pro']);
   assert.deepEqual(seen[0].slice(0, 3), ['start', 'codex', 'gpt']);
-  assert.match(seen[0][3], /^JOB PROFILE PROBLEM:[\s\S]*\n\nthe wake$/);
+  assert.equal(seen[0][3], 'the wake');
   // The record has no brief.
   const rec = readBody(env, b.body);
   assert.equal(JSON.stringify(rec).includes('the wake'), false);

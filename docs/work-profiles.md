@@ -19,7 +19,7 @@ ordinary process identity are infrastructure. This is harness/prompt configurati
 not filesystem isolation from a malicious shell. Jobs needing stronger boundaries
 must run in separately provisioned houses with appropriately scoped secrets.
 
-Every job and conversation kind selects a profile. Missing stores/declarations and
+Every Claude job and conversation kind selects a profile. Missing stores/declarations and
 invalid declarations select an empty minimal profile plus a visible `JOB PROFILE
 PROBLEM` in the body brief. There is no global allowlist and no `off` override.
 A declared but unavailable capability refuses startup rather than silently omitting
@@ -48,7 +48,10 @@ the executable test explicitly distinguishes these intrinsic harness controls.
 
 Codex profiled jobs fail closed with the visible reason "work profiles don't support
 Codex yet". Codex profile support is outside this PR; null owns that follow-up.
-Unprofiled Codex launches retain their existing behavior.
+Codex jobs without a matching declaration retain their existing environment and
+brief through the public start and resume paths, including legacy continuations.
+An unreadable or malformed configured store remains fail-closed; a previously
+profiled history cannot become unprofiled when its declaration is removed.
 No optional work-identity/core API is required or claimed by this runtime change.
 
 ## Owner-approved permanent amendments
@@ -59,7 +62,8 @@ skills, secrets). Its shell supplies its own conversation proof; callers cannot
 choose another job key, profile, or revision. The runtime checks the active body,
 its owner principal and house, derives its key and original declaration, and
 rejects a stale revision before filing anything. An MCP addition includes its
-explicit `mcp.SERVER` credential declaration on the same card.
+explicit `mcp.SERVER` credential declaration on the same card. The card lists
+every added declaration, including that credential bundle.
 
 The runtime publishes the canonical amendment privately before requesting a
 `grant` target `runtime-job-profile:SHA256`. The companion approvals change

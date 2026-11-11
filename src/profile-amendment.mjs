@@ -75,7 +75,7 @@ export async function requestForBody(env, caller, { conversation, field, name },
     '--as', JSON.stringify({kind: 'agent', agent: rec.agent}), '--on-behalf', 'owner', '--conversation', conversation,
     '--ask', `Allow this job to use ${name}?`, '--why', 'It needs this capability to finish its work.',
     '--if-yes', 'I permanently add this capability to this job profile.', '--if-no', 'I keep this job profile unchanged.',
-    '--details', `Job: ${a.key}\nCapability: ${field} ${name}\nRevision: ${a.before}`]);
+    '--details', `Job: ${a.key}\nAdded declarations:\n${['mcp', 'tools', 'skills', 'secrets'].flatMap(k => a.profile[k].filter(n => !a.previous[k].includes(n)).map(n => `${k}: ${n}`)).join('\n')}\nRevision: ${a.before}`]);
   if (result.status !== 0 || result.error) throw Error(approvalsWhy(result));
   const card = JSON.parse(result.stdout);
   if (!/^a-[0-9a-f]{8}$/.test(card.id) || card.target !== a.target || card.kind !== 'grant') throw Error('approvals returned a different amendment');

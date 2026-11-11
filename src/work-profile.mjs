@@ -38,13 +38,15 @@ export function workServers(servers, profile) {
 }
 export function selectProfile(settings, job) {
   const key = jobProfileKey(job);
+  let declared = !!settings.LOOM_RUNTIME_JOB_PROFILES;
   try {
     const file = settings.LOOM_RUNTIME_JOB_PROFILES;
     if (!file) throw Error('no job profile store configured');
     const store = JSON.parse(readFileSync(file, 'utf8'));
-    if (store.v !== 1 || !store.jobs || !Object.hasOwn(store.jobs, key)) throw Error('job has no declared profile');
-    return { key, profile: validateProfile(store.jobs[key]) };
-  } catch (e) { return { key, profile: minimalProfile(), problem: `JOB PROFILE PROBLEM: ${e.message}; using minimal profile (no tools, MCP, skills or secrets).` }; }
+    if (store.v !== 1 || !store.jobs || typeof store.jobs !== 'object' || Array.isArray(store.jobs)) throw Error('invalid job profile store');
+    if (!Object.hasOwn(store.jobs, key)) { declared = false; throw Error('job has no declared profile'); }
+    return { key, declared: true, profile: validateProfile(store.jobs[key]) };
+  } catch (e) { return { key, declared, profile: minimalProfile(), problem: `JOB PROFILE PROBLEM: ${e.message}; using minimal profile (no tools, MCP, skills or secrets).` }; }
 }
 // Small explicit infrastructure environment. No provider key, launcher setting or inherited secret survives by default.
 const BASE_ENV = ['CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'LOOM_BODY_PROFILE_PROBLEM', 'CLAUDE_SECURESTORAGE_CONFIG_DIR', 'HOME', 'PATH', 'LANG', 'LC_ALL', 'TZ', 'TMPDIR', 'TERM', 'USER', 'LOGNAME', 'SHELL', 'LOOM_BODY_KEY', 'LOOM_BODY_CONVERSATION', 'LOOM_BODY_MODEL'];
@@ -66,6 +68,10 @@ export function profileEnv(env, kind, settings = process.env, job = {}, options 
   const source = { ...(!options.deferSecrets ? Object.fromEntries(['CLAUDE_CONFIG_DIR', 'CODEX_HOME'].filter(k => settings[k] !== undefined).map(k => [k, settings[k]])) : {}), ...(env ?? process.env) };
   const { LOOM_BODY_PROFILE: _old, LOOM_BODY_PROFILE_PROBLEM: _problem, ...clean } = source;
   const selected = selectProfile(settings, { ...job, kind });
+  if (options.harness === 'codex' && !selected.declared && !options.forceProfile) {
+    const { LOOM_BODY_PROFILE: _marker, LOOM_BODY_PROFILE_PROBLEM: _notice, ...legacy } = env ?? process.env;
+    return legacy;
+  }
   return { ...restrictedEnv(clean, selected.profile, options), ...(selected.problem ? { LOOM_BODY_PROFILE_PROBLEM: selected.problem } : {}) };
 }
 export function profileNotice(env) { return [env?.LOOM_BODY_PROFILE_PROBLEM, ...(isWork(env) ? ['If a capability is missing, request its permanent owner approval with loom runtime profile request --field mcp|tools|skills|secrets --name NAME. Do not work around the profile.'] : [])].filter(Boolean).join('\n'); }
