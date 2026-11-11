@@ -1249,12 +1249,12 @@ function plan(env, cv, d, mem) {
   if (c.contextCap?.body === c.body && (st === 'idle' || st === 'ended')) {
     try {
       const rec = readBody(env, c.body), runner = d.runner(rec.harness, rec.local);
-      const note = c.contextCap.note ? d.sealer.open(Buffer.from(c.contextCap.note, 'base64')).toString('utf-8') : handoffText(runner.final?.(bodyOf(c.body, rec)));
+      const note = collectContextHandoff(c, runner, bodyOf(c.body, rec), d);
       if (note) {
         c.contextCap.note = d.sealer.seal(Buffer.from(note)).toString('base64');
         return begin({ type: 'context-rotate', body: c.body });
       }
-    } catch { return wait('context handoff collection is pending'); }
+    } catch (e) { return wait(`context handoff held: ${e.message}`); }
   }
 
   if (st === 'working') {
@@ -2742,6 +2742,22 @@ export async function ownerConversationControl(env, caller, { agent, conversatio
   return result;
 }
 
+// A requested handoff with missing/bad storage is a hold, never a completion.
+function collectContextHandoff(c, runner, body, d) {
+  if (c.contextCap.note) {
+    const note = d.sealer.open(Buffer.from(c.contextCap.note, 'base64')).toString('utf-8');
+    if (!note.trim() || note.length > 12000) throw Error('saved context handoff is empty or oversized');
+    return note;
+  }
+  const text = runner.final?.(body);
+  const note = handoffText(text);
+  if (note) return note;
+  if (typeof text !== 'string' || !text.trim() || text.trimStart().startsWith('LOOM_CONTEXT_HANDOFF')) {
+    throw Error('context handoff is missing or malformed');
+  }
+  return null; // A normal final still completes a job that finished before handing off.
+}
+
 async function rotateContext(env, op, d) {
   const before = loadConv(env, op.cv);
   if (!ours(before, op) || before.body !== op.body || !before.contextCap?.note) return;
@@ -3440,14 +3456,19 @@ export async function tick(env, o = {}, only, mem = new Map()) {
         if (c.contextCap?.body === c.body && (st === 'idle' || st === 'ended')) {
           try {
             const rec = readBody(env, c.body), runner = d.runner(rec.harness, rec.local);
-            const note = c.contextCap.note ? d.sealer.open(Buffer.from(c.contextCap.note, 'base64')).toString('utf-8') : handoffText(runner.final?.(bodyOf(c.body, rec)));
+            const note = collectContextHandoff(c, runner, bodyOf(c.body, rec), d);
             if (note) {
               c.contextCap.note = d.sealer.seal(Buffer.from(note)).toString('base64');
               c.starting = mark(now);
               ops.push({ cv: c.conversation, mark: c.starting.op, type: 'context-rotate', body: c.body });
               saveConv(env, c); continue;
             }
-          } catch { /* collection may be pending */ }
+          } catch (e) {
+            const reason = `context handoff held: ${e.message}`;
+            if (c.waiting !== reason) d.warn(`${c.conversation}: ${reason}`);
+            c.waiting = reason;
+            saveConv(env, c); continue;
+          }
         }
         // Waiting on a permission prompt nobody can answer (t-1858): stopped once it has waited stuckAfter, counted from
         // when the tick first saw it waiting. Only a harness that can say (runners.mjs, waiting) is ever asked.

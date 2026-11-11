@@ -227,3 +227,40 @@ test('real Claude and Codex runners discover current context in native transcrip
   writeFileSync(codexFile, JSON.stringify({ type: 'event_msg', payload: { type: 'token_count', info: { last_token_usage: { input_tokens: 170000 } } } }) + '\n');
   assert.equal(x.context({ id: 'body-codex', slot: { session: 'session-codex' } }), 170000);
 });
+
+
+test('missing, malformed and unreadable requested handoffs hold visibly instead of completing', async () => {
+  const { spawnCall } = await import('../src/spawn.mjs');
+  for (const mode of ['missing', 'empty', 'oversized', 'bad-marker', 'unreadable', 'saved-oversized']) {
+    const w = world();
+    const result = await spawnCall(w.env, { kind: 'owner' }, { agent: 'art', brief: 'Do not lose unfinished work' }, w.o);
+    let c = loadConv(w.env, result.handle);
+    const old = c.body;
+    w.runner.context = () => 160000;
+    await tick(w.env, w.o);
+    c = loadConv(w.env, result.handle);
+    if (mode === 'unreadable') {
+      c.contextCap.note = Buffer.from('not sealed').toString('base64');
+      const open = w.o.sealer.open;
+      w.o.sealer.open = blob => { if (blob.toString() === 'not sealed') throw Error('cannot decrypt'); return open(blob); };
+    }
+    if (mode === 'saved-oversized') c.contextCap.note = w.o.sealer.seal(Buffer.from('x'.repeat(12001))).toString('base64');
+    saveConv(w.env, c);
+    w.runner.final = () => mode === 'missing' ? null : mode === 'oversized' ? HANDOFF_MARKER + 'x'.repeat(12001) : mode === 'bad-marker' ? 'LOOM_CONTEXT_HANDOFFwrong\nunfinished' : HANDOFF_MARKER;
+    w.runner.finish(old);
+    await tick(w.env, w.o);
+    c = loadConv(w.env, result.handle);
+    assert.equal(c.body, old, mode);
+    assert.equal(c.spawn.report, undefined, mode);
+    assert.equal(c.contextHandoffs, undefined, mode);
+    assert.match(c.waiting, /context handoff held:/, mode);
+    assert.equal((await spawnCall(w.env, { kind: 'owner' }, { agent: 'art', action: 'result', handle: result.handle }, w.o)).state, 'pending', mode);
+    // Recovery uses the same predecessor's valid note, without dropping history.
+    delete c.contextCap.note; saveConv(w.env, c);
+    w.runner.final = () => HANDOFF_MARKER + 'Recovered note: continue the unfinished work';
+    await tick(w.env, w.o);
+    c = loadConv(w.env, result.handle);
+    assert.notEqual(c.body, old, mode);
+    assert.equal(c.contextHandoffs.length, 1, mode);
+  }
+});
