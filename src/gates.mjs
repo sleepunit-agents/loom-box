@@ -27,7 +27,7 @@ export const AGENT = /^[a-z][a-z0-9-]{0,39}$/;
 export const SLUG = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const PLATFORM_ID = /^[A-Za-z0-9]{1,24}$/;
 const PROPOSAL_ID = /^p-[0-9a-f]{6}$/;
-export const FIELDS = ['name', 'role', 'tier', 'slack', 'discord', 'venues'];
+export const FIELDS = ['name', 'role', 'tier', 'slack', 'discord', 'venues', 'projects'];
 const NAME_MAX = 80, ROLE_MAX = 80, IDS_MAX = 3, TEAMS_MAX = 2, VENUE_MAX = 40, VENUES_MAX = 6, WHY_MAX = 300, SAY_MAX = 600;
 export const PENDING_MAX = 10;
 const PLATFORMS = ['slack', 'discord'];
@@ -85,6 +85,9 @@ export function entryProblem(entry) {
   if (entry.tier !== 1 && entry.tier !== 2) return 'tier is 1 (a guest, only in its venues) or 2 (trusted)';
   if (typeof entry.name !== 'string' || !entry.name.trim() || entry.name.length > NAME_MAX) return `name is the person's name, ${NAME_MAX} characters at most`;
   if ('role' in entry && !(typeof entry.role === 'string' && entry.role.length <= ROLE_MAX)) return `role is a few words, ${ROLE_MAX} characters at most`;
+  if ('projects' in entry && !(Array.isArray(entry.projects) && entry.projects.length >= 1 && entry.projects.length <= 10 && entry.projects.every((p) => typeof p === 'string' && SLUG.test(p)) && new Set(entry.projects).size === entry.projects.length)) {
+    return 'projects is a list of 1 to 10 unique project slugs (lowercase letters, digits and -, 64 characters at most)';
+  }
   if ('discord' in entry) { const w = idList(entry.discord, 'discord'); if (w) return w; }
   if ('slack' in entry) {
     const sl = entry.slack;
@@ -143,7 +146,7 @@ export function collision(slug, entry, doc) {
 /** `slug`'s entry once `entry` is merged: the proposed fields, and what the owner gave it before kept. */
 export function after(doc, slug, entry) {
   const cur = doc?.people?.[slug];
-  const kept = isObj(cur) ? Object.fromEntries(Object.entries(cur).filter(([k]) => !FIELDS.includes(k))) : {};
+  const kept = isObj(cur) ? Object.fromEntries(Object.entries(cur).filter(([k]) => !FIELDS.includes(k) || (k === 'projects' && !('projects' in entry)))) : {};
   return { ...kept, ...entry };
 }
 
@@ -285,6 +288,7 @@ const changes = (before = {}, aft = {}) => [...new Set([...Object.keys(before ??
 function summaryOf(e) {
   const bits = typeof e.role === 'string' && e.role ? [e.role] : [];
   bits.push(`tier ${e.tier}`);
+  if (e.projects) bits.push(`projects ${e.projects.join(', ')}`);
   const slack = Object.values(e.slack ?? {}).flat();
   if (slack.length) bits.push(`Slack ${slack.join(', ')}`);
   if ((e.discord ?? []).length) bits.push(`Discord ${e.discord.join(', ')}`);
