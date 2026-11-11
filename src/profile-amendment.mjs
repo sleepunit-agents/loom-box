@@ -1,9 +1,10 @@
+import { durableJson } from './durable-json.mjs';
 // Runtime half of the approvals contract. Only the trusted approvals adapter calls
 // commitAmendment, under its owner-only grant executor. No body-facing apply endpoint.
-import { readFileSync, mkdirSync, rmSync, openSync, writeFileSync, fsyncSync, closeSync, renameSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { readFileSync, mkdirSync, openSync, closeSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { validateProfile, minimalProfile } from './work-profile.mjs';
 const hash = x => createHash('sha256').update(JSON.stringify(x)).digest('hex');
 const fields = ['mcp', 'tools', 'skills', 'secrets'];
@@ -13,22 +14,6 @@ export function amendment(key, profile, field, name) {
   if (p[field].includes(name)) throw Error('job profile already declares this capability');
   const next = validateProfile({ ...p, [field]: [...new Set([...p[field], name])], ...(field === 'mcp' ? {secrets: [...new Set([...p.secrets, `mcp.${name}`])]} : {}) });
   return { v: 1, key, previous: p, before: hash(p), field, name, profile: next, target: `runtime-job-profile:${hash([key, hash(p), field, name])}` };
-}
-function durableJson(file, value) {
-  mkdirSync(dirname(file), {recursive:true,mode:0o700});
-  // Publish every new directory entry too, including concurrent mkdir races.
-  for (let dir = resolve(dirname(file)); ; dir = dirname(dir)) {
-    const parent = openSync(dir,'r'); try {fsyncSync(parent);} finally {closeSync(parent);}
-    if (dirname(dir) === dir) break;
-  }
-  const tmp = `${file}.${randomBytes(12).toString('hex')}.tmp`;
-  let fd;
-  try {
-    fd = openSync(tmp,'wx',0o600);
-    try {writeFileSync(fd,JSON.stringify(value)); fsyncSync(fd);} finally {closeSync(fd);}
-    renameSync(tmp,file);
-    fd = openSync(dirname(file),'r'); try {fsyncSync(fd);} finally {closeSync(fd);}
-  } finally {rmSync(tmp,{force:true});}
 }
 // flock locks the inherited open-file description, which the parent retains.
 // Process death closes it in the kernel; no PID guessing or stale-lock stealing.

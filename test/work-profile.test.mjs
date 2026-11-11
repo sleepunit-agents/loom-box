@@ -70,11 +70,11 @@ test('Codex adapter fails visibly rather than using unverified tool/skill isolat
   const x = new CodexRunner();
   assert.match(x.plan([], '/tmp', { LOOM_BODY_PROFILE: JSON.stringify(minimalProfile()) }).why, /work profiles don.t support Codex yet/);
 });
-for (const method of ['start', 'prepare']) for (const invalid of [false, true]) test(`house ${method} ${invalid ? 'invalid fallback' : 'declared profile'} removes inherited secrets`, async () => {
+for (const method of ['start', 'prepare']) for (const mode of ['valid', 'invalid', 'missing']) test(`house ${method} ${mode} profile removes inherited secrets`, async () => {
   const { houseWorld, until } = await import('./delivery-world.mjs');
   const { load } = await import('../src/state.mjs');
   const w = houseWorld(); let host; w.houseEnv.PROFILE_TEST_SECRET = 'undeclared-fixture';
-  const p = invalid ? '{broken' : JSON.stringify(profile({ tools: ['Read'] }));
+  const p = mode === 'missing' ? undefined : mode === 'invalid' ? '{broken' : JSON.stringify(profile({ tools: ['Read'] }));
   const options = { agent: 'art', brief: 'profile transport fixture', model: 'opus', seat: 'owner.cv-abcdef123456', deny: ['mcp__github'], env: { LOOM_BODY_PROFILE: p, LOOM_BODY_KEY: 'fixture-key', LOOM_BODY_CONVERSATION: 'cv-abcdef123456' } };
   try {
     const pending = method === 'start' ? w.hr.start(options) : w.hr.prepareLaunch('7'.repeat(64), options);
@@ -83,8 +83,8 @@ for (const method of ['start', 'prepare']) for (const invalid of [false, true]) 
     if (method === 'prepare') w.hr.publishPreparedLaunch(got);
     await until(() => Object.keys(w.local.envs).length > 0);
     const id = Object.keys(w.local.envs)[0];
-    assert.deepEqual(selectedProfile(w.local.envs[id]), invalid ? minimalProfile() : profile({ tools: ['Read'] }));
-    if (invalid) assert.match(w.local.envs[id].LOOM_BODY_PROFILE_PROBLEM, /invalid transported/);
+    assert.deepEqual(selectedProfile(w.local.envs[id]), mode !== 'valid' ? minimalProfile() : profile({ tools: ['Read'] }));
+    if (mode !== 'valid') assert.match(w.local.envs[id].LOOM_BODY_PROFILE_PROBLEM, new RegExp(`${mode} transported`));
     assert.deepEqual(w.local.denies[id], ['mcp__github']);
     assert.equal(w.local.envs[id].PROFILE_TEST_SECRET, undefined);
   } finally { if (host) { await w.kill(); await host; } }
@@ -237,3 +237,19 @@ test('project definitions cannot revive enabled:false in any MCP source', () => 
   writeFileSync(join(root,'.mcp.json'),JSON.stringify({mcpServers:{loom:{command:'replacement'}}}));
   assert.throws(()=>claudeWorkArgs({HOME:root,LOOM_BODY_PROFILE:JSON.stringify(profile({mcp:['loom'],secrets:['mcp.loom']}))},root,join(root,'jobs')),/unavailable/);
 }));
+for (const method of ['start', 'prepare']) test(`unprofiled Codex house ${method} retains its existing environment and brief`, async () => {
+  const { houseWorld, until } = await import('./delivery-world.mjs');
+  const { load } = await import('../src/state.mjs');
+  const w = houseWorld({harness: 'codex'}); let host; w.houseEnv.UNPROFILED_FIXTURE = 'preserved';
+  const options = {agent: 'art', brief: 'legacy Codex', model: 'gpt', seat: 'owner.cv-abcdef123456', env: {LOOM_BODY_KEY: 'fixture-key', LOOM_BODY_CONVERSATION: 'cv-abcdef123456'}};
+  try {
+    const pending = method === 'start' ? w.hr.start(options) : w.hr.prepareLaunch('7'.repeat(64), options);
+    await until(() => load(w.env).houses['h-1']); host = w.host();
+    const got = await pending; if (method === 'prepare') w.hr.publishPreparedLaunch(got);
+    await until(() => Object.keys(w.local.envs).length > 0);
+    const id = Object.keys(w.local.envs)[0];
+    assert.equal(w.local.envs[id].LOOM_BODY_PROFILE, undefined);
+    assert.equal(w.local.envs[id].UNPROFILED_FIXTURE, 'preserved');
+    assert.equal(w.local.briefs[id], 'legacy Codex');
+  } finally { if (host) { await w.kill(); await host; } }
+});

@@ -1,3 +1,4 @@
+import { durableJson } from './durable-json.mjs';
 import { isWork, selectedProfile, restrictedEnv, claudeWorkArgs, minimalProfile, profileNotice } from './work-profile.mjs';
 // Runners (loom docs/specs/agent-runtime.md, section 3): one interface over the harnesses a body runs in.
 //
@@ -37,7 +38,7 @@ import { isWork, selectedProfile, restrictedEnv, claudeWorkArgs, minimalProfile,
 import { spawn as nodeSpawn, spawnSync } from 'node:child_process';
 import { nativeHistoryEnv, validateNativeHistoryOptions } from './native-history.mjs';
 import { createHash, randomBytes } from 'node:crypto';
-import { chmodSync, closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -186,11 +187,11 @@ export class ClaudeRunner {
     const keep = [];
     const session = slot?.session;
     if (typeof session === 'string' && SESSION.test(session)) {
-      if (existsSync(this.floorPath(`session-${session}`))) keep.push({ root: 'projects', rel: join('.loom-profile-floors', `session-${session}.json`) });
       for (const p of dirs(this.roots.projects)) {
         for (const name of [`${session}.jsonl`, session]) if (existsSync(join(this.roots.projects, p, name))) keep.push({ root: 'projects', rel: join(p, name) });
       }
     }
+    if (keep.length && existsSync(this.floorPath(`session-${session}`))) keep.push({ root: 'projects', rel: join('.loom-profile-floors', `session-${session}.json`) });
     const drop = body?.id && /^[A-Za-z0-9-]{4,64}$/.test(body.id) ? [join(this.jobsDir, String(body.id).slice(0, 8))] : [];
     return { keep, drop };
   }
@@ -227,27 +228,16 @@ export class ClaudeRunner {
     return join(this.roots.projects, '.loom-profile-floors', `${key}.json`);
   }
   readFloor(key) {
-    const file = this.floorPath(key);
-    if (!existsSync(file)) return null;
-    const value = JSON.parse(readFileSync(file, 'utf8'));
-    if (!value || !['deny', 'disabled'].every(k => Array.isArray(value[k]) && value[k].every(x => typeof x === 'string'))) throw new RunnerError('invalid saved profile restriction floor');
-    return value;
-  }
-  saveFloor(key, floor) {
-    const file = this.floorPath(key);
-    mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
-    for (let dir = dirname(file); ; dir = dirname(dir)) {
-      const fd = openSync(dir, 'r'); try { fsyncSync(fd); } finally { closeSync(fd); }
-      if (dirname(dir) === dir) break;
-    }
-    const tmp = `${file}.${hex8()}.tmp`;
     try {
-      const fd = openSync(tmp, 'wx', 0o600);
-      try { writeFileSync(fd, JSON.stringify(floor)); fsyncSync(fd); } finally { closeSync(fd); }
-      renameSync(tmp, file);
-      const parent = openSync(dirname(file), 'r'); try { fsyncSync(parent); } finally { closeSync(parent); }
-    } finally { rmSync(tmp, { force: true }); }
+      const value = JSON.parse(readFileSync(this.floorPath(key), 'utf8'));
+      if (!value || !['deny', 'disabled'].every(k => Array.isArray(value[k]) && value[k].every(x => typeof x === 'string'))) throw new Error('invalid floor');
+      return value;
+    } catch (e) {
+      if (e.code === 'ENOENT') return null;
+      return { deny: [], disabled: [], unknown: true };
+    }
   }
+  saveFloor(key, floor) { durableJson(this.floorPath(key), floor); }
 
   bindFloor(token, id, session) {
     const floor = this.readFloor(`launch-${token}`);

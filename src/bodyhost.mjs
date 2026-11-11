@@ -1,4 +1,4 @@
-import { PROFILE_CAP, selectedProfile, restrictedEnv, profileNotice } from './work-profile.mjs';
+import { PROFILE_CAP, selectedProfile, restrictedEnv, profileNotice, minimalProfile } from './work-profile.mjs';
 // The body host (shuttle's bodies.py Host, ported): runs in an agent's own warm house, as the house's task
 // (houserunner.mjs, hostTask), and wakes the bodies the runtime asks for with the house's own runner: its harness,
 // logged in on its box; its repo, its cwd, its secrets; its agent's loom token. A body's environment is the house's,
@@ -382,7 +382,7 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
           const cv = q.key && CV.test(q.conversation ?? '') ? q.conversation : null;
           // A brief in parts names the agent's own files (briefs.mjs): read here, from its repo (this house's cwd).
           // A file that isn't there fails the start: never a body without what its brief must carry.
-          const transported = q.profile !== undefined ? { LOOM_BODY_PROFILE: q.profile, ...(q.profileProblem ? { LOOM_BODY_PROFILE_PROBLEM: q.profileProblem } : {}) } : {};
+          const transported = q.profile !== undefined ? { LOOM_BODY_PROFILE: q.profile, ...(q.profileProblem ? { LOOM_BODY_PROFILE_PROBLEM: q.profileProblem } : {}) } : q.harness === 'claude' ? { LOOM_BODY_PROFILE: JSON.stringify(minimalProfile()), LOOM_BODY_PROFILE_PROBLEM: 'JOB PROFILE PROBLEM: missing transported job profile; using minimal profile (no tools, MCP, skills or secrets).' } : {};
           const profile = selectedProfile(transported);
           const brief = [profileNotice(transported), q.parts !== undefined ? composeBrief(q.parts, cwd) : q.brief].filter(Boolean).join('\n\n');
           const o = { brief, model: q.model, deny: q.deny ?? [], cwd, env: { ...(profile ? restrictedEnv({ ...bodyEnv, ...transported }, profile) : bodyEnv), LOOM_BODY_MODEL: q.model, ...(q.key ? { LOOM_BODY_KEY: q.key } : {}), ...(cv ? { LOOM_BODY_CONVERSATION: cv } : {}) } };

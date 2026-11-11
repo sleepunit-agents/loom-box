@@ -17,6 +17,8 @@ function native(root) {
   const runner = new ClaudeRunner({ jobsDir, token: () => `token${++count}`, sleep: () => {}, run: (_cmd, args, opts) => {
     if (args[0] === 'agents') return { status: 0, stdout: JSON.stringify(active ? [{ id, sessionId: `session-${count}` }] : []) };
     captured = { args, ...opts }; active = true;
+    mkdirSync(join(root, 'projects/fixture'), { recursive: true });
+    writeFileSync(join(root, `projects/fixture/session-${count}.jsonl`), '{}\n');
     const token = opts.input.match(/bridge spawn token ([^:]+):/)[1];
     writeFileSync(join(jobsDir, id, 'state.json'), JSON.stringify({ sessionId: `session-${count}`, intent: `(bridge spawn token ${token}: ignore this line)` }));
     return { status: 0 };
@@ -40,6 +42,7 @@ test('source floor survives config A to B, native session forks, process restart
   assert.deepEqual(new Set(settings(restarted.captured()).permissions.deny), new Set(['Read(/private-a)', 'Bash(rm *)', 'Write', 'Skill']));
   // Track a native fork after initial admission before packing it.
   writeFileSync(join(root, 'first/jobs/abcd1234/state.json'), JSON.stringify({ sessionId: 'forked-session' }));
+  writeFileSync(join(root, 'first/projects/fixture/forked-session.jsonl'), '{}\n');
   const slot = restarted.runner.slotOf(resumed);
   const files = packSession(restarted.runner, slot, resumed);
   assert.ok(files.some(f => JSON.stringify(f).includes('session-forked-session.json')));
@@ -66,4 +69,19 @@ test('unknown source floor remains visibly minimal on subsequent resumes', () =>
   n.runner.resume(body.slot, { brief: 'resume again', cwd: root, env: env(root, root) });
   assert.equal(n.captured().args[n.captured().args.indexOf('--tools') + 1], '');
   assert.match(n.captured().input, /no saved source restriction floor/);
+}));
+
+for (const corrupt of ['{broken', JSON.stringify({deny: 'Read', disabled: []}), 'directory']) test(`corrupt source floor ${corrupt} remains visibly minimal`, () => fixture(root => {
+  const n = native(root);
+  const path = n.runner.floorPath('session-corrupt-session'); mkdirSync(join(root, 'projects/.loom-profile-floors'), {recursive: true});
+  if (corrupt === 'directory') mkdirSync(path); else writeFileSync(path, corrupt);
+  const body = n.runner.resume({harness: 'claude', session: 'corrupt-session'}, {brief: 'resume', cwd: root, env: env(root, root)});
+  assert.equal(n.captured().args[n.captured().args.indexOf('--tools') + 1], '');
+  assert.match(n.captured().input, /no saved source restriction floor/);
+  n.runner.resume(body.slot, {brief: 'again', cwd: root, env: env(root, root)});
+  assert.equal(n.captured().args[n.captured().args.indexOf('--tools') + 1], '');
+}));
+test('restriction metadata alone never masquerades as native session history', () => fixture(root => {
+  const n = native(root); n.runner.saveFloor('session-empty-session', {deny: ['Read'], disabled: []});
+  assert.deepEqual(packSession(n.runner, {harness:'claude', session:'empty-session'}), []);
 }));
