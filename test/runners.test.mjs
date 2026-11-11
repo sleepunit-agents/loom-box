@@ -475,6 +475,7 @@ test('loom-runtime body start: the CLI a source calls, end to end on a stand-in 
   const env = { ...h.env, HOME: h.D, LOOM_BOX_LOCAL_NAME: 'one', LOOM_BOX_HOME: join(h.D, 'state'), LOOM_BOX_DATA: join(h.D, 'data'),
     LOOM_RUNTIME_CLAUDE: join(here, 'fake-claude.mjs'), LOOM_RUNTIME_CLAUDE_JOBS: join(h.D, 'jobs'), LOOM_RUNTIME_ACCOUNTS: 'none', LOOM_RUNTIME_SCORECARDS: 'off' };
   mkdirSync(join(h.D, 'work'));
+  writeFileSync(join(h.D, '.claude.json'), JSON.stringify({ mcpServers: { loom: { url: 'https://example.invalid/mcp' } } }));
   const cli = (args, input) => spawnSync(process.execPath, [join(here, '..', 'src', 'cli.mjs'), ...args], { env, input, encoding: 'utf-8', cwd: join(h.D, 'work') });
   const r = cli(['body', 'start', '--agent', 'art', '--venue', 'wake', '--prefer', 'claude-sonnet-5', '--model-need', 'coordinator: test Claude runner integration', '--brief', '-', '--json'], 'run the knowledge lane\nnow');
   assert.equal(r.status, 0, r.stderr);

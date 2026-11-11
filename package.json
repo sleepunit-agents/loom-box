@@ -80,7 +80,7 @@
       {
         "name": "LOOM_RUNTIME_GRADER_IMAGE",
         "label": "The review's grader image, pinned by digest",
-        "hint": "name@sha256:…, built from grader/Containerfile on loom's machine; without it the review grades nothing (never in an agent's house image)"
+        "hint": "name@sha256:\u2026, built from grader/Containerfile on loom's machine; without it the review grades nothing (never in an agent's house image)"
       },
       {
         "name": "LOOM_RUNTIME_REVIEW_LIMIT",
@@ -159,6 +159,18 @@
           }
         ],
         "hint": "needs the approvals piece with host rules (t-2104); an unreadable answer is the step's own tier"
+      },
+      {
+        "name": "LOOM_RUNTIME_CONTEXT_CAP",
+        "label": "Job context before a fresh session handoff",
+        "default": "150000",
+        "hint": "Scheduled and spawned jobs only; 20000\u20132000000 tokens; off disables. Cooperative handoff at a safe tool boundary; see docs/context-cost.md."
+      },
+      {
+        "name": "LOOM_RUNTIME_WORK_PROFILE",
+        "label": "Lean tools for scheduled and spawned jobs",
+        "default": "on",
+        "hint": "Only loom, GitHub and taskstore MCP servers; Codex apps disabled. off restores the ordinary tool profile; permission deny lists still apply."
       }
     ],
     "services": [
@@ -215,7 +227,7 @@
             },
             "reply_to": {
               "type": "string",
-              "description": "The relay id (r-…) this answers"
+              "description": "The relay id (r-\u2026) this answers"
             },
             "from": {
               "type": "string",
@@ -223,11 +235,11 @@
             },
             "approval": {
               "type": "string",
-              "description": "An approval id (a-…) the owner allowed, for a relay the household doesn't pair"
+              "description": "An approval id (a-\u2026) the owner allowed, for a relay the household doesn't pair"
             },
             "conversation": {
               "type": "string",
-              "description": "Your current conversation (cv-…): replies resume it, or its saved session, as peer messages"
+              "description": "Your current conversation (cv-\u2026): replies resume it, or its saved session, as peer messages"
             }
           },
           "required": [
@@ -242,21 +254,21 @@
         ]
       },
       "comms_trace": {
-        "description": "What happened to a reply of yours, from the message in to the reply shown: delivered to you, your body started and ended, what you sent and what was refused, whether the venue took it and whether the thread shows it. Name a Comms thread (th:…), a run (run-…) or a conversation (cv-…) of your own; never another agent's. No words, only what happened.",
+        "description": "What happened to a reply of yours, from the message in to the reply shown: delivered to you, your body started and ended, what you sent and what was refused, whether the venue took it and whether the thread shows it. Name a Comms thread (th:\u2026), a run (run-\u2026) or a conversation (cv-\u2026) of your own; never another agent's. No words, only what happened.",
         "input_schema": {
           "type": "object",
           "properties": {
             "thread": {
               "type": "string",
-              "description": "A Comms thread of yours, th:…"
+              "description": "A Comms thread of yours, th:\u2026"
             },
             "run": {
               "type": "string",
-              "description": "A run of yours, run-… (its steps; else the newest run's)"
+              "description": "A run of yours, run-\u2026 (its steps; else the newest run's)"
             },
             "conversation": {
               "type": "string",
-              "description": "A conversation of yours, cv-…"
+              "description": "A conversation of yours, cv-\u2026"
             }
           }
         },

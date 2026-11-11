@@ -1,3 +1,4 @@
+import { isWork, workServers, claudeWorkArgs } from './work-profile.mjs';
 // Runners (loom docs/specs/agent-runtime.md, section 3): one interface over the harnesses a body runs in.
 //
 // A runner runs bodies on one harness, on this machine (loom's own, or inside a house):
@@ -40,6 +41,7 @@ import { chmodSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdi
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { lastContext } from './context-cap.mjs';
 import { keptReading } from './statusline.mjs';
 import { claudeActionNow, codexActionNow } from './ticker.mjs';
 import { claudeCards, claudeTokens, codexCards } from './activity.mjs';
@@ -228,8 +230,9 @@ export class ClaudeRunner {
     // A Codex body's key, inherited by a launcher started under one: a Claude body must never key its inbox on it.
     // Nor a Codex thread's id (a launcher running under Codex has one): `send` names a Claude body's own session.
     const { SHUTTLE_BODY: _drop, CODEX_THREAD_ID: _thread, ...clean } = env ?? process.env;
+    if (isWork(clean) && this.args.some(a => a === '--mcp-config' || a.startsWith('--mcp-config='))) throw new RunnerError('work profile cannot combine a custom --mcp-config; set LOOM_RUNTIME_WORK_PROFILE=off for that job');
     const before = new Set((this.agents(clean) ?? []).map((a) => a.id));
-    const argv = ['--bg', ...(model ? ['--model', model] : []), ...this.statusLine(), ...this.args, ...(deny.length ? ['--disallowedTools', ...deny] : []), ...(resume ? ['--resume', resume] : [])];
+    const argv = ['--bg', ...(model ? ['--model', model] : []), ...this.statusLine(), ...this.args, ...claudeWorkArgs(clean, cwd, this.jobsDir), ...(deny.length ? ['--disallowedTools', ...deny] : []), ...(resume ? ['--resume', resume] : [])];
     const r = this.run(this.claude, argv, { cwd, env: clean, input: prompt, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 60_000 });
     if (r.error || r.status !== 0) {
       const message = `claude --bg didn't start: ${(r.stderr || r.error?.message || '').trim().split('\n').pop() || `exit ${r.status}`}`;
@@ -320,6 +323,11 @@ export class ClaudeRunner {
       Object.assign(out, { failed: true, limited: true, error: out.error ?? `its provider refused it (${refused.code})`, ...(until ? { resets: until } : {}) });
     }
     return out;
+  }
+
+  context(body) {
+    const f = this.transcriptOf(body);
+    return f ? lastContext('claude', tailOf(f, 1024 * 1024)) : null;
   }
 
   /**
@@ -649,7 +657,7 @@ export class CodexRunner {
     if (off.error) return { why: off.error };
     const { denied } = off;
     const src = resolve(env?.CODEX_HOME || this.codexHome);
-    if (denied.size) {
+    if (denied.size || isWork(env)) {
       const layers = codexLayers(cwd, { realHome: src, systemDir: this.systemDir });
       if (layers.length) return { why: `Codex would read ${layers.join(', ')} too, a config the runtime can't replace, which could turn a denied tool server back on: refusing a body with a deny list here (remove it, or keep this agent off Codex)` };
     }
@@ -660,7 +668,7 @@ export class CodexRunner {
     }
     const all = conf.mcp_servers && typeof conf.mcp_servers === 'object' && !Array.isArray(conf.mcp_servers) ? conf.mcp_servers : {};
     const servers = Object.fromEntries(Object.entries(all).filter(([n]) => !denied.has(n)));
-    return { src, servers, args: off.args };
+    return { src, servers: isWork(env) ? workServers(servers) : servers, args: [...off.args, ...(isWork(env) ? ['--disable', 'apps', '--disable', 'remote_plugin'] : [])] };
   }
 
   /** Why this runner won't start a body here, or null: what delivery reads to keep the body off Codex. */
@@ -768,6 +776,14 @@ export class CodexRunner {
     return this.launch({ ...o, resume: slot.session });
   }
   feed(body, message) { return feedVia(this, body, message); }
+
+  context(body) {
+    for (const k of this.sessionFiles(this.slotOf(body)).keep) {
+      const got = lastContext('codex', tailOf(join(this.roots[k.root], k.rel), 1024 * 1024));
+      if (got) return got;
+    }
+    return null;
+  }
 
   /** Its thread's rollout (where Codex writes token_count; `exec --json` doesn't): the last reading in its end. */
   usage(body) {
