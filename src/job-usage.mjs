@@ -77,6 +77,7 @@ function summarizeUsage({ calls, session, harness, start, end, malformed, resets
     start: start === undefined ? null : new Date(start).toISOString(), end: end === undefined ? null : new Date(end).toISOString(),
     durationSeconds: start === undefined ? null : Math.round((end - start) / 1000), startingContext: contexts[0],
     averageContext: Math.round(input / rows.length), peakContext: contexts.reduce((a, b) => Math.max(a, b), 0), lastContext: contexts.at(-1),
+    cacheWriteCalls: rows.filter(r => r.cacheCreate > 0).length,
     ...totals, totalTokens: input + totals.output, reasons: reasons.length ? reasons : ['ordinary context and call volume'],
     malformedLines: malformed, counterResets: resets, file };
   Object.defineProperty(result, 'nativeCalls', { value: calls });
