@@ -766,12 +766,13 @@ test('final snapshot excludes mid-scan appends and drops them after intermediate
   const fs = (await import('node:fs')).default;
   const { syncBuiltinESMExports } = await import('node:module');
   const h = harness();
-  const file = join(h.D, 'append-truncate.jsonl');
+  for (const slice of [64, 1024]) {
+  const file = join(h.D, `append-truncate-${slice}.jsonl`);
   const event = text => JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text }] } }) + '\n';
   const first = event('first');
   const surviving = first + event('surviving');
   writeFileSync(file, first);
-  const runner = new ClaudeRunner({ readMax: { final: 1024 } });
+  const runner = new ClaudeRunner({ readMax: { final: slice } });
   runner.transcriptOf = () => file;
   const fstat = fs.fstatSync;
   let appended = false;
@@ -787,4 +788,5 @@ test('final snapshot excludes mid-scan appends and drops them after intermediate
   fs.truncateSync(file, Buffer.byteLength(surviving));
   assert.equal(runner.final({}), 'surviving', 'truncation above initial size never keeps removed words');
   assert.equal(snapshot, 'first', 'one scan is bounded to its initial descriptor snapshot');
+  }
 });
