@@ -148,7 +148,7 @@ test('round 3: a relay to a token-shaped name, bare key/pass flags, a flag first
 test('a repeated result line doesn\'t add a second why', () => {
   const use = { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'u', name: 'Bash', input: { command: 'npm test', description: 'Run the tests' } }] } };
   const res = { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'u', is_error: true, content: 'Exit code 1\n# fail 3' }] } };
-  assert.equal(claudeCards([use, res, res])[0].summary, 'Run the tests — exit 1: 3 tests failed');
+  assert.equal(claudeCards([use, res, res])[0].summary, 'Ran a command — exit 1: 3 tests failed');
 });
 
 test('a content-hashed file name is redacted: the accepted cost of catching keys', () => {
@@ -165,7 +165,8 @@ test('files: the base name only, never the folders above it; a private file show
   const privates = ['/home/art/.config/loom/tokens.json', '~/.config/loom/comms.key', '/home/mark/.config/gh/hosts.yml', '/srv/app/.env', '.env.local', '/tmp/x/slack.token', 'deploy.key', '/home/art/.config'];
   for (const p of privates) {
     assert.equal(fileName(p), PRIVATE_FILE, p);
-    for (const out of [claudeSummary('Read', { file_path: p }), claudeSummary('Write', { file_path: p, content: 'SECRET-CONTENT' }), claudeSummary('Edit', { file_path: p, old_string: 'a', new_string: 'SECRET-CONTENT' }), claudeSummary('Grep', { pattern: 'x', path: p }), claudeSummary('NotebookEdit', { notebook_path: p }), claudeSummary('Bash', { command: 'x', description: `Read ${p}` }), codexCards([{ type: 'item.completed', item: { id: 'f', type: 'file_change', changes: [{ path: p, kind: 'update', diff: 'SECRET-CONTENT' }], status: 'completed' } }])[0].summary]) {
+    assert.equal(claudeSummary('Bash', { command: 'x', description: `Read ${p}` }), 'Ran a command');
+    for (const out of [claudeSummary('Read', { file_path: p }), claudeSummary('Write', { file_path: p, content: 'SECRET-CONTENT' }), claudeSummary('Edit', { file_path: p, old_string: 'a', new_string: 'SECRET-CONTENT' }), claudeSummary('Grep', { pattern: 'x', path: p }), claudeSummary('NotebookEdit', { notebook_path: p }), codexCards([{ type: 'item.completed', item: { id: 'f', type: 'file_change', changes: [{ path: p, kind: 'update', diff: 'SECRET-CONTENT' }], status: 'completed' } }])[0].summary]) {
       assert.ok(out.includes(PRIVATE_FILE), `${p} → ${out}`);
       const name = p.split('/').pop();
       assert.ok(!out.includes(name) && !out.includes('.config') && !out.includes('SECRET-CONTENT') && !out.includes('/home'), `${p} → ${out}`);
@@ -201,13 +202,13 @@ test('a label is one printable line of at most 120: no controls, no separators, 
 test('a failure\'s why can\'t push a label past 120, however long its output\'s numbers', () => {
   const out = codexCards([{ type: 'item.completed', item: { id: 'i', type: 'command_execution', command: "/bin/bash -lc 'npm test'", aggregated_output: `${'9'.repeat(200)} failed`, exit_code: 1, status: 'failed' } }])[0].summary;
   assert.ok(out.length <= MAX_SUMMARY, out);
-  assert.match(out, /^Ran npm test — exit 1/);
+  assert.match(out, /^Ran a command — exit 1/);
   assert.equal(failWhy({ exit: 1, output: `${'9'.repeat(200)} failed` }), 'exit 1');
 });
 
-test('a Bash description is the label, redacted too; a missing one falls back to the short form', () => {
-  assert.equal(claudeSummary('Bash', { command: 'npm test', description: 'Run the approvals tests' }), 'Run the approvals tests');
-  assert.equal(claudeSummary('Bash', { command: 'gh pr checks 603' }), 'Ran gh pr checks 603');
+test('Bash descriptions and raw commands both use the fixed command label', () => {
+  assert.equal(claudeSummary('Bash', { command: 'npm test', description: 'Run the approvals tests' }), 'Ran a command');
+  assert.equal(claudeSummary('Bash', { command: 'gh pr checks 603' }), 'Ran a command');
   assert.deepEqual(leaks(claudeSummary('Bash', { command: 'x', description: `Set GH_TOKEN=${SECRETS.github} and push` })), []);
   assert.ok(claudeSummary('Bash', { description: 'y'.repeat(300) }).length <= MAX_SUMMARY);
 });
@@ -264,12 +265,12 @@ test('a failure says why from fixed phrases, never from its output\'s words', ()
   assert.equal(failWhy({ exit: 2 }), 'exit 2');
   assert.equal(failWhy({ exit: 1, output: `error: ${SECRETS.github} is bad` }), 'exit 1');
   const codex = codexCards([{ type: 'item.completed', item: { id: 'i', type: 'command_execution', command: "/bin/bash -lc 'npm test'", aggregated_output: `SECRET-OUTPUT ${SECRETS.github}\nTests: 2 failed, 5 passed`, exit_code: 1, status: 'failed' } }]);
-  assert.deepEqual(codex.map((c) => [c.summary, c.state]), [['Ran npm test — exit 1: 2 tests failed', 'failed']]);
+  assert.deepEqual(codex.map((c) => [c.summary, c.state]), [['Ran a command — exit 1: 2 tests failed', 'failed']]);
   const claude = claudeCards([
     { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'u1', name: 'Bash', input: { command: 'npm test', description: 'Run the approvals tests' } }] } },
     { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'u1', is_error: true, content: [{ type: 'text', text: `Exit code 1\nSECRET-OUTPUT\n# fail 3` }] }] } },
   ]);
-  assert.equal(claude[0].summary, 'Run the approvals tests — exit 1: 3 tests failed');
+  assert.equal(claude[0].summary, 'Ran a command — exit 1: 3 tests failed');
   // Shell output never appears in any card field, including lazy bodies.
   assert.ok(!JSON.stringify([codex, claude]).includes('SECRET-OUTPUT'));
   assert.deepEqual(leaks(JSON.stringify([codex, claude])), []);
@@ -408,8 +409,8 @@ test('contract, decided (closed vocabulary): a raw fetch, test run, module or sc
   assert.equal(commandLabel('python3 /home/art/Code/x/scripts/build_index.py --all'), 'Ran python3');
   assert.equal(commandLabel('/home/art/.config/loom/hook.sh'), null, 'a script run by its own path names no program');
   // A Claude Bash description is the label: through the gate as a whole, a private path in it named "a private file".
-  assert.equal(claudeSummary('Bash', { command: 'x', description: 'Read /home/art/.config/gh/hosts.yml' }), 'Read a private file');
-  assert.equal(claudeSummary('Bash', { command: 'x', description: 'Check the .env and deploy.key files' }), 'Check the a private file and a private file files');
+  assert.equal(claudeSummary('Bash', { command: 'x', description: 'Read /home/art/.config/gh/hosts.yml' }), 'Ran a command');
+  assert.equal(claudeSummary('Bash', { command: 'x', description: 'Check the .env and deploy.key files' }), 'Ran a command');
   // A tool's structured arguments keep their detail: a page's host, a file's base name.
   assert.equal(claudeSummary('WebFetch', { url: 'https://api.github.com/x' }), 'Read a page on api.github.com');
 });

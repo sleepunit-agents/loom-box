@@ -63,8 +63,10 @@ for (const harness of ['claude', 'codex']) test(`terminal uses common ${harness}
     assert.equal(status.model.harness, harness);
     assert.equal(status.working, true);
     assert.equal(status.cards[0].summary, 'Reading a file', 'live activity reaches the terminal controller');
-    // Shown as core is shown them (t-2109, delivery shownCards): the owner's alone here, so its words and command.
-    assert.ok(JSON.stringify(status.cards).includes('TERMINAL-WORDS') && JSON.stringify(status.cards).includes('TERMINAL-COMMAND'));
+    // Owner-alone prose survives; an unrecognized command has only its fixed label.
+    assert.ok(JSON.stringify(status.cards).includes('TERMINAL-WORDS'));
+    assert.ok(!JSON.stringify(status.cards).includes('TERMINAL-COMMAND'));
+    assert.equal(status.cards.find(c => c.id === 'terminal-cmd').summary, 'Ran a command');
     assert.ok(status.cards.every((k) => !('fixed' in k)), 'through the one gate (delivery shownCards), not the runner\'s cards as they are');
     const choice = await sessionCommand(w.env, owner, { id: 'h-7', action: 'model', harness }, o);
     assert.equal(choice.threadChoice, harness);

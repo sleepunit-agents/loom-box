@@ -401,7 +401,7 @@ export function shownText(text, max = MAX_BODY) {
  * Keep physical newlines so ordinary prose retains its lines and multiline secret assignments retain context. */
 function ownWords(text) {
   const normalized = cutInput(text, 2_000_000).split('\n').map(normLine).join('\n').replace(SGR, '');
-  const withoutKeys = normalized.replace(/-----BEGIN[ \t\n]+(?:[A-Z]+[ \t\n]+){0,4}PRIVATE[ \t\n]+KEY-----[\s\S]*?(?:-----END[ \t\n]+(?:[A-Z]+[ \t\n]+){0,4}PRIVATE[ \t\n]+KEY-----|$)/g, GONE);
+  const withoutKeys = normalized.replace(/-----BEGIN[ \t\n]+(?:[A-Z]+[ \t\n]+){0,4}PRIVATE[ \t\n]+KEY(?:[ \t\n]+BLOCK)?-----[\s\S]*?(?:-----END[ \t\n]+(?:[A-Z]+[ \t\n]+){0,4}PRIVATE[ \t\n]+KEY(?:[ \t\n]+BLOCK)?-----|$)/g, GONE);
   return shownText(redact(withoutKeys, { max: withoutKeys.length }), MAX_TEXT);
 }
 
