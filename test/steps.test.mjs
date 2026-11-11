@@ -854,7 +854,7 @@ test('every marker split position removes every private-key payload from the who
 
 
 test('rules and dash runs cannot hide split or unfinished private-key markers', () => {
-  for (const prefix of ['-----\n\n', '-----', '----------', '---\n--\n', '-----\n---\n--\n']) {
+  for (const prefix of ['-----\n\n', '-----', '----------', '---\n--\n', '-----\n---\n--\n', '-----END noise\n', '-----E N D noise\n']) {
     for (const marker of ['-----BEGIN PRI\nVATE KEY-----', '-----BEGIN PRI\nVATE KEY', '-----BEGIN', ...[1, 2, 3, 4].map(n => '-----BEGIN PRIVATE KEY' + '-'.repeat(n))]) {
       for (const suffix of ['', '\n-----END PRIVATE KEY-----\nDone']) {
         const text = `Material follows:\n${prefix}${marker}\nAQIDBAUG\nBQYHCAkL${suffix}`;

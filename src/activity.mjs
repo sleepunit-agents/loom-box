@@ -401,16 +401,16 @@ export function shownText(text, max = MAX_BODY) {
 function proseWithoutKeys(text) {
   const out = [];
   let inKey = false, from = 0;
-  // Match marker words themselves: a preceding rule must never consume their opening dashes.
+  // Look ahead at marker words: neither a rule nor a malformed END may consume a later opening delimiter.
   // Any BEGIN is fail-closed, including an unfinished header at the chunk boundary.
   // The scan stays linear in bounded text; only marker words are compacted.
-  for (const m of text.matchAll(/-----\s*(B\s*E\s*G\s*I\s*N|E\s*N\s*D[^-]*-----)/g)) {
-    const marker = m[1].replace(/\s/g, '').replace(/-----$/, '');
+  for (const m of text.matchAll(/(?=(-----\s*(B\s*E\s*G\s*I\s*N|E\s*N\s*D[^-]*-----)))/g)) {
+    const marker = m[2].replace(/\s/g, '').replace(/-----$/, '');
     if (!inKey && /^BEGIN/.test(marker)) {
       out.push(text.slice(from, m.index), GONE);
       inKey = true;
     } else if (inKey && /^END[A-Z]*PRIVATEKEY(?:BLOCK)?$/.test(marker)) {
-      from = m.index + m[0].length;
+      from = m.index + m[1].length;
       inKey = false;
     }
   }
