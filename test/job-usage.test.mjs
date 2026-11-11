@@ -229,3 +229,19 @@ test('ranking includes cache and output, and CLI forwards root/day/timezone/limi
     assert.equal(cli.day, '2026-11-10'); assert.equal(cli.timezone, 'America/Chicago'); assert.deepEqual(cli.roots, [root]);
   });
 });
+
+test('Claude synthetic error messages do not change call context or model counts', async () => {
+  const row = (id, input, extra = {}) => ({ type: 'assistant', sessionId: 'errors', timestamp: '2026-11-11T01:00:00Z', message: { id, model: 'claude', usage: { input_tokens: input } }, ...extra });
+  const error = row('error', 0, { isApiErrorMessage: true });
+  const placeholder = row('placeholder', 0);
+  placeholder.message.model = '<synthetic>';
+  await fixture([placeholder, row('real', 120), error, placeholder], async f => {
+    const r = await transcriptUsage(f);
+    assert.equal(r.calls, 1); assert.deepEqual(r.models, ['claude']);
+    assert.equal(r.startingContext, 120); assert.equal(r.averageContext, 120);
+    assert.equal(r.lastContext, 120); assert.equal(r.totalTokens, 120);
+  });
+  await fixture([error, placeholder], async (f, root) => {
+    assert.equal((await usageJobs({ roots: [root], day: 'all' })).measuredJobs, 0);
+  });
+});

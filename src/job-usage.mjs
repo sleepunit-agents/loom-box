@@ -44,6 +44,8 @@ export async function transcriptUsage(file) {
     if (r.type === 'assistant' && r.message?.usage) {
       harness = 'claude';
       const m = r.message, u = m.usage;
+      // Local error/placeholder messages carry zero usage, but are not model calls.
+      if (r.isApiErrorMessage || m.model === '<synthetic>') continue;
       const ids = [r.requestId && `request:${r.requestId}`, m.id && `message:${m.id}`].filter(Boolean);
       // Without an API message/request id, duplicate billing cannot be ruled out.
       if (!ids.length) continue;
