@@ -404,8 +404,8 @@ function proseWithoutKeys(text) {
   // Match marker words themselves: a preceding rule must never consume their opening dashes.
   // Any BEGIN is fail-closed, including an unfinished header at the chunk boundary.
   // The scan stays linear in bounded text; only marker words are compacted.
-  for (const m of text.matchAll(/-----\s*((?:B\s*E\s*G\s*I\s*N|E\s*N\s*D)[^-]*)(?:-----|$)/g)) {
-    const marker = m[1].replace(/\s/g, '');
+  for (const m of text.matchAll(/-----\s*(B\s*E\s*G\s*I\s*N|E\s*N\s*D[^-]*-----)/g)) {
+    const marker = m[1].replace(/\s/g, '').replace(/-----$/, '');
     if (!inKey && /^BEGIN/.test(marker)) {
       out.push(text.slice(from, m.index), GONE);
       inKey = true;
