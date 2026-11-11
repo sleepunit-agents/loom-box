@@ -201,7 +201,7 @@ test('semantic invalidity selects minimal access and a visible diagnostic before
     assert.deepEqual(JSON.parse(readFileSync(args[args.indexOf('--mcp-config') + 1])).mcpServers, {});
   }
 }));
-test('custom config restrictions survive selection, filtering and continuation', () => fixture(root => {
+test('current custom config restrictions survive selection and filtering', () => fixture(root => {
   const config = join(root, 'custom'); mkdirSync(config);
   writeFileSync(join(config, 'settings.json'), JSON.stringify({ permissions: { deny: ['Read(private)'] }, disabledMcpServers: ['blocked'] }));
   writeFileSync(join(config, '.claude.json'), JSON.stringify({ mcpServers: { blocked: {} } }));
