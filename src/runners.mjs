@@ -41,6 +41,7 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { keptReading } from './statusline.mjs';
+import { openFinalCheckpoint, closeFinalCheckpoint, loadFinalCheckpoint, saveFinalCheckpoint, dropFinalCheckpoints } from './final-checkpoint.mjs';
 import { claudeActionNow, codexActionNow } from './ticker.mjs';
 import { claudeCards, claudeTokens, codexCards } from './activity.mjs';
 import { CRED_FILE, lastRateLimit, lastRefusal, refusedUntil, tailOf } from './logins.mjs';
@@ -330,12 +331,14 @@ export class ClaudeRunner {
   final(body, retry = 0) {
     const f = this.transcriptOf(body);
     if (!f) return null;
-    let fd, st;
+    let fd, st, checkpoint;
     try {
+      checkpoint = openFinalCheckpoint(this.jobsDir, body, this.slotOf(body)?.session, f);
       fd = openSync(f, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
       st = fstatSync(fd);
       if (!st.isFile()) return null;
-    let m = FINAL_MEMO.get(f);
+    let m = FINAL_MEMO.get(f) ?? (retry === 0 ? loadFinalCheckpoint(checkpoint) : null);
+    const previousOffset = m?.offset, previousSize = m?.size;
     // Another file at that path, or one cut shorter, is read again from its start.
     if (!m || m.ino !== st.ino || m.dev !== st.dev || st.size < (m.size ?? m.offset)) m = { ino: st.ino, dev: st.dev, offset: 0, rest: '', last: null };
     while (st.size > m.offset) {
@@ -367,11 +370,26 @@ export class ClaudeRunner {
       return retry < 1 ? this.final(body, retry + 1) : null;
     }
     m.size = st.size;
+    if (checkpoint && (m.savedKey !== checkpoint.key || previousOffset !== m.offset || previousSize !== m.size)) {
+      if (saveFinalCheckpoint(checkpoint, m)) m.savedKey = checkpoint.key;
+    }
     FINAL_MEMO.delete(f); FINAL_MEMO.set(f, m);
     if (FINAL_MEMO.size > 64) FINAL_MEMO.delete(FINAL_MEMO.keys().next().value);
     return m.omitted ? `… (transcript line exceeded 16 MiB; last readable words follow)\n${last ?? ''}` : last;
     } catch { FINAL_MEMO.delete(f); return null; }
-    finally { if (fd !== undefined) try { closeSync(fd); } catch { /* closed */ } }
+    finally {
+      if (fd !== undefined) try { closeSync(fd); } catch { /* closed */ }
+      closeFinalCheckpoint(checkpoint);
+    }
+  }
+
+  /** Forget derived words when the job retires, including slot-only expiry after interrupted retirement. */
+  forgetFinal(slot, body) {
+    const session = slot?.session ?? (body ? this.slotOf(body)?.session : null);
+    if (session) {
+      for (const f of FINAL_MEMO.keys()) if (f.endsWith(`/${session}.jsonl`)) FINAL_MEMO.delete(f);
+    }
+    if (session || body) dropFinalCheckpoints(this.jobsDir, session, body);
   }
 
   /** Its session's transcript, the newest of that name under projects; null when there's none. */

@@ -45,6 +45,7 @@ export function packSession(runner, slot, body) {
  */
 export function dropSession(runner, slot, body) {
   const files = runner.sessionFiles?.(slot, body) ?? { keep: [], drop: [] };
+  runner.forgetFinal?.(slot, body);
   for (const f of files.keep) rmSync(join(runner.roots[f.root], f.rel), { recursive: true, force: true });
   for (const p of files.drop) rmSync(p, { recursive: true, force: true });
   try { runner.sweepHomes?.(); } catch { /* locked or unreadable: the next end, or the tick, sweeps */ }
