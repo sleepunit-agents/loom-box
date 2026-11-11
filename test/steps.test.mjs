@@ -27,7 +27,7 @@ test('a long output keeps its head and tail and says how many lines it left out'
 test('a shell step: its whole command (redacted), its result and exit code, when it ended; its output never, from here or a house', () => {
   const out = `\x1b[32mline 1\x1b[0m\nOUTPUT-NEVER-KEPT ${GH}`;
   const [s] = claudeCards([use('u1', 'Bash', { command: `GH_TOKEN=${GH} gh pr list\necho second`, description: 'List PRs', timeout: 600000 }), res('u1', out, { stdout: out, stderr: '' })]);
-  assert.deepEqual([s.summary, s.detail, s.limit, s.result, s.body, s.end], ['List PRs', 'GH_TOKEN=… gh pr list\necho second', 600, '2 lines of output', undefined, '2026-11-10T10:00:05.000Z']);
+  assert.deepEqual([s.summary, s.detail, s.limit, s.result, s.body, s.end], ['Ran a command', undefined, 600, '2 lines of output', undefined, '2026-11-10T10:00:05.000Z']);
   assert.ok(!JSON.stringify(s).includes('OUTPUT-NEVER-KEPT') && !leak(JSON.stringify(s)));
   const [x] = codexCards([{ type: 'item.completed', item: { id: 'i', type: 'command_execution', command: "/usr/bin/bash -lc 'git status'", aggregated_output: 'OUTPUT-NEVER-KEPT\n', exit_code: 0, status: 'completed' } }], 'b:');
   assert.deepEqual([x.detail, x.body], ['git status', undefined]);
@@ -151,7 +151,7 @@ test('a house\'s parts pass the same gate, and a parent id is renamed as its car
 test('a Codex command is unwrapped from its shell', () => {
   const [c] = codexCards([{ type: 'item.completed', item: { id: 'i', type: 'command_execution', command: "/usr/bin/bash -lc 'git status'", aggregated_output: 'clean\n', exit_code: 0, status: 'completed' } }], 'b:');
   assert.deepEqual([c.detail, c.body], ['git status', undefined]);
-  assert.equal(commandLine("cat > f <<'EOF'\nbody\nEOF"), "cat > f <<'EOF'\nbody\nEOF");
+  assert.equal(commandLine("cat > f <<'EOF'\nbody\nEOF"), "");
 });
 
 test('tests counts from node, jest, vitest and pytest', () => {
@@ -251,12 +251,12 @@ test('shown text keeps to its bounds: a command to MAX_DETAIL, the body\'s words
   const { MAX_DETAIL, MAX_TEXT } = await import('../src/activity.mjs');
   const cmd = Array.from({ length: 2000 }, (_, i) => `echo ${i}`).join('\n');
   const [c] = claudeCards([use('d', 'Bash', { command: cmd })]);
-  assert.ok(c.detail.length <= MAX_DETAIL && c.detail.includes('lines not kept'));
+  assert.equal(c.detail, undefined);
   const words = Array.from({ length: 4000 }, (_, i) => `word ${i}`).join('\n');
   const [t] = claudeCards([{ type: 'assistant', timestamp: '2026-11-10T10:00:00.000Z', message: { id: 'm', content: [{ type: 'text', text: words }] } }]);
   assert.ok(t.body.length <= MAX_TEXT);
   assert.equal(stepParts({ tool: 'text', body: words }).body.length <= MAX_TEXT, true);
-  assert.equal(stepParts({ tool: 'Bash', detail: cmd }).detail.length <= MAX_DETAIL, true);
+  assert.equal(stepParts({ tool: 'Bash', detail: cmd }).detail, undefined);
 });
 
 test('a sign of life is when the record last moved: Claude\'s transcript, Codex\'s events; a house\'s report of it is checked', async () => {
@@ -302,7 +302,7 @@ test('a house\'s target is only the shape made here for its tool: a file\'s base
   assert.equal(d('mcp__loom__recall', 'what Art remembered about Loren'), undefined);
   assert.equal(d('Grep', '"sleep(" in test'), '"sleep(" in test');
   assert.equal(d('Grep', 'anything at all'), undefined);
-  assert.equal(d('Bash', 'npm test'), 'npm test');
+  assert.equal(d('Bash', 'npm test'), undefined);
 });
 
 test('two results in one line: neither reads the line\'s structured result, so no diff lands on the wrong card', () => {
@@ -610,25 +610,15 @@ test('a command that takes a secret in shows no command, only its label: logins,
   // A house's command that takes a secret in is dropped at the gate too.
   assert.equal(stepParts({ id: 'h', tool: 'Bash', summary: 's', state: 'done', detail: `gh secret set FOO --body ${S}` }).detail, undefined);
   // An ordinary command still shows whole.
-  assert.equal(commandLine('npm test -- deploy'), 'npm test -- deploy');
-  assert.equal(commandLine('ls > out.txt'), 'ls > out.txt');
+  assert.equal(commandLine('npm test -- deploy'), '');
+  assert.equal(commandLine('ls > out.txt'), '');
 });
 
-test('padding can\'t hide a secret taken in: sudo -S or a private write far along its part, read in linear time (t-2109)', async () => {
-  const { secretIn } = await import('../src/activity.mjs');
-  assert.equal(secretIn(`echo x | sudo ${'A'.repeat(5000)} -S apt`), true);
-  assert.equal(secretIn(`printf ${'y '.repeat(3000)} > ~/.ssh/id_ed25519`), true);
-  assert.equal(secretIn(`printf ${'y '.repeat(3000)} > a private file`), true, 'as shown');
+test('padding and sudo forms remain unclassified, in bounded time', () => {
   const t0 = Date.now();
-  for (const s of ['sudo '.repeat(12_000), '> '.repeat(30_000), 'tee '.repeat(15_000)]) secretIn(s);
+  for (const command of ['sudo '.repeat(12_000), '> '.repeat(30_000), 'tee '.repeat(15_000),
+    'echo pw | sudo -Sk apt install x', 'echo pw | sudo -kSv ls', 'sudo --stdin apt', 'sudo ls']) assert.equal(commandLine(command), '');
   assert.ok(Date.now() - t0 < 1000);
-  assert.equal(secretIn('sudo ls'), false);
-});
-
-test('sudo reading a password from stdin in any flag form shows no command (t-2109)', async () => {
-  const { secretIn } = await import('../src/activity.mjs');
-  for (const c of ['echo pw | sudo -Sk apt install x', 'echo pw | sudo -kSv ls', 'echo pw | sudo --stdin apt install x', 'echo pw | sudo -S ls']) assert.equal(secretIn(c), true, c);
-  assert.equal(secretIn('sudo -k ls'), false);
 });
 
 test('a window of many shell steps: commands worked out only for the cards read, and a second pass makes none again (t-2109)', () => {
@@ -779,5 +769,36 @@ test('Codex commentary normalizes split tokens before redacting the complete car
     const [card]=codexCards([{type:'item.completed',item:{id:'split-token',type:'agent_message',text}}]);
     const out=JSON.stringify(card);
     assert.ok(!out.includes(GH.slice(0,12)) && !out.includes(GH.slice(12)),out);
+  }
+});
+
+
+test('Claude summaries normalize the whole text before projecting a line or truncating', () => {
+  for (const split of ['\u2028', '\x1b[31m']) {
+    const text = GH.slice(0, 12) + split + GH.slice(12);
+    const cards = claudeCards([{ type: 'assistant', uuid: 'summary', message: { content: [{ type: 'text', text }] } }]);
+    assert.ok(!leak(JSON.stringify(cards)), 'no fragment in any serialized Claude field');
+  }
+});
+
+test('command details fail closed for unrecognized shell shapes in delivered Claude and Codex cards', async () => {
+  const { shownCards } = await import('../src/delivery.mjs');
+  const { world } = await import('./delivery-world.mjs');
+  const o = world();
+  const S = 'review-canary-value';
+  for (const command of [`gh -R owner/repo secret set API_KEY --body '${S}'`, `export TOKEN='first\n${S}'`,
+    `X=${S} git status`, `git -c x=${S} status`, `ls --password ${S}`, `cat < ~/.ssh/id_ed25519`,
+    `git status; echo ${S}`, `echo ${S}`, `ls > out.txt`, `npm test -- ${S}`, 'git status\n', 'git status\r\n']) {
+    const c = claudeCards([use('b', 'Bash', { command })]);
+    const x = codexCards([{ type: 'item.completed', item: { id: 'i', type: 'command_execution', command, status: 'completed', exit_code: 0 } }]);
+    const delivered = shownCards(o.env, { agent: 'art', actsFor: { owner: true, owners: [], people: [], unknown: false } }, [...c, ...x]);
+    assert.equal(commandLine(command), '', command);
+    for (const card of delivered) { assert.equal(card.detail, undefined); assert.equal(card.summary, 'Ran a command'); }
+    assert.ok(!JSON.stringify(delivered).includes(S));
+  }
+  for (const command of ['git status', 'git diff --stat', 'git log --oneline', 'ls', 'pwd']) {
+    assert.equal(commandLine(command), command);
+    const [card] = shownCards(o.env, { agent: 'art', actsFor: { owner: true, owners: [], people: [], unknown: false } }, claudeCards([use('safe', 'Bash', { command })]));
+    assert.equal(card.detail, command, 'owner-alone delivery keeps recognized detail');
   }
 });

@@ -1599,17 +1599,22 @@ async function activityPass(env, c, d) {
   // In batches of at most POST_MAX of JSON (core takes 1 MB a post; an older core 64 KB, which refuses with 413).
   try { for (const [k, batch] of batches(told).entries()) await post(batch, sendAlive && k === 0 ? alive : null); } catch (e) {
     if (e?.status !== 409 && e?.status !== 400 && e?.status !== 413) throw e;
-    const hold = e.status === 409 ? { noThread: nowMs } : {};
+    let status = e.status;
+    const hold = status === 409 ? { noThread: nowMs } : {};
     let retold = false;
     if ((e.status === 413 || (e.status === 400 && OLD_CORE.test(String(e.message ?? '')))) && !old) {
       hold.oldCore = nowMs;
       const plain = out.filter((x) => x.tool !== 'text').map(baseCard);
-      try { if (plain.length) { for (const b of batches(plain)) await post(b, null); retold = true; } } catch (e2) { if (![400, 409, 413].includes(e2?.status)) throw e2; }
+      try { if (plain.length) { for (const b of batches(plain)) await post(b, null); retold = true; } } catch (e2) {
+        if (![400, 409, 413].includes(e2?.status)) throw e2;
+        status = e2.status;
+        if (status === 409) hold.noThread = nowMs;
+      }
     }
-    if (!retold) d.warn(`${c.conversation}: core took none of ${out.length} activity cards${sendAlive ? ' and its sign of life' : ''} (${e.message}); they're not sent again`);
+    if (!retold) d.warn(`${c.conversation}: core took none of ${out.length} activity cards${sendAlive ? ' and its sign of life' : ''} (${e.message}); ${status === 409 ? 'they wait for the thread to reopen' : "they're not sent again"}`);
     // A refused sign of life counts as told: it isn't posted again until it moves, past the throttle.
     // A 409's cards weren't taken but aren't refused either: they stay untold, so they go once the hold is over.
-    saveSent(env, c, e.status === 409 ? (c.cardsSent ?? {}) : next, sendAlive ? alive : null, nowMs, hold);
+    saveSent(env, c, status === 409 ? (c.cardsSent ?? {}) : next, sendAlive ? alive : null, nowMs, hold);
     return;
   }
   saveSent(env, c, next, sendAlive ? alive : null, nowMs);

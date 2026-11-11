@@ -16,7 +16,7 @@ const read = (f) => readFileSync(join(here, 'fixtures', f), 'utf-8').split('\n')
 test('a Claude transcript: tool_use makes a running card, its result done or failed; thinking makes none', () => {
   const cards = claudeCards(read('claude-transcript.jsonl'));
   assert.deepEqual(cards.map((c) => [c.tool, c.summary, c.state]), [
-    ['Bash', 'Run the test suite', 'failed'],
+    ['Bash', 'Ran a command', 'failed'],
     ['text', 'Thinking aloud: the secret plan is here.', 'done'],
     ['Read', 'Read delivery.ts', 'done'],
     ['Grep', 'Searched for "deliverAsOwner" in src', 'running'],
@@ -31,7 +31,7 @@ test('a Claude transcript: tool_use makes a running card, its result done or fai
   // A label is never a command line (t-1944); the owner's Watching view gets the whole command, redacted, in its own
   // field (t-2109). Output and a read's contents never, anywhere.
   for (const c of cards) for (const never of ['npm test', 'OUTPUT-THAT-MUST-NOT-SHOW']) assert.ok(!c.summary.includes(never), never);
-  assert.equal(cards[0].detail, 'export TOKEN=…; npm test');
+  assert.equal(cards[0].detail, undefined);
   assert.deepEqual([cards[0].result, cards[0].body, cards[0].limit], ['failed', undefined, 120]);
   assert.ok(!all.includes('OUTPUT-THAT-MUST-NOT-SHOW'), 'a step\'s output is never kept or sent (t-2109)');
   assert.ok(!JSON.stringify(cards[1]).includes('OUTPUT-THAT-MUST-NOT-SHOW'), 'a file read never shows what it read');
@@ -44,13 +44,13 @@ test('a Codex run: item.started makes a card, item.completed finishes it; failed
   const cards = all.filter(c => c.tool !== 'text');
   assert.deepEqual(cards.map((c) => [c.id, c.tool, c.summary, c.state]), [
     ['b1:item_1', 'command_execution', 'Ran a command', 'done'], // echo says nothing of what it's for
-    ['b1:item_2', 'command_execution', 'Ran ls — exit 2: no such file', 'failed'], // a raw command names no file
+    ['b1:item_2', 'command_execution', 'Ran a command — exit 2: no such file', 'failed'], // a raw command names no file
   ]);
   assert.ok(!cards.some((c) => c.summary.includes('cannot access')), 'never the output in a label');
   assert.deepEqual(cards.map((c) => c.fixed), ['Ran a command', 'Ran a command — exit 2: no such file']);
   assert.deepEqual(cards.map((c) => [c.detail, c.exit, c.result, c.body]), [
-    ['echo hi', 0, '1 line of output', undefined],
-    ['ls /nonexistent-dir', 2, 'exit 2', undefined],
+    [undefined, 0, '1 line of output', undefined],
+    [undefined, 2, 'exit 2', undefined],
   ]);
   assert.ok(!JSON.stringify(cards).includes('cannot access'), 'never the output (t-2109: on demand is its own task)');
 });
@@ -68,7 +68,7 @@ test('Codex\'s other tool items: an MCP call in words, a file change by its path
 });
 
 test('the fixed table: a command\'s short form, a file\'s base name, searches cut at 60, MCP tools in words', () => {
-  assert.equal(claudeSummary('Bash', { command: 'curl -H "Authorization: x" ...' }), 'Ran curl');
+  assert.equal(claudeSummary('Bash', { command: 'curl -H "Authorization: x" ...' }), 'Ran a command');
   assert.equal(claudeSummary('Bash', { command: 'echo hi' }), 'Ran a command');
   assert.equal(claudeSummary('Read', { file_path: '/etc/shadow' }, '/home/art/repo'), 'Read shadow');
   assert.ok(!claudeSummary('Read', { file_path: '/home/art/repo/a/b.ts' }, '/home/art/repo').includes('/home'));
@@ -313,7 +313,7 @@ test('every card goes through the one gate where the owner is alone too: no shel
   const r = await spawnCall(o.env, { kind: 'owner' }, { agent: 'art', brief: 'x' }, o.o);
   await tick(o.env, o.o); await tick(o.env, o.o);
   const [card] = o.core.activityCalls.filter((a) => a.conversation === r.handle).flatMap((a) => a.cards);
-  assert.deepEqual(card, { id: 't1', at: 'x', tool: 'Bash', summary: 'Ran npm test', state: 'done', detail: 'npm test' });
+  assert.deepEqual(card, { id: 't1', at: 'x', tool: 'Bash', summary: 'Ran npm test', state: 'done' });
 });
 
 test('told marks are kept for every card still read, so a long run\'s steps aren\'t told again (t-2109)', () => {
@@ -439,7 +439,7 @@ test('a job\'s own house is trusted for a step\'s command line and its own words
   };
   const alone = await run(false);
   assert.deepEqual(alone.map((x) => [x.tool, x.summary, x.detail, x.body]), [
-    ['Bash', 'Ran a command', 'echo HOUSE-COMMAND-WORDS', undefined],
+    ['Bash', 'Ran a command', undefined, undefined],
     ['text', 'HOUSE-OWN-WORDS', undefined, 'HOUSE-OWN-WORDS']]);
   const withPerson = await run(true);
   assert.deepEqual(withPerson.map((x) => [x.tool, x.summary, x.detail, x.body]), [['Bash', 'Ran a command', undefined, undefined]]);
@@ -475,4 +475,31 @@ test('a token total discovered on catch-up goes with the same sign-of-life times
   assert.deepEqual(calls()[1].alive,{at,tokens:1234});
   o.clock.advance(20_000); await tick(o.env,o.o);
   assert.equal(calls().length,2,'unchanged totals are not repeated');
+});
+
+
+test('plain fallback 409 holds and retries unchanged cards after reopening', async () => {
+  const { spawnCall } = await import('../src/spawn.mjs');
+  for (const status of [400, 413]) {
+    const o = world();
+    o.core.commsAnswer = (x) => (x.op === 'spawn' ? { ok: true, id: 'th:abcdefghij' } : { ok: true });
+    o.runner.activity = () => [{ id: 't1', at: 'x', tool: 'Bash', summary: 's', state: 'done', detail: 'git status' }];
+    let phase = 0;
+    o.core.activity = async (x) => {
+      o.core.activityCalls.push(x);
+      if (phase++ === 0) throw Object.assign(new Error('bad-input: card 0 has unknown keys'), { status });
+      if (phase === 2) throw Object.assign(new Error('no live thread'), { status: 409 });
+      return { ok: true };
+    };
+    const r = await spawnCall(o.env, { kind: 'owner' }, { agent: 'art', brief: 'x' }, o.o);
+    await tick(o.env, o.o); await tick(o.env, o.o);
+    assert.equal(o.core.activityCalls.length, 2, 'rich refusal then plain 409; no posts during hold');
+    assert.ok(loadConv(o.env, r.handle).activityHeld?.noThread);
+    o.clock.advance(11 * 60_000);
+    await tick(o.env, o.o);
+    assert.deepEqual(o.core.activityCalls.at(-1).cards.map(c => c.id), ['t1']);
+    assert.equal(o.core.activityCalls.length, 3, 'unchanged rejected card retries');
+    await tick(o.env, o.o);
+    assert.equal(o.core.activityCalls.length, 3, 'accepted retry is acknowledged');
+  }
 });

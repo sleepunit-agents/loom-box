@@ -5,7 +5,7 @@
 //   - Codex: events.jsonl. `item.started` makes a card, `item.completed` finishes it (`status: "failed"` is failed).
 // A card's summary is its label (t-1944): what the step did, in plain words, from the fixed rules below and in
 // redact.mjs; nothing is asked of a model for one (a Bash description is the body's own words, redacted like the
-// rest). A shell command shows as its description when the harness gives one, else its short form
+// rest). A recognized safe shell command shows as its description when given, else its short form
 // (`Ran gh pr checks 603`); a file by its base name; a search by its pattern; a message by who it went to; a tool this
 // table doesn't know as "Used a tool". Every variable part passes redact.mjs `part` (the gate), and every finished label
 // `finish` (redacted whole, one line, at most 120). A failed step adds why, from fixed phrases only
@@ -162,7 +162,7 @@ export function claudeSummary(name, input = {}) {
   switch (name) {
     case 'Bash': {
       const d = typeof i.description === 'string' ? i.description.trim() : '';
-      return finish(d ? txt(d) : commandLabel(i.command) || 'Ran a command');
+      return commandLine(i.command) ? finish(d ? txt(d) : commandLabel(i.command) || 'Ran a command') : 'Ran a command';
     }
     case 'BashOutput': return 'Checked a background command';
     case 'KillShell': case 'KillBash': return 'Stopped a background command';
@@ -406,39 +406,12 @@ function unwrapShell(c) {
   return m ? m[2] : String(c ?? '');
 }
 
-/**
- * A command that takes a secret in (t-2109): its words can hold one that redaction can't tell from any other word (a
- * value piped to a login, given to a secrets store, or written into a private file). Its command isn't shown, only its
- * label. Read on the command as written and on it as shown (where a private path reads PRIVATE_FILE).
- */
-const SECRET_IN = /--password-stdin\b|--with-token\b|--token-stdin\b|\bgh\s+secret\s+set\b|\bgh\s+auth\s+login\b|\b(?:vault\s+(?:kv\s+)?(?:put|write)|kubectl\s+create\s+secret|docker\s+secret\s+create|secret-tool\s+store|pass\s+(?:insert|edit)|op\s+item\s+(?:create|edit)|aws\s+secretsmanager|gcloud\s+secrets|az\s+keyvault\s+secret\s+set|security\s+add-\w+-password|htpasswd|chpasswd|passwd)\b/i;
-const CMD_MAX = 64_000;
-const REDIRECT = /(?:>{1,2}|\btee\b(?:\s+-\w+)*)\s*(['"]?)([^\s'"|;&<>]+)\1/g;
-export function secretIn(command) {
-  // Read to CMD_MAX (a command past it isn't shown whole anyway); each scan bounded, so none backtracks far.
-  const c = String(command ?? '').slice(0, CMD_MAX);
-  if (SECRET_IN.test(c)) return true;
-  for (const m of c.matchAll(REDIRECT)) if (privateFile(m[2])) return true;
-  // Each part of a pipe or list on its own, with linear tests only: sudo reading its password from stdin; a write
-  // into a file shown as private.
-  for (const part of c.split(/[|;&\n]/)) {
-    if (/\bsudo\b/i.test(part) && /\s(?:-[A-Za-z]*S[A-Za-z]*|--stdin)\b/i.test(part)) return true;
-    if (/>|\btee\b/.test(part) && part.includes(PRIVATE_FILE)) return true;
-  }
-  return false;
-}
-
-/**
- * A shell step's whole command, as its card's `detail`: shown text (redacted line by line, a line continued with `\`
- * joined first so a secret on the next line is read with its flag), at most MAX_DETAIL; none for one that takes a
- * secret in (secretIn). Worked out once for the process (worked).
- */
+/** Only these complete read-only command shapes have displayable detail. No operands, shell syntax,
+ * assignments or arbitrary flags: unknown commands carry the fixed label only. */
+const SAFE_COMMAND = /^(?:pwd|ls(?: -(?:l|a|la|al))?|git (?:status(?: --short| --porcelain)?|diff(?: --stat| --name-only)?|log --oneline))(?![\s\S])/;
 export function commandLine(command) {
-  // Past CMD_MAX, it isn't read for a secret taken in: so it isn't shown.
-  if (String(command ?? '').length > CMD_MAX) return '';
-  const c = String(command ?? '').replace(/\\\r?\n[ \t]*/g, ' ');
-  if (secretIn(c)) return '';
-  return worked('cmd', c, () => { const d = shownText(c.replace(SGR, ''), MAX_DETAIL); return secretIn(d) ? '' : d; });
+  const c = String(command ?? '');
+  return SAFE_COMMAND.test(c) ? c : '';
 }
 
 /** A diff (Claude Code's structuredPatch hunks) as shown text: `@@ -a,b +c,d @@` and its lines. */
@@ -587,10 +560,11 @@ export function claudeCards(lines, prefix = '', parent = null) {
       content.forEach((c, n) => {
         if (c?.type !== 'text' || typeof c.text !== 'string' || !c.text.trim() || !mid) return;
         const id = `${prefix}${mid}:${n}`.slice(0, 80);
-        const label = part('text', firstLine(c.text), MAX_SUMMARY);
+        const shown = worked('text', c.text, () => shownText(c.text.replace(SGR, ''), MAX_TEXT));
+        const label = part('text', firstLine(shown), MAX_SUMMARY);
         if (label === GONE) return;
         const card = { id, at: cardTime(l.timestamp), tool: 'text', summary: clean(label), fixed: 'Wrote its words', state: 'done', ...(parent ? { parent } : {}) };
-        cards.set(id, lazyBody(card, () => worked('text', c.text, () => shownText(c.text.replace(SGR, ''), MAX_TEXT))));
+        cards.set(id, lazyBody(card, () => shown));
       });
       for (const c of content) {
         if (c?.type !== 'tool_use' || typeof c.id !== 'string') continue;
@@ -638,7 +612,7 @@ const CODEX_TYPES = ['command_execution', 'mcp_tool_call', 'file_change', 'web_s
 
 function codexSummary(item) {
   switch (item.type) {
-    case 'command_execution': return finish(commandLabel(item.command) ?? 'Ran a command');
+    case 'command_execution': return commandLine(unwrapShell(item.command)) ? finish(commandLabel(item.command) ?? 'Ran a command') : 'Ran a command';
     case 'file_change': {
       const paths = Array.isArray(item.changes) ? item.changes.map((c) => fileName(c?.path)) : [];
       return finish(paths.length === 1 ? `Changed ${paths[0]}` : paths.length === 2 ? `Changed ${paths.join(', ')}` : paths.length ? `Changed ${paths[0]} and ${paths.length - 1} more` : 'Changed files');
@@ -762,8 +736,8 @@ const SHELL_TOOLS = new Set(['Bash', 'command_execution']);
 /** Whether a target fits what's made here for its tool: a shell step's command; a file tool's base name (no folder);
  * a search's `"pattern"` and where; nothing for any other tool (a private store's argument never shows). */
 function detailOk(tool, d) {
-  // A house's command is read for a secret taken in as one made here is (secretIn).
-  if (SHELL_TOOLS.has(tool)) return !secretIn(d);
+  // A house's command must match the same complete safe shape.
+  if (SHELL_TOOLS.has(tool)) return !!commandLine(d);
   if (FILE_TOOLS.has(tool)) return d.length <= 80 && !/[/\\\n]/.test(d) && fileName(d) === d;
   if (tool === 'Grep') return d.length <= 160 && /^"[^"\n]{1,60}"(?: in [^/\\\n]{1,80})?$/.test(d);
   return false;
