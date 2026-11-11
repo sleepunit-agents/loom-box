@@ -1,3 +1,4 @@
+import { syncProblems } from './houserunner.mjs';
 import { checkLoginExpiry, loginExpiryAsks, loginExpiry } from './login-expiry.mjs';
 // The Boxes tab on loom's page (loom docs/extensions.md, "The page"): the
 // boxes, what each has and may host, the houses asked for, and the owner's
@@ -259,7 +260,7 @@ export function manifest(env, nowMs = Date.now(), o = {}) {
   let convs = [];
   try { convs = workingConversations(env); } catch { /* the delivery state unreadable this time: the cards say what else is known */ }
   const busy = { ...reportedBusy(s), ...sessionsBusy(join(stateDir(env), 'session-cpu.json')) };
-  const reports = agentReports(s, Date.now(), busy, convs, adapters);
+  const reports = agentReports(s, nowMs, busy, convs, adapters, syncProblems(env, s));
   try {
     const busyAgents = nonIdleAgents(env);
     for (const a of Object.keys(s.agents ?? {})) {
@@ -641,11 +642,11 @@ export function withFallbacks(reports) {
  * task house runs; unavailable while a service it wants up is down; broken when one keeps failing. Readings: its
  * bridges, its remote sessions, and how many tasks are running. It says nothing about an agent with nothing here.
  */
-export function agentReports(s, nowMs = Date.now(), busy = {}, convs = [], adapters = {}) {
+export function agentReports(s, nowMs = Date.now(), busy = {}, convs = [], adapters = {}, syncFailures = {}) {
   const out = {};
   const liveAdapters = Object.entries(adapters).filter(([, d]) => d.mode === 'live').flatMap(([name, d]) => d.agents.map((agent) => ({name, agent, want: 'up', adapter: true})));
   const services = [...Object.values(s.services ?? {}).filter((v) => !liveAdapters.some((a) => a.agent === v.agent && a.name === v.name)), ...liveAdapters];
-  const agents = new Set([...Object.keys(s.agents ?? {}), ...services.map((v) => v.agent), ...Object.keys(s.remotes ?? {}), ...convs.map((c) => c.agent)]);
+  const agents = new Set([...Object.keys(s.agents ?? {}), ...services.map((v) => v.agent), ...Object.keys(s.remotes ?? {}), ...convs.map((c) => c.agent), ...Object.keys(syncFailures)]);
   for (const a of agents) {
     if (!/^[a-z][a-z0-9-]{0,39}$/.test(a)) continue;
     const mine = services.filter((v) => v.agent === a && v.want === 'up');
@@ -694,7 +695,8 @@ export function agentReports(s, nowMs = Date.now(), busy = {}, convs = [], adapt
       ...convs.filter((c) => c.agent === a).map(convDoing),
     ].slice(0, 6);
     if (doing.length) report.doing = doing;
-    if (failing.length) Object.assign(report, { state: 'broken', reason: `${failing.map((v) => v.name).join(' and ')} keep${failing.length === 1 ? 's' : ''} failing (${failing[0].restarts} restarts)` });
+    if (syncFailures[a]?.length) Object.assign(report, { state: 'broken', reason: `House sync keeps failing (${syncFailures[a][0].kind}; ${syncFailures[a][0].failures} failures)` });
+    else if (failing.length) Object.assign(report, { state: 'broken', reason: `${failing.map((v) => v.name).join(' and ')} keep${failing.length === 1 ? 's' : ''} failing (${failing[0].restarts} restarts)` });
     else if (down.length) Object.assign(report, { state: 'unavailable', reason: `${down.map((v) => v.name).join(' and ')} ${down.length === 1 ? 'is' : 'are'} down` });
     else if (!tasks.length && working.length) Object.assign(report, { state: 'working', reason: `in a remote session: ${working.join(', ')}` });
     else if (tasks.length) {
