@@ -10,6 +10,7 @@
 // gave it), its own state and nested-container dirs, and the repo mirror
 // read-only. No agent code runs on the box itself. When it ends, its secrets,
 // clone and dirs go.
+import { observeHouse, observationReplaced, reapHouseWaits, waitForHouseWaits } from './house-watchers.mjs';
 import { lastUpgrade, maybeUpgrade, ownCommit, ownPiece } from './version.mjs';
 import { createHash, randomBytes } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
@@ -471,7 +472,8 @@ function rootless(env) {
 export function runner(env, client, { loomUrl, labels = [], log = (m) => process.stderr.write(`loom-box: ${m}\n`), hasSocket = (p) => existsSync(p), hasCdi = () => CDI_SPECS.some((p) => existsSync(p)), upgrade = maybeUpgrade,
   machineLogin = false, machineStatus = () => machineClaudeStatus(env), status = (agents, force) => harnessStatus(env, { agents, force }), login = (h, o) => startLogin(env, h, o), codexUsage = () => null, clock = () => Date.now(), secureChannel = true,
   sweep = () => sweepCliContainers(env), runtime = () => ({ commit: ownCommit(), piece: ownPiece() }),
-  buildOf = (c) => buildNow(env, c), houseImage = (id) => imageOf(env, id), sampleUnits: unitsImpl = undefined, bootInfo: bootImpl = undefined, sampleHealth: healthImpl = undefined, reportOnly = undefined, collectionGiveUpMs = collectionGiveUpOf(env) }) {
+  buildOf = (c) => buildNow(env, c), houseImage = (id) => imageOf(env, id), sampleUnits: unitsImpl = undefined, bootInfo: bootImpl = undefined, sampleHealth: healthImpl = undefined, reportOnly = undefined, collectionGiveUpMs = collectionGiveUpOf(env),
+  reapWaits = async names => { await waitForHouseWaits(reapHouseWaits(podman(env), names, '/proc', process.kill, env.PATH)); } }) {
   const houses = new Map(); // id -> { child, dir, stopAt? }
   // This runner, as the control plane tells it from one before it: a login handed to another run is one a restart
   // dropped (control.mjs, settleLogins).
@@ -793,7 +795,7 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
     if (e.stopAt && !e.stopAck) { e.pendingExit = [h, dir, secretNames, code, signal, acknowledged]; return; }
     if (!acknowledged && !e.stopAck) {
       const seen = physical(h.id);
-      if (seen.state === 'running') { adopt(h.id, h, secretNames); return; }
+      if (seen.state === 'running') { await adopt(h.id, h, secretNames); return; }
       if (seen.state === 'unknown') { e.pendingExit = [h, dir, secretNames, code, signal]; return; }
       if (seen.state === 'stopped') code = seen.code;
     }
@@ -810,11 +812,10 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
   }
 
   /** Reattach observation without restarting a live container or its native work. */
-  function adopt(id, h = { id }, secretNames = secretNamesOf(id)) {
+  async function adopt(id, h = { id }, secretNames = secretNamesOf(id)) {
     const old = houses.get(id);
     const dir = pathJoin(dataDir(env), 'houses', id);
-    const child = spawn(podman(env), ['wait', containerName(id)], {
-      detached: true, stdio: ['ignore', 'pipe', 'ignore'],
+    const child = await observeHouse(podman(env), containerName(id), { stdio: ['ignore', 'pipe', 'ignore'],
       env: { PATH: env.PATH, HOME: env.HOME, ...(env.XDG_RUNTIME_DIR ? { XDG_RUNTIME_DIR: env.XDG_RUNTIME_DIR } : {}) },
     });
     let out = '';
@@ -823,7 +824,7 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
     houses.set(id, e);
     child.once('error', () => { if (houses.get(id) === e) e.pendingExit = [h, dir, secretNames, null, null]; });
     child.once('exit', status => {
-      if (houses.get(id) !== e) return;
+      if (houses.get(id) !== e || observationReplaced(child)) return;
       const valid = status === 0 && /^[0-9]+\s*$/.test(out) && Number(out.trim()) <= 255;
       ended(h, dir, secretNames, valid ? Number(out.trim()) : null, null, valid);
     });
@@ -967,14 +968,20 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
     return want;
   }
 
+  let waitsReaped = false;
   async function reconcile(want) {
     const active = new Set(want.active ?? []);
+    const root = pathJoin(dataDir(env), 'houses');
+    // Historical receipts are ownership evidence even after a house is terminal.
+    const receipts = !collectionsScanned && existsSync(root) ? readdirSync(root).filter(n => /^h-[0-9]+$/.test(n)) : [];
+    if (!waitsReaped) {
+      await reapWaits(new Set([...active, ...receipts].map(containerName)));
+      waitsReaped = true;
+    }
     // A completion can land while this poll is in flight. Keep its tombstone until a later poll observes the terminal state.
     for (const id of recentlyCollected) if (!active.has(id)) recentlyCollected.delete(id);
     // An acknowledged physical exit may still owe state or a terminal report after a runner restart.
-    const root = pathJoin(dataDir(env), 'houses');
-    // Discover old receipts once per runner. New receipts are already owned in houses; scanning every historical log on each poll adds avoidable I/O.
-    const receipts = !collectionsScanned && existsSync(root) ? readdirSync(root).filter(n => /^h-[0-9]+$/.test(n)) : [];
+    // Discover old receipts once per runner; new receipts are already owned in houses.
     collectionsScanned = true;
     for (const id of receipts) {
       if (houses.has(id)) continue;
@@ -1002,7 +1009,7 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
     for (const id of active) {
       if (houses.has(id) || recentlyCollected.has(id)) continue;
       const seen = physical(id), h = { id, ...(want.activeInfo?.[id] ?? {}) };
-      if (seen.state === 'running') { unknownContainers.delete(id); adopt(id, h); continue; }
+      if (seen.state === 'running') { unknownContainers.delete(id); await adopt(id, h); continue; }
       if (seen.state === 'unknown') {
         if (!unknownContainers.has(id)) log(`${id}: container inspection is unknown; preserving its state and retrying`);
         unknownContainers.add(id); continue;
