@@ -93,7 +93,7 @@ export function claudeWorkArgs(env, cwd, jobsDir, floor = { deny: [], disabled: 
   const scoped = conf.projects?.[resolve(cwd || home)] ?? {};
   const configDir = env.CLAUDE_CONFIG_DIR || join(home, '.claude');
   const layers = [json(join(configDir, 'settings.json')), ...(cwd ? [json(join(cwd, '.claude/settings.json')), json(join(cwd, '.claude/settings.local.json'))] : [])];
-  const disabled = new Set([...floor.disabled, ...[conf, scoped, project, ...layers].flatMap(c => [...(c.disabledMcpServers ?? []), ...Object.entries(c.mcpServers ?? {}).filter(([,v]) => v?.enabled === false).map(([n]) => n)])]);
+  const disabled = new Set([...floor.disabled, ...[conf, scoped, project, ...layers].flatMap(c => [...(c.disabledMcpServers ?? []), ...(c.disabledMcpjsonServers ?? []), ...Object.entries(c.mcpServers ?? {}).filter(([,v]) => v?.enabled === false).map(([n]) => n)])]);
   const all = Object.fromEntries(Object.entries({ ...conf.mcpServers, ...scoped.mcpServers, ...project.mcpServers }).filter(([name]) => !disabled.has(name)));
   const servers = workServers(all, p);
   // Preload only the declared skill text through the supported prompt control.
@@ -114,6 +114,6 @@ export function claudeWorkArgs(env, cwd, jobsDir, floor = { deny: [], disabled: 
   if (priorDenies.some(rule => typeof rule !== 'string')) throw Error('invalid inherited permission deny rules');
   floor.deny = [...new Set(priorDenies)];
   floor.disabled = [...disabled];
-  const settings = privateJson(dir, { permissions: { deny: [...new Set([...priorDenies, 'Skill'])] }, enabledPlugins: {} });
-  return [...(skills.length ? ['--append-system-prompt', skills.join('\n\n')] : []), '--system-prompt-snapshot', 'off', '--strict-mcp-config', '--mcp-config', mcp, '--safe-mode', '--disable-slash-commands', '--tools', p.tools.join(','), '--settings', settings];
+  const settings = privateJson(dir, { permissions: { allow: p.mcp.map(n => `mcp__${n}__*`), deny: [...new Set([...priorDenies, 'Skill'])] }, enabledPlugins: {} });
+  return [...(skills.length ? ['--append-system-prompt', skills.join('\n\n')] : []), '--system-prompt-snapshot', 'off', '--strict-mcp-config', '--mcp-config', mcp, ...(p.mcp.length ? ['--restricted'] : ['--safe-mode']), '--disable-slash-commands', '--tools', p.tools.join(','), '--settings', settings];
 }

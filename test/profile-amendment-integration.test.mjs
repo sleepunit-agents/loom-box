@@ -37,6 +37,12 @@ test('authenticated runtime request → real approvals Deny/Allow → owner exec
     assert.match(card.details,/mcp: loom/);
     assert.match(card.details,/secrets: mcp\.loom/);
     assert.equal(card.target, amendment(jobProfileKey(job),minimalProfile(),'mcp','loom').target);
+    for (const name of ['a'.repeat(128), 'chain-check', 'h-123']) {
+      const result = await requestForBody(env,{kind:'agent',agent:'art'},{conversation:cv,field:'skills',name},{key:'correct',session:'session'},d);
+      const published = JSON.parse(readFileSync(join(env.APPROVALS_DIR,'approvals.json'))).approvals[result.approval];
+      assert.equal(published.ask,'Allow this job to use the requested capability?');
+      assert.ok(published.details.includes(`skills: ${name}`));
+    }
     const [a,b] = await Promise.all([ask('Read'),ask('Read')]); assert.equal(a.approval,b.approval);
     const owner={kind:'owner',who:'jonathan-barket',agents:'*'};
     const answer = (id, action) => {const r=call(['ui','act'],JSON.stringify({action,fields:{id},caller:owner}));assert.equal(r.status,0,r.stderr);assert.equal(JSON.parse(r.stdout).ok,true);};

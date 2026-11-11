@@ -55,7 +55,7 @@ test('Claude config is private, exact servers/tools, disables discovery; missing
   assert.deepEqual(Object.keys(JSON.parse(readFileSync(config, 'utf8')).mcpServers), ['loom']);
   assert.equal(statSync(config).mode & 0o777, 0o600);
   assert.equal(args[args.indexOf('--tools') + 1], 'Read');
-  assert.ok(args.includes('--safe-mode')); assert.ok(args.includes('--disable-slash-commands'));
+  assert.ok(args.includes('--restricted')); assert.ok(args.includes('--disable-slash-commands'));
   assert.doesNotMatch(args.join(' '), /fixture-only/);
   assert.deepEqual(JSON.parse(readFileSync(args[args.indexOf('--settings') + 1], 'utf8')).permissions.deny, ['Bash(rm *)', 'Skill']);
   assert.throws(() => claudeWorkArgs({ ...env, LOOM_BODY_PROFILE: JSON.stringify(profile({ skills: ['music'] })) }, root, join(root, 'jobs')), /skill unavailable/);
@@ -253,3 +253,10 @@ for (const method of ['start', 'prepare']) test(`unprofiled Codex house ${method
     assert.equal(w.local.briefs[id], 'legacy Codex');
   } finally { if (host) { await w.kill(); await host; } }
 });
+
+for (const source of ['user', 'project']) test(`native disabledMcpjsonServers in ${source} configuration cannot be revived`, () => fixture(root => {
+  const disabled = {disabledMcpjsonServers:['blocked']};
+  writeFileSync(join(root,'.claude.json'), JSON.stringify(source === 'user' ? disabled : {projects:{[root]:disabled}}));
+  writeFileSync(join(root,'.mcp.json'), JSON.stringify({mcpServers:{blocked:{command:'must-not-run'}}}));
+  assert.throws(() => claudeWorkArgs({HOME:root,LOOM_BODY_PROFILE:JSON.stringify(profile({mcp:['blocked'],secrets:['mcp.blocked']}))},root,join(root,'jobs')), /unavailable/);
+}));

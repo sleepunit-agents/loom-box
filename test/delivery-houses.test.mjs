@@ -98,6 +98,8 @@ test('a delivered body is a session in its agent\'s own house: placed, woken by 
     LOOM_RUNTIME_TOKEN_FILE: join(D, 'runtime-token'), LOOM_RUNTIME_ACCOUNTS: 'none', LOOM_RUNTIME_SCORECARDS: 'off',
     ANTHROPIC_API_KEY: 'sk-ant-runtimes-own', CLAUDE_CONFIG_DIR: join(D, 'loom', '.claude'), FOO_SECRET: 'hunter2',
   };
+  env.LOOM_RUNTIME_JOB_PROFILES = join(D,'profiles.json');
+  writeFileSync(env.LOOM_RUNTIME_JOB_PROFILES,JSON.stringify({v:1,jobs:{[JSON.stringify(['art','slack','live','dm:U1'])]:{v:1,mcp:[],tools:[],skills:[],secrets:['FAKE_HARNESS','LOOM_URL','LOOM_TOKEN_FILE']}}}));
   mkdirSync(env.LOOM_HOME, { recursive: true });
   env.LOOM_BIN = fakeLoomBin(D);
   writeFileSync(env.LOOM_RUNTIME_TOKEN_FILE, `${TOKENS.runtime}\n`);

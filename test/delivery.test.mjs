@@ -361,12 +361,18 @@ test('venues are core\'s answer (GET /api/loom/venues), checked: a row that does
   assert.deepEqual(venuesOf(null), {});
 });
 
-test('D. nothing of the runtime\'s environment reaches a body: no token, no key path, no harness login or setting', async () => {
+test('D. a profiled local body keeps configuration identity and strips undeclared secrets', async () => {
   const w = world({ FOO_SECRET: 'hunter2', ANTHROPIC_API_KEY: 'sk-ant-x', OPENAI_API_KEY: 'sk-x', CLAUDE_CONFIG_DIR: '/home/loom/.claude', CODEX_HOME: '/home/loom/.codex', LOOM_RUNTIME_BODY_ENV: 'ANTHROPIC_API_KEY,LOOM_RUNTIME_TOKEN_FILE,SOMETHING_ELSE' });
   await deliver(w.env, w.msg('dm:E', 'hi'), w.o);
   const e = w.runner.envs[loadConv(w.env, cvOf('art', 'slack', 'dm:E')).body.split(':')[1]];
-  for (const k of ['FOO_SECRET', 'ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'ANTHROPIC_BASE_URL', 'LOOM_RUNTIME_TOKEN_FILE', 'LOOM_RUNTIME_LOOM_URL', 'LOOM_BOX_DATA', 'LOOM_BOX_HOME']) assert.equal(e[k], undefined, k);
-  assert.deepEqual(Object.keys(e).sort(), ['HOME', 'LANG', 'LOOM_BODY_CONVERSATION', 'LOOM_BODY_KEY', 'PATH', 'SOMETHING_ELSE'], 'the basics, what BODY_ENV may name, and its run\'s key and conversation');
+  for (const k of ['FOO_SECRET', 'ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_BASE_URL', 'LOOM_RUNTIME_TOKEN_FILE', 'LOOM_RUNTIME_LOOM_URL', 'LOOM_BOX_DATA', 'LOOM_BOX_HOME']) assert.equal(e[k], undefined, k);
+  assert.equal(e.CLAUDE_CONFIG_DIR, '/home/loom/.claude');
+  assert.equal(e.CODEX_HOME, '/home/loom/.codex');
+  assert.equal(e.SOMETHING_ELSE, undefined, 'BODY_ENV cannot bypass the selected profile');
+  assert.deepEqual(JSON.parse(e.LOOM_BODY_PROFILE), {v:1,mcp:[],tools:[],skills:[],secrets:[]});
+  assert.match(e.LOOM_BODY_PROFILE_PROBLEM, /no job profile store/);
+  assert.equal(e.CLAUDE_CODE_DISABLE_ADVISOR_TOOL, '1');
+  assert.deepEqual(Object.keys(e).sort(), ['CLAUDE_CODE_DISABLE_ADVISOR_TOOL', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'HOME', 'LANG', 'LOOM_BODY_CONVERSATION', 'LOOM_BODY_KEY', 'LOOM_BODY_PROFILE', 'LOOM_BODY_PROFILE_PROBLEM', 'PATH']);
   assert.equal(e.LOOM_BODY_CONVERSATION, cvOf('art', 'slack', 'dm:E'));
 });
 

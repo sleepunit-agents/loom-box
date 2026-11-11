@@ -27,7 +27,12 @@ it. Requests carry the validated declaration to the house; both launch paths req
 `job-profile-v1` before publication. Old hosts receive no profiled work.
 
 Claude uses strict explicit MCP configuration, an explicit built-in tool list,
-settings deny rules, safe mode and disabled slash commands. Custom configuration
+settings deny rules and disabled skills/commands. Jobs without MCP use safe mode.
+Jobs declaring MCP use restricted mode because the installed Claude safe mode
+disables even explicitly supplied MCP servers. Restricted mode ignores inherited
+user/project/local settings, and confines file tools to working directories; the
+generated settings retain the accumulated deny floor and explicitly allow only
+the declared MCP servers. Managed policy remains authoritative. Custom configuration
 directories survive selection so their denies and disabled servers remain effective.
 Named skills are preloaded through `--append-system-prompt`: only their selected
 SKILL.md text is included, with discovery and Skill invocation disabled. Relative
@@ -83,7 +88,10 @@ The background executable test uses the actual Claude --bg runner through both
 house admission paths and a narrowed continuation; it is opt-in because it spends
 model calls. Its host transport is in-process; it does not prove a deployed image.
 
-Rollout awaits independent clearance and green checks. The source deny and disabled-server
+Rollout remains HOLD after the scoped third-pass review reached its three-round
+bound still BLOCKING. Every final finding was folded, including a working declared
+MCP conformance fixture that exposed the safe-mode defect. Those final folds have
+no fresh independent clearance; passing executable checks does not supply it. The source deny and disabled-server
 floor is saved before native admission, retained with the native session (including
 forked session ids), and packed with its continuity history. A different config
 directory or house unions the old floor with its current sources. Unknown floors

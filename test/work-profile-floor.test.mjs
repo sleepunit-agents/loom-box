@@ -31,7 +31,7 @@ const settings = captured => JSON.parse(readFileSync(captured.args[captured.args
 test('source floor survives config A to B, native session forks, process restart and packed house transfer', () => fixture(root => {
   const a = join(root, 'a'), b = join(root, 'b');
   mkdirSync(a); mkdirSync(b);
-  writeFileSync(join(a, '.claude.json'), JSON.stringify({ permissions: { deny: ['Read(/private-a)'] }, mcpServers: { blocked: { enabled: false } } }));
+  writeFileSync(join(a, '.claude.json'), JSON.stringify({ permissions: { deny: ['Read(/private-a)'] }, projects: {[root]: {disabledMcpjsonServers: ['blocked']}}, mcpServers: {blocked: {command:'disabled-in-project'}} }));
   writeFileSync(join(a, 'settings.json'), JSON.stringify({ permissions: { deny: ['Bash(rm *)'] } }));
   writeFileSync(join(b, '.claude.json'), JSON.stringify({ mcpServers: { blocked: { command: 'must-not-start' } } }));
   const first = native(join(root, 'first'));

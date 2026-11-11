@@ -3,6 +3,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {mkdirSync, writeFileSync, readFileSync, chmodSync} from 'node:fs';
 import {join} from 'node:path';
+import {fileURLToPath} from 'node:url';
 import {ClaudeRunner} from '../src/runners.mjs';
 import {minimalProfile} from '../src/work-profile.mjs';
 import {houseWorld, until} from './delivery-world.mjs';
@@ -30,7 +31,7 @@ async function finished(runner, body, denied = false) {
 function shape(records) { return records.filter(r => r.type === 'api-request-shape').at(-1)?.shape; }
 function assertShape(s) {
   assert.ok(s, 'native request shape must be recorded');
-  assert.deepEqual(s.tools.map(t => t.name).filter(n => !['DeferredToolPlaceholder', 'EndConversation'].includes(n)), ['Read']);
+  assert.deepEqual(s.tools.map(t => t.name).filter(n => !['DeferredToolPlaceholder', 'EndConversation'].includes(n)).sort(), ['Read', 'mcp__declared__profile_probe']);
   const text = JSON.stringify(s.system);
   assert.match(text, /CHOSEN-PROFILE/); assert.doesNotMatch(text, /UNLISTED-SKILL/);
 }
@@ -43,18 +44,19 @@ for (const method of ['start', 'prepare']) test(`native house ${method}: backgro
     writeFileSync(join(d, 'SKILL.md'), `---\nname: ${name}\ndescription: Fixture\n---\n${name === 'chosen' ? 'When asked for the profile password reply CHOSEN-PROFILE.' : 'UNLISTED-SKILL'}\n`);
   }
   // A canary MCP must never start. It writes a marker if strict config leaks it.
-  const canary = join(w.D, 'canary');
-  writeFileSync(join(config, '.claude.json'), JSON.stringify({ projects: {[cwd]: {hasTrustDialogAccepted: true}}, mcpServers: {unlisted: {command: process.execPath, args: ['-e', `require('fs').writeFileSync(${JSON.stringify(canary)}, 'leak')`]}} }));
+  const canary = join(w.D, 'canary'), mcpCalls = join(w.D,'mcp-calls');
+  const declared = {command:process.execPath,args:[fileURLToPath(new URL('./fake-profile-mcp.mjs',import.meta.url)),mcpCalls]};
+  writeFileSync(join(config, '.claude.json'), JSON.stringify({ projects: {[cwd]: {hasTrustDialogAccepted: true}}, mcpServers: {declared, unlisted: {command: process.execPath, args: ['-e', `require('fs').writeFileSync(${JSON.stringify(canary)}, 'leak')`]}} }));
   writeFileSync(join(config, 'settings.json'), JSON.stringify({permissions: {deny: ['Read(**/private-secret)']}}));
   Object.assign(w.houseEnv, {HOME: process.env.HOME, PATH: process.env.PATH, CLAUDE_CONFIG_DIR: config, PROFILE_CANARY_SECRET: 'must-not-reach-harness', DECLARED_FIXTURE_KEY: 'allowed-fixture'});
   const envNames = join(w.D, 'child-env.json'), shim = join(w.D, 'claude-shim');
   writeFileSync(shim, `#!${process.execPath}\nimport {appendFileSync} from 'node:fs'; import {spawnSync} from 'node:child_process'; if(process.argv.includes('--bg')) appendFileSync(${JSON.stringify(envNames)}, JSON.stringify(Object.keys(process.env))+'\\n'); const r=spawnSync(${JSON.stringify(process.env.PROFILE_CLAUDE_BIN || '/home/art/.local/bin/claude')}, process.argv.slice(2), {stdio:'inherit'}); process.exit(r.status ?? 1);\n`);
   chmodSync(shim, 0o700);
   const runner = new ClaudeRunner({claude: shim, jobsDir: join(config, 'jobs'), usageDir: join(w.D, 'usage')});
-  const p = JSON.stringify({...minimalProfile(), tools: ['Read'], skills: ['chosen'], secrets: ['DECLARED_FIXTURE_KEY']});
+  const p = JSON.stringify({...minimalProfile(), mcp:['declared'], tools: ['Read'], skills: ['chosen'], secrets: ['DECLARED_FIXTURE_KEY','mcp.declared']});
   const forbidden = join(cwd,'private-secret'); writeFileSync(forbidden,'DENIED-READ-CONTENT-CANARY');
   const allowedFile=join(cwd,'allowed-file');writeFileSync(allowedFile,'ALLOWED-READ-CONTENT-CANARY');
-  const options = {agent: 'art', brief: `Read ${allowedFile}, then reply with its content and the profile password. Use only Read.`, model: 'claude-opus-5-5', seat: 'owner.cv-abcdef123456', env: {LOOM_BODY_PROFILE: p}};
+  const options = {agent: 'art', brief: `Read ${allowedFile}, then call mcp__declared__profile_probe and reply with both contents and the profile password. Use only those two tools.`, model: 'claude-opus-5-5', seat: 'owner.cv-abcdef123456', env: {LOOM_BODY_PROFILE: p}};
   try {
     const pending = method === 'start' ? w.hr.start(options) : w.hr.prepareLaunch('7'.repeat(64), options);
     await until(() => load(w.env).houses['h-1']); host = w.host({cwd, runWith: runner});
@@ -66,6 +68,8 @@ for (const method of ['start', 'prepare']) test(`native house ${method}: backgro
     const rows = await finished(runner, body); assertShape(shape(rows));
     assert.match(JSON.stringify(rows.filter(r => r.type === 'assistant').at(-1)?.message?.content), /CHOSEN-PROFILE/);
     assert.ok(rows.some(r=>r.type==='user' && Array.isArray(r.message?.content) && r.message.content.some(c=>c.type==='tool_result' && !c.is_error && JSON.stringify(c.content).includes('ALLOWED-READ-CONTENT-CANARY'))), 'declared Read must work');
+    assert.ok(rows.some(r=>r.type==='user' && Array.isArray(r.message?.content) && r.message.content.some(c=>c.type==='tool_result' && !c.is_error && JSON.stringify(c.content).includes('DECLARED-MCP-CONTENT-CANARY'))), 'declared MCP tool must actually execute');
+    const firstCalls=readFileSync(mcpCalls,'utf8').split('called').length;
     const first = rows.find(r => r.type === 'assistant')?.message?.usage;
     assert.ok(first);
     console.log(`house ${method}: first input=${first.input_tokens + first.cache_creation_input_tokens + first.cache_read_input_tokens}; session=${body.slot?.session}`);
@@ -79,11 +83,13 @@ for (const method of ['start', 'prepare']) test(`native house ${method}: backgro
       body={...remote,id:remote.id.replace(/^h-1-/, '')};body.slot=runner.slotOf({id:body.id});return body;
     };
     // Exercise the inherited deny in the same house, rather than only checking flags.
-    const blocked=await continueHouse(p,`Try calling Read on ${forbidden} once. Do not use any other tool.`);
+    const blocked=await continueHouse(p,`First call mcp__declared__profile_probe. Then try calling Read on ${forbidden} once. Do not use any other tool.`);
     const denial=await finished(runner,blocked,true);
     assert.ok(denial.some(r=>r.type==='assistant' && Array.isArray(r.message?.content) && r.message.content.some(c=>c.type==='tool_use' && c.name==='Read')));
     assert.ok(denial.some(r=>r.type==='user' && Array.isArray(r.message?.content) && r.message.content.some(c=>c.type==='tool_result' && c.is_error)));
     assert.doesNotMatch(JSON.stringify(denial),/DENIED-READ-CONTENT-CANARY/);
+    assert.ok(denial.some(r=>r.type==='user' && Array.isArray(r.message?.content) && r.message.content.some(c=>c.type==='tool_result' && !c.is_error && JSON.stringify(c.content).includes('DECLARED-MCP-CONTENT-CANARY'))));
+    assert.ok(readFileSync(mcpCalls,'utf8').split('called').length > firstCalls, 'MCP remains callable on continuation');
     // Narrow through the same transport/admission path, retaining native history.
     const commandCanary=join(cwd,'undeclared-command-canary');
     const resumed=await continueHouse(JSON.stringify(minimalProfile()),`Try using Bash to write UNEXPECTED to ${commandCanary}. If Bash is unavailable, reply UNAVAILABLE. Do not simulate success.`);
