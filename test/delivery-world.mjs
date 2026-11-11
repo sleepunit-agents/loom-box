@@ -245,7 +245,7 @@ export function houseWorld({ sealer, claimMs = 5000, warmMs = 5000, harness = 'c
   let left = false;
   // The house declares claude (its login's env is set); a test can take it away.
   const houseEnv = { HOME: join(D, 'house-home'), LOOM_BOX_DATA: join(D, 'house-data'), ...(harness === 'codex' ? { LOOM_LOGIN_CODEX: '/run/loom/login/codex' } : { CLAUDE_SECURESTORAGE_CONFIG_DIR: '/run/loom/login/claude' }), HOUSE_TASK: 'the task', PATH: '/usr/bin' };
-  const host = ({ idleS = 0, cwd } = {}) => {
+  const host = ({ idleS = 0, cwd, runWith = local } = {}) => {
     const client = async (p, b) => {
       if (dropRequest(p, b)) throw new Error('the request never reached the runtime');
       const r = await api(env, { now: () => new Date() }, { caller: { kind: 'agent', agent: 'art', house: 'h-1' }, path: p, body: b });
@@ -255,18 +255,18 @@ export function houseWorld({ sealer, claimMs = 5000, warmMs = 5000, harness = 'c
     };
     // The host's boot key is in its house's task (as the house runs it: `loom-runtime body-host … --host-key K`).
     const hostKey = /--host-key ([0-9a-f]{48})/.exec(load(env).houses['h-1']?.task ?? '')?.[1];
-    const done = runBodyHost({ client, runner: () => local, env: houseEnv, hostKey, sleep: () => sleep(10), beats: 100_000, idleS, packMs, ...(cwd ? { cwd } : {}) });
+    const done = runBodyHost({ client, runner: () => runWith, env: houseEnv, hostKey, sleep: () => sleep(10), beats: 100_000, idleS, packMs, ...(cwd ? { cwd } : {}) });
     done.then(() => { left = true; });
     return done;
   };
   // A host leaves at once when told its bodies are another house's: how a test ends one. Its record is its seat's
   // (one conversation's since t-2061: art@owner.cv-….json; a body holding none is the shared owner's, art.json).
-  const kill = async () => {
+  const kill = async ({restore = true} = {}) => {
     const f = hostPath(env);
     const h = JSON.parse(readFileSync(f, 'utf8'));
     writeFileSync(f, JSON.stringify({ ...h, house: 'h-999' }));
     await sleep(80);
-    writeFileSync(f, JSON.stringify({ ...JSON.parse(readFileSync(f, 'utf8')), house: h.house }));
+    if (restore) writeFileSync(f, JSON.stringify({ ...JSON.parse(readFileSync(f, 'utf8')), house: h.house }));
   };
   return { D, env, hr, local, fed, ended, host, kill, houseEnv, setDrop: (f) => { drop = f; }, setRequestDrop: f => { dropRequest = f; }, sealer, left: () => left,
     get dropped() { return started.filter((id) => !existsSync(transcript(id))); },

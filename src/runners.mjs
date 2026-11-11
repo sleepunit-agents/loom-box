@@ -232,7 +232,6 @@ export class ClaudeRunner {
     const effective = isWork(incoming) ? restrictedEnv(incoming, selectedProfile(incoming)) : incoming;
     const { SHUTTLE_BODY: _drop, CODEX_THREAD_ID: _thread, ...clean } = effective;
     if (isWork(clean) && this.args.length) throw new RunnerError('job profiles cannot combine custom Claude arguments');
-    if (isWork(clean) && resume) throw new RunnerError('profiled Claude resume needs a verified profile-bound history; start a fresh body');
     const before = new Set((this.agents(clean) ?? []).map((a) => a.id));
     const argv = ['--bg', ...(model ? ['--model', model] : []), ...this.statusLine(), ...this.args, ...claudeWorkArgs(clean, cwd, this.jobsDir), ...(deny.length ? ['--disallowedTools', ...deny] : []), ...(resume ? ['--resume', resume] : [])];
     const r = this.run(this.claude, argv, { cwd, env: clean, input: prompt, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 60_000 });
@@ -388,7 +387,7 @@ export class ClaudeRunner {
   }
 
   slotOf(body) {
-    const session = body.slot?.session ?? this.job(body.id)?.sessionId;
+    const session = this.job(body.id)?.sessionId ?? body.slot?.session;
     return session ? { harness: 'claude', session } : null;
   }
 

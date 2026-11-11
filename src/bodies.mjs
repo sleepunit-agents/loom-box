@@ -1,4 +1,4 @@
-import { profileEnv, profileNotice } from './work-profile.mjs';
+import { profileEnv, profileNotice, minimalProfile, restrictedEnv } from './work-profile.mjs';
 // Bodies (loom docs/specs/agent-runtime.md, sections 3 and 4): whoever needs a body asks the runtime for one. It
 // picks the model (models.mjs), starts the body on that model's harness (runners.mjs), and keeps a record of it on
 // this machine, so the body can be fed, resumed and ended by its id.
@@ -139,6 +139,15 @@ export async function resumeBody(env, { body: ref, slot, agent, venue, venueKind
     if (!slot) fail(`${ref} has no slot yet: its harness hasn't said which session it is`, 409);
   }
   if (!slot || !['claude', 'codex'].includes(slot.harness) || typeof slot.session !== 'string' || !slot.session) fail('resume takes a body, or a slot {harness, session}');
+  if (!ref) {
+    let names=[];try {names=readdirSync(dir(env));} catch(e) {if(e.code!=='ENOENT') throw e;}
+    const prior=names.filter(n=>n.endsWith('.json')).flatMap(n=>{try {const x=JSON.parse(readFileSync(join(dir(env),n),'utf8'));return x.harness===slot.harness && x.slot?.session===slot.session ? [x] : [];} catch {return [];}});
+    if (agent && prior.some(x=>x.agent!==agent)) fail('this continuation slot belongs to another agent',403);
+    if (prior.length) {
+      prior.sort((a,b)=>String(a.started).localeCompare(String(b.started)));
+      rec={...prior.at(-1),restrictionUnknown:prior.some(x=>x.restrictionUnknown),deny:[...new Set(prior.flatMap(x=>x.deny ?? []))]};
+    }
+  }
   modelNeed ??= rec?.modelNeed;
   deny = [...new Set([...(rec?.deny ?? []), ...deny])];
   const who = rec?.agent ?? agent;
@@ -155,6 +164,11 @@ export async function resumeBody(env, { body: ref, slot, agent, venue, venueKind
     instance: randomBytes(12).toString('hex'), slot, ...(ref ? { resumed: ref } : {}),
   };
   const options = { agent: who, brief: forRunner(runner, brief(b), cwd), model: pick.model, cwd, env: profileEnv(o.bodyEnv, pick.kind, env, { agent: who, venue: where, place: rec?.place ?? place }, { deferSecrets: !!runner.remote }), deny, ...(seat ? { seat } : {}), ...(needs.length ? { needs } : {}), ...(files ? { files } : {}), ...((where === COMMS_VENUE || activity) ? { activity: true } : {}) };
+  if (!rec || rec.restrictionUnknown) {
+    metadata.restrictionUnknown=true;
+    options.env=restrictedEnv(options.env,minimalProfile(),{deferSecrets:!!runner.remote});
+    options.env.LOOM_BODY_PROFILE_PROBLEM='JOB PROFILE PROBLEM: continuation has no runtime restriction record; using minimal profile (no tools, MCP, skills or secrets).';
+  }
   metadata.profile = options.env.LOOM_BODY_PROFILE;
   if (profileNotice(options.env) && typeof options.brief === 'string') options.brief = `${profileNotice(options.env)}\n\n${options.brief}`;
   const prepared = { metadata, why: pick.why, preferred: pick.preferred };

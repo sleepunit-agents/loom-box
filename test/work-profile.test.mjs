@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync, readFileSync, statSync, mkdirSync, rmSync }
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PROFILE_CAP, profileHostProblem, profileEnv, selectedProfile, minimalProfile, jobProfileKey, validateProfile, restrictedEnv, workServers, claudeWorkArgs } from '../src/work-profile.mjs';
-import { amendment, requestAmendment, commitAmendment } from '../src/profile-amendment.mjs';
+import { amendment, commitAmendment } from '../src/profile-amendment.mjs';
 const profile = patch => ({ ...minimalProfile(), ...patch });
 const job = { agent: 'art', venue: 'wake', kind: 'scheduled', place: 'lane:plan' };
 function fixture(fn) {
@@ -43,9 +43,9 @@ test('only declared environment and MCP credentials cross the profile boundary',
   assert.throws(() => restrictedEnv({ NODE_OPTIONS: 'bad' }, profile({ secrets: ['NODE_OPTIONS'] })), /configure the harness/);
   assert.throws(() => restrictedEnv({}, profile({ secrets: ['MISSING_KEY'] })), /unavailable/);
   assert.throws(() => workServers({ loom: { headers: { Authorization: 'undeclared' } } }, profile({ mcp: ['loom'] })), /explicitly declare/);
-  assert.throws(() => workServers({}, profile({ mcp: ['loom'] })), /unavailable/);
+  assert.throws(() => workServers({}, profile({ mcp: ['loom'], secrets: ['mcp.loom'] })), /unavailable/);
 });
-test('Claude config is private, exact servers/tools, disables inherited skills; unsupported skills refuse', () => fixture(root => {
+test('Claude config is private, exact servers/tools, disables discovery; missing named skills refuse', () => fixture(root => {
   writeFileSync(join(root, '.claude.json'), JSON.stringify({ mcpServers: { loom: { url: 'https://example.invalid', headers: { Authorization: 'fixture-only' } }, gmail: {} }, permissions: { deny: ['Bash(rm *)'] } }));
   const env = { HOME: root, LOOM_BODY_PROFILE: JSON.stringify(profile({ mcp: ['loom'], tools: ['Read'], secrets: ['mcp.loom'] })) };
   const args = claudeWorkArgs(env, root, join(root, 'jobs'));
@@ -56,12 +56,12 @@ test('Claude config is private, exact servers/tools, disables inherited skills; 
   assert.ok(args.includes('--safe-mode')); assert.ok(args.includes('--disable-slash-commands'));
   assert.doesNotMatch(args.join(' '), /fixture-only/);
   assert.deepEqual(JSON.parse(readFileSync(args[args.indexOf('--settings') + 1], 'utf8')).permissions.deny, ['Bash(rm *)', 'Skill']);
-  assert.throws(() => claudeWorkArgs({ ...env, LOOM_BODY_PROFILE: JSON.stringify(profile({ skills: ['music'] })) }, root, join(root, 'jobs')), /cannot yet isolate/);
+  assert.throws(() => claudeWorkArgs({ ...env, LOOM_BODY_PROFILE: JSON.stringify(profile({ skills: ['music'] })) }, root, join(root, 'jobs')), /skill unavailable/);
 }));
 test('source disabled flags cannot be promoted by a declaration or project config', () => fixture(root => {
   writeFileSync(join(root, '.claude.json'), JSON.stringify({ mcpServers: { loom: {} }, disabledMcpServers: ['loom'] }));
   writeFileSync(join(root, '.mcp.json'), JSON.stringify({ mcpServers: { loom: {} } }));
-  assert.throws(() => claudeWorkArgs({ HOME: root, LOOM_BODY_PROFILE: JSON.stringify(profile({ mcp: ['loom'] })) }, root, join(root, 'jobs')), /unavailable/);
+  assert.throws(() => claudeWorkArgs({ HOME: root, LOOM_BODY_PROFILE: JSON.stringify(profile({ mcp: ['loom'], secrets: ['mcp.loom'] })) }, root, join(root, 'jobs')), /unavailable/);
 }));
 test('Codex adapter fails visibly rather than using unverified tool/skill isolation', async () => {
   const { CodexRunner } = await import('../src/runners.mjs');
@@ -71,7 +71,7 @@ test('Codex adapter fails visibly rather than using unverified tool/skill isolat
 for (const method of ['start', 'prepare']) test(`house ${method} enforces transported declaration and removes inherited secrets`, async () => {
   const { houseWorld, until } = await import('./delivery-world.mjs');
   const { load } = await import('../src/state.mjs');
-  const w = houseWorld(); let host; w.env.PROFILE_TEST_SECRET = 'undeclared-fixture';
+  const w = houseWorld(); let host; w.houseEnv.PROFILE_TEST_SECRET = 'undeclared-fixture';
   const p = JSON.stringify(profile({ tools: ['Read'] }));
   const options = { agent: 'art', brief: 'profile transport fixture', model: 'opus', seat: 'owner.cv-abcdef123456', deny: ['mcp__github'], env: { LOOM_BODY_PROFILE: p, LOOM_BODY_KEY: 'fixture-key', LOOM_BODY_CONVERSATION: 'cv-abcdef123456' } };
   try {
@@ -91,11 +91,8 @@ test('amendments use stable per-job/revision grant targets; owner callback persi
   try {
     const key = jobProfileKey(job), file = join(root, 'store.json'), p = minimalProfile();
     writeFileSync(file, JSON.stringify({ v: 1, jobs: { [key]: p } }));
-    const cards = new Map();
-    const request = async x => { if (!cards.has(x.target)) cards.set(x.target, { approval: 'a-fixture', state: 'pending' }); return cards.get(x.target); };
-    const args = { key, profile: p, field: 'tools', name: 'Read', request };
-    const [a,b] = await Promise.all([requestAmendment(args), requestAmendment(args)]);
-    assert.equal(a.approval, b.approval); assert.equal(cards.size, 1);
+    const a = {amendment: amendment(key,p,'tools','Read')};
+    assert.equal(a.amendment.target, amendment(key,p,'tools','Read').target);
     assert.deepEqual(JSON.parse(readFileSync(file)).jobs[key], p); // A pending/denied request does not amend.
     const other = amendment(key, p, 'tools', 'Bash');
     assert.throws(() => commitAmendment(file, { ...a.amendment, key: 'other-job' }), /does not match/);
@@ -104,8 +101,8 @@ test('amendments use stable per-job/revision grant targets; owner callback persi
     assert.deepEqual(selectedProfile(profileEnv({}, 'scheduled', { LOOM_RUNTIME_JOB_PROFILES: file }, job)).tools, ['Read']);
     assert.deepEqual(commitAmendment(file, a.amendment), { applied: false, already: true });
     assert.throws(() => commitAmendment(file, other), /changed since approval/);
-    mkdirSync(`${file}.lock`);
-    assert.throws(() => commitAmendment(file, a.amendment), /EEXIST/);
+    rmSync(`${file}.lock`); mkdirSync(`${file}.lock`);
+    assert.throws(() => commitAmendment(file, a.amendment), /EISDIR/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -140,11 +137,15 @@ test('Claude launch enforces secret filtering at the process boundary and preser
       if (args[0] === 'agents') return { status: 0, stdout: JSON.stringify(started ? [{ id: 'abcd1234', sessionId: 'session-id' }] : []) };
       captured = { args, env: opts.env }; started = true; return { status: 0 };
     } });
-    c.start({ brief: 'profile job', cwd: root, env: { HOME: root, PATH: '/bin', SLACK_TOKEN: 'must-not-pass', MUSIC_KEY: 'allowed', LOOM_BODY_PROFILE: JSON.stringify(profile({ tools: ['Read'], secrets: ['MUSIC_KEY'] })) }, deny: ['mcp__github'] });
+    const launched=c.start({ brief: 'profile job', cwd: root, env: { HOME: root, PATH: '/bin', SLACK_TOKEN: 'must-not-pass', MUSIC_KEY: 'allowed', LOOM_BODY_PROFILE: JSON.stringify(profile({ tools: ['Read'], secrets: ['MUSIC_KEY'] })) }, deny: ['mcp__github'] });
+    assert.equal(c.slotOf({...launched,slot:{harness:'claude',session:'stale-session'}}).session,'session-id');
     assert.equal(captured.env.SLACK_TOKEN, undefined); assert.equal(captured.env.MUSIC_KEY, 'allowed');
     assert.equal(captured.args[captured.args.indexOf('--tools') + 1], 'Read');
     assert.equal(captured.args[captured.args.indexOf('--disallowedTools') + 1], 'mcp__github');
-    assert.throws(() => c.resume({ harness: 'claude', session: 'old' }, { brief: 'resume', env: { HOME: root, LOOM_BODY_PROFILE: JSON.stringify(minimalProfile()) } }), /verified profile-bound history/);
+    c.resume({ harness: 'claude', session: 'old' }, { brief: 'resume', env: { HOME: root, LOOM_BODY_PROFILE: JSON.stringify(minimalProfile()) } });
+    assert.equal(captured.args[captured.args.indexOf('--resume') + 1], 'old');
+    assert.equal(captured.args[captured.args.indexOf('--tools') + 1], '');
+    assert.equal(captured.args[captured.args.indexOf('--system-prompt-snapshot') + 1], 'off');
   });
 });
 
@@ -186,4 +187,50 @@ test('Claude preserves distinct denies from user, project and local settings', (
   writeFileSync(join(cwd, '.claude/settings.local.json'), JSON.stringify({ permissions: { deny: ['Read(local-secret)'] } }));
   const args = claudeWorkArgs({ HOME: home, LOOM_BODY_PROFILE: JSON.stringify(minimalProfile()) }, cwd, join(root, 'jobs'));
   assert.deepEqual(JSON.parse(readFileSync(args[args.indexOf('--settings') + 1], 'utf8')).permissions.deny, ['Bash(user *)', 'Bash(project *)', 'Read(local-secret)', 'Skill']);
+}));
+
+test('semantic invalidity selects minimal access and a visible diagnostic before launch', () => fixture(root => {
+  const file = join(root, 'profiles.json');
+  for (const bad of [{ tools: ['UnknownTool'] }, {tools:['Skill']}, { secrets: ['NODE_OPTIONS'] }, { secrets: ['CLAUDE_CONFIG_DIR'] }, { mcp: ['loom'] }]) {
+    writeFileSync(file, JSON.stringify({ v: 1, jobs: { [jobProfileKey(job)]: profile(bad) } }));
+    const env = profileEnv({ HOME: root }, 'scheduled', { LOOM_RUNTIME_JOB_PROFILES: file }, job);
+    assert.deepEqual(selectedProfile(env), minimalProfile());
+    assert.match(env.LOOM_BODY_PROFILE_PROBLEM, /JOB PROFILE PROBLEM/);
+    const args = claudeWorkArgs(env, root, join(root, 'jobs'));
+    assert.equal(args[args.indexOf('--tools') + 1], '');
+    assert.deepEqual(JSON.parse(readFileSync(args[args.indexOf('--mcp-config') + 1])).mcpServers, {});
+  }
+}));
+test('custom config restrictions survive selection, filtering and continuation', () => fixture(root => {
+  const config = join(root, 'custom'); mkdirSync(config);
+  writeFileSync(join(config, 'settings.json'), JSON.stringify({ permissions: { deny: ['Read(private)'] }, disabledMcpServers: ['blocked'] }));
+  writeFileSync(join(config, '.claude.json'), JSON.stringify({ mcpServers: { blocked: {} } }));
+  const env = profileEnv({ HOME: root }, 'live', { CLAUDE_CONFIG_DIR: config });
+  assert.equal(restrictedEnv(env, selectedProfile(env)).CLAUDE_CONFIG_DIR, config);
+  const args = claudeWorkArgs(env, root, join(root, 'jobs'));
+  assert.ok(JSON.parse(readFileSync(args[args.indexOf('--settings') + 1])).permissions.deny.includes('Read(private)'));
+  assert.throws(() => claudeWorkArgs({ ...env, LOOM_BODY_PROFILE: JSON.stringify(profile({ mcp: ['blocked'], secrets: ['mcp.blocked'] })) }, root, join(root, 'jobs')), /unavailable/);
+}));
+test('named skills preload only declared text with discovery and invocation disabled', () => fixture(root => {
+  for (const name of ['chosen', 'unlisted']) { mkdirSync(join(root, '.claude/skills', name), { recursive: true }); writeFileSync(join(root, '.claude/skills', name, 'SKILL.md'), `Skill body ${name}`); }
+  const args = claudeWorkArgs({ HOME: root, LOOM_BODY_PROFILE: JSON.stringify(profile({ skills: ['chosen'] })) }, root, join(root, 'jobs'));
+  assert.match(args[args.indexOf('--append-system-prompt') + 1], /Skill body chosen/);
+  assert.doesNotMatch(args.join(' '), /Skill body unlisted/);
+  assert.ok(args.includes('--safe-mode'));
+  assert.ok(JSON.parse(readFileSync(args[args.indexOf('--settings') + 1])).permissions.deny.includes('Skill'));
+}));
+
+test('an MCP approval explicitly adds its credential bundle on the same revision-bound card', () => fixture(root => {
+  const key = jobProfileKey(job), file = join(root, 'profiles.json');
+  writeFileSync(file, JSON.stringify({v:1,jobs:{[key]:minimalProfile()}}));
+  const a = amendment(key, minimalProfile(), 'mcp', 'loom');
+  assert.deepEqual(a.profile.mcp, ['loom']); assert.deepEqual(a.profile.secrets, ['mcp.loom']);
+  assert.equal(commitAmendment(file,a).applied,true);
+  assert.deepEqual(selectedProfile(profileEnv({},'scheduled',{LOOM_RUNTIME_JOB_PROFILES:file},job)).mcp,['loom']);
+}));
+
+test('project definitions cannot revive enabled:false in any MCP source', () => fixture(root => {
+  writeFileSync(join(root,'.claude.json'),JSON.stringify({mcpServers:{loom:{enabled:false,command:'blocked'}}}));
+  writeFileSync(join(root,'.mcp.json'),JSON.stringify({mcpServers:{loom:{command:'replacement'}}}));
+  assert.throws(()=>claudeWorkArgs({HOME:root,LOOM_BODY_PROFILE:JSON.stringify(profile({mcp:['loom'],secrets:['mcp.loom']}))},root,join(root,'jobs')),/unavailable/);
 }));

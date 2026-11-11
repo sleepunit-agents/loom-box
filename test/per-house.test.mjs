@@ -675,6 +675,21 @@ test('two of the owner\'s conversations never share a house: one can\'t speak, a
   const hd = { heldConv, principalOf, housePrincipal: () => ({ owner: true }), householdAgent: () => true };
   assert.ok(ownerBody(w.env, inB, A, stolen, hd).reason);
   assert.equal(ownerBody(w.env, inA, A, stolen, hd).c?.conversation, A, 'from its own house, the same proof stands');
+  // Profile requests use that same real conversation/house proof, before any card.
+  const {requestForBody}=await import('../src/profile-amendment.mjs');
+  const {readBody}=await import('../src/bodies.mjs');
+  const {jobProfileKey}=await import('../src/work-profile.mjs');
+  const active=readBody(w.env,loadConv(w.env,A).body), file=join(w.env.HOME,'job-profiles.json');
+  w.env.LOOM_RUNTIME_JOB_PROFILES=file;
+  writeFileSync(file,JSON.stringify({v:1,jobs:{[jobProfileKey(active)]:JSON.parse(active.profile)}}));
+  let cards=0;
+  const pd={...hd,approvalsRun:async(_env,args)=>{cards++;return {status:0,stdout:JSON.stringify({id:'a-12345678',kind:'grant',state:'pending',target:args[args.indexOf('--target')+1]})};}};
+  const request={conversation:A,field:'tools',name:'Read'};
+  await assert.rejects(requestForBody(w.env,inB,request,stolen,pd),/authenticated/);
+  assert.equal(cards,0);
+  assert.equal((await requestForBody(w.env,inA,request,stolen,pd)).approval,'a-12345678');
+  assert.equal(cards,1);
+
   // From its own house, everything above is answered: it's the house that was refused, nothing else.
   assert.equal((await api(w.env, fx, { caller: inA, path: 'principal', body: stolen })).status, 200);
   assert.equal(holdsRun(w.env, A, stolen, { ...w.o, caller: inA }), true);

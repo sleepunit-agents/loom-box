@@ -27,39 +27,61 @@ it. Requests carry the validated declaration to the house; both launch paths req
 `job-profile-v1` before publication. Old hosts receive no profiled work.
 
 Claude uses strict explicit MCP configuration, an explicit built-in tool list,
-settings deny rules, safe mode and disabled slash commands. Inherited environment
-secrets are removed. Named skills are currently **refused**: local executable
-probing shows safe mode still advertises built-in skills and does not load the
-explicit plugin's skill. Codex profiled jobs are also **refused** until its complete
-built-in tool and skill discovery adapters are verified. Profiled Claude resumes
-are refused because old histories can retain capabilities and prompt snapshots.
-These are rollout blockers, not completed support for the requested contract.
+settings deny rules, safe mode and disabled slash commands. Custom configuration
+directories survive selection so their denies and disabled servers remain effective.
+Named skills are preloaded through `--append-system-prompt`: only their selected
+SKILL.md text is included, with discovery and Skill invocation disabled. Relative
+references in those skills still require declared file tools. Continuations render
+fresh system instructions with `--system-prompt-snapshot off`, and apply the selected
+profile again. Prior runtime denies remain unioned across continuation, including
+slot-only continuations recovered from the runtime records. An unrecognized slot
+gets a visible minimal-profile fallback because its prior restriction floor is unknown.
+`Skill` itself is unsupported under this adapter; declaring it selects a visible
+minimal fallback rather than silently losing a declared tool. Named skills use
+the explicit preloading path above.
+
+The runtime sets `CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1`: background requests otherwise
+advertise the provider advisor despite `--tools`. Native request traces can also
+contain `DeferredToolPlaceholder` (provider schema placeholder) and `EndConversation`
+(background lifecycle control). They are not MCP, shell, file or secret access;
+the executable test explicitly distinguishes these intrinsic harness controls.
+
+Codex profiled jobs remain refused: its installed CLI has no verified arbitrary
+built-in tool allowlist. This remains a rollout blocker, not completed Codex support.
 No optional work-identity/core API is required or claimed by this runtime change.
 
 ## Owner-approved permanent amendments
 
-`profile-amendment.mjs` is the runtime half of the approvals integration:
-`requestAmendment` sends a deterministic grant target tied to the job, current
-profile hash and single capability; the approvals adapter must deduplicate pending,
-allowed and denied requests for that target. `commitAmendment` is an owner-executor
-library, never a body-facing endpoint. It checks the exact target, compare-and-swaps
-the prior profile, serializes writers and durably replaces the store. Replayed
-callbacks are idempotent. A changed profile needs a new approval. A crash-held lock
-requires operator recovery; never silently steal it.
+A running owner job asks for a missing capability with
+`loom runtime profile request --field tools --name Read` (fields: mcp, tools,
+skills, secrets). Its shell supplies its own conversation proof; callers cannot
+choose another job key, profile, or revision. The runtime checks the active body,
+its owner principal and house, derives its key and original declaration, and
+rejects a stale revision before filing anything. An MCP addition includes its
+explicit `mcp.SERVER` credential declaration on the same card.
 
-Required separate approvals change before rollout: register grant namespace
-`runtime-job-profile`, authenticate the requesting running job and derive its key
-and current declaration server-side (ignore caller-supplied key/profile), retain the
-exact amendment with the card, deduplicate its target including Deny, and on Allow
-invoke `commitAmendment` in the trusted owner executor with that stored amendment.
-Never expose a general apply endpoint or accept an approval boolean from a body.
-Record completion durably and retry the same callback after crashes. Reject grant
-callbacks whose target/payload differs, whose requester job is unproved, or whose
-profile revision is stale. Tests: concurrent identical requests produce one card;
-Deny never mutates; Allow survives restart and affects the next launch; stale and
-cross-job payloads cannot amend another job; replay after write-before-ack is safe.
-This adapter is not installed by the runtime PR, so ask-once is not end-to-end yet.
+The runtime publishes the canonical amendment privately before requesting a
+`grant` target `runtime-job-profile:SHA256`. The companion approvals change
+retains one answer per job/revision/capability, including Deny, and only accepts
+these requests from the trusted runtime. On Allow, core's existing grant callback
+reaches the runtime's owner-only `grant-approved` executor. It loads the stored
+amendment, checks the requesting agent and exact target, spends the exact approval,
+and durably compare-and-swaps the profile. The trusted spend and write are
+idempotent so retries after either crash boundary do not ask again or widen access.
+There is no body-facing apply endpoint. A changed profile needs a fresh request.
+A kernel file lock serializes writers and is released automatically on process death. Hosts without flock refuse the callback visibly.
 
-Rollout remains HOLD until named-skill support, Codex isolation, profile-bound
-continuation, and that approvals adapter pass independent review. Do not enable
-scheduled rollout or update hosts from this draft.
+The companion approvals adapter must ship together with this runtime change.
+Tests exercise actual temporary approvals stores, concurrent request deduplication,
+Deny, owner Allow, cross-job rejection, replay, and fresh next-launch selection.
+The background executable test uses the actual Claude --bg runner through both
+house admission paths and a narrowed continuation; it is opt-in because it spends
+model calls. Its host transport is in-process; it does not prove a deployed image.
+
+Rollout remains HOLD. Codex isolation is still unimplemented. Source restrictions
+are read from the current configuration but their prior effective floor is not yet
+persisted across a change of configuration directory. Invalid transported profiles
+still refuse startup rather than launching minimal access with a diagnostic.
+These remain contract blockers, alongside fresh independent clearance after the
+bounded reviews; passing focused tests does not resolve them.
+Do not enable scheduled rollout or update hosts from this draft.

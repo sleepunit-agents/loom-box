@@ -8,11 +8,15 @@ export const profileHostProblem = (profile, report) => profile !== undefined && 
   ? 'its body host cannot enforce job profiles; update its house runtime' : null;
 const FIELDS = ['mcp', 'tools', 'skills', 'secrets'];
 const NAME = /^[A-Za-z_][A-Za-z0-9_.-]{0,127}$/;
+export const CLAUDE_TOOLS = new Set(['Task', 'Bash', 'CronCreate', 'CronDelete', 'CronList', 'DesignSync', 'Edit', 'EnterWorktree', 'ExitWorktree', 'ListAgents', 'ListMcpResourcesTool', 'Monitor', 'NotebookEdit', 'PushNotification', 'Read', 'ReadMcpResourceDirTool', 'ReadMcpResourceTool', 'RemoteTrigger', 'ReportFindings', 'ScheduleWakeup', 'SendMessage', 'TaskStop', 'ToolSearch', 'WebSearch', 'Workflow', 'Write']);
+const forbiddenSecret = k => BASE_ENV.includes(k) || (/^(LOOM_|CLAUDE_|CODEX_|NODE_|BASH_|ENV$)/.test(k) && !['LOOM_URL', 'LOOM_TOKEN', 'LOOM_TOKEN_FILE'].includes(k));
 export const minimalProfile = () => ({ v: 1, mcp: [], tools: [], skills: [], secrets: [] });
 export function validateProfile(p) {
   if (!p || p.v !== 1 || Object.keys(p).some(k => !['v', ...FIELDS].includes(k))) throw Error('invalid job profile version or field');
   for (const k of FIELDS) if (!Array.isArray(p[k]) || p[k].length > 128 || p[k].some(n => typeof n !== 'string' || !NAME.test(n)) || new Set(p[k]).size !== p[k].length) throw Error(`invalid job profile ${k}`);
-  if (p.tools.includes('default')) throw Error('a job profile must name each tool');
+  if (p.tools.some(t => !CLAUDE_TOOLS.has(t))) throw Error('job profile names an unsupported built-in tool');
+  for (const k of p.secrets) if (!k.startsWith('mcp.') && forbiddenSecret(k)) throw Error(`job profile secret cannot configure the harness: ${k}`);
+  for (const n of p.mcp) if (!p.secrets.includes(`mcp.${n}`)) throw Error(`job profile must explicitly declare configured MCP credentials: mcp.${n}`);
   return Object.fromEntries(['v', ...FIELDS].map(k => [k, Array.isArray(p[k]) ? [...p[k]].sort() : p[k]]));
 }
 export const jobProfileKey = ({ agent, venue, kind, place }) => JSON.stringify([agent, venue, kind, place ?? null]);
@@ -26,7 +30,6 @@ export function workServers(servers, profile) {
   const p = validateProfile(profile);
   const missing = p.mcp.filter(n => !servers[n] || servers[n].enabled === false);
   if (missing.length) throw Error(`job profile MCP unavailable: ${missing.join(', ')}`);
-  for (const n of p.mcp) if (!p.secrets.includes(`mcp.${n}`)) throw Error(`job profile must explicitly declare configured MCP credentials: mcp.${n}`);
   return Object.fromEntries(p.mcp.map(n => [n, servers[n]]));
 }
 export function selectProfile(settings, job) {
@@ -40,26 +43,28 @@ export function selectProfile(settings, job) {
   } catch (e) { return { key, profile: minimalProfile(), problem: `JOB PROFILE PROBLEM: ${e.message}; using minimal profile (no tools, MCP, skills or secrets).` }; }
 }
 // Small explicit infrastructure environment. No provider key, launcher setting or inherited secret survives by default.
-const BASE_ENV = ['CLAUDE_SECURESTORAGE_CONFIG_DIR', 'HOME', 'PATH', 'LANG', 'LC_ALL', 'TZ', 'TMPDIR', 'TERM', 'USER', 'LOGNAME', 'SHELL', 'LOOM_BODY_KEY', 'LOOM_BODY_CONVERSATION', 'LOOM_BODY_MODEL'];
+const BASE_ENV = ['CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'LOOM_BODY_PROFILE_PROBLEM', 'CLAUDE_SECURESTORAGE_CONFIG_DIR', 'HOME', 'PATH', 'LANG', 'LC_ALL', 'TZ', 'TMPDIR', 'TERM', 'USER', 'LOGNAME', 'SHELL', 'LOOM_BODY_KEY', 'LOOM_BODY_CONVERSATION', 'LOOM_BODY_MODEL'];
 export function restrictedEnv(env, profile, { deferSecrets = false } = {}) {
   const p = validateProfile(profile);
   const out = Object.fromEntries(BASE_ENV.filter(k => env[k] !== undefined).map(k => [k, env[k]]));
   for (const k of p.secrets) {
     if (k.startsWith('mcp.')) continue;
-    if (BASE_ENV.includes(k) || (/^(LOOM_|CLAUDE_|CODEX_|NODE_|BASH_|ENV$)/.test(k) && !['LOOM_URL', 'LOOM_TOKEN', 'LOOM_TOKEN_FILE'].includes(k))) throw Error(`job profile secret cannot configure the harness: ${k}`);
+    if (forbiddenSecret(k)) throw Error(`job profile secret cannot configure the harness: ${k}`);
     if (env[k] === undefined) { if (deferSecrets) continue; throw Error(`job profile secret unavailable: ${k}`); }
     out[k] = env[k];
   }
+  // Provider-side advisor tools are otherwise injected even with --tools ''.
+  out.CLAUDE_CODE_DISABLE_ADVISOR_TOOL = '1';
   out.LOOM_BODY_PROFILE = JSON.stringify(p);
   return out;
 }
 export function profileEnv(env, kind, settings = process.env, job = {}, options = {}) {
-  const source = env ?? process.env;
+  const source = { ...(!options.deferSecrets ? Object.fromEntries(['CLAUDE_CONFIG_DIR', 'CODEX_HOME'].filter(k => settings[k] !== undefined).map(k => [k, settings[k]])) : {}), ...(env ?? process.env) };
   const { LOOM_BODY_PROFILE: _old, LOOM_BODY_PROFILE_PROBLEM: _problem, ...clean } = source;
   const selected = selectProfile(settings, { ...job, kind });
   return { ...restrictedEnv(clean, selected.profile, options), ...(selected.problem ? { LOOM_BODY_PROFILE_PROBLEM: selected.problem } : {}) };
 }
-export function profileNotice(env) { return env?.LOOM_BODY_PROFILE_PROBLEM ?? ''; }
+export function profileNotice(env) { return [env?.LOOM_BODY_PROFILE_PROBLEM, ...(isWork(env) ? ['If a capability is missing, request its permanent owner approval with loom runtime profile request --field mcp|tools|skills|secrets --name NAME. Do not work around the profile.'] : [])].filter(Boolean).join('\n'); }
 const json = file => { try { return JSON.parse(readFileSync(file, 'utf8')); } catch (e) { if (e.code === 'ENOENT') return {}; throw Error('cannot read job profile MCP configuration'); } };
 export function privateJson(dir, value) {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -78,16 +83,25 @@ export function claudeWorkArgs(env, cwd, jobsDir) {
   const scoped = conf.projects?.[resolve(cwd || home)] ?? {};
   const configDir = env.CLAUDE_CONFIG_DIR || join(home, '.claude');
   const layers = [json(join(configDir, 'settings.json')), ...(cwd ? [json(join(cwd, '.claude/settings.json')), json(join(cwd, '.claude/settings.local.json'))] : [])];
-  const disabled = new Set([conf, scoped, ...layers].flatMap(c => c.disabledMcpServers ?? []));
+  const disabled = new Set([conf, scoped, project, ...layers].flatMap(c => [...(c.disabledMcpServers ?? []), ...Object.entries(c.mcpServers ?? {}).filter(([,v]) => v?.enabled === false).map(([n]) => n)]));
   const all = Object.fromEntries(Object.entries({ ...conf.mcpServers, ...scoped.mcpServers, ...project.mcpServers }).filter(([name]) => !disabled.has(name)));
   const servers = workServers(all, p);
-  const supported = new Set(['Task', 'Bash', 'CronCreate', 'CronDelete', 'CronList', 'DesignSync', 'Edit', 'EnterWorktree', 'ExitWorktree', 'ListAgents', 'ListMcpResourcesTool', 'Monitor', 'NotebookEdit', 'PushNotification', 'Read', 'ReadMcpResourceDirTool', 'ReadMcpResourceTool', 'RemoteTrigger', 'ReportFindings', 'ScheduleWakeup', 'SendMessage', 'Skill', 'TaskStop', 'ToolSearch', 'WebSearch', 'Workflow', 'Write']);
-  if (p.tools.some(t => !supported.has(t))) throw Error('job profile names an unsupported Claude built-in tool');
-  if (p.skills.length) throw Error('this Claude profile adapter cannot yet isolate named skills; refusing launch');
+  // Preload only the declared skill text through the supported prompt control.
+  // Safe mode disables discovery; Skill stays denied so the inherited catalog
+  // cannot reappear. References remain subject to the declared file tools.
+  const skills = p.skills.map(name => {
+    let body, source;
+    for (const base of [cwd && join(cwd, '.claude/skills'), join(configDir, 'skills')].filter(Boolean)) {
+      try { source = join(base, name, 'SKILL.md'); body = readFileSync(source, 'utf8'); break; }
+      catch (e) { if (e.code !== 'ENOENT') throw Error(`job profile skill unreadable: ${name}`); }
+    }
+    if (body === undefined) throw Error(`job profile skill unavailable: ${name}`);
+    return `### Declared skill: ${name}\nSource (resolve relative references here): ${source}\n${body}`;
+  });
   const dir = join(jobsDir, '..', 'work-profiles');
   const mcp = privateJson(dir, { mcpServers: servers });
   const priorDenies = [conf, scoped, ...layers].flatMap(c => c.permissions?.deny ?? []);
   if (priorDenies.some(rule => typeof rule !== 'string')) throw Error('invalid inherited permission deny rules');
   const settings = privateJson(dir, { permissions: { deny: [...new Set([...priorDenies, 'Skill'])] }, enabledPlugins: {} });
-  return ['--strict-mcp-config', '--mcp-config', mcp, '--safe-mode', '--disable-slash-commands', '--tools', p.tools.join(','), '--settings', settings];
+  return [...(skills.length ? ['--append-system-prompt', skills.join('\n\n')] : []), '--system-prompt-snapshot', 'off', '--strict-mcp-config', '--mcp-config', mcp, '--safe-mode', '--disable-slash-commands', '--tools', p.tools.join(','), '--settings', settings];
 }
