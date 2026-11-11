@@ -20,7 +20,7 @@
 // shows only for a conversation that acts for the owner alone. A read shows its line count, never what it read; a shell
 // step's output is read only for its fixed phrases and never kept or sent (showing it on demand is its own task).
 import { createHash } from 'node:crypto';
-import { commandLabel, cutInput, cutTo, failWhy, fileName, WHY_WORDS, GONE, INPUT_MAX, part, PRIVATE_FILE, privateFile, privateWords, redact, UNPRINTABLE, UNPRINTABLE_ONE } from './redact.mjs';
+import { cutInput, cutTo, failWhy, fileName, WHY_WORDS, GONE, INPUT_MAX, part, PRIVATE_FILE, privateFile, privateWords, redact, UNPRINTABLE, UNPRINTABLE_ONE } from './redact.mjs';
 
 
 
@@ -160,10 +160,7 @@ export function claudeSummary(name, input = {}) {
     return Number.isFinite(l) && l > 0 ? ` (lines ${part('count', Math.floor(from))}–${part('count', Math.floor(from + l - 1))})` : ` (from line ${part('count', Math.floor(from))})`;
   };
   switch (name) {
-    case 'Bash': {
-      const d = typeof i.description === 'string' ? i.description.trim() : '';
-      return commandLine(i.command) ? finish(d ? txt(d) : commandLabel(i.command) || 'Ran a command') : 'Ran a command';
-    }
+    case 'Bash': return 'Ran a command';
     case 'BashOutput': return 'Checked a background command';
     case 'KillShell': case 'KillBash': return 'Stopped a background command';
     case 'Read': return finish(`Read ${fileName(i.file_path)}${lines()}`);
@@ -400,6 +397,13 @@ export function shownText(text, max = MAX_BODY) {
   return capLines([...shown, ...tail.map(show)], max, middle.length);
 }
 
+/** Assistant prose is normalized and redacted as a complete bounded text before any label/body window.
+ * Keep physical newlines so ordinary prose retains its lines and multiline secret assignments retain context. */
+function ownWords(text) {
+  const normalized = cutInput(text, 2_000_000).split('\n').map(normLine).join('\n').replace(SGR, '');
+  return shownText(redact(normalized, { max: normalized.length }), MAX_TEXT);
+}
+
 /** A shell command as Codex runs it (`/usr/bin/bash -lc '…'`), unwrapped to what the body wrote. */
 function unwrapShell(c) {
   const m = /^(?:\/usr)?(?:\/bin\/)?(?:ba|z)?sh\s+-l?c\s+(['"])([\s\S]*)\1\s*$/.exec(String(c ?? '').trim());
@@ -560,7 +564,7 @@ export function claudeCards(lines, prefix = '', parent = null) {
       content.forEach((c, n) => {
         if (c?.type !== 'text' || typeof c.text !== 'string' || !c.text.trim() || !mid) return;
         const id = `${prefix}${mid}:${n}`.slice(0, 80);
-        const shown = worked('text', c.text, () => shownText(c.text.replace(SGR, ''), MAX_TEXT));
+        const shown = worked('text', c.text, () => ownWords(c.text));
         const label = part('text', firstLine(shown), MAX_SUMMARY);
         if (label === GONE) return;
         const card = { id, at: cardTime(l.timestamp), tool: 'text', summary: clean(label), fixed: 'Wrote its words', state: 'done', ...(parent ? { parent } : {}) };
@@ -612,7 +616,7 @@ const CODEX_TYPES = ['command_execution', 'mcp_tool_call', 'file_change', 'web_s
 
 function codexSummary(item) {
   switch (item.type) {
-    case 'command_execution': return commandLine(unwrapShell(item.command)) ? finish(commandLabel(item.command) ?? 'Ran a command') : 'Ran a command';
+    case 'command_execution': return 'Ran a command';
     case 'file_change': {
       const paths = Array.isArray(item.changes) ? item.changes.map((c) => fileName(c?.path)) : [];
       return finish(paths.length === 1 ? `Changed ${paths[0]}` : paths.length === 2 ? `Changed ${paths.join(', ')}` : paths.length ? `Changed ${paths[0]} and ${paths.length - 1} more` : 'Changed files');
@@ -640,9 +644,9 @@ export function codexCards(events, prefix = '', timeOf = () => new Date().toISOS
     if (item.type === 'agent_message') {
       if (e.type !== 'item.completed' || typeof item.text !== 'string' || !item.text.trim()) continue;
       const id = `${prefix}${item.id}`.slice(0, 80);
-      const text = item.text;
-      const card = { id, at: timeOf(id), tool: 'text', summary: finish(text.split('\n')[0]), fixed: 'Wrote its words', state: 'done' };
-      cards.set(id, lazyBody(card, () => worked('text', text, () => shownText(text, MAX_TEXT))));
+      const text = worked('text', item.text, () => ownWords(item.text));
+      const card = { id, at: timeOf(id), tool: 'text', summary: finish(firstLine(text)), fixed: 'Wrote its words', state: 'done' };
+      cards.set(id, lazyBody(card, () => text));
       continue;
     }
     if (!CODEX_TYPES.includes(item.type)) continue;

@@ -150,7 +150,7 @@ test('a spawned job\'s body posts its steps to the job\'s own thread once it has
   await tick(w.env, w.o);
   const sent = w.core.activityCalls.filter((a) => a.conversation === r.handle);
   assert.equal(sent.length, 1);
-  assert.deepEqual(sent[0].cards.map((c) => [c.summary, c.state]), [['Ran the tests', 'running']]);
+  assert.deepEqual(sent[0].cards.map((c) => [c.summary, c.state]), [['Ran a command', 'running']]);
   assert.equal(sent[0].run, loadConv(w.env, r.handle).run);
 });
 
@@ -197,7 +197,7 @@ test('the body\'s own words go only where it works for the owner alone; its sign
   await tick(o.env, o.o); await tick(o.env, o.o);
   const calls = o.core.activityCalls.filter((a) => a.conversation === r2.handle);
   assert.equal(calls.length, 2);
-  assert.deepEqual(calls[1].cards, [{ id: 't1', at: 'x', tool: 'Bash', summary: 'Ran the tests', state: 'done' }]);
+  assert.deepEqual(calls[1].cards, [{ id: 't1', at: 'x', tool: 'Bash', summary: 'Ran a command', state: 'done' }]);
   assert.equal(calls[1].alive, undefined);
 });
 
@@ -313,7 +313,7 @@ test('every card goes through the one gate where the owner is alone too: no shel
   const r = await spawnCall(o.env, { kind: 'owner' }, { agent: 'art', brief: 'x' }, o.o);
   await tick(o.env, o.o); await tick(o.env, o.o);
   const [card] = o.core.activityCalls.filter((a) => a.conversation === r.handle).flatMap((a) => a.cards);
-  assert.deepEqual(card, { id: 't1', at: 'x', tool: 'Bash', summary: 'Ran npm test', state: 'done' });
+  assert.deepEqual(card, { id: 't1', at: 'x', tool: 'Bash', summary: 'Ran a command', state: 'done' });
 });
 
 test('told marks are kept for every card still read, so a long run\'s steps aren\'t told again (t-2109)', () => {

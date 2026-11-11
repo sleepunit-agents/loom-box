@@ -802,3 +802,21 @@ test('command details fail closed for unrecognized shell shapes in delivered Cla
     assert.equal(card.detail, command, 'owner-alone delivery keeps recognized detail');
   }
 });
+
+
+test('assistant prose retains multiline secret assignment context before projection', () => {
+  const S = 'review-canary-value';
+  for (const text of [`password:\n${S}`, `-----BEGIN\nPRIVATE KEY-----\n${S}\n-----END PRIVATE KEY-----`]) {
+    const cards = claudeCards([{ type: 'assistant', uuid: 'private', message: { content: [{ type: 'text', text }] } }]);
+    assert.ok(!JSON.stringify(cards).includes(S));
+  }
+});
+
+test('command descriptions are never projected, even for an allowlisted command', () => {
+  for (const split of ['\u2028', '\x1b[31m']) {
+    const cards = claudeCards([use('description', 'Bash', { command: 'git status', description: GH.slice(0, 12) + split + GH.slice(12) })]);
+    assert.equal(cards[0].summary, 'Ran a command');
+    assert.equal(cards[0].detail, 'git status');
+    assert.ok(!leak(JSON.stringify(cards)));
+  }
+});

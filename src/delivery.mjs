@@ -1643,7 +1643,7 @@ export function shownCards(env, c, cards) {
   return cards.filter((x) => x && (x.tool !== 'text' || ownersAlone)).map((x) => {
     // Its words aren't even read where they won't go (a diff is worked out only when it's read).
     const { fixed, ...parts } = stepParts(x, undefined, { words: ownersAlone });
-    if (ownersAlone) return { ...baseCard(x), ...parts };
+    if (ownersAlone) return { ...baseCard(x), ...parts, ...(['Bash', 'command_execution'].includes(x.tool) ? { summary: fixed?.startsWith('Ran a command') ? fixed : 'Ran a command' } : {}) };
     // Where someone else is: its fixed label (set where the card was made, never derived from its words), else "Did a
     // step"; no words of any kind (its label, command, diff, plan items); its state, result phrase, times and nesting.
     const { detail: _d, body: _b, items: _i, parent, ...plain } = parts;
