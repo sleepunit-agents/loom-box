@@ -302,7 +302,7 @@ const collectionReceipt = (x, raw) => Object.values(x?.offlineCollection?.done ?
 const freshRec = (x, house, now) => !!x?.report && now - x.report.at < HOST_STALE_MS && x.report.house === house;
 const fresh = (h, now) => freshRec(h, h.house, now);
 /** What's one house's in the record (the rest is the agent's). */
-const PER_HOUSE = ['report', 'hostHash', 'bootHash', 'req', 'stop', 'inbox', 'claimed', 'cancel', 'quiescing', 'admissionProtocol', 'offlineCollection'];
+const PER_HOUSE = ['report', 'hostHash', 'bootHash', 'healthBootHash', 'syncFailure', 'req', 'stop', 'inbox', 'claimed', 'cancel', 'quiescing', 'admissionProtocol', 'offlineCollection'];
 function retainOfflineHouse(env, house, record, s) {
   if (s.houses[house]?.nativeHistory?.v === 1 && !s.houses[house].nativeHistory.complete) return true;
   const collection = record.offlineCollection;
@@ -432,6 +432,36 @@ export function cleanReport(r) {
   return { bodies, done, caps, starting, startingUnknown };
 }
 
+/** A tiny, separately authenticated failure report: an oversized sync must still be visible on the agent card. */
+export function bodyHealth(env, caller, body) {
+  if (caller?.kind !== 'agent' || !AGENT_NAME.test(caller.agent ?? '') || !HOUSE.test(caller.house ?? '')) throw new StateError('body-health is a house host only', 403);
+  return hostLocked(env, () => {
+    const found = recordOfHouse(env, caller.agent, caller.house);
+    if (!found) throw new StateError('not this agent’s host house', 403);
+    const { h, seat } = found, x = houseRec(h, caller.house), given = keyHash(body?.hostKey ?? '');
+    if (!((x.hostHash && sameHash(given, x.hostHash)) || ((x.bootHash || x.healthBootHash) && sameHash(given, x.bootHash || x.healthBootHash)))) throw new StateError('body-health takes the host’s own key', 403);
+    if (!Number.isSafeInteger(body?.failures) || body.failures < 5 || !['oversized', 'timeout', 'unavailable'].includes(body.kind)) throw new StateError('invalid sync failure report', 400);
+    x.syncFailure = { failures: Math.min(body.failures, 1_000_000), kind: body.kind };
+    writeJson(hostFile(env, caller.agent, seat), h);
+    return { ok: true };
+  });
+}
+
+/** Failures for active houses only; retained until an authenticated full sync succeeds. */
+export function syncProblems(env, s) {
+  const out = {};
+  for (const agent of new Set(Object.values(s.houses ?? {}).filter(h => ['running', 'starting'].includes(h.state)).map(h => h.agent))) {
+    if (!AGENT_NAME.test(agent ?? '')) continue;
+    for (const seat of seatsOf(env, agent)) {
+      const h = loadHost(env, agent, seat);
+      for (const [house, x] of [[h.house, h], ...Object.entries(h.draining ?? {})]) {
+        if (x.syncFailure && ['running', 'starting'].includes(s.houses?.[house]?.state)) (out[agent] ??= []).push({ house, ...x.syncFailure });
+      }
+    }
+  }
+  return out;
+}
+
 /**
  * POST /api/<piece>/body-sync {report: {bodies, done, packed: {id: {part, parts, data}}}}, from an agent's house:
  * its report goes into its agent's host record, and it's answered what to start, stop and feed.
@@ -460,6 +490,7 @@ export function bodySync(env, caller, body, o = {}) {
       // The boot key, once: traded for the host's own key, which only the host process holds.
       issued = randomBytes(24).toString('hex');
       x.hostHash = keyHash(issued);
+      x.healthBootHash = x.bootHash; // health only: a lost first sync answer must still be reportable
       delete x.bootHash; delete x.bootSealed;
     }
     const { bodies, done, caps, starting, startingUnknown: malformedStarting } = cleanReport(body?.report);
@@ -529,6 +560,7 @@ export function bodySync(env, caller, body, o = {}) {
       if (['ready', 'refused'].includes(record.state)) received.push(rid);
     }
     x.report = { at: now, house, bodies, done, caps, starting, startingUnknown };
+    delete x.syncFailure;
     // A request given up on whose body the house started late: stopped, never run.
     x.cancel ??= {};
     for (const [rid, at] of Object.entries(x.cancel)) {
@@ -549,8 +581,11 @@ export function bodySync(env, caller, body, o = {}) {
       if (!x.stop?.[id]?.pack) { got.push([id, p.part]); continue; }
       if (!Number.isSafeInteger(p?.part) || !Number.isSafeInteger(p?.parts) || p.parts < 1 || p.parts > 64 || p.part < 0 || p.part >= p.parts || typeof p.data !== 'string' || p.data.length > PART_CHARS) continue;
       const dir = partDir(env, agent, house, id);
-      const pending = p.pending ?? null;
+      const format = p.format ?? null;
+      if (format !== null && format !== 'receipts-v1') continue;
+      let pending = p.pending ?? null;
       if (!validPendingInbox(pending)) continue;
+      const receipt = format ? { format } : pending;
       const omitted = p.omitted ?? null;
       if (omitted !== null && omitted !== 'size-limit') continue;
       let sealedPart;
@@ -560,8 +595,8 @@ export function bodySync(env, caller, body, o = {}) {
       if (current?.nativeHistory?.v === 1) writeJson(join(dir, 'offline.json'), { v: 1, source: 'host', bodyId: id });
       const inboxReceipt = join(dir, 'pending.age');
       if (existsSync(inboxReceipt)) {
-        if (sealer.open(readFileSync(inboxReceipt)).toString() !== JSON.stringify(pending)) continue;
-      } else writeFileSync(inboxReceipt, sealer.seal(Buffer.from(JSON.stringify(pending))), { mode: 0o600 });
+        if (sealer.open(readFileSync(inboxReceipt)).toString() !== JSON.stringify(receipt)) continue;
+      } else writeFileSync(inboxReceipt, sealer.seal(Buffer.from(JSON.stringify(receipt))), { mode: 0o600 });
       const omissionReceipt = join(dir, 'omitted.age');
       if (existsSync(omissionReceipt)) {
         if (sealer.open(readFileSync(omissionReceipt)).toString() !== JSON.stringify(omitted)) continue;
@@ -576,9 +611,11 @@ export function bodySync(env, caller, body, o = {}) {
         // Keep the native session identity with its files. The host may forget
         // the body after this acknowledgement, before a later tick retires it.
         const session = bodies[id]?.session ?? x.stop[id]?.session;
-        const packedFiles = JSON.parse(whole.toString('utf8'));
+        const transferred = JSON.parse(whole.toString('utf8'));
+        const packedFiles = format ? transferred.files : transferred;
+        if (format) { pending = transferred.pending; if (!Array.isArray(packedFiles) || !validPendingInbox(pending)) continue; }
         if (omitted && (!session || !Array.isArray(packedFiles) || packedFiles.length)) continue;
-        const kept = session ? Buffer.from(JSON.stringify({ v: 1, session, files: packedFiles, pending, ...(omitted ? { omitted } : {}) })) : whole;
+        const kept = session ? Buffer.from(JSON.stringify({ v: 1, session, files: packedFiles, pending, ...(omitted ? { omitted } : {}) })) : format ? Buffer.from(JSON.stringify(packedFiles)) : whole;
         if (current?.nativeHistory?.v === 1) writeJson(offlinePin(f), { v: 1, source: 'host' });
         writeFileSync(f, sealer.seal(kept), { mode: 0o600 });
         rmSync(dir, { recursive: true, force: true });
@@ -614,7 +651,7 @@ export function bodySync(env, caller, body, o = {}) {
     const outstanding = stopping && listConvs(env).some(c => c.agent === agent && (wanted.has(c.conversation) || belongsToHouse(c, house)) && (c.body || c.starting || c.control?.state !== 'held'));
     const live = Object.values(bodies).some(b => b.status !== 'ended');
     const exit = stopping && !startingUnknown && !starting.length && !live && !outstanding && !Object.keys(x.stop ?? {}).length && !Object.keys(req).length;
-    return { req, stop: x.stop ?? {}, inbox, acked: got, received, ...(restart.length ? { restart } : {}), ...(stopping ? { stopping: true } : {}), ...(exit ? { exit: true, reason: 'its conversations and native sessions were collected before house rescue' } : {}), ...(issued ? { hostKey: issued } : {}) };
+    return { packedReceipts: true, req, stop: x.stop ?? {}, inbox, acked: got, received, ...(restart.length ? { restart } : {}), ...(stopping ? { stopping: true } : {}), ...(exit ? { exit: true, reason: 'its conversations and native sessions were collected before house rescue' } : {}), ...(issued ? { hostKey: issued } : {}) };
   });
 }
 
@@ -917,7 +954,7 @@ export class HouseRunner {
             (x.draining ??= {})[x.house] = Object.fromEntries(PER_HOUSE.filter(k => k in x).map(k => [k, x[k]]));
             for (const k of PER_HOUSE) delete x[k];
           }
-          x.house = r.id; delete x.report; delete x.hostHash; delete x.cancel; delete x.quiescing; delete x.offlineCollection;
+          x.house = r.id; delete x.report; delete x.hostHash; delete x.healthBootHash; delete x.syncFailure; delete x.cancel; delete x.quiescing; delete x.offlineCollection;
           x.bootHash = keyHash(boot); x.req = {}; x.stop = {}; x.inbox = {}; x.claimed = {};
           pruneDraining(this.env, x); writeJson(hostFile(this.env, agent, seat), x);
         });
