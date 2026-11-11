@@ -59,3 +59,56 @@ test('real runner launch keeps deny flags, and lean/full Codex homes cannot over
     assert.match(config, /mcp_servers.loom/); assert.doesNotMatch(config, /mcp_servers.github|mcp_servers.Gmail/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test('work launch retains project definitions and refuses conflicting layers even without denies', async () => {
+  const { ClaudeRunner, CodexRunner } = await import('../src/runners.mjs');
+  const root = mkdtempSync(join(tmpdir(), 'profile-layers-'));
+  try {
+    const home = join(root, 'home'), cwd = join(root, 'repo');
+    mkdirSync(home); mkdirSync(cwd); mkdirSync(join(cwd, '.git'));
+    writeFileSync(join(home, '.claude.json'), JSON.stringify({ mcpServers: { loom: { url: 'https://global.invalid' }, taskstore: { command: 'global-taskstore' } }, projects: { [cwd]: { mcpServers: { loom: { url: 'https://scoped.invalid' }, github: { command: 'scoped-github' }, taskstore: { command: 'scoped-taskstore' } } } } }));
+    writeFileSync(join(cwd, '.mcp.json'), JSON.stringify({ mcpServers: { loom: { url: 'https://project.invalid' }, slack: {} } }));
+    const args = claudeWorkArgs({ HOME: home, LOOM_BODY_PROFILE: 'work' }, cwd, join(home, 'jobs'));
+    assert.deepEqual(JSON.parse(readFileSync(args[2], 'utf8')).mcpServers, { loom: { url: 'https://project.invalid' }, github: { command: 'scoped-github' }, taskstore: { command: 'scoped-taskstore' } });
+    for (const args of [['--mcp-config', 'custom.json'], ['--mcp-config=custom.json']]) {
+      const runner = new ClaudeRunner({ jobsDir: join(home, 'jobs'), args, run: () => { throw Error('must not launch'); } });
+      assert.throws(() => runner.start({ brief: 'Work', cwd, env: { HOME: home, LOOM_BODY_PROFILE: 'work' }, deny: [] }), /custom --mcp-config/);
+    }
+    writeFileSync(join(home, 'config.toml'), '[mcp_servers.loom]\nurl="https://example.invalid"\n');
+    const systemDir = join(root, 'system'); mkdirSync(systemDir);
+    const runner = new CodexRunner({ codexHome: home, systemDir });
+    const env = { CODEX_HOME: home, LOOM_BODY_PROFILE: 'work' };
+    mkdirSync(join(cwd, '.codex')); writeFileSync(join(cwd, '.codex/config.toml'), '');
+    assert.match(runner.plan([], cwd, env).why, /config.*runtime can.t replace/);
+    rmSync(join(cwd, '.codex'), { recursive: true });
+    writeFileSync(join(systemDir, 'requirements.toml'), '');
+    assert.match(runner.plan([], cwd, env).why, /requirements.toml/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('Claude work definitions use the configured home instead of default-home servers', () => {
+  const root = mkdtempSync(join(tmpdir(), 'profile-configured-'));
+  try {
+    const configured = join(root, 'configured'); mkdirSync(configured);
+    writeFileSync(join(root, '.claude.json'), JSON.stringify({ mcpServers: { loom: { url: 'https://wrong.invalid' }, github: {} } }));
+    writeFileSync(join(configured, '.claude.json'), JSON.stringify({ mcpServers: { loom: { url: 'https://right.invalid' }, taskstore: {} } }));
+    const args = claudeWorkArgs({ HOME: root, CLAUDE_CONFIG_DIR: configured, LOOM_BODY_PROFILE: 'work' }, root, join(root, 'jobs'));
+    assert.deepEqual(JSON.parse(readFileSync(args[2], 'utf8')).mcpServers, { loom: { url: 'https://right.invalid' }, taskstore: {} });
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+for (const method of ['start', 'prepare']) test(`house ${method} transport preserves work profile and deny flags`, async () => {
+  const { houseWorld, until } = await import('./delivery-world.mjs');
+  const { load } = await import('../src/state.mjs');
+  const w = houseWorld(); let host;
+  const options = { agent: 'art', brief: 'profile transport fixture', model: 'opus', seat: 'owner.cv-abcdef123456', deny: ['mcp__github'], env: { LOOM_BODY_PROFILE: 'work', LOOM_BODY_KEY: 'fixture-key', LOOM_BODY_CONVERSATION: 'cv-abcdef123456' } };
+  try {
+    const pending = method === 'start' ? w.hr.start(options) : w.hr.prepareLaunch('7'.repeat(64), options);
+    await until(() => load(w.env).houses['h-1']); host = w.host();
+    const got = await pending;
+    if (method === 'prepare') w.hr.publishPreparedLaunch(got);
+    await until(() => Object.keys(w.local.envs).length > 0);
+    const id = Object.keys(w.local.envs)[0];
+    assert.equal(w.local.envs[id].LOOM_BODY_PROFILE, 'work');
+    assert.deepEqual(w.local.denies[id], ['mcp__github']);
+  } finally { if (host) { await w.kill(); await host; } }
+});

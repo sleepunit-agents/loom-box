@@ -17,7 +17,7 @@ export function claudeWorkArgs(env, cwd, jobsDir) {
   if (!isWork(env)) return [];
   const home = env.HOME;
   if (!home) throw Error('work profile needs HOME');
-  const conf = json(join(home, '.claude.json'));
+  const conf = json(join(env.CLAUDE_CONFIG_DIR || home, '.claude.json'));
   const project = cwd ? json(join(cwd, '.mcp.json')) : {};
   const servers = workServers({ ...conf.mcpServers, ...conf.projects?.[resolve(cwd || home)]?.mcpServers, ...project.mcpServers });
   if (!servers.loom) throw Error('work profile needs the loom MCP server in ~/.claude.json or .mcp.json');

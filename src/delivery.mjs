@@ -196,7 +196,7 @@ function syncPath(file) {
 }
 const syncConversation = (env, cv) => syncPath(join(convDir(env), `${cv}.json`));
 function archiveContextFile(file, archive) {
-  if (!existsSync(file)) return;
+  if (!existsSync(file)) throw Error('context archive source is missing');
   const tmp = `${archive}.${process.pid}.tmp`;
   copyFileSync(file, tmp); syncPath(tmp);
   renameSync(tmp, archive); syncPath(archive);
@@ -1246,6 +1246,17 @@ function plan(env, cv, d, mem) {
   // The owner reset it (resetPrincipal): the body that heard what came before ends, its session not kept.
   if (c.resetPending && (st === 'working' || st === 'idle')) return begin({ type: 'reseat', body: c.body });
   if (c.resetPending && st === 'none') delete c.resetPending;
+  if (c.contextCap?.body === c.body && (st === 'idle' || st === 'ended')) {
+    try {
+      const rec = readBody(env, c.body), runner = d.runner(rec.harness, rec.local);
+      const note = c.contextCap.note ? d.sealer.open(Buffer.from(c.contextCap.note, 'base64')).toString('utf-8') : handoffText(runner.final?.(bodyOf(c.body, rec)));
+      if (note) {
+        c.contextCap.note = d.sealer.seal(Buffer.from(note)).toString('base64');
+        return begin({ type: 'context-rotate', body: c.body });
+      }
+    } catch { return wait('context handoff collection is pending'); }
+  }
+
   if (st === 'working') {
     // A guest's message never reaches a body that isn't a guest venue's (its tools aren't narrowed, its brief has no
     // floor): that body is ended, its session not kept, and a body under a guest venue's rules starts for it.
@@ -2275,7 +2286,14 @@ async function executeOne(env, op, d, mem) {
     });
     return;
   }
-  if (op.type === 'context-rotate') return rotateContext(env, op, d);
+  if (op.type === 'context-rotate') {
+    try { return await rotateContext(env, op, d); }
+    catch (e) {
+      if (e instanceof RetirementPending) throw e;
+      d.warn(`context rotation for ${op.cv} waits for durable storage: ${e.message}`);
+      throw new RetirementPending();
+    }
+  }
   if (op.type === 'recover-start') return recoverPreparedStart(env, op, d);
   if (op.type === 'interrupt') return interruptOp(env, op, d);
   if (op.type === 'loop-note') return loopNote(env, op, d);
@@ -2738,7 +2756,7 @@ async function rotateContext(env, op, d) {
     c.contextModel = { model: old.model, harness: old.harness };
     c.contextFloor = c.bodyRules;
     const voices = c.runMsgs?.msgs?.filter(x => !isNote(x)).map(({ from, tier, owner, tierUnread, wakeFor, local }) => ({ from, tier, owner, tierUnread, wakeFor, local })) ?? [];
-    if (voices.length) c.contextAuthority = voices;
+    if (voices.length) c.contextAuthority = [...new Map([...(c.contextAuthority ?? []), ...voices].map(v => [JSON.stringify(v), v])).values()];
     const file = slotFile(env, op.cv);
     // Keep the old sealed transcript as lineage, but never select it for resume.
     const archive = `${file}.context-${handoff.run}`;
@@ -3137,6 +3155,7 @@ async function retire(env, cv, ref, d, stop) {
     try {
       files = runner.remote ? await runner.pack(body, { deferAck: true }) : packSession(runner, slot, body);
     } catch (e) {
+      if (c?.contextCap?.note) throw new RetirementPending(pending);
       if (runner.remote && !(e instanceof SessionSizeError) && !(e instanceof SessionHistoryMissing) && runner.pending?.(body) !== false) throw new RetirementPending(pending);
       if (!runner.remote && !(e instanceof SessionSizeError) && !(e instanceof SessionHistoryMissing)) {
         d.warn(`keeping ${cv}'s native session until its files can be read (${e.message})`);
@@ -3176,6 +3195,7 @@ async function retire(env, cv, ref, d, stop) {
         ...(c.fed ?? []).filter(x => x.sealed && !unread.has(x.key)).map(x => ({ ...x, reconciliation: true })), ...pending]
         .filter(x => !seen.has(x.key) && (seen.add(x.key), true));
     }
+    if (c?.contextCap?.note && (!Array.isArray(files) || !files.length)) throw new RetirementPending(pending);
     let kept = null, prepared = null;
     if (Array.isArray(files) && files.length) {
       if (!slot || !c) throw new RetirementPending(pending);
@@ -3222,6 +3242,7 @@ async function retire(env, cv, ref, d, stop) {
   }
 
   if (c?.contextCap?.note) {
+    if (!committed?.slot || committed.loss) throw new RetirementPending(pending);
     if (existsSync(file)) syncPath(file);
     syncConversation(env, cv);
   }

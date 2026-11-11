@@ -24,7 +24,7 @@ test('Codex inclusive input and repeated quota readings do not double count', as
   const count = (input, last, output) => ({ type: 'event_msg', timestamp: '2026-11-11T01:00:00Z', payload: { type: 'token_count', info: { total_token_usage: { input_tokens: input, output_tokens: output }, last_token_usage: { input_tokens: last, cached_input_tokens: 60, cache_write_input_tokens: 10, output_tokens: 5 } } } });
   await fixture([{ type: 'turn_context', payload: { model: 'gpt-test' } }, count(100, 100, 5), count(100, 100, 5), count(220, 120, 10)], async f => {
     const r = await transcriptUsage(f);
-    assert.equal(r.calls, 2); assert.equal(r.averageContext, 110); assert.equal(r.cacheRead, 120); assert.equal(r.cacheCreate, 20); assert.equal(r.uncached, 80); assert.equal(r.output, 10); assert.deepEqual(r.models, ['gpt-test']);
+    assert.equal(r.calls, 2); assert.equal(r.cacheWriteCalls, 2); assert.equal(r.startingContext, 100); assert.equal(r.lastContext, 120); assert.equal(r.peakContext, 120); assert.equal(r.averageContext, 110); assert.equal(r.cacheRead, 120); assert.equal(r.cacheCreate, 20); assert.equal(r.uncached, 80); assert.equal(r.output, 10); assert.deepEqual(r.models, ['gpt-test']);
   });
 });
 test('ranks full session totals on Central start day; no symlink duplicates', async () => {
@@ -55,4 +55,44 @@ test('partial Codex copy starting on a quota-only repeat is not another call; re
     const merged = await usageJobs({ roots: [root], day: '2026-11-10' });
     assert.equal(merged.jobs[0].calls, 3); assert.equal(merged.jobs[0].uncached, 270);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('mixed Claude request/message aliases dedupe within and across copies', async () => {
+  const row = (requestId, id) => ({ type: 'assistant', sessionId: 'mixed', requestId, timestamp: '2026-11-11T01:00:00Z', message: { id, usage: { input_tokens: 10, cache_creation_input_tokens: 20 } } });
+  await fixture([row('r', undefined), row(undefined, 'm')], async (f, root) => {
+    writeFileSync(join(root, 'bridge.jsonl'), JSON.stringify(row('r', 'm')));
+    let report = await usageJobs({ roots: [root], day: 'all' });
+    assert.equal(report.jobs[0].calls, 1); assert.equal(report.jobs[0].cacheWriteCalls, 1); assert.equal(report.jobs[0].totalTokens, 30);
+    writeFileSync(f, [row('r', undefined), row(undefined, 'm'), row('r', 'm')].map(JSON.stringify).join('\n'));
+    assert.equal((await transcriptUsage(f)).calls, 1);
+  });
+});
+test('timezone determines the default date, and limit constrains ranking', async () => {
+  const row = (id, amount) => ({ type: 'assistant', sessionId: id, timestamp: new Date().toISOString(), message: { id, usage: { input_tokens: amount } } });
+  await fixture([row('small', 10)], async (f, root) => {
+    writeFileSync(join(root, 'big.jsonl'), JSON.stringify(row('big', 20)));
+    for (const timezone of ['Pacific/Kiritimati', 'Pacific/Honolulu']) {
+      const report = await usageJobs({ roots: [root], timezone, limit: 1 });
+      assert.equal(report.day, new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date()));
+      assert.equal(report.measuredJobs, 2); assert.deepEqual(report.jobs.map(r => r.session), ['big']);
+    }
+  });
+});
+test('zero Codex cache writes and quota-only repeats count no writes', async () => {
+  const row = { type: 'event_msg', timestamp: '2026-11-11T01:00:00Z', payload: { type: 'token_count', info: { total_token_usage: { input_tokens: 100 }, last_token_usage: { input_tokens: 100, output_tokens: 3 } } } };
+  await fixture([row, row], async f => { const r = await transcriptUsage(f); assert.equal(r.calls, 1); assert.equal(r.cacheWriteCalls, 0); });
+});
+
+test('Claude counts writes only when cache creation is positive', async () => {
+  const row = (id, cache_creation_input_tokens) => ({ type: 'assistant', sessionId: 'mixed-writes', message: { id, usage: { input_tokens: 10, cache_creation_input_tokens } } });
+  await fixture([row('absent'), row('zero', 0), row('positive', 20), row('positive', 20)], async f => {
+    const r = await transcriptUsage(f); assert.equal(r.calls, 3); assert.equal(r.cacheWriteCalls, 1); assert.equal(r.cacheCreate, 20);
+  });
+});
+
+test('reordered Codex totals and absent zero counters are the same observation', async () => {
+  const row = (timestamp, total) => ({ type: 'event_msg', timestamp, payload: { type: 'token_count', info: { total_token_usage: total, last_token_usage: { input_tokens: 100, cache_write_input_tokens: 20, output_tokens: 5 } } } });
+  await fixture([row('2026-11-11T01:00:00Z', { input_tokens: 100, output_tokens: 5 }), row('2026-11-11T01:00:01Z', { output_tokens: 5, input_tokens: 100, cached_input_tokens: 0 })], async f => {
+    const r = await transcriptUsage(f); assert.equal(r.calls, 1); assert.equal(r.cacheWriteCalls, 1); assert.equal(r.cacheCreate, 20); assert.equal(r.output, 5);
+  });
 });

@@ -8,6 +8,26 @@ const n = x => Number.isFinite(x) && x >= 0 ? x : 0;
 const stamp = x => { const t = Date.parse(x); return Number.isFinite(t) ? t : null; };
 export const dayOf = (t, tz = 'America/Chicago') => new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(t));
 
+const counters = ['uncached', 'cacheRead', 'cacheCreate', 'output'];
+const mergeCall = (a, b) => ({ ...a, ...b, at: Math.min(a.at ?? Infinity, b.at ?? Infinity),
+  ...Object.fromEntries(counters.map(k => [k, Math.max(a[k], b[k])])) });
+function claudeCalls(rows) {
+  const aliases = new Map(), groups = new Set();
+  for (const row of rows) {
+    const found = [...new Set(row.ids.map(id => aliases.get(id)).filter(Boolean))];
+    const group = found.shift() ?? { row, ids: new Set() };
+    for (const old of found) {
+      group.row = mergeCall(group.row, old.row);
+      for (const id of old.ids) { group.ids.add(id); aliases.set(id, group); }
+      groups.delete(old);
+    }
+    group.row = mergeCall(group.row, row);
+    for (const id of row.ids) { group.ids.add(id); aliases.set(id, group); }
+    groups.add(group);
+  }
+  return new Map([...groups].map(g => [ [...g.ids].sort()[0], { ...g.row, ids: [...g.ids] } ]).sort((a,b) => a[1].at - b[1].at));
+}
+
 export async function transcriptUsage(file) {
   let calls = new Map();
   const observations = [];
@@ -23,13 +43,11 @@ export async function transcriptUsage(file) {
     if (r.type === 'assistant' && r.message?.usage) {
       harness = 'claude';
       const m = r.message, u = m.usage;
-      const key = r.requestId ?? m.id;
+      const ids = [r.requestId && `request:${r.requestId}`, m.id && `message:${m.id}`].filter(Boolean);
       // Without an API message/request id, duplicate billing cannot be ruled out.
-      if (!key) continue;
-      const v = { at, model: m.model ?? model ?? 'unknown', uncached: n(u.input_tokens), cacheRead: n(u.cache_read_input_tokens), cacheCreate: n(u.cache_creation_input_tokens), output: n(u.output_tokens) };
-      const old = calls.get(key);
-      if (old) for (const k of ['uncached', 'cacheRead', 'cacheCreate', 'output']) v[k] = Math.max(old[k], v[k]);
-      calls.set(key, v);
+      if (!ids.length) continue;
+      const v = { ids, at, model: m.model ?? model ?? 'unknown', uncached: n(u.input_tokens), cacheRead: n(u.cache_read_input_tokens), cacheCreate: n(u.cache_creation_input_tokens), output: n(u.output_tokens) };
+      calls.set(calls.size, v);
     }
     if (r.type === 'event_msg' && p.type === 'token_count' && p.info?.last_token_usage && p.info?.total_token_usage) {
       harness = 'codex';
@@ -38,6 +56,7 @@ export async function transcriptUsage(file) {
     }
   }
   if (harness === 'codex') { const normalized = codexCalls(observations); calls = normalized.calls; resets = normalized.resets; }
+  if (harness === 'claude') calls = claudeCalls(calls.values());
   if (!calls.size) return null;
   const result = summarizeUsage({ calls, session: session ?? basename(file, '.jsonl'), harness, start, end, malformed, resets, file: resolve(file) });
   Object.defineProperty(result, 'nativeObservations', { value: observations });
@@ -47,7 +66,7 @@ function codexCalls(observations) {
   const calls = new Map(), seen = new Set();
   let last, resets = 0;
   for (const row of [...observations].sort((a,b) => (a.at ?? 0) - (b.at ?? 0) || (a.ordinal ?? 0) - (b.ordinal ?? 0))) {
-    const sig = JSON.stringify(row.total);
+    const sig = JSON.stringify(['input_tokens', 'cached_input_tokens', 'cache_write_input_tokens', 'output_tokens', 'reasoning_output_tokens', 'total_tokens'].map(k => n(row.total[k])));
     const key = row.ordinal === undefined ? `${row.at}:${sig}` : `ordinal:${row.ordinal}`;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -105,7 +124,8 @@ export function defaultUsageRoots(env = process.env) {
   return native && existsSync(native) ? [join(native, 'claude-projects'), join(native, 'codex-sessions')]
     : [join(env.CLAUDE_CONFIG_DIR || join(home, '.claude'), 'projects'), join(env.CODEX_HOME || join(home, '.codex'), 'sessions')];
 }
-export async function usageJobs({ roots = defaultUsageRoots(), day = dayOf(Date.now()), timezone = 'America/Chicago', limit = 10 } = {}) {
+export async function usageJobs({ roots = defaultUsageRoots(), day, timezone = 'America/Chicago', limit = 10 } = {}) {
+  day ??= dayOf(Date.now(), timezone);
   const sessions = new Map(), seen = new Set();
   let scanned = 0;
   for (const root of roots) for (const file of transcriptFiles(root)) {
@@ -117,10 +137,7 @@ export async function usageJobs({ roots = defaultUsageRoots(), day = dayOf(Date.
     if (!old) { sessions.set(id, job); continue; }
     let calls = new Map(old.nativeCalls);
     const observations = [...(old.nativeObservations ?? []), ...(job.nativeObservations ?? [])];
-    for (const [key, row] of job.nativeCalls) {
-      const before = calls.get(key);
-      calls.set(key, before ? { ...row, ...Object.fromEntries(['uncached', 'cacheRead', 'cacheCreate', 'output'].map(k => [k, Math.max(before[k], row[k])])) } : row);
-    }
+    if (job.harness === 'claude') calls = claudeCalls([...old.nativeCalls.values(), ...job.nativeCalls.values()]);
     let resets = Math.max(old.counterResets, job.counterResets);
     if (job.harness === 'codex') { const normalized = codexCalls(observations); calls = normalized.calls; resets = normalized.resets; }
     // Copies may be partial. Native call identity dedupes the union before ranking.
