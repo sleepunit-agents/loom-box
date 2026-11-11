@@ -401,10 +401,12 @@ export function shownText(text, max = MAX_BODY) {
 function proseWithoutKeys(text) {
   const out = [];
   let inKey = false, from = 0;
-  // Delimiter scans are linear in the already bounded text. Only marker words are compacted; prose keeps its lines.
-  for (const m of text.matchAll(/-----([^-]*)-----/g)) {
+  // Match marker words themselves: a preceding rule must never consume their opening dashes.
+  // Any BEGIN is fail-closed, including an unfinished header at the chunk boundary.
+  // The scan stays linear in bounded text; only marker words are compacted.
+  for (const m of text.matchAll(/-----\s*((?:B\s*E\s*G\s*I\s*N|E\s*N\s*D)[^-]*)(?:-----|$)/g)) {
     const marker = m[1].replace(/\s/g, '');
-    if (!inKey && /^BEGIN[A-Z]*PRIVATEKEY(?:BLOCK)?$/.test(marker)) {
+    if (!inKey && /^BEGIN/.test(marker)) {
       out.push(text.slice(from, m.index), GONE);
       inKey = true;
     } else if (inKey && /^END[A-Z]*PRIVATEKEY(?:BLOCK)?$/.test(marker)) {
