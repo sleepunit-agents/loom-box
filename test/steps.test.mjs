@@ -835,3 +835,19 @@ test('house command detail is allowlisted before any normalization', async () =>
     assert.equal(card.summary, 'Ran a command');
   }
 });
+
+
+test('every marker split position removes every private-key payload from the whole Claude card', () => {
+  for (const header of ['-----BEGIN PRIVATE KEY-----', '-----BEGIN RSA PRIVATE KEY-----', '-----BEGIN PGP PRIVATE KEY BLOCK-----']) {
+    for (const split of ['\n', '\r', '\t', '\u2028', '\x1b[31m']) {
+      // Delimiters stay intact; every marker-word boundary and position inside its words is exercised.
+      for (let at = 5; at <= header.length - 5; at++) {
+        const marker = header.slice(0, at) + split + header.slice(at);
+        const text = `intro\n${marker}\nfirst-private-payload\nsecond-private-payload\n${header.replace('BEGIN', 'END')}\nafter`;
+        const [card] = claudeCards([{ type: 'assistant', uuid: 'key-split', message: { content: [{ type: 'text', text }] } }]);
+        assert.equal(card.summary, 'intro');
+        assert.equal(card.body, 'intro\n…\nafter');
+      }
+    }
+  }
+});

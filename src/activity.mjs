@@ -397,11 +397,30 @@ export function shownText(text, max = MAX_BODY) {
   return capLines([...shown, ...tail.map(show)], max, middle.length);
 }
 
+/** Remove private-key blocks before a prose window. Whitespace inside a marker never hides it. */
+function proseWithoutKeys(text) {
+  const out = [];
+  let inKey = false, from = 0;
+  // Delimiter scans are linear in the already bounded text. Only marker words are compacted; prose keeps its lines.
+  for (const m of text.matchAll(/-----([^-]*)-----/g)) {
+    const marker = m[1].replace(/\s/g, '');
+    if (!inKey && /^BEGIN[A-Z]*PRIVATEKEY(?:BLOCK)?$/.test(marker)) {
+      out.push(text.slice(from, m.index), GONE);
+      inKey = true;
+    } else if (inKey && /^END[A-Z]*PRIVATEKEY(?:BLOCK)?$/.test(marker)) {
+      from = m.index + m[0].length;
+      inKey = false;
+    }
+  }
+  if (!inKey) out.push(text.slice(from));
+  return out.join('');
+}
+
 /** Assistant prose is normalized and redacted as a complete bounded text before any label/body window.
  * Keep physical newlines so ordinary prose retains its lines and multiline secret assignments retain context. */
 function ownWords(text) {
   const normalized = cutInput(text, 2_000_000).split('\n').map(normLine).join('\n').replace(SGR, '');
-  const withoutKeys = normalized.replace(/-----BEGIN[ \t\n]+(?:[A-Z]+[ \t\n]+){0,4}PRIVATE[ \t\n]+KEY(?:[ \t\n]+BLOCK)?-----[\s\S]*?(?:-----END[ \t\n]+(?:[A-Z]+[ \t\n]+){0,4}PRIVATE[ \t\n]+KEY(?:[ \t\n]+BLOCK)?-----|$)/g, GONE);
+  const withoutKeys = proseWithoutKeys(normalized);
   return shownText(redact(withoutKeys, { max: withoutKeys.length }), MAX_TEXT);
 }
 
