@@ -315,7 +315,9 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
       }
       let tickerAction;
       if (status === 'working') { try { tickerAction = r.tickerAction?.({ id, ...(b.slot ? { slot: b.slot } : {}) }); } catch { /* unavailable */ } }
-      bodies[id] = { ...(tickerAction ? { tickerAction, tickerObservedAt: new Date(now()).toISOString() } : {}), harness: b.harness, status, ...(slot?.session ? { session: slot.session } : {}), feedable: !!r.inbox, pending, ...(turn ? { turn } : {}), ...(typeof final === 'string' ? { final } : {}), ...(cards ? { cards } : {}), ...(alive ? { alive } : {}) };
+      let contextTokens;
+      try { contextTokens = r.context?.({ id, ...(b.slot ? { slot: b.slot } : {}) }); } catch { /* no observation */ }
+      bodies[id] = { ...(Number.isSafeInteger(contextTokens) && contextTokens > 0 ? { contextTokens } : {}), ...(tickerAction ? { tickerAction, tickerObservedAt: new Date(now()).toISOString() } : {}), harness: b.harness, status, ...(slot?.session ? { session: slot.session } : {}), feedable: !!r.inbox, pending, ...(turn ? { turn } : {}), ...(typeof final === 'string' ? { final } : {}), ...(cards ? { cards } : {}), ...(alive ? { alive } : {}) };
     }
     await reportUsage(turnsOver);
     const packed = packedParts(packing, history);

@@ -40,6 +40,7 @@ import { chmodSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdi
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { lastContext } from './context-cap.mjs';
 import { keptReading } from './statusline.mjs';
 import { claudeActionNow, codexActionNow } from './ticker.mjs';
 import { claudeCards, claudeTokens, codexCards } from './activity.mjs';
@@ -320,6 +321,11 @@ export class ClaudeRunner {
       Object.assign(out, { failed: true, limited: true, error: out.error ?? `its provider refused it (${refused.code})`, ...(until ? { resets: until } : {}) });
     }
     return out;
+  }
+
+  context(body) {
+    const f = this.transcriptOf(body);
+    return f ? lastContext('claude', tailOf(f, 1024 * 1024)) : null;
   }
 
   /**
@@ -768,6 +774,14 @@ export class CodexRunner {
     return this.launch({ ...o, resume: slot.session });
   }
   feed(body, message) { return feedVia(this, body, message); }
+
+  context(body) {
+    for (const k of this.sessionFiles(this.slotOf(body)).keep) {
+      const got = lastContext('codex', tailOf(join(this.roots[k.root], k.rel), 1024 * 1024));
+      if (got) return got;
+    }
+    return null;
+  }
 
   /** Its thread's rollout (where Codex writes token_count; `exec --json` doesn't): the last reading in its end. */
   usage(body) {

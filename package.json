@@ -159,6 +159,12 @@
           }
         ],
         "hint": "needs the approvals piece with host rules (t-2104); an unreadable answer is the step's own tier"
+      },
+      {
+        "name": "LOOM_RUNTIME_CONTEXT_CAP",
+        "label": "Job context before a fresh session handoff",
+        "default": "150000",
+        "hint": "Scheduled and spawned jobs only; 20000–2000000 tokens; off disables. Cooperative handoff at a safe tool boundary; see docs/context-continuation.md."
       }
     ],
     "services": [
