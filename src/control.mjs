@@ -1844,6 +1844,7 @@ export function api(env, effects, { caller, path, body }) {
     if (caller.kind === 'piece') fail(`a box can't ${path || 'do that'}`, 403);
     if (caller.kind !== 'owner' && caller.kind !== 'agent') fail('not for you', 403);
     // A body host, in its agent's house, as that house's own token (houserunner.mjs).
+    if (path === 'body-health') return import('./houserunner.mjs').then(m => ({ status: 200, body: m.bodyHealth(env, caller, b) })).catch(apiError);
     if (path === 'body-sync') {
       if (caller.kind !== 'agent') fail('body-sync is a body host\'s, in its agent\'s house', 403);
       return import('./houserunner.mjs').then((m) => ({ status: 200, body: m.bodySync(env, caller, b) })).catch(apiError);

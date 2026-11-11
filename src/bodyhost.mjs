@@ -62,7 +62,7 @@ export function packedParts(packing, history) {
     const n = String(p.parts[p.next] ?? '').length;
     if (Object.keys(packed).length && size + n > PACKED_MAX) continue;
     size += n;
-    packed[id] = { part: p.next, parts: p.parts.length, data: p.parts[p.next], ...(history ? { pending: p.pending } : {}), ...(p.omitted ? { omitted: p.omitted } : {}) };
+    packed[id] = { part: p.next, parts: p.parts.length, data: p.parts[p.next], ...(p.format ? { format: p.format } : history ? { pending: p.pending } : {}), ...(p.omitted ? { omitted: p.omitted } : {}) };
   }
   return packed;
 }
@@ -221,6 +221,18 @@ function dropKey(env, conversation, key) {
 
 export const SYNC_MS = 2000;
 export const IDLE_S = 600;
+export const SYNC_BACKOFF_MAX_MS = 300_000;
+export const SYNC_BROKEN_AFTER = 5;
+/** The whole HTTP request, including its key and envelope, stays below core's 1 MiB cap. */
+export const SYNC_REQUEST_MAX = 1000 * 1024;
+export const syncFailureKind = (e) => /oversized|size cap/.test(String(e?.message)) ? 'oversized'
+  : /timeout|timed out|aborted/i.test(String(e?.message)) ? 'timeout' : 'unavailable';
+export const syncBackoff = (n) => Math.min(SYNC_BACKOFF_MAX_MS, SYNC_MS * 2 ** Math.min(20, Math.max(0, n - 1)));
+export function checkedSyncRequest(hostKey, report) {
+  const body = { hostKey, report };
+  if (Buffer.byteLength(JSON.stringify(body)) > SYNC_REQUEST_MAX) throw Error('sync report exceeds size cap');
+  return body;
+}
 /** An abandoned transfer may expire after this age only when a fresh controller answer no longer requests it. */
 export const PACK_MS = 120_000;
 
@@ -271,6 +283,8 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
     }
   }
   let lastBusy = now();
+  let syncFailures = 0;
+  let packedReceipts = false;
   for (let beat = 0; beat < beats; beat++) {
     const bodies = {};
     const turnsOver = [];
@@ -311,8 +325,26 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
     const sent = acks;
     const report = { bodies, done, packed, inboxAck: sent, caps: ['parts', 'native-admission', ...(history ? ['native-history'] : [])], starting: [...new Set([...launching.keys(), ...uncertain.keys(), ...Object.keys(done)])] };
     fitCards(report, REPORT_MAX);
-    try { got = await client('body-sync', { hostKey: key, report }); } catch (e) { log(`sync failed: ${e.message}`); await sleep(SYNC_MS); continue; }
+    try { got = await client('body-sync', checkedSyncRequest(key, report)); } catch (e) {
+      syncFailures++;
+      const kind = syncFailureKind(e), delay = syncBackoff(syncFailures);
+      log(`sync failed (${syncFailures}, ${kind}); retry in ${delay / 1000}s`);
+      // This small independent request still works when the full report is rejected. Never send error text:
+      // it can carry credentials or a body's words. Retry reporting at the same bounded cadence as sync.
+      if (syncFailures >= SYNC_BROKEN_AFTER) {
+        try { await client('body-health', { hostKey: key, failures: syncFailures, kind }); }
+        catch { log('could not report broken sync to the runtime'); }
+      }
+      // No native work or uncollected data here: even a host that never got its first answer may leave.
+      // A working/unknown body or uncertain launch must never be abandoned on a network failure.
+      if (idleS && !mine.size && !packing.size && !launching.size && !uncertain.size && !Object.keys(done).length && now() - lastBusy >= idleS * 1000) {
+        log(`idle ${idleS}s with failing sync: leaving`); return;
+      }
+      await sleep(delay); continue;
+    }
+    syncFailures = 0;
     if (typeof got.hostKey === 'string') key = got.hostKey;
+    packedReceipts = got.packedReceipts === true;
     // Answered: what it acknowledged is the runtime's to forget now. (A lost answer: they go again next beat.)
     if (acks === sent) acks = {};
     for (const [id, part] of got.acked ?? []) {
@@ -421,11 +453,14 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
           omitted = 'size-limit';
         }
         if (!history) dropSession(r, slot, { id });
-        const all = Buffer.from(JSON.stringify(files)).toString('base64');
+        const pending = history ? (r.inbox ? nativePendingInbox(r.inbox.dir, id) : []) : null;
+        // Receipts travel in the same bounded parts as session files, rather than repeated beside every part.
+        const format = history && packedReceipts ? 'receipts-v1' : undefined;
+        const all = Buffer.from(JSON.stringify(format ? { files, pending } : files)).toString('base64');
         const parts = [];
         for (let i = 0; i < all.length || i === 0; i += PART_CHARS) parts.push(all.slice(i, i + PART_CHARS));
-        packing.set(id, { parts, next: 0, since: now(), ...(omitted ? { omitted } : {}), ...(history ? {
-          cleanup: { harness: b.harness, slot }, pending: r.inbox ? nativePendingInbox(r.inbox.dir, id) : [],
+        packing.set(id, { parts, next: 0, since: now(), ...(format ? { format } : {}), ...(omitted ? { omitted } : {}), ...(history ? {
+          cleanup: { harness: b.harness, slot }, pending: r.inbox ? pending : [],
         } : {}) });
       } else {
         // A plain stop leaves nothing: its session's files go (only a pack keeps them, sealed, in a slot).
