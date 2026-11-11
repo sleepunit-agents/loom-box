@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, rmSync, symlinkSync, copyFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { transcriptUsage, usageJobs } from '../src/job-usage.mjs';
 const fixture = async (rows, fn) => {
@@ -180,5 +181,51 @@ test('call-count and output-volume reasons distinguish workloads at their thresh
     assert.deepEqual((await transcriptUsage(f)).reasons, ['many model calls', 'large output volume']);
     writeFileSync(f, Array.from({ length: 100 }, (_, i) => JSON.stringify(row(String(i), 1000))).join('\n'));
     assert.deepEqual((await transcriptUsage(f)).reasons, ['ordinary context and call volume']);
+  });
+});
+
+test('Claude metadata-only user fragment contributes native start day', async () => {
+  const meta = { type: 'user', sessionId: 'claude-fragments', timestamp: '2026-11-10T05:59:00Z', message: { role: 'user', content: 'PRIVATE_PROMPT_SENTINEL' } };
+  await fixture([meta], async (f, root) => {
+    writeFileSync(join(root, 'later.jsonl'), JSON.stringify({ type: 'assistant', sessionId: meta.sessionId, timestamp: '2026-11-10T06:01:00Z', message: { id: 'answer', content: [{ type: 'text', text: 'PRIVATE_ANSWER_SENTINEL' }, { type: 'tool_use', input: { private: 'PRIVATE_TOOL_SENTINEL' } }], usage: { input_tokens: 100 } } }));
+    const r = await usageJobs({ roots: [root], day: '2026-11-09' });
+    assert.equal(r.jobs.length, 1); assert.equal(r.jobs[0].durationSeconds, 120); assert.equal(r.jobs[0].start, '2026-11-10T05:59:00.000Z');
+    assert.doesNotMatch(JSON.stringify(r), /PRIVATE_/);
+  });
+});
+test('same-timestamp Codex quota repeat after a model switch cannot relabel the call', async () => {
+  const row = { type: 'event_msg', timestamp: '2026-11-11T01:00:00Z', payload: { type: 'token_count', info: { total_token_usage: { input_tokens: 100 }, last_token_usage: { input_tokens: 100 } } } };
+  await fixture([row, { type: 'turn_context', payload: { model: 'later-model' } }, row], async f => {
+    const r = await transcriptUsage(f); assert.equal(r.calls, 1); assert.deepEqual(r.models, ['unknown']);
+  });
+});
+test('call count and output reasons fire independently', async () => {
+  const row = (id, output) => ({ type: 'assistant', sessionId: 'independent-volume', message: { id, usage: { input_tokens: 10, output_tokens: output } } });
+  await fixture(Array.from({ length: 101 }, (_, i) => row(String(i), 1)), async f => {
+    assert.deepEqual((await transcriptUsage(f)).reasons, ['many model calls']);
+    writeFileSync(f, JSON.stringify(row('one', 100001)));
+    assert.deepEqual((await transcriptUsage(f)).reasons, ['large output volume']);
+  });
+});
+test('Codex report never emits prompt, answer or tool contents', async () => {
+  await fixture([
+    { type: 'session_meta', payload: { id: 'private-fixture' } },
+    { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'PRIVATE_CODEX_PROMPT' }] } },
+    { type: 'response_item', payload: { type: 'function_call', arguments: 'PRIVATE_CODEX_TOOL' } },
+    { type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'PRIVATE_CODEX_ANSWER' }] } },
+    { type: 'event_msg', payload: { type: 'token_count', info: { total_token_usage: { input_tokens: 100 }, last_token_usage: { input_tokens: 100 } } } }
+  ], async (f, root) => { const r = await usageJobs({ roots: [root], day: 'all' }); assert.equal(r.jobs[0].calls, 1); assert.doesNotMatch(JSON.stringify(r), /PRIVATE_/); });
+});
+test('ranking includes cache and output, and CLI forwards root/day/timezone/limit', async () => {
+  const row = (id, input, cache, output) => ({ type: 'assistant', sessionId: id, timestamp: '2026-11-11T01:00:00Z', message: { id, usage: { input_tokens: input, cache_read_input_tokens: cache, output_tokens: output } } });
+  await fixture([row('uncached', 500, 0, 0)], async (f, root) => {
+    writeFileSync(join(root, 'cache.jsonl'), JSON.stringify(row('cache-heavy', 10, 1000, 0)));
+    writeFileSync(join(root, 'output.jsonl'), JSON.stringify(row('output-heavy', 10, 0, 2000)));
+    const r = await usageJobs({ roots: [root], day: 'all' });
+    assert.deepEqual(r.jobs.map(j => j.session), ['output-heavy', 'cache-heavy', 'uncached']);
+    const got = spawnSync(process.execPath, [fileURLToPath(new URL('../src/cli.mjs', import.meta.url)), 'usage', 'jobs', '--root', root, '--day', '2026-11-10', '--timezone', 'America/Chicago', '--limit', '1'], { encoding: 'utf8' });
+    assert.equal(got.status, 0, got.stderr); const cli = JSON.parse(got.stdout);
+    assert.deepEqual(cli.jobs.map(j => j.session), ['output-heavy']); assert.equal(cli.measuredJobs, 3);
+    assert.equal(cli.day, '2026-11-10'); assert.equal(cli.timezone, 'America/Chicago'); assert.deepEqual(cli.roots, [root]);
   });
 });

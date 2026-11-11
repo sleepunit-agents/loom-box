@@ -39,7 +39,7 @@ export async function transcriptUsage(file) {
     const p = r.payload ?? {}, at = stamp(r.timestamp);
     if (at !== null) { start = start === undefined ? at : Math.min(start, at); end = end === undefined ? at : Math.max(end, at); }
     if (r.type === 'session_meta') { harness = 'codex'; session = p.id ?? p.session_id; }
-    if (r.sessionId) session = r.sessionId;
+    if (r.sessionId) { session = r.sessionId; harness ??= 'claude'; }
     if (r.type === 'turn_context' && p.model) model = p.model;
     if (r.type === 'assistant' && r.message?.usage) {
       harness = 'claude';
@@ -52,7 +52,7 @@ export async function transcriptUsage(file) {
     }
     if (r.type === 'event_msg' && p.type === 'token_count' && p.info?.last_token_usage && p.info?.total_token_usage) {
       harness = 'codex';
-      observations.push({ at, ordinal: r.ordinal, model: model ?? 'unknown', total: p.info.total_token_usage, usage: p.info.last_token_usage });
+      observations.push({ source: resolve(file), at, ordinal: r.ordinal, model: model ?? 'unknown', total: p.info.total_token_usage, usage: p.info.last_token_usage });
 
     }
   }
@@ -71,7 +71,7 @@ function codexCalls(observations) {
     const sig = JSON.stringify(keys.map(k => tokenCount(row.total[k])));
     const key = row.ordinal === undefined ? `${row.at}:${sig}` : `ordinal:${row.ordinal}`;
     const old = unique.get(key);
-    unique.set(key, { ...row, key, sig, model: row.model === 'unknown' && old ? old.model : row.model });
+    unique.set(key, old?.source === row.source ? old : { ...row, key, sig, model: row.model === 'unknown' && old ? old.model : row.model });
   }
   for (const row of [...unique.values()].sort((a,b) => (a.at ?? 0) - (b.at ?? 0) || (a.ordinal ?? 0) - (b.ordinal ?? 0))) {
     if (row.sig === last?.sig) {
