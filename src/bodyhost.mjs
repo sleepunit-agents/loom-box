@@ -1,4 +1,4 @@
-import { PROFILE_CAP, selectedProfile, restrictedEnv } from './work-profile.mjs';
+import { PROFILE_CAP, selectedProfile, restrictedEnv, profileNotice } from './work-profile.mjs';
 // The body host (shuttle's bodies.py Host, ported): runs in an agent's own warm house, as the house's task
 // (houserunner.mjs, hostTask), and wakes the bodies the runtime asks for with the house's own runner: its harness,
 // logged in on its box; its repo, its cwd, its secrets; its agent's loom token. A body's environment is the house's,
@@ -382,9 +382,10 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
           const cv = q.key && CV.test(q.conversation ?? '') ? q.conversation : null;
           // A brief in parts names the agent's own files (briefs.mjs): read here, from its repo (this house's cwd).
           // A file that isn't there fails the start: never a body without what its brief must carry.
-          const brief = [q.profileProblem, q.parts !== undefined ? composeBrief(q.parts, cwd) : q.brief].filter(Boolean).join('\n\n');
-          const profile = q.profile !== undefined ? selectedProfile({ LOOM_BODY_PROFILE: q.profile }) : null;
-          const o = { brief, model: q.model, deny: q.deny ?? [], cwd, env: { ...(profile ? restrictedEnv(bodyEnv, profile) : bodyEnv), LOOM_BODY_MODEL: q.model, ...(q.key ? { LOOM_BODY_KEY: q.key } : {}), ...(cv ? { LOOM_BODY_CONVERSATION: cv } : {}) } };
+          const transported = q.profile !== undefined ? { LOOM_BODY_PROFILE: q.profile, ...(q.profileProblem ? { LOOM_BODY_PROFILE_PROBLEM: q.profileProblem } : {}) } : {};
+          const profile = selectedProfile(transported);
+          const brief = [profileNotice(transported), q.parts !== undefined ? composeBrief(q.parts, cwd) : q.brief].filter(Boolean).join('\n\n');
+          const o = { brief, model: q.model, deny: q.deny ?? [], cwd, env: { ...(profile ? restrictedEnv({ ...bodyEnv, ...transported }, profile) : bodyEnv), LOOM_BODY_MODEL: q.model, ...(q.key ? { LOOM_BODY_KEY: q.key } : {}), ...(cv ? { LOOM_BODY_CONVERSATION: cv } : {}) } };
           // Kept by its conversation before the body starts, so its first `send` finds it.
           if (cv) keepKey(env, cv, q.key);
           let written = [];

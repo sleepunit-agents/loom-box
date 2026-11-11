@@ -24,7 +24,11 @@ export const isWork = env => env?.LOOM_BODY_PROFILE !== undefined;
 export function selectedProfile(env) {
   if (!isWork(env)) return null;
   try { return validateProfile(JSON.parse(env.LOOM_BODY_PROFILE)); }
-  catch { throw Error('invalid transported job profile; refusing unrestricted launch'); }
+  catch {
+    env.LOOM_BODY_PROFILE = JSON.stringify(minimalProfile());
+    env.LOOM_BODY_PROFILE_PROBLEM = 'JOB PROFILE PROBLEM: invalid transported job profile; using minimal profile (no tools, MCP, skills or secrets).';
+    return minimalProfile();
+  }
 }
 export function workServers(servers, profile) {
   const p = validateProfile(profile);
@@ -73,7 +77,7 @@ export function privateJson(dir, value) {
   writeFileSync(tmp, body, { mode: 0o600, flag: 'wx' }); renameSync(tmp, file);
   return file;
 }
-export function claudeWorkArgs(env, cwd, jobsDir) {
+export function claudeWorkArgs(env, cwd, jobsDir, floor = { deny: [], disabled: [] }) {
   const p = selectedProfile(env);
   if (!p) return [];
   const home = env.HOME;
@@ -83,7 +87,7 @@ export function claudeWorkArgs(env, cwd, jobsDir) {
   const scoped = conf.projects?.[resolve(cwd || home)] ?? {};
   const configDir = env.CLAUDE_CONFIG_DIR || join(home, '.claude');
   const layers = [json(join(configDir, 'settings.json')), ...(cwd ? [json(join(cwd, '.claude/settings.json')), json(join(cwd, '.claude/settings.local.json'))] : [])];
-  const disabled = new Set([conf, scoped, project, ...layers].flatMap(c => [...(c.disabledMcpServers ?? []), ...Object.entries(c.mcpServers ?? {}).filter(([,v]) => v?.enabled === false).map(([n]) => n)]));
+  const disabled = new Set([...floor.disabled, ...[conf, scoped, project, ...layers].flatMap(c => [...(c.disabledMcpServers ?? []), ...Object.entries(c.mcpServers ?? {}).filter(([,v]) => v?.enabled === false).map(([n]) => n)])]);
   const all = Object.fromEntries(Object.entries({ ...conf.mcpServers, ...scoped.mcpServers, ...project.mcpServers }).filter(([name]) => !disabled.has(name)));
   const servers = workServers(all, p);
   // Preload only the declared skill text through the supported prompt control.
@@ -100,8 +104,10 @@ export function claudeWorkArgs(env, cwd, jobsDir) {
   });
   const dir = join(jobsDir, '..', 'work-profiles');
   const mcp = privateJson(dir, { mcpServers: servers });
-  const priorDenies = [conf, scoped, ...layers].flatMap(c => c.permissions?.deny ?? []);
+  const priorDenies = [...floor.deny, ...[conf, scoped, ...layers].flatMap(c => c.permissions?.deny ?? [])];
   if (priorDenies.some(rule => typeof rule !== 'string')) throw Error('invalid inherited permission deny rules');
+  floor.deny = [...new Set(priorDenies)];
+  floor.disabled = [...disabled];
   const settings = privateJson(dir, { permissions: { deny: [...new Set([...priorDenies, 'Skill'])] }, enabledPlugins: {} });
   return [...(skills.length ? ['--append-system-prompt', skills.join('\n\n')] : []), '--system-prompt-snapshot', 'off', '--strict-mcp-config', '--mcp-config', mcp, '--safe-mode', '--disable-slash-commands', '--tools', p.tools.join(','), '--settings', settings];
 }

@@ -34,7 +34,9 @@ test('missing and malformed profiles have minimal access and visible problem, ne
     assert.match(env.LOOM_BODY_PROFILE_PROBLEM, /JOB PROFILE PROBLEM/);
     assert.equal(env.SLACK_TOKEN, undefined);
   }
-  assert.throws(() => selectedProfile({ LOOM_BODY_PROFILE: 'work' }), /invalid transported/);
+  const transported = { LOOM_BODY_PROFILE: 'work' };
+  assert.deepEqual(selectedProfile(transported), minimalProfile());
+  assert.match(transported.LOOM_BODY_PROFILE_PROBLEM, /invalid transported/);
   assert.throws(() => validateProfile(profile({ skills: ['../escape'] })), /invalid/);
 }));
 test('only declared environment and MCP credentials cross the profile boundary', () => {
@@ -66,13 +68,13 @@ test('source disabled flags cannot be promoted by a declaration or project confi
 test('Codex adapter fails visibly rather than using unverified tool/skill isolation', async () => {
   const { CodexRunner } = await import('../src/runners.mjs');
   const x = new CodexRunner();
-  assert.match(x.plan([], '/tmp', { LOOM_BODY_PROFILE: JSON.stringify(minimalProfile()) }).why, /refusing launch/);
+  assert.match(x.plan([], '/tmp', { LOOM_BODY_PROFILE: JSON.stringify(minimalProfile()) }).why, /work profiles don.t support Codex yet/);
 });
-for (const method of ['start', 'prepare']) test(`house ${method} enforces transported declaration and removes inherited secrets`, async () => {
+for (const method of ['start', 'prepare']) for (const invalid of [false, true]) test(`house ${method} ${invalid ? 'invalid fallback' : 'declared profile'} removes inherited secrets`, async () => {
   const { houseWorld, until } = await import('./delivery-world.mjs');
   const { load } = await import('../src/state.mjs');
   const w = houseWorld(); let host; w.houseEnv.PROFILE_TEST_SECRET = 'undeclared-fixture';
-  const p = JSON.stringify(profile({ tools: ['Read'] }));
+  const p = invalid ? '{broken' : JSON.stringify(profile({ tools: ['Read'] }));
   const options = { agent: 'art', brief: 'profile transport fixture', model: 'opus', seat: 'owner.cv-abcdef123456', deny: ['mcp__github'], env: { LOOM_BODY_PROFILE: p, LOOM_BODY_KEY: 'fixture-key', LOOM_BODY_CONVERSATION: 'cv-abcdef123456' } };
   try {
     const pending = method === 'start' ? w.hr.start(options) : w.hr.prepareLaunch('7'.repeat(64), options);
@@ -81,7 +83,8 @@ for (const method of ['start', 'prepare']) test(`house ${method} enforces transp
     if (method === 'prepare') w.hr.publishPreparedLaunch(got);
     await until(() => Object.keys(w.local.envs).length > 0);
     const id = Object.keys(w.local.envs)[0];
-    assert.deepEqual(selectedProfile(w.local.envs[id]), profile({ tools: ['Read'] }));
+    assert.deepEqual(selectedProfile(w.local.envs[id]), invalid ? minimalProfile() : profile({ tools: ['Read'] }));
+    if (invalid) assert.match(w.local.envs[id].LOOM_BODY_PROFILE_PROBLEM, /invalid transported/);
     assert.deepEqual(w.local.denies[id], ['mcp__github']);
     assert.equal(w.local.envs[id].PROFILE_TEST_SECRET, undefined);
   } finally { if (host) { await w.kill(); await host; } }

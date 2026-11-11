@@ -46,8 +46,9 @@ contain `DeferredToolPlaceholder` (provider schema placeholder) and `EndConversa
 (background lifecycle control). They are not MCP, shell, file or secret access;
 the executable test explicitly distinguishes these intrinsic harness controls.
 
-Codex profiled jobs remain refused: its installed CLI has no verified arbitrary
-built-in tool allowlist. This remains a rollout blocker, not completed Codex support.
+Codex profiled jobs fail closed with the visible reason "work profiles don't support
+Codex yet". Codex profile support is outside this PR; null owns that follow-up.
+Unprofiled Codex launches retain their existing behavior.
 No optional work-identity/core API is required or claimed by this runtime change.
 
 ## Owner-approved permanent amendments
@@ -78,10 +79,12 @@ The background executable test uses the actual Claude --bg runner through both
 house admission paths and a narrowed continuation; it is opt-in because it spends
 model calls. Its host transport is in-process; it does not prove a deployed image.
 
-Rollout remains HOLD. Codex isolation is still unimplemented. Source restrictions
-are read from the current configuration but their prior effective floor is not yet
-persisted across a change of configuration directory. Invalid transported profiles
-still refuse startup rather than launching minimal access with a diagnostic.
-These remain contract blockers, alongside fresh independent clearance after the
-bounded reviews; passing focused tests does not resolve them.
-Do not enable scheduled rollout or update hosts from this draft.
+Rollout awaits independent clearance and green checks. The source deny and disabled-server
+floor is saved before native admission, retained with the native session (including
+forked session ids), and packed with its continuity history. A different config
+directory or house unions the old floor with its current sources. Unknown floors
+remain visibly minimal on later continuations. Invalid transported declarations
+also launch minimal access with a visible diagnostic and no inherited job secrets.
+Install the companion approvals piece before runtime: runtime uses its new trusted
+profile-grant request and replay semantics. Do not enable scheduled rollout or
+update hosts until the coordinator clears the reviewed heads.

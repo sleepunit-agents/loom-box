@@ -1,4 +1,4 @@
-import { isWork, selectedProfile, restrictedEnv, claudeWorkArgs } from './work-profile.mjs';
+import { isWork, selectedProfile, restrictedEnv, claudeWorkArgs, minimalProfile, profileNotice } from './work-profile.mjs';
 // Runners (loom docs/specs/agent-runtime.md, section 3): one interface over the harnesses a body runs in.
 //
 // A runner runs bodies on one harness, on this machine (loom's own, or inside a house):
@@ -37,7 +37,7 @@ import { isWork, selectedProfile, restrictedEnv, claudeWorkArgs } from './work-p
 import { spawn as nodeSpawn, spawnSync } from 'node:child_process';
 import { nativeHistoryEnv, validateNativeHistoryOptions } from './native-history.mjs';
 import { createHash, randomBytes } from 'node:crypto';
-import { chmodSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -186,6 +186,7 @@ export class ClaudeRunner {
     const keep = [];
     const session = slot?.session;
     if (typeof session === 'string' && SESSION.test(session)) {
+      if (existsSync(this.floorPath(`session-${session}`))) keep.push({ root: 'projects', rel: join('.loom-profile-floors', `session-${session}.json`) });
       for (const p of dirs(this.roots.projects)) {
         for (const name of [`${session}.jsonl`, session]) if (existsSync(join(this.roots.projects, p, name))) keep.push({ root: 'projects', rel: join(p, name) });
       }
@@ -221,19 +222,63 @@ export class ClaudeRunner {
     return found ? lastToolUse(found) : { tool: '', what: '' };
   }
 
+  floorPath(key) {
+    if (!/^[A-Za-z0-9._-]+$/.test(key)) throw new RunnerError('invalid profile floor key');
+    return join(this.roots.projects, '.loom-profile-floors', `${key}.json`);
+  }
+  readFloor(key) {
+    const file = this.floorPath(key);
+    if (!existsSync(file)) return null;
+    const value = JSON.parse(readFileSync(file, 'utf8'));
+    if (!value || !['deny', 'disabled'].every(k => Array.isArray(value[k]) && value[k].every(x => typeof x === 'string'))) throw new RunnerError('invalid saved profile restriction floor');
+    return value;
+  }
+  saveFloor(key, floor) {
+    const file = this.floorPath(key);
+    mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+    for (let dir = dirname(file); ; dir = dirname(dir)) {
+      const fd = openSync(dir, 'r'); try { fsyncSync(fd); } finally { closeSync(fd); }
+      if (dirname(dir) === dir) break;
+    }
+    const tmp = `${file}.${hex8()}.tmp`;
+    try {
+      const fd = openSync(tmp, 'wx', 0o600);
+      try { writeFileSync(fd, JSON.stringify(floor)); fsyncSync(fd); } finally { closeSync(fd); }
+      renameSync(tmp, file);
+      const parent = openSync(dirname(file), 'r'); try { fsyncSync(parent); } finally { closeSync(parent); }
+    } finally { rmSync(tmp, { force: true }); }
+  }
+
+  bindFloor(token, id, session) {
+    const floor = this.readFloor(`launch-${token}`);
+    if (!floor) return;
+    this.saveFloor(`body-${id}`, floor);
+    if (session) this.saveFloor(`session-${session}`, floor);
+  }
+
   launch({ brief, model, cwd, env, deny = [], resume, launchToken }) {
     const token = launchToken === undefined ? this.token() : stableLaunchToken(launchToken);
+    const incoming = env ?? process.env;
+    const selected = selectedProfile(incoming);
+    let floor = selected ? (resume ? this.readFloor(`session-${resume}`) : { deny: [], disabled: [] }) : null;
+    if (selected && (!floor || floor.unknown)) {
+      incoming.LOOM_BODY_PROFILE = JSON.stringify(minimalProfile());
+      incoming.LOOM_BODY_PROFILE_PROBLEM = 'JOB PROFILE PROBLEM: continuation has no saved source restriction floor; using minimal profile (no tools, MCP, skills or secrets).';
+      floor = { deny: floor?.deny ?? [], disabled: floor?.disabled ?? [], unknown: true };
+    }
+    const effective = isWork(incoming) ? restrictedEnv(incoming, selectedProfile(incoming)) : incoming;
+    if (profileNotice(effective)) brief = `${profileNotice(effective)}\n\n${brief}`;
     const nl = brief.indexOf('\n');
     const prompt = nl < 0 ? `${brief}\n${ClaudeRunner.TOKEN_LINE.replace('{token}', token)}\n`
       : `${brief.slice(0, nl)}\n${ClaudeRunner.TOKEN_LINE.replace('{token}', token)}\n${brief.slice(nl + 1)}`;
     // A Codex body's key, inherited by a launcher started under one: a Claude body must never key its inbox on it.
     // Nor a Codex thread's id (a launcher running under Codex has one): `send` names a Claude body's own session.
-    const incoming = env ?? process.env;
-    const effective = isWork(incoming) ? restrictedEnv(incoming, selectedProfile(incoming)) : incoming;
     const { SHUTTLE_BODY: _drop, CODEX_THREAD_ID: _thread, ...clean } = effective;
     if (isWork(clean) && this.args.length) throw new RunnerError('job profiles cannot combine custom Claude arguments');
     const before = new Set((this.agents(clean) ?? []).map((a) => a.id));
-    const argv = ['--bg', ...(model ? ['--model', model] : []), ...this.statusLine(), ...this.args, ...claudeWorkArgs(clean, cwd, this.jobsDir), ...(deny.length ? ['--disallowedTools', ...deny] : []), ...(resume ? ['--resume', resume] : [])];
+    const workArgs = claudeWorkArgs(clean, cwd, this.jobsDir, floor ?? undefined);
+    if (floor) { floor.deny = [...new Set([...floor.deny, ...deny])]; this.saveFloor(`launch-${token}`, floor); }
+    const argv = ['--bg', ...(model ? ['--model', model] : []), ...this.statusLine(), ...this.args, ...workArgs, ...(deny.length ? ['--disallowedTools', ...deny] : []), ...(resume ? ['--resume', resume] : [])];
     const r = this.run(this.claude, argv, { cwd, env: clean, input: prompt, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 60_000 });
     if (r.error || r.status !== 0) {
       const message = `claude --bg didn't start: ${(r.stderr || r.error?.message || '').trim().split('\n').pop() || `exit ${r.status}`}`;
@@ -249,6 +294,7 @@ export class ClaudeRunner {
       if (found.length === 1) {
         const a = found[0];
         const session = a.sessionId ?? this.job(a.id)?.sessionId;
+        this.bindFloor(token, a.id, session);
         const body = { id: a.id, harness: 'claude', model, ...(session ? { slot: { harness: 'claude', session } } : {}) };
         this.inbox?.open(a.id, { venue: 'runtime', chan: a.id, bridge: 'runtime' });
         return body;
@@ -287,6 +333,7 @@ export class ClaudeRunner {
     const found = [...new Map(rows.filter(a => a?.id && (this.job(a.id)?.intent ?? '').includes(marker)).map(a => [a.id, a])).values()];
     if (found.length !== 1) return { state: 'pending' };
     const a = found[0], session = a.sessionId ?? this.job(a.id)?.sessionId;
+    this.bindFloor(token, a.id, session);
     return { state: 'ready', body: { id: a.id, harness: 'claude', model, ...(session ? { slot: { harness: 'claude', session } } : {}) } };
   }
   resume(slot, o) {
@@ -388,6 +435,10 @@ export class ClaudeRunner {
 
   slotOf(body) {
     const session = this.job(body.id)?.sessionId ?? body.slot?.session;
+    if (session && body.id) {
+      const floor = this.readFloor(`body-${body.id}`);
+      if (floor) this.saveFloor(`session-${session}`, floor);
+    }
     return session ? { harness: 'claude', session } : null;
   }
 
@@ -648,7 +699,7 @@ export class CodexRunner {
   }
 
   planOf(deny, cwd, env) {
-    if (isWork(env)) return { why: 'Codex job-profile isolation is not verified for its built-in tools and skill discovery; refusing launch instead of widening the profile' };
+    if (isWork(env)) return { why: "work profiles don't support Codex yet; refusing launch instead of widening the profile" };
     if (this.profile) return { why: `LOOM_RUNTIME_CODEX_PROFILE is set (${String(this.profile).slice(0, 64)}): a Codex profile can turn a denied tool server back on, so the codex runner runs no body under one; unset it` };
     const off = codexDeny(deny);
     if (off.error) return { why: off.error };
