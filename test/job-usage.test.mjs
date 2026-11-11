@@ -17,7 +17,7 @@ test('Claude counts each request once, includes cache context, tolerates partial
     assert.deepEqual(r.models, ['claude']); assert.equal(r.durationSeconds, 3); assert.deepEqual(r.reasons, ['large starting context', 'context exceeded 150k', 'repeated cached context dominates', 'cache creation is a material share']);
     assert.doesNotMatch(JSON.stringify(r), /nativeCalls|message|content/);
     assert.equal(r.calls, 2); assert.equal(r.startingContext, 230010); assert.equal(r.averageContext, 280010); assert.equal(r.peakContext, 330010); assert.equal(r.lastContext, 330010);
-    assert.equal(r.cacheRead, 500000); assert.equal(r.cacheCreate, 60000); assert.equal(r.uncached, 20); assert.equal(r.output, 11); assert.equal(r.malformedLines, 1);
+    assert.equal(r.cacheWriteCalls, 2); assert.equal(r.cacheRead, 500000); assert.equal(r.cacheCreate, 60000); assert.equal(r.uncached, 20); assert.equal(r.output, 11); assert.equal(r.malformedLines, 1);
   });
 });
 test('Codex inclusive input and repeated quota readings do not double count', async () => {
