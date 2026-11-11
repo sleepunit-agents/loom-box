@@ -5,14 +5,14 @@
 //   - Codex: events.jsonl. `item.started` makes a card, `item.completed` finishes it (`status: "failed"` is failed).
 // A card's summary is its label (t-1944): what the step did, in plain words, from the fixed rules below and in
 // redact.mjs; nothing is asked of a model for one (a Bash description is the body's own words, redacted like the
-// rest). A recognized safe shell command shows as its description when given, else its short form
-// (`Ran gh pr checks 603`); a file by its base name; a search by its pattern; a message by who it went to; a tool this
+// rest). Shell commands use fixed labels; only exact safe read-only forms may carry command detail. A file shows
+// by its base name; a search by its pattern; a message by who it went to; a tool this
 // table doesn't know as "Used a tool". Every variable part passes redact.mjs `part` (the gate), and every finished label
 // `finish` (redacted whole, one line, at most 120). A failed step adds why, from fixed phrases only
 // (`exit 1: 3 tests failed`). Never a tool's output, a file's contents, a whole command line or an environment value
 // in a label.
 // A card may also carry, for the owner's Watching view (t-2109; Jonathan, 2026-11-10: work done for him is shown in
-// full, only other people's words are kept out): `detail`, the step's whole command or target; `result`, one line of
+// full, only other people's words are kept out): `detail`, an allowlisted read-only command or the step's target; `result`, one line of
 // fixed phrases (`Read 120 lines`, `3 additions, 1 removal`, `12 passed, 1 failed`, `exit 1`); `body`, an edit's diff
 // of a file that isn't private, each line redacted (shownText), at most MAX_BODY; `exit`; `limit`,
 // the step's own timeout in seconds; `end`, when it finished; `parent`, the helper (subagent) it ran under; and for a
