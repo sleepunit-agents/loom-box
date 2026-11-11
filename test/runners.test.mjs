@@ -766,8 +766,8 @@ test('final snapshot excludes mid-scan appends and drops them after intermediate
   const fs = (await import('node:fs')).default;
   const { syncBuiltinESMExports } = await import('node:module');
   const h = harness();
-  for (const slice of [256, 1024]) {
-  const file = join(h.D, `append-truncate-${slice}.jsonl`);
+  for (const slice of [256, 1024]) for (const truncate of [false, true]) {
+  const file = join(h.D, `append-truncate-${slice}-${truncate}.jsonl`);
   const event = text => JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text }] } }) + '\n';
   const initial = event('first');
   // At 256 bytes, the second slice has room for both appended messages if remaining bytes are not subtracted.
@@ -787,8 +787,9 @@ test('final snapshot excludes mid-scan appends and drops them after intermediate
   let snapshot;
   try { snapshot = runner.final({}); }
   finally { fs.fstatSync = fstat; syncBuiltinESMExports(); }
-  fs.truncateSync(file, Buffer.byteLength(surviving));
-  assert.equal(runner.final({}), 'surviving', 'truncation above initial size never keeps removed words');
+  if (truncate) fs.truncateSync(file, Buffer.byteLength(surviving));
+  assert.equal(runner.final({}), truncate ? 'surviving' : 'removed',
+    truncate ? 'truncation above initial size never keeps removed words' : 'the next scan reads deferred appends without further writes');
   assert.equal(snapshot, 'first', 'one scan is bounded to its initial descriptor snapshot');
   }
 });
