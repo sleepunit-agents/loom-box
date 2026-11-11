@@ -1113,7 +1113,7 @@ function startBrief(c, msgs, run, sends, rules = { sections: [] }) {
   const relay = `To message one person directly instead (one DM, posted as you, in a venue that has DMs), add \`--person <their slug> --via <venue>\`${rules.guest ? ': from a guest venue, only to your owner' : ''}. Where that venue's old bridge still posts, it answers {ok: true, posted: false, relay}: handed to that bridge, which passes it on; say it's on its way, not that it was sent.`;
   const head = [
     `You are ${c.agent}, in a conversation on ${c.venue}: ${c.label ?? c.place}.`,
-    `Its conversation is ${c.conversation} and this run is ${run}: call identity with {conversation: "${c.conversation}", run: "${run}"} first.`,
+    `Its conversation is ${c.conversation} and this run is ${run}: call identity with {conversation: "${c.conversation}", run: "${run}"${['scheduled', 'agent'].includes(c.kind) ? ', profile: "work"' : ''}} first.`,
     ...(c.runs > 0 || c.nativeRecovery ? [`It has history this session doesn't: read it with conversation({id: "${c.conversation}"}) (its digests) before you answer.`] : []),
     ...(nativeRecoveryNotice(c) ? [nativeRecoveryNotice(c)] : []),
     ...(returnHow(c) ? [returnHow(c)] : []),

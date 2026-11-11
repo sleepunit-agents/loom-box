@@ -159,6 +159,12 @@
           }
         ],
         "hint": "needs the approvals piece with host rules (t-2104); an unreadable answer is the step's own tier"
+      },
+      {
+        "name": "LOOM_RUNTIME_WORK_PROFILE",
+        "label": "Lean tools for scheduled and spawned jobs",
+        "default": "on",
+        "hint": "Only loom, GitHub and taskstore MCP servers; Codex apps disabled. off restores the ordinary tool profile; permission deny lists still apply."
       }
     ],
     "services": [

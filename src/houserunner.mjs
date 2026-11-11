@@ -999,7 +999,7 @@ export class HouseRunner {
     const needs = o.needs ?? [];
     const seat = hostKeyOf(o.seat ?? OWNER_SEAT, needs);
     const parts = isParts(o.brief);
-    const ask = { attempt: id, harness: this.harness, model: o.model, deny: o.deny ?? [], ...(parts ? { parts: o.brief } : { brief: o.brief }), key: o.env?.LOOM_BODY_KEY,
+    const ask = { attempt: id, harness: this.harness, model: o.model, deny: o.deny ?? [], ...(o.env?.LOOM_BODY_PROFILE === 'work' ? { profile: 'work' } : {}), ...(parts ? { parts: o.brief } : { brief: o.brief }), key: o.env?.LOOM_BODY_KEY,
       ...(o.env?.LOOM_BODY_CONVERSATION ? { conversation: o.env.LOOM_BODY_CONVERSATION } : {}), ...(o.activity ? { activity: true } : {}),
       ...(resume ? { resume: resume.session, files: o.files ?? [] } : {}) };
     const intent = JSON.stringify({ agent: o.agent, seat, ask });
@@ -1136,7 +1136,7 @@ export class HouseRunner {
     // gets one (an older host would start the body without them).
     const parts = isParts(o.brief);
     const rid = randomBytes(8).toString('hex');
-    const ask = { harness: this.harness, model: o.model, deny: o.deny ?? [], ...(parts ? { parts: o.brief } : { brief: o.brief }), key: o.env?.LOOM_BODY_KEY, ...(o.env?.LOOM_BODY_CONVERSATION ? { conversation: o.env.LOOM_BODY_CONVERSATION } : {}), ...(o.activity ? { activity: true } : {}), ...(resume ? { resume: resume.session, files: o.files ?? [] } : {}) };
+    const ask = { harness: this.harness, model: o.model, deny: o.deny ?? [], ...(o.env?.LOOM_BODY_PROFILE === 'work' ? { profile: 'work' } : {}), ...(parts ? { parts: o.brief } : { brief: o.brief }), key: o.env?.LOOM_BODY_KEY, ...(o.env?.LOOM_BODY_CONVERSATION ? { conversation: o.env.LOOM_BODY_CONVERSATION } : {}), ...(o.activity ? { activity: true } : {}), ...(resume ? { resume: resume.session, files: o.files ?? [] } : {}) };
     const sealed = this.transit.seal(Buffer.from(JSON.stringify(ask)));
     // Asked of the house warm() gave, only while it's still the agent's house (not drained since): else warm again.
     let house;
