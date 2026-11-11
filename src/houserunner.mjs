@@ -406,6 +406,7 @@ export function cleanReport(r) {
       status: ['working', 'idle', 'ended', 'unknown'].includes(b.status) ? b.status : 'unknown',
       ...(typeof b.session === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{3,127}$/.test(b.session) ? { session: b.session } : {}),
       ...(ACTIONS.has(b.tickerAction) && Number.isFinite(Date.parse(b.tickerObservedAt)) ? { tickerAction: b.tickerAction, tickerObservedAt: b.tickerObservedAt } : {}),
+      ...(Number.isSafeInteger(b.contextTokens) && b.contextTokens > 0 && b.contextTokens <= 10000000 ? { contextTokens: b.contextTokens } : {}),
       feedable: b.feedable === true,
       pending: Array.isArray(b.pending) ? b.pending.filter((k) => typeof k === 'string' && k.length <= 64).slice(0, 64) : [],
       // A Comms thread's body's tool steps (activity.mjs), checked here as core will check them.
@@ -1263,6 +1264,7 @@ export class HouseRunner {
   }
   /** How its turn went, as its house's host reports it: null from a host that doesn't say. */
   turn(body) { return this.entry(body)?.turn ?? null; }
+  context(body) { return this.entry(body)?.contextTokens ?? null; }
   final(body) {
     const s = this.entry(body)?.finalSealed;
     return s ? this.sealer.open(Buffer.from(s, 'base64')).toString('utf-8') : null;

@@ -1,3 +1,4 @@
+import { contextCapOf, HANDOFF_REQUEST, handoffText } from './context-cap.mjs';
 import { observation } from './ticker.mjs';
 // Delivery (loom docs/specs/agent-runtime.md, section 5): anything addressed to an agent arrives the same way.
 //
@@ -78,7 +79,7 @@ import { askDarkBoxes } from './dark-box.mjs';
 import { houseLaunchHandle, readHouseLaunch } from './house-launch-journal.mjs';
 import { spawn as nodeSpawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, closeSync, fsyncSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -185,6 +186,20 @@ function writeJson(path, v) {
   const tmp = `${path}.${process.pid}.${randomBytes(3).toString('hex')}.tmp`;
   writeFileSync(tmp, JSON.stringify(v) + '\n', { mode: 0o600 });
   renameSync(tmp, path);
+}
+// Explicitly durable boundaries for context retirement before the native copy is removed.
+function syncPath(file) {
+  const fd = openSync(file, 'r');
+  try { fsyncSync(fd); } finally { closeSync(fd); }
+  const dir = openSync(dirname(file), 'r');
+  try { fsyncSync(dir); } finally { closeSync(dir); }
+}
+const syncConversation = (env, cv) => syncPath(join(convDir(env), `${cv}.json`));
+function archiveContextFile(file, archive) {
+  if (!existsSync(file)) throw Error('context archive source is missing');
+  const tmp = `${archive}.${process.pid}.tmp`;
+  copyFileSync(file, tmp); syncPath(tmp);
+  renameSync(tmp, archive); syncPath(archive);
 }
 const readJson = (p) => { try { return JSON.parse(readFileSync(p, 'utf-8')); } catch { return null; } };
 
@@ -1194,7 +1209,7 @@ function plan(env, cv, d, mem) {
   }
   // A post-failure note is never a delivery of its own (t-1760): alone on the queue (what it rode with went another
   // way), it goes back to waiting for the conversation's next real message, and nothing starts for it.
-  if (c.queue.every(isNote)) {
+  if (c.queue.every(isNote) && !c.queue.some(x => x.contextContinuation === true)) {
     c.postFail = { ...c.queue.at(-1), note: true };
     c.queue = [];
     delete c.waiting;
@@ -1231,6 +1246,17 @@ function plan(env, cv, d, mem) {
   // The owner reset it (resetPrincipal): the body that heard what came before ends, its session not kept.
   if (c.resetPending && (st === 'working' || st === 'idle')) return begin({ type: 'reseat', body: c.body });
   if (c.resetPending && st === 'none') delete c.resetPending;
+  if (c.contextCap?.body === c.body && (st === 'idle' || st === 'ended')) {
+    try {
+      const rec = readBody(env, c.body), runner = d.runner(rec.harness, rec.local);
+      const note = c.contextCap.note ? d.sealer.open(Buffer.from(c.contextCap.note, 'base64')).toString('utf-8') : handoffText(runner.final?.(bodyOf(c.body, rec)));
+      if (note) {
+        c.contextCap.note = d.sealer.seal(Buffer.from(note)).toString('base64');
+        return begin({ type: 'context-rotate', body: c.body });
+      }
+    } catch { return wait('context handoff collection is pending'); }
+  }
+
   if (st === 'working') {
     // A guest's message never reaches a body that isn't a guest venue's (its tools aren't narrowed, its brief has no
     // floor): that body is ended, its session not kept, and a body under a guest venue's rules starts for it.
@@ -1730,6 +1756,7 @@ function closeRun(env, c, d, now) {
       const rec = readBody(env, c.body);
       const runner = d.runner(rec.harness, rec.local), body = bodyOf(c.body, rec);
       const text = runner.final?.(body);
+      if (c.contextCap?.body === c.body && handoffText(text)) { r.end = now; r.contextHandoff = true; return true; }
       if (typeof text === 'string' && text.trim()) {
         c.spawn.report = d.sealer.seal(Buffer.from(text.slice(0, MAX_TEXT))).toString('base64');
         c.spawn.reportRun = r.run;
@@ -2244,6 +2271,29 @@ function preparedLaunch(env, op, d, context) {
 
 async function executeOne(env, op, d, mem) {
   const now = () => d.now().getTime();
+  if (op.type === 'context-request') {
+    const c = loadConv(env, op.cv);
+    if (!ours(c, op) || c.body !== op.body) return;
+    const rec = readBody(env, op.body), runner = d.runner(rec.harness, rec.local);
+    let fed;
+    try { fed = runner.feed(bodyOf(op.body, rec), { id: `cap-${c.run}`, text: HANDOFF_REQUEST }); }
+    catch (e) { d.warn(`context handoff feed for ${op.cv}: ${e.message}`); }
+    locked(env, () => {
+      const fresh = loadConv(env, op.cv);
+      if (!ours(fresh, op) || fresh.body !== op.body) return;
+      if (fed?.fed) fresh.contextCap = { ...fresh.contextCap, requested: true };
+      delete fresh.starting; saveConv(env, fresh);
+    });
+    return;
+  }
+  if (op.type === 'context-rotate') {
+    try { return await rotateContext(env, op, d); }
+    catch (e) {
+      if (e instanceof RetirementPending) throw e;
+      d.warn(`context rotation for ${op.cv} waits for durable storage: ${e.message}`);
+      throw new RetirementPending();
+    }
+  }
   if (op.type === 'recover-start') return recoverPreparedStart(env, op, d);
   if (op.type === 'interrupt') return interruptOp(env, op, d);
   if (op.type === 'loop-note') return loopNote(env, op, d);
@@ -2315,7 +2365,7 @@ async function executeOne(env, op, d, mem) {
     const v0 = await venueOf(d, c0.venue);
     const sends = posts(v0) ? 'post' : recordsOnly(v0) ? 'record' : null;
     // Its rules (policy.mjs): what it's told and what it may use. Any that can't be had is no body (fail closed).
-    rules = await rulesFor(c0, msgs.filter((x) => !isNote(x)), rulesDeps(d, v0, c0), { platform: posts(v0), core: coreAdapted(v0), principal: principalOf(env, c0), ownerSpoke: c0.actsFor?.owner === true });
+    rules = await rulesFor(c0, [...(c0.contextAuthority ?? []), ...msgs.filter((x) => !isNote(x))], rulesDeps(d, v0, c0), { ...(c0.contextFloor ? { narrowing: c0.contextFloor } : {}), platform: posts(v0), core: coreAdapted(v0), principal: principalOf(env, c0), ownerSpoke: c0.actsFor?.owner === true });
     if (c0.spawn?.ruleSource) {
       const source = c0.spawn.ruleSource;
       const venue = await venueOf(d, source.venue);
@@ -2440,6 +2490,7 @@ async function executeOne(env, op, d, mem) {
         // A Codex that won't run this body where it would run (a house's: only its host can tell, at the start;
         // runners.mjs, CODEX_WONT): started again off Codex now, never a failed start (t-1924).
         if (cant.includes('codex') || !CODEX_WONT.test(String(e?.message ?? ''))) throw e;
+        if (c0.contextModel) throw Object.assign(new DeliveryError('context continuation waits for its original model: the remote host refused it', 503), { held: true });
         cant = ['codex'];
         cantWhy = String(e.message).replace(CODEX_WONT, '');
         d.warn(`${op.cv}: ${String(e.message).slice(0, 200)}; starting it off Codex`);
@@ -2691,6 +2742,39 @@ export async function ownerConversationControl(env, caller, { agent, conversatio
   return result;
 }
 
+async function rotateContext(env, op, d) {
+  const before = loadConv(env, op.cv);
+  if (!ours(before, op) || before.body !== op.body || !before.contextCap?.note) return;
+  syncConversation(env, op.cv);
+  // Existing retirement owns stop acknowledgement, inbox reconciliation and durable packing.
+  const saved = await retire(env, op.cv, op.body, d, true);
+  locked(env, () => {
+    const c = loadConv(env, op.cv);
+    if (!ours(c, op) || c.body !== op.body || !c.contextCap?.note) return;
+    const handoff = c.contextCap;
+    const old = readBody(env, op.body);
+    c.contextModel = { model: old.model, harness: old.harness };
+    c.contextFloor = c.bodyRules;
+    const voices = c.runMsgs?.msgs?.filter(x => !isNote(x)).map(({ from, tier, owner, tierUnread, wakeFor, local }) => ({ from, tier, owner, tierUnread, wakeFor, local })) ?? [];
+    if (voices.length) c.contextAuthority = [...new Map([...(c.contextAuthority ?? []), ...voices].map(v => [JSON.stringify(v), v])).values()];
+    const file = slotFile(env, op.cv);
+    // Keep the old sealed transcript as lineage, but never select it for resume.
+    const archive = `${file}.context-${handoff.run}`;
+    archiveContextFile(file, archive);
+    if (c.home) archiveContextFile(homeFile(env, op.cv), `${archive}.home`);
+    delete c.home; delete c.fallback;
+    (c.contextHandoffs ??= []).push({ ...handoff, archive, at: d.now().toISOString() });
+    const row = c.runLog?.findLast(r => r.run === c.run);
+    if (row) { row.end = d.now().getTime(); row.contextHandoff = true; }
+    const text = 'Continue the same job in this fresh session from the saved handoff below. Verify branch heads before changing anything. Read the original conversation for the assignment if needed.\n\n' + d.sealer.open(Buffer.from(handoff.note, 'base64')).toString('utf-8');
+    const key = `context-${handoff.run}`;
+    requeue(c, [...saved.pending, { key, id: key, note: true, contextContinuation: true, kind: 'message', at: d.now().toISOString(), sealed: d.sealer.seal(Buffer.from(text)).toString('base64') }]);
+    c.body = undefined; delete c.slot; delete c.idleSince; delete c.contextCap; delete c.starting;
+    forgetRunKey(env, c);
+    saveConv(env, c); syncConversation(env, op.cv);
+  });
+}
+
 async function interruptOp(env, op, d) {
   const c0 = loadConv(env, op.cv);
   if (!c0 || !ours(c0, op) || c0.control?.id !== op.control) return;
@@ -2745,14 +2829,17 @@ async function routeOf(env, c0, op, rules, d, cant = []) {
   // its spawn allowed a failover: then it starts on another eligible model, its slot kept as lineage, no return.
   // Its rules come first: a harness this body's rules can't be kept on (`cant`: a deny list Codex can't hold, a local
   // body with no Codex opt-in) is never resumed or started, pinned or not; the job moves, said as such in its lineage.
-  const pin = c0.spawn?.assignment?.model;
+  const pin = c0.spawn?.assignment?.model ?? c0.contextModel?.model;
   if (pin) {
-    const h = c0.spawn.assignment.harness;
+    const h = c0.spawn?.assignment?.harness ?? c0.contextModel.harness;
     const move = (why) => {
       if (op.type === 'resume') parkSlot(env, op);
       return { how: 'start', avoid: [...new Set([...avoid, h])], failover: why };
     };
-    if (cant.includes(h)) return move('rules');
+    if (cant.includes(h)) {
+      if (c0.contextModel) throw Object.assign(new DeliveryError('the context continuation waits for its original model to support its rules', 503), { held: true });
+      return move('rules');
+    }
     // Its model gone from the list, or no longer one the agent may use: not quota, so no reset brings it back and no
     // failover is for it. The job holds, its session and messages kept (never the failed-resume path, which would
     // drop its slot), and says why.
@@ -2761,7 +2848,7 @@ async function routeOf(env, c0, op, rules, d, cant = []) {
     // Out of quota: a failover if its spawn allowed one; else it waits for its model, its messages queued (not failed).
     if (!(await roomOn(env, c0, h, d, pin))) {
       // A failover only when another eligible model has room: else it waits as any job does (its messages queued).
-      if (c0.spawn.failover && await roomElsewhere(env, c0, [...new Set([...avoid, h])], d)) return move('quota');
+      if (!c0.contextModel && c0.spawn?.failover && await roomElsewhere(env, c0, [...new Set([...avoid, h])], d)) return move('quota');
       throw Object.assign(new DeliveryError(`this job's assigned model ${pin} is out of quota; it waits for it, its session and messages kept`, 503), { held: true });
     }
     // Slice 4 (t-2037), with the owner's allocator on: a job continuing on its model takes only what leaves conversations
@@ -2771,7 +2858,7 @@ async function routeOf(env, c0, op, rules, d, cant = []) {
     if (gate) {
       const room = await roomOn(env, c0, h, d, pin, gate);
       if (room?.reserved) {
-        if (c0.spawn.failover && await roomElsewhere(env, c0, [...new Set([...avoid, h])], d, gate)) return move('capacity');
+        if (!c0.contextModel && c0.spawn?.failover && await roomElsewhere(env, c0, [...new Set([...avoid, h])], d, gate)) return move('capacity');
         throw Object.assign(new StateError(`this job's assigned model ${pin} is kept for conversations until its account's reset; it waits for room, its session and messages kept`, 409), { reserved: true, ...(Number.isFinite(room.until) ? { until: room.until } : {}) });
       }
     }
@@ -2781,7 +2868,7 @@ async function routeOf(env, c0, op, rules, d, cant = []) {
     // No slot, and its session parked as home on its own harness (a failover that found no room anywhere): that
     // session resumed, never a fresh body beside it.
     // Only under the rules and seat it began with, as every resume (a home that doesn't carry is dropped, never resumed).
-    if (!op.slot && c0.home?.harness === h && existsSync(homeFile(env, op.cv))) {
+    if (!c0.contextModel && !op.slot && c0.home?.harness === h && existsSync(homeFile(env, op.cv))) {
       if (sameRules(c0.home.rules ?? {}, rules) && carriesSession(c0.home.rules?.seat, rules.seat, op.cv)) return { how: 'resume', file: homeFile(env, op.cv), home: true, job: true, avoid: keep };
       dropHome(env, op.cv);
     }
@@ -2837,6 +2924,7 @@ function parkSlot(env, op) {
  * spawned jobs: a live conversation keeps its preferred-primary and fallback policy (routeOf).
  */
 function jobModel(c) {
+  if (!c.spawn?.assignment && c.contextModel) return { pin: c.contextModel.model };
   if (!c.spawn) return {};
   if (c.spawn.assignment?.model) return { pin: c.spawn.assignment.model };
   return c.spawn.role ? { role: c.spawn.role } : {};
@@ -3067,6 +3155,7 @@ async function retire(env, cv, ref, d, stop) {
     try {
       files = runner.remote ? await runner.pack(body, { deferAck: true }) : packSession(runner, slot, body);
     } catch (e) {
+      if (c?.contextCap?.note) throw new RetirementPending(pending);
       if (runner.remote && !(e instanceof SessionSizeError) && !(e instanceof SessionHistoryMissing) && runner.pending?.(body) !== false) throw new RetirementPending(pending);
       if (!runner.remote && !(e instanceof SessionSizeError) && !(e instanceof SessionHistoryMissing)) {
         d.warn(`keeping ${cv}'s native session until its files can be read (${e.message})`);
@@ -3106,6 +3195,7 @@ async function retire(env, cv, ref, d, stop) {
         ...(c.fed ?? []).filter(x => x.sealed && !unread.has(x.key)).map(x => ({ ...x, reconciliation: true })), ...pending]
         .filter(x => !seen.has(x.key) && (seen.add(x.key), true));
     }
+    if (c?.contextCap?.note && (!Array.isArray(files) || !files.length)) throw new RetirementPending(pending);
     let kept = null, prepared = null;
     if (Array.isArray(files) && files.length) {
       if (!slot || !c) throw new RetirementPending(pending);
@@ -3151,6 +3241,11 @@ async function retire(env, cv, ref, d, stop) {
     }
   }
 
+  if (c?.contextCap?.note) {
+    if (!committed?.slot || committed.loss) throw new RetirementPending(pending);
+    if (existsSync(file)) syncPath(file);
+    syncConversation(env, cv);
+  }
   // The receipt makes this boundary retryable even if the worker dies before updating the conversation pointer.
   if (runner.remote) {
     runner.ackPack?.(body);
@@ -3328,6 +3423,31 @@ export async function tick(env, o = {}, only, mem = new Map()) {
           let gone = false;
           try { const rec = readBody(env, c.body); const r = d.runner(rec.harness, rec.local); gone = typeof r.alive === 'function' && r.alive(bodyOf(c.body, rec)) === false; } catch { gone = false; }
           if (gone) st = 'ended';
+        }
+        const cap = contextCapOf(env, c);
+        if (cap && st === 'working' && (c.contextCap?.body !== c.body || c.contextCap.requested === false)) {
+          try {
+            const rec = readBody(env, c.body), runner = d.runner(rec.harness, rec.local);
+            const tokens = runner.context?.(bodyOf(c.body, rec));
+            if (Number.isSafeInteger(tokens) && tokens >= cap) {
+              c.contextCap = { body: c.body, run: c.run, tokens, asked: now, requested: false };
+              c.starting = mark(now);
+              ops.push({ cv: c.conversation, mark: c.starting.op, type: 'context-request', body: c.body, tokens });
+              saveConv(env, c); continue;
+            }
+          } catch { /* an unavailable observation never invents a cap event */ }
+        }
+        if (c.contextCap?.body === c.body && (st === 'idle' || st === 'ended')) {
+          try {
+            const rec = readBody(env, c.body), runner = d.runner(rec.harness, rec.local);
+            const note = c.contextCap.note ? d.sealer.open(Buffer.from(c.contextCap.note, 'base64')).toString('utf-8') : handoffText(runner.final?.(bodyOf(c.body, rec)));
+            if (note) {
+              c.contextCap.note = d.sealer.seal(Buffer.from(note)).toString('base64');
+              c.starting = mark(now);
+              ops.push({ cv: c.conversation, mark: c.starting.op, type: 'context-rotate', body: c.body });
+              saveConv(env, c); continue;
+            }
+          } catch { /* collection may be pending */ }
         }
         // Waiting on a permission prompt nobody can answer (t-1858): stopped once it has waited stuckAfter, counted from
         // when the tick first saw it waiting. Only a harness that can say (runners.mjs, waiting) is ever asked.
@@ -3904,6 +4024,7 @@ export function resetPrincipal(env, conversation, { agent, approval } = {}) {
     rmSync(slotFile(env, conversation), { force: true });
     rmSync(homeFile(env, conversation), { force: true });
     delete c.slot; delete c.home; delete c.fallback;
+    delete c.contextCap; delete c.contextFloor; delete c.contextAuthority; delete c.contextModel;
     // The run that heard what came before speaks no more: its key is gone now, not when its body is ended.
     if (c.body) { c.resetPending = true; forgetRunKey(env, c); }
     // A reset is activity: the record (and the reset it holds) outlives any continuation issued before it (t-2004).
@@ -4138,13 +4259,13 @@ function tellBody(env, cv, ref, out, where, reason, d) {
     const c = loadConv(env, cv);
     if (!c) return;
     // One pending note per conversation: the one waiting (or already on the queue, riding with a message that waits).
-    const prev = c.postFail ?? (c.queue ?? []).find(isNote);
+    const prev = c.postFail ?? (c.queue ?? []).find(x => isNote(x) && !x.contextContinuation);
     const count = (Number.isSafeInteger(prev?.count) ? prev.count : prev ? 1 : 0) + 1;
     const text = count === 1
       ? `(couldn't post your message ${out} in ${where}: ${reason})`
       : `(couldn't post ${count} of your messages in ${where}; the latest, ${out}: ${reason})`;
     const id = /^note-[0-9a-f]{12}$/.test(prev?.id ?? '') ? prev.id : `note-${randomBytes(6).toString('hex')}`;
-    c.queue = (c.queue ?? []).filter((x) => !isNote(x));
+    c.queue = (c.queue ?? []).filter((x) => !isNote(x) || x.contextContinuation);
     delete c.postFail;
     // It knows now, the earlier ones with it.
     if (!feedLive(env, ref, id, text, d)) {
