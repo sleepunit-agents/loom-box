@@ -857,15 +857,15 @@ test('rules and dash runs cannot hide split or unfinished private-key markers', 
   for (const prefix of ['-----\n\n', '-----', '----------', '---\n--\n', '-----\n---\n--\n']) {
     for (const marker of ['-----BEGIN PRI\nVATE KEY-----', '-----BEGIN PRI\nVATE KEY', '-----BEGIN', ...[1, 2, 3, 4].map(n => '-----BEGIN PRIVATE KEY' + '-'.repeat(n))]) {
       for (const suffix of ['', '\n-----END PRIVATE KEY-----\nDone']) {
-      const text = `Material follows:\n${prefix}${marker}\nAQIDBAUG\nBQYHCAkL${suffix}`;
-      const [card] = claudeCards([{ type: 'assistant', uuid: 'rule-probe', message: { content: [{ type: 'text', text }] } }]);
-      const [codex] = codexCards([{ type: 'item.completed', item: { id: 'rule-probe', type: 'agent_message', text } }], 'b:');
-      for (const c of [card, codex]) {
-        assert.ok(c && c.summary === 'Material follows:');
-        const delivered = JSON.stringify([c, stepParts(c)]);
-        assert.ok(!delivered.includes('AQIDBAUG'), `${prefix}: first payload escaped`);
-        assert.ok(!delivered.includes('BQYHCAkL'), `${prefix}: second payload escaped`);
-      }
+        const text = `Material follows:\n${prefix}${marker}\nAQIDBAUG\nBQYHCAkL${suffix}`;
+        const [card] = claudeCards([{ type: 'assistant', uuid: 'rule-probe', message: { content: [{ type: 'text', text }] } }]);
+        const [codex] = codexCards([{ type: 'item.completed', item: { id: 'rule-probe', type: 'agent_message', text } }], 'b:');
+        for (const c of [card, codex]) {
+          assert.ok(c && c.summary === 'Material follows:');
+          const delivered = JSON.stringify([c, stepParts(c)]);
+          assert.ok(!delivered.includes('AQIDBAUG'), `${prefix}: first payload escaped`);
+          assert.ok(!delivered.includes('BQYHCAkL'), `${prefix}: second payload escaped`);
+        }
       }
     }
   }
@@ -877,9 +877,10 @@ test('a rule split between text chunks cannot hide the following key marker', ()
     ['Material follows:\n---', '--\n\n-----BEGIN PRI\nVATE KEY-----\nAQIDBAUG\nBQYHCAkL\n-----END PRIVATE KEY-----\nDone'],
     ['Material follows:\n-----', '-----BEGIN PRI\nVATE KEY-----\nAQIDBAUG\nBQYHCAkL\n-----END PRIVATE KEY-----\nDone'],
   ]) {
-    const [card] = claudeCards([{ type: 'assistant', uuid: 'chunk-probe', message: { content: chunks.map(text => ({ type: 'text', text })) } }]);
-    assert.ok(card && card.summary === 'Material follows:');
-    assert.ok(!JSON.stringify([card, stepParts(card)]).includes('AQIDBAUG'));
-    assert.ok(!JSON.stringify([card, stepParts(card)]).includes('BQYHCAkL'));
+    const cards = claudeCards([{ type: 'assistant', uuid: 'chunk-probe', message: { content: chunks.map(text => ({ type: 'text', text })) } }]);
+    assert.equal(cards[0]?.summary, 'Material follows:');
+    const delivered = JSON.stringify([cards, cards.map(stepParts)]);
+    assert.ok(!delivered.includes('AQIDBAUG'));
+    assert.ok(!delivered.includes('BQYHCAkL'));
   }
 });
