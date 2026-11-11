@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
+import { spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, symlinkSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -92,7 +93,7 @@ test('orphan sweep requires exact executable, argv, parent and assigned house', 
   rmSync(proc,{recursive:true});
 });
 
-test('startup waits for confirmed death and refuses adoption while SIGKILL is pending', async () => {
+test('death acknowledgement times out for a pending kill and accepts a zombie', async () => {
   const proc=join(dir,'pending-proc');mkdirSync(join(proc,'100'),{recursive:true});
   const status=join(proc,'100','status');writeFileSync(status,'State: D\n');
   try {
@@ -102,6 +103,15 @@ test('startup waits for confirmed death and refuses adoption while SIGKILL is pe
     try { await waitForHouseWaits([100],proc,200); assert.equal(released,true,'death was acknowledged before startup continues'); }
     finally { clearTimeout(timer); }
   } finally { rmSync(proc,{recursive:true}); }
+});
+
+test('default startup cleanup blocks real adoption, retries rejection, and awaits death acknowledgement', () => {
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
+  const result = spawnSync(process.execPath, ['--experimental-test-module-mocks', '--test',
+    new URL('./fixtures/pending-watcher-cleanup.mjs', import.meta.url).pathname],
+  { encoding: 'utf8', timeout: 15000, env });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
 });
 
 for (const [output,exit] of [['9',0],['0',7]]) test(`guardian forwards actual wait output ${output} and exit ${exit}`, async () => {
