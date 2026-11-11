@@ -358,7 +358,7 @@ export class ClaudeRunner {
     }
     // A last line not yet ended (no newline after it) counts once it's whole JSON, as reading the file whole did.
     const completeTail = m.rest ? lastWordsOf(m.rest) : null;
-    if (completeTail !== null) m.omitted = false;
+    if (completeTail !== null) { m.omitted = false; m.last = completeTail; }
     const last = completeTail ?? m.last;
     // One descriptor supplies the snapshot. Never commit old words after replacement or shortening during the scan.
     const after = lstatSync(f);

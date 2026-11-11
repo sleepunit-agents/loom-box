@@ -750,3 +750,14 @@ test('final retries a changing snapshot once and then returns no words', async (
   try{assert.equal(runner.final({}),null);assert.equal(reads,2,'one original scan and one retry');}
   finally{fs.readSync=read;syncBuiltinESMExports();}
 });
+
+
+test('final keeps readable unterminated words when that line later exceeds the bound', () => {
+  const h=harness(),file=join(h.D,'tail-oversize.jsonl');
+  writeFileSync(file,JSON.stringify({type:'assistant',message:{content:[{type:'text',text:'latest'}]}}));
+  const runner=new ClaudeRunner();runner.transcriptOf=()=>file;
+  assert.equal(runner.final({}),'latest');
+  const fsChunk=spawnSync(process.execPath,['--input-type=module','-e',`import {appendFileSync} from 'node:fs';appendFileSync(${JSON.stringify(file)},' '.repeat(17*1024*1024));`]);
+  assert.equal(fsChunk.status,0);
+  assert.match(runner.final({}),/transcript line exceeded 16 MiB; last readable words follow\)\nlatest$/);
+});
