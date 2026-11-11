@@ -806,9 +806,10 @@ test('command details fail closed for unrecognized shell shapes in delivered Cla
 
 test('assistant prose retains multiline secret assignment context before projection', () => {
   const S = 'review-canary-value';
-  for (const text of [`password:\n${S}`, `-----BEGIN\nPRIVATE KEY-----\n${S}\n-----END PRIVATE KEY-----`]) {
+  for (const text of [`password:\n${S}`, `-----BEGIN\nPRIVATE KEY-----\n${S}\nsecond-canary-line\n-----END PRIVATE KEY-----`]) {
     const cards = claudeCards([{ type: 'assistant', uuid: 'private', message: { content: [{ type: 'text', text }] } }]);
     assert.ok(!JSON.stringify(cards).includes(S));
+    assert.ok(!JSON.stringify(cards).includes('second-canary-line'));
   }
 });
 
@@ -818,5 +819,19 @@ test('command descriptions are never projected, even for an allowlisted command'
     assert.equal(cards[0].summary, 'Ran a command');
     assert.equal(cards[0].detail, 'git status');
     assert.ok(!leak(JSON.stringify(cards)));
+  }
+});
+
+
+test('house command detail is allowlisted before any normalization', async () => {
+  const { shownCards } = await import('../src/delivery.mjs');
+  const { world } = await import('./delivery-world.mjs');
+  const o = world();
+  for (const detail of ['git\u200b status', 'git\x1b[31m status', 'git status\n', 'git status; echo private']) {
+    const raw = { id: 'house', tool: 'Bash', at: 'x', state: 'done', summary: 'private-command-description', detail };
+    assert.equal(stepParts(raw).detail, undefined, 'unrecognized raw detail fails closed');
+    const [card] = shownCards(o.env, { agent: 'art', actsFor: { owner: true, owners: [], people: [] } }, [raw]);
+    assert.equal(card.detail, undefined);
+    assert.equal(card.summary, 'Ran a command');
   }
 });

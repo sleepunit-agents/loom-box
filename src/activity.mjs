@@ -401,7 +401,8 @@ export function shownText(text, max = MAX_BODY) {
  * Keep physical newlines so ordinary prose retains its lines and multiline secret assignments retain context. */
 function ownWords(text) {
   const normalized = cutInput(text, 2_000_000).split('\n').map(normLine).join('\n').replace(SGR, '');
-  return shownText(redact(normalized, { max: normalized.length }), MAX_TEXT);
+  const withoutKeys = normalized.replace(/-----BEGIN[ \t\n]+(?:[A-Z]+[ \t\n]+){0,4}PRIVATE[ \t\n]+KEY-----[\s\S]*?(?:-----END[ \t\n]+(?:[A-Z]+[ \t\n]+){0,4}PRIVATE[ \t\n]+KEY-----|$)/g, GONE);
+  return shownText(redact(withoutKeys, { max: withoutKeys.length }), MAX_TEXT);
 }
 
 /** A shell command as Codex runs it (`/usr/bin/bash -lc '…'`), unwrapped to what the body wrote. */
@@ -717,7 +718,7 @@ export function stepParts(c, idOf = (x) => x, { words = true } = {}) {
   const int = (v, lo, hi) => (Number.isInteger(v) && v >= lo && v <= hi ? v : null);
   const tool = String(c?.tool ?? '');
   // A target only of the shape made here for its tool (detailOk): a command; a file's base name; a search's pattern.
-  if (words && typeof c?.detail === 'string' && c.detail) { const d = shownText(c.detail.replace(SGR, ''), MAX_DETAIL); if (d && detailOk(tool, d)) o.detail = d; }
+  if (words && typeof c?.detail === 'string' && c.detail && (!SHELL_TOOLS.has(tool) || commandLine(c.detail))) { const d = shownText(c.detail.replace(SGR, ''), MAX_DETAIL); if (d && detailOk(tool, d)) o.detail = d; }
   // A body only where one is made here (bodyAllowed): the body's words, or a diff of a file whose shown name is plain
   // and not private. Never a shell step's output, never a read's.
   // Read only where it may go: its words wanted, and its tool's (a lazy body is worked out only then).
