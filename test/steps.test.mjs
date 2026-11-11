@@ -471,6 +471,9 @@ test('a whole report fits core\'s cap: several threads in one house share one bu
   fitCards(report, REPORT_MAX);
   assert.ok(Buffer.byteLength(JSON.stringify(report)) <= REPORT_MAX, 'within it after');
   assert.equal(report.packed.b0000009.data.length, 360 * 1024, 'a packed part is never trimmed');
+  assert.deepEqual(Object.fromEntries(Object.entries(report.bodies).map(([id,b])=>[id,b.cards.map(c=>c.id)])), {
+    b000000x:['x8','x9','x10','x11'],b000000y:['y7','y8','y9','y10','y11'],b000000z:['z7','z8','z9','z10','z11'],
+  },'every retained card is the complete newest-first selection across bodies');
   const kept = Object.values(report.bodies).flatMap((b) => b.cards);
   assert.ok(kept.length > 0);
   const ids = new Set(kept.map((c) => c.id));
@@ -745,4 +748,25 @@ test('the actual body-host sync applies count, per-body and shared card budgets'
   }
   assert.deepEqual(transmitted.bodies.b5.cards.map(c=>c.id),Array.from({length:100},(_,i)=>`b5-${100+i}`));
   assert.ok(Object.values(transmitted.bodies).slice(0,4).reduce((n,b)=>n+b.cards.length,0)<32,'shared budget trimmed the four full per-body snapshots');
+});
+
+
+test('helper discovery considers only the first 500 directory entries, including nonmetadata', async () => {
+  const fs=(await import('node:fs')).default;
+  const {syncBuiltinESMExports}=await import('node:module');
+  const root=scratch('helper-window'),proj=join(root,'projects','-x'),session='11111111-2222-3333-4444-999999999999';
+  const dir=join(proj,session,'subagents');mkdirSync(dir,{recursive:true});
+  const own=join(proj,session+'.jsonl');writeFileSync(own,JSON.stringify(use('own','Bash',{command:'true'}))+'\n');
+  const names=['agent-inside.meta.json','agent-outside.meta.json'];
+  for(const name of names){writeFileSync(join(dir,name),'{}');writeFileSync(join(dir,name.replace('.meta.json','.jsonl')),JSON.stringify(use(name,'Bash',{command:'true'}))+'\n');}
+  const read=fs.readdirSync;
+  fs.readdirSync=(path,...args)=>String(path)===dir?[...Array.from({length:499},(_,i)=>`padding-${i}`),names[0],names[1]]:read(path,...args);
+  syncBuiltinESMExports();
+  try{
+    const runner=new ClaudeRunner({projectsDir:join(root,'projects'),jobsDir:join(root,'jobs')});
+    const cards=runner.activity({slot:{session}});
+    assert.equal(cards.length,2,'own card and helper in entry 500 only');
+    assert.ok(cards.some(c=>c.id.startsWith('inside:')));
+    assert.ok(!cards.some(c=>c.id.startsWith('outside:')));
+  }finally{fs.readdirSync=read;syncBuiltinESMExports();}
 });

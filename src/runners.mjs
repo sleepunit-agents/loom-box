@@ -352,7 +352,7 @@ export class ClaudeRunner {
     const dir = join(f.slice(0, -'.jsonl'.length), 'subagents');
     let metas = [];
     // The body writes there: a meta is only ever a plain file, never followed through a link, read to META_MAX.
-    try { metas = readdirSync(dir).filter((n) => /^agent-[A-Za-z0-9_-]{1,64}\.meta\.json$/.test(n)).slice(0, 500); } catch { return cards; }
+    try { metas = readdirSync(dir).slice(0, 500).filter((n) => /^agent-[A-Za-z0-9_-]{1,64}\.meta\.json$/.test(n)); } catch { return cards; }
     const helpers = metas.map((n) => { try { const st = lstatSync(join(dir, n)); if (!st.isFile()) return null; let t = st.mtimeMs; try { const transcript = lstatSync(join(dir, n.replace('.meta.json', '.jsonl'))); if (transcript.isFile()) t = transcript.mtimeMs; } catch { /* no transcript */ } return { n, t }; } catch { return null; } }).filter(Boolean).sort((a, b) => b.t - a.t).slice(0, 20);
     for (const { n } of helpers) {
       const agent = n.slice('agent-'.length, -'.meta.json'.length);
