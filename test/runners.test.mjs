@@ -761,3 +761,30 @@ test('final keeps readable unterminated words when that line later exceeds the b
   assert.equal(fsChunk.status,0);
   assert.match(runner.final({}),/transcript line exceeded 16 MiB; last readable words follow\)\nlatest$/);
 });
+
+test('final snapshot excludes mid-scan appends and drops them after intermediate truncation', async () => {
+  const fs = (await import('node:fs')).default;
+  const { syncBuiltinESMExports } = await import('node:module');
+  const h = harness();
+  const file = join(h.D, 'append-truncate.jsonl');
+  const event = text => JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text }] } }) + '\n';
+  const first = event('first');
+  const surviving = first + event('surviving');
+  writeFileSync(file, first);
+  const runner = new ClaudeRunner({ readMax: { final: 1024 } });
+  runner.transcriptOf = () => file;
+  const fstat = fs.fstatSync;
+  let appended = false;
+  fs.fstatSync = (...args) => {
+    const st = fstat(...args);
+    if (!appended) { appended = true; fs.appendFileSync(file, event('surviving') + event('removed')); }
+    return st;
+  };
+  syncBuiltinESMExports();
+  let snapshot;
+  try { snapshot = runner.final({}); }
+  finally { fs.fstatSync = fstat; syncBuiltinESMExports(); }
+  fs.truncateSync(file, Buffer.byteLength(surviving));
+  assert.equal(runner.final({}), 'surviving', 'truncation above initial size never keeps removed words');
+  assert.equal(snapshot, 'first', 'one scan is bounded to its initial descriptor snapshot');
+});

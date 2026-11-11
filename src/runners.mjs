@@ -339,7 +339,7 @@ export class ClaudeRunner {
     // Another file at that path, or one cut shorter, is read again from its start.
     if (!m || m.ino !== st.ino || m.dev !== st.dev || st.size < (m.size ?? m.offset)) m = { ino: st.ino, dev: st.dev, offset: 0, rest: '', last: null };
     while (st.size > m.offset) {
-      const { text, next } = readFrom(f, m.offset, this.readMax.final, fd);
+      const { text, next } = readFrom(f, m.offset, Math.min(this.readMax.final, st.size - m.offset), fd);
       if (next === m.offset) break;
       const parts = (m.rest + text).split('\n');
       const tail = parts.pop() ?? '';
