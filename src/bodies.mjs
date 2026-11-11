@@ -1,4 +1,4 @@
-import { profileEnv } from './work-profile.mjs';
+import { profileEnv, profileNotice } from './work-profile.mjs';
 // Bodies (loom docs/specs/agent-runtime.md, sections 3 and 4): whoever needs a body asks the runtime for one. It
 // picks the model (models.mjs), starts the body on that model's harness (runners.mjs), and keeps a record of it on
 // this machine, so the body can be fed, resumed and ended by its id.
@@ -114,7 +114,9 @@ export async function startBody(env, { agent, brief: b, venue, venueKind, prefer
     ...(deny.length ? { deny: [...deny] } : {}), ...(guest ? { guest: true } : {}), ...(local ? { local: true } : {}),
     ...(modelNeed ? { modelNeed } : {}), harness: pick.harness, model: pick.model, family: pick.family, ...(pick.account ? { account: pick.account } : {}), ...(pick.accountKey ? { accountKey: pick.accountKey } : {}), ...switchedOf(pick), instance: randomBytes(12).toString('hex'),
   };
-  const options = { agent, brief: forRunner(runner, text, cwd), model: pick.model, cwd, env: profileEnv(o.bodyEnv, pick.kind, env), deny, ...(seat ? { seat } : {}), ...(needs.length ? { needs } : {}), ...((venue === COMMS_VENUE || activity) ? { activity: true } : {}) };
+  const options = { agent, brief: forRunner(runner, text, cwd), model: pick.model, cwd, env: profileEnv(o.bodyEnv, pick.kind, env, { agent, venue, place }, { deferSecrets: !!runner.remote }), deny, ...(seat ? { seat } : {}), ...(needs.length ? { needs } : {}), ...((venue === COMMS_VENUE || activity) ? { activity: true } : {}) };
+  metadata.profile = options.env.LOOM_BODY_PROFILE;
+  if (profileNotice(options.env) && typeof options.brief === 'string') options.brief = `${profileNotice(options.env)}\n\n${options.brief}`;
   const prepared = { metadata, why: pick.why, preferred: pick.preferred };
   const body = o.launch ? await o.launch({ runner, harness: pick.harness, options, prepared }) : await runner.start(options);
   const at = d.now().toISOString();
@@ -128,7 +130,7 @@ export function feedBody(env, ref, message, o = {}) {
 }
 
 /** A body continued: by its id (its slot, from the harness), or by a slot ({harness, session}) another machine kept. */
-export async function resumeBody(env, { body: ref, slot, agent, venue, venueKind, brief: b, prefer = [], modelNeed, cwd, deny = [], files, guest, local, seat, activity = false, role, pin, needs = [] }, o = {}) {
+export async function resumeBody(env, { body: ref, slot, agent, venue, venueKind, brief: b, prefer = [], modelNeed, cwd, deny = [], files, place, guest, local, seat, activity = false, role, pin, needs = [] }, o = {}) {
   const d = deps(env, o);
   let rec = null;
   if (ref) {
@@ -138,6 +140,7 @@ export async function resumeBody(env, { body: ref, slot, agent, venue, venueKind
   }
   if (!slot || !['claude', 'codex'].includes(slot.harness) || typeof slot.session !== 'string' || !slot.session) fail('resume takes a body, or a slot {harness, session}');
   modelNeed ??= rec?.modelNeed;
+  deny = [...new Set([...(rec?.deny ?? []), ...deny])];
   const who = rec?.agent ?? agent;
   const where = rec?.venue ?? venue;
   // A resume keeps the slot's harness; its model is chosen again, among that harness's (quota may have moved).
@@ -146,12 +149,14 @@ export async function resumeBody(env, { body: ref, slot, agent, venue, venueKind
   const runner = d.runner(slot.harness, here);
   needsMet(env, runner, needs);
   const metadata = {
-    agent: who, venue: where, kind: pick.kind, ...(rec?.place ? { place: rec.place } : {}),
+    agent: who, venue: where, kind: pick.kind, ...((rec?.place ?? place) ? { place: rec?.place ?? place } : {}),
     ...(deny.length ? { deny: [...deny] } : {}), ...(guest ? { guest: true } : {}), ...(here ? { local: true } : {}),
     ...(modelNeed ? { modelNeed } : {}), harness: pick.harness, model: pick.model, family: pick.family, ...(pick.account ? { account: pick.account } : {}), ...(pick.accountKey ? { accountKey: pick.accountKey } : {}), ...switchedOf(pick),
     instance: randomBytes(12).toString('hex'), slot, ...(ref ? { resumed: ref } : {}),
   };
-  const options = { agent: who, brief: forRunner(runner, brief(b), cwd), model: pick.model, cwd, env: profileEnv(o.bodyEnv, pick.kind, env), deny, ...(seat ? { seat } : {}), ...(needs.length ? { needs } : {}), ...(files ? { files } : {}), ...((where === COMMS_VENUE || activity) ? { activity: true } : {}) };
+  const options = { agent: who, brief: forRunner(runner, brief(b), cwd), model: pick.model, cwd, env: profileEnv(o.bodyEnv, pick.kind, env, { agent: who, venue: where, place: rec?.place ?? place }, { deferSecrets: !!runner.remote }), deny, ...(seat ? { seat } : {}), ...(needs.length ? { needs } : {}), ...(files ? { files } : {}), ...((where === COMMS_VENUE || activity) ? { activity: true } : {}) };
+  metadata.profile = options.env.LOOM_BODY_PROFILE;
+  if (profileNotice(options.env) && typeof options.brief === 'string') options.brief = `${profileNotice(options.env)}\n\n${options.brief}`;
   const prepared = { metadata, why: pick.why, preferred: pick.preferred };
   const body = o.launch ? await o.launch({ runner, harness: pick.harness, options, resume: slot, prepared }) : await runner.resume(slot, options);
   const at = d.now().toISOString();

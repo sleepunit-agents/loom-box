@@ -447,7 +447,8 @@ test('a body is asked of the runtime: it picks the model, starts it through the 
   // opus is preferred but out of quota: the body runs on gpt, through the codex runner.
   const b = await startBody(env, { agent: 'art', brief: 'the wake', venue: 'wake', place: 'schedule:reflect' }, o);
   assert.deepEqual([b.body, b.model, b.harness, b.family, b.kind, b.account], ['codex:x0000000', 'gpt', 'codex', 'openai', 'scheduled', 'pro']);
-  assert.deepEqual(seen[0], ['start', 'codex', 'gpt', 'the wake']);
+  assert.deepEqual(seen[0].slice(0, 3), ['start', 'codex', 'gpt']);
+  assert.match(seen[0][3], /^JOB PROFILE PROBLEM:.*\n\nthe wake$/);
   // The record has no brief.
   const rec = readBody(env, b.body);
   assert.equal(JSON.stringify(rec).includes('the wake'), false);
@@ -473,9 +474,10 @@ test('a body is asked of the runtime: it picks the model, starts it through the 
 test('loom-runtime body start: the CLI a source calls, end to end on a stand-in Claude Code', () => {
   const h = harness();
   const env = { ...h.env, HOME: h.D, LOOM_BOX_LOCAL_NAME: 'one', LOOM_BOX_HOME: join(h.D, 'state'), LOOM_BOX_DATA: join(h.D, 'data'),
-    LOOM_RUNTIME_CLAUDE: join(here, 'fake-claude.mjs'), LOOM_RUNTIME_CLAUDE_JOBS: join(h.D, 'jobs'), LOOM_RUNTIME_ACCOUNTS: 'none', LOOM_RUNTIME_SCORECARDS: 'off' };
+    LOOM_RUNTIME_CLAUDE: join(here, 'fake-claude.mjs'), LOOM_RUNTIME_CLAUDE_JOBS: join(h.D, 'jobs'), LOOM_RUNTIME_ACCOUNTS: 'none', LOOM_RUNTIME_SCORECARDS: 'off',
+    LOOM_RUNTIME_BODY_ENV: 'FAKE_HARNESS', LOOM_RUNTIME_JOB_PROFILES: join(h.D, 'profiles.json') };
+  writeFileSync(env.LOOM_RUNTIME_JOB_PROFILES, JSON.stringify({ v: 1, jobs: { [JSON.stringify(['art', 'wake', 'scheduled', null])]: { v: 1, mcp: [], tools: [], skills: [], secrets: ['FAKE_HARNESS'] } } }));
   mkdirSync(join(h.D, 'work'));
-  writeFileSync(join(h.D, '.claude.json'), JSON.stringify({ mcpServers: { loom: { url: 'https://example.invalid/mcp' } } }));
   const cli = (args, input) => spawnSync(process.execPath, [join(here, '..', 'src', 'cli.mjs'), ...args], { env, input, encoding: 'utf-8', cwd: join(h.D, 'work') });
   const r = cli(['body', 'start', '--agent', 'art', '--venue', 'wake', '--prefer', 'claude-sonnet-5', '--model-need', 'coordinator: test Claude runner integration', '--brief', '-', '--json'], 'run the knowledge lane\nnow');
   assert.equal(r.status, 0, r.stderr);
