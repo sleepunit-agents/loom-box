@@ -18,3 +18,6 @@ saved note cannot be decrypted, is held visibly on the conversation. Its native
 history remains owned by the predecessor; it is not returned as a spawned result.
 A corrected valid handoff can be collected on a later tick. An ordinary final
 response can still finish work that completed before handing off.
+Missing or malformed predecessor model metadata holds rotation before retirement.
+A continuation with an invalid or mismatched pin waits rather than selecting a
+new model.

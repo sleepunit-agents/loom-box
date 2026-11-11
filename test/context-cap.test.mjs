@@ -264,3 +264,27 @@ test('missing, malformed and unreadable requested handoffs hold visibly instead 
     assert.equal(c.contextHandoffs.length, 1, mode);
   }
 });
+
+
+test('missing or malformed predecessor model metadata holds before native retirement', async () => {
+  for (const model of [undefined, '', ' ', {}, 'bad\nmodel']) {
+    const w = world(); w.o.venues = () => ({ slack: { kind: 'agent', send: ['adapter'] } });
+    const first = await deliver(w.env, w.msg('model-hold', 'Keep the same model'), w.o);
+    let c = loadConv(w.env, first.conversation); const old = c.body;
+    const file = join(w.env.LOOM_BOX_DATA, 'bodies', old.replace(':', '-') + '.json');
+    const record = JSON.parse(readFileSync(file));
+    writeFileSync(file, JSON.stringify({ ...record, model }));
+    const native = w.runner.transcript('s-' + old.split(':')[1]);
+    w.runner.context = () => 160000;
+    w.runner.final = () => HANDOFF_MARKER + 'Continue the job safely';
+    await tick(w.env, w.o); w.runner.finish(old); await tick(w.env, w.o);
+    c = loadConv(w.env, first.conversation);
+    assert.equal(c.body, old); assert.equal(c.contextHandoffs, undefined);
+    assert.ok(existsSync(native)); assert.ok(c.contextCap.note);
+    assert.equal(w.log.filter(x => x[0] === 'start').length, 1);
+    writeFileSync(file, JSON.stringify(record));
+    await tick(w.env, w.o);
+    c = loadConv(w.env, first.conversation);
+    assert.notEqual(c.body, old); assert.equal(c.contextModel.model, record.model);
+  }
+});

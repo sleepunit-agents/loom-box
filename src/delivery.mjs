@@ -2758,9 +2758,16 @@ function collectContextHandoff(c, runner, body, d) {
   return null; // A normal final still completes a job that finished before handing off.
 }
 
+function validContextModel(pin) {
+  return pin && ['claude', 'codex'].includes(pin.harness) && typeof pin.model === 'string'
+    && pin.model.length > 0 && pin.model.length <= 200 && !/\s|[\x00-\x1f\x7f]/.test(pin.model);
+}
+
 async function rotateContext(env, op, d) {
   const before = loadConv(env, op.cv);
   if (!ours(before, op) || before.body !== op.body || !before.contextCap?.note) return;
+  const predecessor = readBody(env, op.body);
+  if (!validContextModel(predecessor)) throw Error('context continuation requires valid predecessor model metadata');
   syncConversation(env, op.cv);
   // Existing retirement owns stop acknowledgement, inbox reconciliation and durable packing.
   const saved = await retire(env, op.cv, op.body, d, true);
@@ -2845,6 +2852,10 @@ async function routeOf(env, c0, op, rules, d, cant = []) {
   // its spawn allowed a failover: then it starts on another eligible model, its slot kept as lineage, no return.
   // Its rules come first: a harness this body's rules can't be kept on (`cant`: a deny list Codex can't hold, a local
   // body with no Codex opt-in) is never resumed or started, pinned or not; the job moves, said as such in its lineage.
+  if ((c0.contextModel || c0.contextHandoffs?.length) && (!validContextModel(c0.contextModel) || (c0.spawn?.assignment &&
+      (c0.spawn.assignment.model !== c0.contextModel.model || c0.spawn.assignment.harness !== c0.contextModel.harness)))) {
+    throw Object.assign(new DeliveryError('context continuation waits for valid matching original model metadata', 503), { held: true });
+  }
   const pin = c0.spawn?.assignment?.model ?? c0.contextModel?.model;
   if (pin) {
     const h = c0.spawn?.assignment?.harness ?? c0.contextModel.harness;
