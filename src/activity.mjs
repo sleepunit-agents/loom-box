@@ -5,19 +5,35 @@
 //   - Codex: events.jsonl. `item.started` makes a card, `item.completed` finishes it (`status: "failed"` is failed).
 // A card's summary is its label (t-1944): what the step did, in plain words, from the fixed rules below and in
 // redact.mjs; nothing is asked of a model for one (a Bash description is the body's own words, redacted like the
-// rest). A shell command shows as its description when the harness gives one, else its short form
-// (`Ran gh pr checks 603`); a file by its base name; a search by its pattern; a message by who it went to; a tool this
+// rest). Shell commands use fixed labels; only exact safe read-only forms may carry command detail. A file shows
+// by its base name; a search by its pattern; a message by who it went to; a tool this
 // table doesn't know as "Used a tool". Every variable part passes redact.mjs `part` (the gate), and every finished label
 // `finish` (redacted whole, one line, at most 120). A failed step adds why, from fixed phrases only
-// (`exit 1: 3 tests failed`). Never a tool's output, a file's contents, a whole command line or an environment value.
-// Text and thinking make no card.
+// (`exit 1: 3 tests failed`). Never a tool's output, a file's contents, a whole command line or an environment value
+// in a label.
+// A card may also carry, for the owner's Watching view (t-2109; Jonathan, 2026-11-10: work done for him is shown in
+// full, only other people's words are kept out): `detail`, an allowlisted read-only command or the step's target; `result`, one line of
+// fixed phrases (`Read 120 lines`, `3 additions, 1 removal`, `12 passed, 1 failed`, `exit 1`); `body`, an edit's diff
+// of a file that isn't private, each line redacted (shownText), at most MAX_BODY; `exit`; `limit`,
+// the step's own timeout in seconds; `end`, when it finished; `parent`, the helper (subagent) it ran under; and for a
+// plan, `items`, its checklist. The body's own words between steps are a `text` card (tool `text`), which delivery
+// shows only for a conversation that acts for the owner alone. A read shows its line count, never what it read; a shell
+// step's output is read only for its fixed phrases and never kept or sent (showing it on demand is its own task).
 import { createHash } from 'node:crypto';
-import { commandLabel, cutTo, failWhy, fileName, GONE, part, PRIVATE_FILE, privateFile, redact, UNPRINTABLE, UNPRINTABLE_ONE } from './redact.mjs';
+import { cutInput, cutTo, failWhy, fileName, WHY_WORDS, GONE, INPUT_MAX, part, PRIVATE_FILE, privateFile, privateWords, redact, UNPRINTABLE, UNPRINTABLE_ONE } from './redact.mjs';
+
+
 
 export { UNPRINTABLE, UNPRINTABLE_ONE };
 
 export const MAX_SUMMARY = 120;
 export const MAX_CARDS = 50;
+/** A card's `detail` (a whole command), its `body` (output, a diff, its words) at most, in UTF-16 units; plan items. */
+export const MAX_DETAIL = 4000;
+export const MAX_BODY = 32_000;
+/** The body's own words between steps, at most. */
+export const MAX_TEXT = 8_000;
+export const MAX_ITEMS = 20;
 
 /**
  * loom's tools in fixed words. Those that read or write a private store (memory, people, notes, knowledge, threads,
@@ -57,7 +73,7 @@ export function clean(s, n = MAX_SUMMARY) {
 }
 
 /** A finished label: redacted as a whole once more, on one printable line, at most MAX_SUMMARY. */
-const finish = (s) => clean(redact(s));
+const finish = (s) => clean(redact(normLine(s).replace(SGR, '')));
 /** A text part of a label (a pattern, a query, a first line), through the gate, cut to `n`. */
 const txt = (s, n) => part('text', s, n);
 const firstLine = (s) => String(s ?? '').split('\n').map((l) => l.trim()).find(Boolean) ?? '';
@@ -75,6 +91,13 @@ function hostOf(u) {
     const host = new URL(r).hostname || null;
     return host && new URL(s).hostname === host && redact(host) === host ? host : null;
   } catch { return null; }
+}
+
+/** A plan's checklist: each item through the gate, `done`, `now` (the one it's on) or `todo`; at most MAX_ITEMS. */
+function planItems(items) {
+  if (!Array.isArray(items)) return [];
+  const now = items.find((x) => x.now) ?? items.find((x) => !x.done);
+  return items.slice(0, MAX_ITEMS).map((x) => ({ text: (() => { const t = txt(x.text, 100); return t === GONE ? 'an item' : t; })(), state: x.done ? 'done' : x === now ? 'now' : 'todo' }));
 }
 
 /** A plan's (TodoWrite's or Codex's todo list's) line: `Plan (2/5): Running the tests`. */
@@ -137,10 +160,7 @@ export function claudeSummary(name, input = {}) {
     return Number.isFinite(l) && l > 0 ? ` (lines ${part('count', Math.floor(from))}–${part('count', Math.floor(from + l - 1))})` : ` (from line ${part('count', Math.floor(from))})`;
   };
   switch (name) {
-    case 'Bash': {
-      const d = typeof i.description === 'string' ? i.description.trim() : '';
-      return finish(d ? txt(d) : commandLabel(i.command) || 'Ran a command');
-    }
+    case 'Bash': return 'Ran a command';
     case 'BashOutput': return 'Checked a background command';
     case 'KillShell': case 'KillBash': return 'Stopped a background command';
     case 'Read': return finish(`Read ${fileName(i.file_path)}${lines()}`);
@@ -162,6 +182,81 @@ export function claudeSummary(name, input = {}) {
     default: return name.startsWith('mcp__') ? mcpLabel(mcpName(name), i) : 'Used a tool';
   }
 }
+
+// ─── A card's fixed label (t-2109): fixed words and safe parts only, set where the card is made ──────────────────────
+
+/** A file's base name as a fixed label may hold it: plain characters only, never a quote, a colon or a folder. */
+const safeName = (p) => { const n = fileName(p); return n !== GONE && n !== PRIVATE_FILE && /^[A-Za-z0-9._+-]{1,60}$/.test(n) && redact(n) === n ? n : null; };
+/** A person's or agent's name as a fixed label may hold it: a plain handle (`mark`, `loren-b`), else nothing. */
+const safeWho = (w) => (typeof w === 'string' && /^[a-z][a-z0-9]{0,30}(?:-[a-z0-9]{1,30}){0,3}$/.test(w) && redact(w) === w ? w : null);
+const planFixed = (items) => (Array.isArray(items) && items.length ? `Plan (${items.filter((x) => x.done).length}/${items.length})` : 'Updated its plan');
+
+/**
+ * A Claude tool call's fixed label: what the owner's view shows where someone else is in the conversation, and the
+ * only label sent there (delivery's activityPass). Built from fixed words and safe parts (a file's plain base name, a
+ * plan's counts, a plain name, a work id) — never a pattern, a query, a description or a message's words.
+ */
+export function claudeFixed(name, input = {}) {
+  const i = input && typeof input === 'object' ? input : {};
+  const file = (verb, p) => { const n = safeName(p); return n ? `${verb} ${n}` : `${verb} a file`; };
+  switch (name) {
+    case 'Bash': case 'BashOutput': return 'Ran a command';
+    case 'KillShell': case 'KillBash': return 'Stopped a background command';
+    case 'Read': return file('Read', i.file_path);
+    case 'Edit': case 'MultiEdit': return file('Edited', i.file_path);
+    case 'Write': return file('Wrote', i.file_path);
+    case 'NotebookEdit': return file('Edited', i.notebook_path);
+    case 'Grep': return 'Searched files';
+    case 'Glob': return 'Looked for files';
+    case 'WebSearch': return 'Searched the web';
+    case 'WebFetch': return 'Read a web page';
+    case 'Task': case 'Agent': return 'Started a helper';
+    case 'SendMessage': return 'Messaged a helper';
+    case 'TodoWrite': return planFixed((Array.isArray(i.todos) ? i.todos : []).map((t) => ({ done: t?.status === 'completed' })));
+    case 'Skill': return 'Used a skill';
+    case 'ToolSearch': return 'Loaded more tools';
+    default: return name.startsWith('mcp__') ? mcpFixed(mcpName(name), i) : 'Used a tool';
+  }
+}
+
+/** An MCP tool's fixed label: loom's tools in their fixed words, a relay as who it went to, a public tool's id. */
+function mcpFixed(tool, input) {
+  const i = input && typeof input === 'object' ? input : {};
+  if (tool === 'relay') { const w = safeWho(i.to); return w ? `Messaged ${w}` : 'Messaged someone'; }
+  if (Object.hasOwn(LOOM_TOOLS, tool)) return LOOM_TOOLS[tool];
+  const priv = PRIVATE.find(([re]) => re.test(tool));
+  if (priv) return priv[1];
+  const pub = PUBLIC_ARGS.find(([re]) => re.test(tool));
+  if (!pub) return 'Used a tool';
+  const arg = publicArg(tool, i);
+  return `${pub[4]}${arg ? ` ${arg}` : ''}`;
+}
+
+/** A Codex item's fixed label. */
+function codexFixed(item) {
+  switch (item.type) {
+    case 'command_execution': return 'Ran a command';
+    case 'file_change': { const c = Array.isArray(item.changes) ? item.changes : []; const n = c.length === 1 ? safeName(c[0]?.path) : null; return n ? `Changed ${n}` : c.length ? `Changed ${c.length} file${c.length === 1 ? '' : 's'}` : 'Changed files'; }
+    case 'mcp_tool_call': return mcpFixed(String(item.tool ?? ''), item.arguments);
+    case 'web_search': return 'Searched the web';
+    case 'todo_list': return planFixed((Array.isArray(item.items) ? item.items : []).map((t) => ({ done: t?.completed === true })));
+    default: return 'Used a tool';
+  }
+}
+
+/** A failure's fixed phrase after a fixed label: its exit code and failWhy's fixed words only. */
+const fixedWhy = (label, why) => (why ? `${label} — ${why}` : label);
+
+/** The shapes a fixed label may take (a house's is checked against them): fixed words, a plain name, a count, an id. */
+const NAME = '[A-Za-z0-9._+-]{1,60}';
+/** failWhy's fixed phrases (redact.mjs WHY), the only words a failure adds to a fixed label. */
+const WHY_PHRASES = WHY_WORDS;
+const WHY_TAIL = `(?:\\d{1,6} tests? failed|${WHY_PHRASES.map((w) => w.replace(/[()]/g, '\\$&')).join('|')})`;
+const FIXED_WORDS = [...new Set(['Ran a command', 'Stopped a background command', 'Searched files', 'Looked for files', 'Searched the web', 'Read a web page',
+  'Started a helper', 'Messaged a helper', 'Messaged someone', 'Used a skill', 'Loaded more tools', 'Used a tool', 'Updated its plan', 'Changed files',
+  'Read a file', 'Edited a file', 'Wrote a file', 'Did a step', 'Wrote its words', 'Used a task tool', 'Used a GitHub tool', ...Object.values(LOOM_TOOLS), ...PRIVATE.map(([, w]) => w)])];
+const esc = (w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+export const FIXED = new RegExp(`^(?:${FIXED_WORDS.map(esc).join('|')}|(?:Read|Edited|Wrote|Changed) ${NAME}|Changed \\d{1,6} files?|Plan \\(\\d{1,4}/\\d{1,4}\\)|Messaged [a-z][a-z0-9]{0,30}(?:-[a-z0-9]{1,30}){0,3}|Used a task tool t-\\d{1,9}|Used a GitHub tool #\\d{1,9})(?: — (?:exit -?\\d{1,6}(?:: ${WHY_TAIL})?|${WHY_TAIL}))?$`);
 
 /** A glob's last part, through the gate; checked whole first, so a secret with a / in it never shows its tail. */
 function lastPart(g) {
@@ -194,17 +289,324 @@ const toolName = (n) => (TOOL.test(String(n)) && redact(String(n)) === String(n)
 /** A card's time: an ISO time as the transcript wrote it, else now. */
 export const cardTime = (t) => (typeof t === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/.test(t) ? t : new Date().toISOString());
 
+// ─── Claude Code's look: a step's target, its result line, a few lines of a shell step's output (t-2109) ──────────
+
+/** ANSI colour (SGR) codes: kept in a shown text for a terminal's look; every other control goes. */
+const SGR = /\x1b\[[0-9;]{0,30}m/g;
+const CONTROL = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g;
+
+/** A line with every terminal code but a short colour gone whole, and every other unprintable character but a tab. */
+function normLine(line) {
+  return String(line)
+    // OSC (a title, a link) to its end; any CSI (ECMA-48: parameters, intermediates, a final byte) but a colour of at
+    // most 30 parameter characters; any other escape with its intermediates and final byte (ESC ( B, ESC 7, ESC =).
+    .replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\|$)/g, '')
+    .replace(/\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]/g, (m) => (/^\x1b\[[0-9;]{0,30}m$/.test(m) ? m : ''))
+    .replace(/\x1b[\x20-\x2f]*[\x30-\x7e]/g, (m) => (/^\x1b\[/.test(m) ? m : ''))
+    .split(/(\x1b\[[0-9;]{0,30}m)/)
+    .map((seg, i) => (i % 2 ? seg : seg.replace(UNPRINTABLE, (m) => m.replace(/[^\t]/gu, ''))))
+    .join('');
+}
+
+/**
+ * One line of shown text. Normalised first: every terminal code but colour (SGR) goes whole, then every other control
+ * and invisible character but a tab, so nothing can sit inside a token. Then the colour-free text is cut to INPUT_MAX
+ * and redacted, a private path named. Its colours are kept only when redaction left that text as it was; else it's the
+ * redacted text, without them. Nothing is taken out after redaction runs.
+ */
+function shownTextLine(line) {
+  const norm = normLine(line);
+  const plain = norm.replace(SGR, '');
+  // A line past INPUT_MAX is cut at a word, before redaction, and says so.
+  const cut = plain.length > INPUT_MAX ? cutInput(plain) : plain;
+  const r = privateWords(redact(cut));
+  return r === plain ? norm : cut === plain ? r : `${r} … (line cut)`;
+}
+
+/** Lines already shown (each through shownTextLine), at most `max`: their head and tail around a line saying how many
+ * weren't kept. Nothing is redacted or taken out of a line here. */
+function capLines(lines, max, more = 0) {
+  while (lines.length && !lines.at(-1).trim()) lines.pop();
+  while (lines.length && !lines[0].trim()) lines.shift();
+  const all = lines.join('\n');
+  if (all.length <= max && !more) return all;
+  const head = [], tail = [];
+  let h = 0, k = 0;
+  for (const l of lines) { if (h + l.length + 1 > max / 2) break; head.push(l); h += l.length + 1; }
+  for (let i = lines.length - 1; i >= head.length; i--) { if (k + lines[i].length + 1 > max / 2 - 40) break; tail.unshift(lines[i]); k += lines[i].length + 1; }
+  return [...head, `… ${lines.length - head.length - tail.length + more} lines not kept …`, ...tail].join('\n');
+}
+
+/**
+ * The raw lines worth working on to show at most `max` (t-2109): a head and a tail of WINDOW times `max` each, and how
+ * many lines between them weren't (capLines keeps less than either), so a long file isn't redacted whole to keep 32 KB.
+ */
+const WINDOW = 2;
+function window(lines, max) {
+  let n = 0;
+  for (const l of lines) { n += l.length + 1; if (n > 2 * WINDOW * max) break; }
+  if (n <= 2 * WINDOW * max) return { head: lines, middle: [], tail: [] };
+  let h = 0, t = 0, i = 0, j = lines.length;
+  while (i < j && h + lines[i].length + 1 <= WINDOW * max) h += lines[i++].length + 1;
+  while (j > i && t + lines[j - 1].length + 1 <= WINDOW * max) t += lines[--j].length + 1;
+  return { head: lines.slice(0, i), middle: lines.slice(i, j), tail: lines.slice(j) };
+}
+
+const KEY_BEGIN = /-----BEGIN [A-Z ]{0,40}PRIVATE KEY(?: BLOCK)?-----/;
+const KEY_END = /-----END [A-Z ]{0,40}PRIVATE KEY(?: BLOCK)?-----/;
+
+/**
+ * A diff as shown: each line's content redacted apart from its mark (+, -, space), so `+NAME=value` is an assignment to
+ * redact and `-print(…)` isn't read as a `-p` flag; a hunk header as itself; at most MAX_BODY.
+ */
+export function diffText(text) {
+  // Its mark is read after the line is normalised, so nothing invisible before it can hide it. A key block's every line,
+  // from its BEGIN to its END whatever its mark, goes whole (redact can't see a key line by line).
+  // Only its head and tail are worked out (window); the lines between are read for a key block's start and end only.
+  let inKey = false;
+  const key = (l) => {
+    const words = (/^[-+ ]/.test(l) ? l.slice(1) : l).replace(SGR, '');
+    if (KEY_BEGIN.test(words)) inKey = true;
+    if (inKey) { if (KEY_END.test(words)) inKey = false; return true; }
+    return false;
+  };
+  const show = (raw) => { const l = normLine(raw); return key(l) ? GONE : /^[-+ ]/.test(l) ? `${l[0]}${shownTextLine(l.slice(1))}` : shownTextLine(l); };
+  const { head, middle, tail } = window(String(text ?? '').slice(0, 2_000_000).split('\n'), MAX_BODY);
+  const shown = head.map(show);
+  for (const raw of middle) key(normLine(raw));
+  return capLines([...shown, ...tail.map(show)], MAX_BODY, middle.length);
+}
+
+/**
+ * Text as the owner's view shows it (t-2109): a key block taken out whole, then each line through shownTextLine; at
+ * most `max`, its head and tail kept around a line saying how many weren't. '' for none.
+ */
+export function shownText(text, max = MAX_BODY) {
+  let inKey = false;
+  const key = (line) => {
+    const words = line.replace(SGR, '');
+    if (KEY_BEGIN.test(words)) inKey = true;
+    if (!inKey) return false;
+    if (KEY_END.test(words)) inKey = false;
+    return true;
+  };
+  const show = (raw) => { const line = normLine(raw); return key(line) ? GONE : shownTextLine(line); };
+  const { head, middle, tail } = window(String(text ?? '').slice(0, 2_000_000).split('\n'), max);
+  const shown = head.map(show);
+  for (const raw of middle) key(normLine(raw));
+  return capLines([...shown, ...tail.map(show)], max, middle.length);
+}
+
+/** Remove private-key blocks before a prose window. Whitespace inside a marker never hides it. */
+function proseWithoutKeys(text) {
+  const out = [];
+  let inKey = false, from = 0;
+  // Look ahead at marker words: neither a rule nor a malformed END may consume a later opening delimiter.
+  // Any BEGIN is fail-closed, including an unfinished header at the chunk boundary.
+  // The scan stays linear in bounded text; only marker words are compacted.
+  for (const m of text.matchAll(/(?=(-----\s*(B\s*E\s*G\s*I\s*N|E\s*N\s*D[^-]*-----)))/g)) {
+    const marker = m[2].replace(/\s/g, '').replace(/-----$/, '');
+    if (!inKey && /^BEGIN/.test(marker)) {
+      out.push(text.slice(from, m.index), GONE);
+      inKey = true;
+    } else if (inKey && /^END[A-Z]*PRIVATEKEY(?:BLOCK)?$/.test(marker)) {
+      from = m.index + m[1].length;
+      inKey = false;
+    }
+  }
+  if (!inKey) out.push(text.slice(from));
+  return out.join('');
+}
+
+/** Assistant prose is normalized and redacted as a complete bounded text before any label/body window.
+ * Keep physical newlines so ordinary prose retains its lines and multiline secret assignments retain context. */
+function ownWords(text) {
+  const normalized = cutInput(text, 2_000_000).split('\n').map(normLine).join('\n').replace(SGR, '');
+  const withoutKeys = proseWithoutKeys(normalized);
+  return shownText(redact(withoutKeys, { max: withoutKeys.length }), MAX_TEXT);
+}
+
+/** A shell command as Codex runs it (`/usr/bin/bash -lc '…'`), unwrapped to what the body wrote. */
+function unwrapShell(c) {
+  const m = /^(?:\/usr)?(?:\/bin\/)?(?:ba|z)?sh\s+-l?c\s+(['"])([\s\S]*)\1\s*$/.exec(String(c ?? '').trim());
+  return m ? m[2] : String(c ?? '');
+}
+
+/** Only these complete read-only command shapes have displayable detail. No operands, shell syntax,
+ * assignments or arbitrary flags: unknown commands carry the fixed label only. */
+const SAFE_COMMAND = /^(?:pwd|ls(?: -(?:l|a|la|al))?|git (?:status(?: --short| --porcelain)?|diff(?: --stat| --name-only)?|log --oneline))(?![\s\S])/;
+export function commandLine(command) {
+  const c = String(command ?? '');
+  return SAFE_COMMAND.test(c) ? c : '';
+}
+
+/** A diff (Claude Code's structuredPatch hunks) as shown text: `@@ -a,b +c,d @@` and its lines. */
+function patchText(patch) {
+  if (!Array.isArray(patch)) return '';
+  const out = [];
+  for (const h of patch.slice(0, 200)) {
+    if (!h || typeof h !== 'object') continue;
+    const n = (v) => (Number.isInteger(v) && v >= 0 ? v : 0);
+    out.push(`@@ -${n(h.oldStart)},${n(h.oldLines)} +${n(h.newStart)},${n(h.newLines)} @@`);
+    for (const l of Array.isArray(h.lines) ? h.lines : []) if (typeof l === 'string') out.push(l.replace(/\n/g, ' '));
+  }
+  return diffText(out.join('\n'));
+}
+
+const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+const count = (n) => (Number.isInteger(n) && n >= 0 && n < 1e9 ? n : null);
+
+/** A test run's counts in fixed words, from its output (node --test, vitest, jest, pytest): `12 passed, 1 failed`. */
+export function testsLine(output) {
+  const t = String(output ?? '').slice(-20_000);
+  let pass = null, fail = null;
+  const node = /^[#ℹ] pass (\d{1,6})\s*$/m.exec(t), nodeF = /^[#ℹ] fail (\d{1,6})\s*$/m.exec(t);
+  if (node) { pass = Number(node[1]); fail = nodeF ? Number(nodeF[1]) : 0; }
+  const jest = /\bTests:\s{1,10}(?:(\d{1,6}) failed,\s*)?(?:\d{1,6} \w+,\s*)*?(\d{1,6}) passed/.exec(t);
+  if (pass === null && jest) { pass = Number(jest[2]); fail = jest[1] ? Number(jest[1]) : 0; }
+  const vitest = /\bTests\s{1,10}(?:(\d{1,6}) failed \|\s*)?(\d{1,6}) passed/.exec(t);
+  if (pass === null && vitest) { pass = Number(vitest[2]); fail = vitest[1] ? Number(vitest[1]) : 0; }
+  const py = /=+ ([^=\n]*)=+/.exec(t);
+  if (pass === null && py) {
+    const counts = [...py[1].matchAll(/\b(\d{1,6}) (passed|failed)\b/g)];
+    if (counts.length) { pass = Number(counts.find(x => x[2] === 'passed')?.[1] ?? 0); fail = Number(counts.find(x => x[2] === 'failed')?.[1] ?? 0); }
+  }
+  if (pass === null) return null;
+  return fail ? `${pass} passed, ${fail} failed` : `${plural(pass, 'test')} passed`;
+}
+
+/** A shell step's result line: its exit code when it failed, a test run's counts, or how much it printed. */
+function shellResult({ exit, output, failed }) {
+  const tests = testsLine(output);
+  const lines = String(output ?? '').split('\n').filter((l) => l.trim()).length;
+  const code = Number.isInteger(exit) && exit !== 0 && Math.abs(exit) < 1e6 ? `exit ${exit}` : failed ? 'failed' : null;
+  return [code, tests ?? (code ? null : lines ? plural(lines, 'line') + ' of output' : 'no output')].filter(Boolean).join(': ');
+}
+
+/** A patch's (Claude Code's structuredPatch) counts: `3 additions, 1 removal`. */
+function patchLine(patch) {
+  if (!Array.isArray(patch)) return null;
+  let add = 0, rm = 0;
+  for (const h of patch) for (const l of Array.isArray(h?.lines) ? h.lines : []) { if (typeof l !== 'string') continue; if (l.startsWith('+')) add++; else if (l.startsWith('-')) rm++; }
+  return `${plural(add, 'addition')}, ${plural(rm, 'removal')}`;
+}
+
+/** A Claude tool's target, for `Tool(target)`: a shell step's command, a file's shown name, a search's pattern. */
+function claudeDetail(name, i) {
+  switch (name) {
+    case 'Bash': return commandLine(i.command);
+    case 'Read': case 'Edit': case 'MultiEdit': case 'Write': return fileName(i.file_path) === GONE ? '' : fileName(i.file_path);
+    case 'NotebookEdit': return fileName(i.notebook_path) === GONE ? '' : fileName(i.notebook_path);
+    case 'Grep': { const p = txt(i.pattern, 60); return p === GONE ? '' : `"${p}"${i.path && fileName(i.path) !== GONE ? ` in ${fileName(i.path)}` : ''}`; }
+    case 'Glob': return privateGlob(i.pattern) ? PRIVATE_FILE : (lastPart(i.pattern) === GONE ? '' : lastPart(i.pattern));
+    default: return '';
+  }
+}
+
+/** Whether a file's contents must never show: no path, a private one, or one whose shown name isn't plain. */
+function hidden(path) {
+  if (typeof path !== 'string' || !path) return true;
+  const n = fileName(path);
+  return privateFile(path) || n === PRIVATE_FILE || n === GONE;
+}
+
+/** A shell step's own timeout, in seconds (Claude Code's Bash: `timeout` ms, 2 minutes when unset; none in the background). */
+function claudeLimit(name, i) {
+  if (name !== 'Bash' || i.run_in_background === true) return null;
+  const ms = Number(i.timeout);
+  return Math.min(86_400, Math.max(1, Math.ceil((Number.isFinite(ms) && ms > 0 ? ms : 120_000) / 1000)));
+}
+
+/** A finished Claude step's result line and its body (an edit's diff, made when read: lazyBody): from its `toolUseResult`. */
+function claudeResult(name, r, text, failed, exit, input = {}) {
+  const u = r && typeof r === 'object' ? r : {};
+  // A private file's contents never show, in a diff or as written (a .env, a key, loom's private stores): its counts only.
+  const shows = !hidden(input.file_path ?? input.notebook_path);
+  switch (name) {
+    case 'Bash': {
+      // A shell step's output is read only for its fixed phrases (exit code, test counts, how many lines), never kept or
+      // sent (t-2109: showing it on demand is its own task).
+      const output = typeof u.stdout === 'string' || typeof u.stderr === 'string' ? [u.stdout, u.stderr].filter(Boolean).join('\n') : text;
+      return { result: shellResult({ exit, output, failed }) };
+    }
+    case 'Read': { const n = count(u.file?.numLines); return n === null ? {} : { result: `Read ${plural(n, 'line')}` }; }
+    case 'Edit': case 'MultiEdit': { const p = patchLine(u.structuredPatch); return p ? { result: p, ...(shows ? { body: () => worked('patch', JSON.stringify(u.structuredPatch), () => patchText(u.structuredPatch)) } : {}) } : {}; }
+    case 'Write': {
+      if (u.type === 'create' && typeof u.content === 'string') return { result: `Wrote ${plural(u.content.split('\n').length, 'line')}`, ...(shows ? { body: () => worked('write', u.content, () => diffText(u.content.split('\n').map((l) => `+${l}`).join('\n'))) } : {}) };
+      const p = patchLine(u.structuredPatch); return p ? { result: p, ...(shows ? { body: () => worked('patch', JSON.stringify(u.structuredPatch), () => patchText(u.structuredPatch)) } : {}) } : {};
+    }
+    case 'Grep': { const f = count(u.numFiles), n = count(u.numLines); return n !== null && u.mode === 'content' ? { result: `Found ${plural(n, 'line')}` } : f !== null ? { result: `Found ${plural(f, 'file')}` } : {}; }
+    case 'Glob': { const f = count(u.numFiles); return f === null ? {} : { result: `Found ${plural(f, 'file')}` }; }
+    case 'Task': case 'Agent': { const n = count(u.totalToolUseCount); return n === null ? {} : { result: `${plural(n, 'tool use')}` }; }
+    default: return {};
+  }
+}
+
+/**
+ * A card's `body` made only when it's first read (t-2109): a transcript's window holds thousands of steps, and only the
+ * newest few are ever kept or sent, so their diffs and words are worked out, redacted line by line, for those only.
+ * An empty one reads as none.
+ */
+/**
+ * Text worked out once (t-2109): a diff or words shown are made again from the same input every pass (a transcript is
+ * read whole each time), so what was made is kept for the process by its input's hash, the newest WORKED_MAX of them.
+ */
+const WORKED = new Map();
+/** How many of each kind are kept: well over CARDS_KEPT for several conversations at once (a command is small). */
+const WORKED_MAX = { cmd: 8000, text: 2000, 'gate-text': 2000, patch: 1500, write: 1500, 'gate-diff': 1500 };
+function worked(kind, input, make) {
+  if (!WORKED.has(kind)) WORKED.set(kind, new Map());
+  const m = WORKED.get(kind), k = createHash('sha256').update(String(input)).digest('hex');
+  if (m.has(k)) { const v = m.get(k); m.delete(k); m.set(k, v); return v; }
+  const v = make();
+  m.set(k, v);
+  if (m.size > (WORKED_MAX[kind] ?? 1000)) m.delete(m.keys().next().value);
+  return v;
+}
+
+function lazyBody(card, make, key = 'body') {
+  let made = false, v;
+  Object.defineProperty(card, key, { enumerable: true, configurable: true,
+    get() { if (!made) { made = true; v = make() || undefined; } return v; },
+    set(x) { Object.defineProperty(card, key, { value: x, enumerable: true, configurable: true, writable: true }); } });
+  return card;
+}
+
 /** The cards in a Claude transcript's lines (parsed JSON objects), in order; `prefix` keeps ids unique per thread. */
-export function claudeCards(lines, prefix = '') {
-  const cards = new Map();
+export function claudeCards(lines, prefix = '', parent = null) {
+  const cards = new Map(), names = new Map(), inputs = new Map();
   for (const l of lines) {
     const content = l?.message?.content;
     if (!Array.isArray(content)) continue;
     if (l.type === 'assistant') {
+      // The body's own words between steps (t-2109): a `text` card, its first line the label and the whole the body.
+      // Thinking never. Delivery keeps them only for a conversation that acts for the owner alone.
+      // By its line's own uuid: Claude Code writes each block of one message as a line of its own, under one message id.
+      const mid = typeof l.uuid === 'string' ? l.uuid : typeof l.message?.id === 'string' ? l.message.id : null;
+      content.forEach((c, n) => {
+        if (c?.type !== 'text' || typeof c.text !== 'string' || !c.text.trim() || !mid) return;
+        const id = `${prefix}${mid}:${n}`.slice(0, 80);
+        const shown = worked('text', c.text, () => ownWords(c.text));
+        const label = part('text', firstLine(shown), MAX_SUMMARY);
+        if (label === GONE) return;
+        const card = { id, at: cardTime(l.timestamp), tool: 'text', summary: clean(label), fixed: 'Wrote its words', state: 'done', ...(parent ? { parent } : {}) };
+        cards.set(id, lazyBody(card, () => shown));
+      });
       for (const c of content) {
         if (c?.type !== 'tool_use' || typeof c.id !== 'string') continue;
         const id = `${prefix}${c.id}`.slice(0, 80);
-        if (!cards.has(id)) cards.set(id, { id, at: cardTime(l.timestamp), tool: toolName(c.name), summary: claudeSummary(String(c.name ?? ''), c.input) || 'Used a tool', state: 'running' });
+        if (cards.has(id)) continue;
+        const name = String(c.name ?? ''), input = c.input && typeof c.input === 'object' ? c.input : {};
+        const card = { id, at: cardTime(l.timestamp), tool: toolName(c.name), summary: claudeSummary(name, input) || 'Used a tool', fixed: claudeFixed(name, input), state: 'running', ...(parent ? { parent } : {}) };
+        // A shell step's command is worked out only when it's read, as a body is (a window holds thousands).
+        const limit = claudeLimit(name, input);
+        if (name === 'Bash') lazyBody(card, () => claudeDetail(name, input), 'detail');
+        else { const detail = claudeDetail(name, input); if (detail) card.detail = detail; }
+        if (limit) card.limit = limit;
+        if (name === 'TodoWrite') card.items = planItems((Array.isArray(input.todos) ? input.todos : []).map((t) => ({ text: t?.status === 'in_progress' ? (t.activeForm || t.content) : t?.content, done: t?.status === 'completed', now: t?.status === 'in_progress' })));
+        names.set(id, name);
+        inputs.set(id, input);
+        cards.set(id, card);
       }
     } else if (l.type === 'user') {
       for (const c of content) {
@@ -212,12 +614,20 @@ export function claudeCards(lines, prefix = '') {
         const card = cards.get(`${prefix}${c.tool_use_id}`.slice(0, 80));
         if (!card || card.state !== 'running') continue; // one result per call: a repeated line changes nothing
         card.state = c.is_error === true ? 'failed' : 'done';
-        if (card.state === 'failed') {
-          // Claude Code's Bash result starts "Exit code N" on a failure; the rest is only matched, never shown.
-          const text = resultText(c);
-          const exit = /^Exit code (\d+)/.exec(text)?.[1];
-          card.summary = withWhy(card.summary, failWhy({ exit: exit ? Number(exit) : undefined, output: text }));
-        }
+        const text = resultText(c);
+        // Claude Code's Bash result starts "Exit code N" on a failure.
+        const code = /^Exit code (\d+)/.exec(text)?.[1];
+        const exit = code ? Number(code) : undefined;
+        if (card.state === 'failed') { const why = failWhy({ exit, output: text }); card.summary = withWhy(card.summary, why); card.fixed = fixedWhy(card.fixed, why); }
+        // An exit code only for a shell step: any other tool's result text (a file's contents) is never read for one.
+        if (Number.isInteger(exit) && SHELL_TOOLS.has(names.get(card.id))) card.exit = exit;
+        // A line's toolUseResult is its one result's: with several results in one line, whose it is can't be told, so
+        // none of them is read from it (no diff on the wrong card).
+        const own = content.filter((x) => x?.type === 'tool_result').length === 1 ? l.toolUseResult : undefined;
+        const { result, body } = claudeResult(names.get(card.id), own, text, card.state === 'failed', exit, inputs.get(card.id));
+        if (result) card.result = clean(redact(result));
+        if (body) lazyBody(card, body);
+        if (typeof l.timestamp === 'string' && cardTime(l.timestamp) === l.timestamp) card.end = l.timestamp;
       }
     }
   }
@@ -228,7 +638,7 @@ const CODEX_TYPES = ['command_execution', 'mcp_tool_call', 'file_change', 'web_s
 
 function codexSummary(item) {
   switch (item.type) {
-    case 'command_execution': return finish(commandLabel(item.command) ?? 'Ran a command');
+    case 'command_execution': return 'Ran a command';
     case 'file_change': {
       const paths = Array.isArray(item.changes) ? item.changes.map((c) => fileName(c?.path)) : [];
       return finish(paths.length === 1 ? `Changed ${paths[0]}` : paths.length === 2 ? `Changed ${paths.join(', ')}` : paths.length ? `Changed ${paths[0]} and ${paths.length - 1} more` : 'Changed files');
@@ -248,31 +658,132 @@ function codexWhy(item) {
 }
 
 /** The cards in a Codex run's events (parsed JSON objects), in order; `prefix` keeps item ids unique per thread. */
-export function codexCards(events, prefix = '') {
+export function codexCards(events, prefix = '', timeOf = () => new Date().toISOString()) {
   const cards = new Map();
   for (const e of events) {
     const item = e?.item;
-    if (!item || !CODEX_TYPES.includes(item.type) || typeof item.id !== 'string') continue;
+    if (!item || typeof item.id !== 'string') continue;
+    if (item.type === 'agent_message') {
+      if (e.type !== 'item.completed' || typeof item.text !== 'string' || !item.text.trim()) continue;
+      const id = `${prefix}${item.id}`.slice(0, 80);
+      const text = worked('text', item.text, () => ownWords(item.text));
+      const card = { id, at: timeOf(id), tool: 'text', summary: finish(firstLine(text)), fixed: 'Wrote its words', state: 'done' };
+      cards.set(id, lazyBody(card, () => text));
+      continue;
+    }
+    if (!CODEX_TYPES.includes(item.type)) continue;
     const id = `${prefix}${item.id}`.slice(0, 80);
     if (!cards.has(id) && ['item.started', 'item.updated', 'item.completed'].includes(e.type)) {
-      cards.set(id, { id, at: new Date().toISOString(), tool: toolName(item.type), summary: '', state: item.type === 'todo_list' ? 'done' : 'running' });
+      cards.set(id, { id, at: timeOf(id), tool: toolName(item.type), summary: '', state: item.type === 'todo_list' ? 'done' : 'running' });
     }
     const card = cards.get(id);
     if (!card) continue;
     const label = codexSummary(item); // once per event: a plan moves on item.updated, a step's label on completion
     if (!card.summary) card.summary = label;
+    if (!card.fixed || item.type === 'todo_list') card.fixed = codexFixed(item);
+    if (!card.detail) {
+      const detail = item.type === 'command_execution' ? commandLine(unwrapShell(item.command))
+        : item.type === 'file_change' && Array.isArray(item.changes) && item.changes.length && fileName(item.changes[0]?.path) !== GONE ? fileName(item.changes[0]?.path) : '';
+      if (detail) card.detail = detail;
+    }
     // A plan changes as the turn goes (item.updated): it's never a running step, only the latest plan.
-    if (item.type === 'todo_list') { card.summary = label; continue; }
+    if (item.type === 'todo_list') { card.summary = label; card.items = planItems((Array.isArray(item.items) ? item.items : []).map((t) => ({ text: t?.text, done: t?.completed === true }))); continue; }
     if (e.type === 'item.completed') {
       card.state = item.status === 'failed' || (item.type === 'command_execution' && Number.isInteger(item.exit_code) && item.exit_code !== 0) ? 'failed' : 'done';
       card.summary = card.state === 'failed' ? withWhy(label, codexWhy(item)) : label;
+      card.fixed = card.state === 'failed' ? fixedWhy(codexFixed(item), codexWhy(item)) : codexFixed(item);
+      if (item.type === 'command_execution') {
+        if (Number.isInteger(item.exit_code) && Math.abs(item.exit_code) < 1e6) card.exit = item.exit_code;
+        card.result = clean(redact(shellResult({ exit: item.exit_code, output: item.aggregated_output, failed: card.state === 'failed' })));
+      } else if (item.type === 'file_change' && Array.isArray(item.changes)) card.result = `${plural(item.changes.length, 'file')} changed`;
     }
   }
   return [...cards.values()];
 }
 
+/**
+ * How many tokens a Claude session has written: each assistant message's output_tokens once (its largest: Claude
+ * Code writes a message's lines as it streams, each with the usage so far); null for none. `seen` (message id → its
+ * tokens) carries a count across reads of a growing transcript.
+ */
+export function claudeTokens(lines, seen = new Map()) {
+  for (const l of lines) {
+    const id = l?.message?.id, n = l?.message?.usage?.output_tokens;
+    if (l?.type === 'assistant' && typeof id === 'string' && Number.isInteger(n) && n >= 0) seen.set(id, Math.max(seen.get(id) ?? 0, Math.min(n, 1e9)));
+  }
+  if (!seen.size) return null;
+  let t = 0;
+  for (const n of seen.values()) t += n;
+  return Math.min(t, 1e12);
+}
+
+/** A body's last sign of life as core takes it: an ISO time, and its tokens so far when it says; null when neither. */
+export function cleanAlive(a) {
+  if (!a || typeof a !== 'object' || typeof a.at !== 'string' || !Number.isFinite(Date.parse(a.at)) || cardTime(a.at) !== a.at) return null;
+  return { at: a.at, ...(Number.isInteger(a.tokens) && a.tokens >= 0 && a.tokens <= 1e12 ? { tokens: a.tokens } : {}) };
+}
+
+/**
+ * A card's further parts (t-2109), as core takes them, each through the gate again: a house's (houserunner cleanCards)
+ * and our own alike (delivery's activityPass passes every card through it before it's told). A part that isn't its shape is left out, never the card. `detail` shown text of at most
+ * MAX_DETAIL without colours, `body` shown text of at most MAX_BODY, `result` one printable line of at most
+ * MAX_SUMMARY, `items` at most MAX_ITEMS of {text (100), state done|now|todo}, `end` an ISO time, `parent` an id (as
+ * the caller makes it), `exit` and `limit` whole numbers in range.
+ */
+export function stepParts(c, idOf = (x) => x, { words = true } = {}) {
+  const o = {};
+  // Its fixed label, only in a shape made here (FIXED); else none (delivery then says "Did a step").
+  // A file it names isn't a private one (a house's label could say `Read .env`; one made here never does).
+  const named = typeof c?.fixed === 'string' ? /^(?:Read|Edited|Wrote|Changed) (\S+)/.exec(c.fixed)?.[1] : undefined;
+  if (typeof c?.fixed === 'string' && c.fixed.length <= MAX_SUMMARY && FIXED.test(c.fixed) && redact(c.fixed) === c.fixed && !(named && privateFile(named))) o.fixed = c.fixed;
+  const int = (v, lo, hi) => (Number.isInteger(v) && v >= lo && v <= hi ? v : null);
+  const tool = String(c?.tool ?? '');
+  // A target only of the shape made here for its tool (detailOk): a command; a file's base name; a search's pattern.
+  if (words && typeof c?.detail === 'string' && c.detail && (!SHELL_TOOLS.has(tool) || commandLine(c.detail))) { const d = shownText(c.detail.replace(SGR, ''), MAX_DETAIL); if (d && detailOk(tool, d)) o.detail = d; }
+  // A body only where one is made here (bodyAllowed): the body's words, or a diff of a file whose shown name is plain
+  // and not private. Never a shell step's output, never a read's.
+  // Read only where it may go: its words wanted, and its tool's (a lazy body is worked out only then).
+  if (words && bodyAllowed(tool, o.detail) && typeof c?.body === 'string' && c.body) { const t = tool === 'text' ? worked('gate-text', c.body, () => shownText(c.body, MAX_TEXT)) : worked('gate-diff', c.body, () => diffText(c.body)); if (t) o.body = t; }
+  // A result is one of the fixed phrases made here (shellResult, claudeResult, codexCards), never a house's prose.
+  if (typeof c?.result === 'string' && RESULT.test(c.result) && redact(c.result) === c.result) o.result = c.result;
+  const exit = int(c?.exit, -999_999, 999_999); if (exit !== null) o.exit = exit;
+  const limit = int(c?.limit, 1, 86_400); if (limit !== null) o.limit = limit;
+  if (typeof c?.end === 'string' && cardTime(c.end) === c.end) o.end = c.end;
+  if (typeof c?.parent === 'string' && /^[A-Za-z0-9_.:\-]{1,80}$/.test(c.parent)) { const p = idOf(c.parent); if (p) o.parent = p; }
+  if (words && Array.isArray(c?.items) && c.items.length) {
+    o.items = c.items.slice(0, MAX_ITEMS).map((x) => { const t = typeof x?.text === 'string' ? part('text', x.text, 100) : GONE; return { text: t === GONE ? 'an item' : t, state: ['done', 'now', 'todo'].includes(x?.state) ? x.state : 'todo' }; });
+  }
+  return o;
+}
+
+const DIFFS = new Set(['Edit', 'MultiEdit', 'Write']);
+const FILE_TOOLS = new Set(['Read', 'Edit', 'MultiEdit', 'Write', 'NotebookEdit', 'file_change', 'Glob']);
+const SHELL_TOOLS = new Set(['Bash', 'command_execution']);
+/** Whether a target fits what's made here for its tool: a shell step's command; a file tool's base name (no folder);
+ * a search's `"pattern"` and where; nothing for any other tool (a private store's argument never shows). */
+function detailOk(tool, d) {
+  // A house's command must match the same complete safe shape.
+  if (SHELL_TOOLS.has(tool)) return !!commandLine(d);
+  if (FILE_TOOLS.has(tool)) return d.length <= 80 && !/[/\\\n]/.test(d) && fileName(d) === d;
+  if (tool === 'Grep') return d.length <= 160 && /^"[^"\n]{1,60}"(?: in [^/\\\n]{1,80})?$/.test(d);
+  return false;
+}
+/** The result lines made here, as their shapes: counts and fixed words only. */
+const N = '\\d{1,9}';
+const TESTS = `(?:${N} tests? passed|${N} passed, ${N} failed)`;
+const RESULT = new RegExp(`^(?:(?:exit -?${N}|failed)(?:: ${TESTS})?|${TESTS}|${N} lines? of output|no output|Read ${N} lines?|Wrote ${N} lines?|${N} additions?, ${N} removals?|Found ${N} (?:files?|lines?)|${N} tool uses?|${N} files? changed)$`);
+/** Whether a card of this tool, with this (gated) target, may carry a body: the rule claudeResult follows (`shows`). */
+function bodyAllowed(tool, detail) {
+  if (tool === 'text') return true;
+  if (DIFFS.has(tool)) return !!detail && detail !== PRIVATE_FILE && detail !== GONE && !hidden(detail);
+  return false;
+}
+
+/** Only a card's base fields, as a core from before t-2109 takes them. */
+export const baseCard = (c) => ({ id: c.id, at: c.at, tool: c.tool, summary: c.summary, state: c.state });
+
 /** What the record keeps of a card: its state and a short hash of its label (never the label itself). */
-const mark = (c) => `${c.state}:${createHash('sha256').update(String(c.summary)).digest('hex').slice(0, 8)}`;
+const mark = (c) => `${c.state}:${createHash('sha256').update(JSON.stringify([c.summary, c.fixed, c.detail, c.result, c.body, c.exit, c.limit, c.end, c.items, c.parent])).digest('hex').slice(0, 8)}`;
 
 /**
  * What to post of `cards` given what was posted (`sent`: id → its mark): the new ones and those whose state or label
@@ -285,8 +796,13 @@ export function changed(cards, sent = {}) {
   const next = { ...sent };
   for (const c of cards) if (next[c.id] === c.state) next[c.id] = mark(c);
   for (const c of out) next[c.id] = mark(c);
-  // Keep the record bounded: the newest 400 ids.
+  // Keep the record bounded: every card still in what was read (or each would be told again, t-2109), and of the rest,
+  // the newest, to 400 in all.
   const keys = Object.keys(next);
-  if (keys.length > 400) for (const k of keys.slice(0, keys.length - 400)) delete next[k];
+  if (keys.length > 400) {
+    const now = new Set(cards.map((c) => c.id));
+    let over = keys.length - Math.max(400, now.size);
+    for (const k of keys) { if (over <= 0) break; if (!now.has(k)) { delete next[k]; over--; } }
+  }
   return { out, next };
 }

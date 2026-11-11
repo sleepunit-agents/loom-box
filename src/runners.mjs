@@ -36,13 +36,13 @@
 import { spawn as nodeSpawn, spawnSync } from 'node:child_process';
 import { nativeHistoryEnv, validateNativeHistoryOptions } from './native-history.mjs';
 import { createHash, randomBytes } from 'node:crypto';
-import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { keptReading } from './statusline.mjs';
 import { claudeActionNow, codexActionNow } from './ticker.mjs';
-import { claudeCards, codexCards } from './activity.mjs';
+import { claudeCards, claudeTokens, codexCards } from './activity.mjs';
 import { CRED_FILE, lastRateLimit, lastRefusal, refusedUntil, tailOf } from './logins.mjs';
 // A ticker observation never scans an unbounded conversation history. Missing starts mean generic Working.
 const tickerLines = p => (tailOf(p, 1024 * 1024) ?? '').split('\n').flatMap(l => { try { return [JSON.parse(l)]; } catch { return []; } });
@@ -66,6 +66,35 @@ const stableLaunchToken = value => {
   return value;
 };
 
+/** At most how much of a session's transcript a sign of life reads a time, and of a helper's transcript (t-2109). */
+const SIGN_READ_MAX = 4 * 1024 * 1024;
+const HELPER_READ_MAX = 2 * 1024 * 1024;
+const SIGN_MEMO = new Map();
+const CODEX_CARD_TIMES = new Map();
+/** The longest unfinished line a sign of life carries between reads; past it, the line's dropped. */
+const REST_MAX = 16 * 1024 * 1024;
+/** At most how much of a helper's meta file is read (a few hundred bytes, as Claude Code writes it). */
+const META_MAX = 64 * 1024;
+const ACTIVITY_READ_MAX = 16 * 1024 * 1024;
+const jsonLines = (t) => t.split('\n').flatMap((l) => { try { const v = JSON.parse(l); return v && typeof v === 'object' ? [v] : []; } catch { return []; } });
+/** `max` bytes of `p` from `offset` (as text), and the offset after them. */
+function readFrom(p, offset, max) {
+  let fd;
+  try {
+    // As tailOf reads; a buffer only as large as what's there to read.
+    // Never through a link, nor a FIFO or device a body put there (no wait to open it, only a plain file read).
+    fd = openSync(p, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    const st = fstatSync(fd);
+    if (!st.isFile()) return { text: '', next: offset };
+    const size = Math.max(0, Math.min(max, st.size - offset));
+    const buf = Buffer.alloc(size);
+    const n = size ? readSync(fd, buf, 0, size, offset) : 0;
+    // Up to the last whole UTF-8 character: a character cut by the slice is read whole next time, never as U+FFFD.
+    let end = n;
+    if (n === max) { let k = n - 1, back = 0; while (k >= 0 && back < 4 && (buf[k] & 0xc0) === 0x80) { k--; back++; } if (k >= 0 && buf[k] >= 0xc0) end = k; }
+    return { text: buf.subarray(0, end).toString('utf-8'), next: offset + end };
+  } catch { return { text: '', next: offset }; } finally { if (fd !== undefined) try { closeSync(fd); } catch { /* closed */ } }
+}
 const lines = (p) => { try { return readFileSync(p, 'utf-8').split('\n').flatMap((l) => { try { const v = JSON.parse(l); return v && typeof v === 'object' ? [v] : []; } catch { return []; } }); } catch { return []; } };
 
 /** A body's inbox, in the bridges piece's layout (shuttle/inbox.py), so its hook reads what's put here. */
@@ -126,7 +155,9 @@ export class ClaudeRunner {
   harness = 'claude';
   static TOKEN_LINE = '(bridge spawn token {token}: ignore this line)';
 
-  constructor({ claude = 'claude', jobsDir = join(homedir(), '.claude', 'jobs'), projectsDir, args = [], inboxDir, usageDir = usageDirOf(), node = process.execPath, run = spawnSync, sleep = sleepMs, claimPolls = 10, token = hex8 } = {}) {
+  constructor({ claude = 'claude', jobsDir = join(homedir(), '.claude', 'jobs'), projectsDir, args = [], inboxDir, usageDir = usageDirOf(), node = process.execPath, run = spawnSync, sleep = sleepMs, claimPolls = 10, token = hex8, readMax = {} } = {}) {
+    // How much it reads of a transcript a pass (t-2109): its steps, a helper's, its sign of life.
+    this.readMax = { activity: ACTIVITY_READ_MAX, helper: HELPER_READ_MAX, sign: SIGN_READ_MAX, ...readMax };
     Object.assign(this, { claude, jobsDir, args, usageDir, node, run, sleep, claimPolls, token });
     this.inbox = inboxDir ? inbox(inboxDir, { run }) : null;
     // Claude Code keeps a session's transcript at <config>/projects/<cwd, slugged>/<session>.jsonl (and its tool
@@ -309,13 +340,64 @@ export class ClaudeRunner {
   }
 
   activity(body) {
-    const session = this.slotOf(body)?.session;
-    if (typeof session !== 'string' || !SESSION.test(session)) return [];
-    for (const p of dirs(this.roots.projects)) {
-      const f = join(this.roots.projects, p, `${session}.jsonl`);
-      if (existsSync(f)) return claudeCards(lines(f));
+    const f = this.transcriptOf(body);
+    if (!f) return [];
+    // Its newest ACTIVITY_READ_MAX of transcript, never the whole of a long session each pass. A step whose start is
+    // older than that and whose end lands inside it stays as last told (its end can't be matched).
+    const cards = claudeCards(jsonLines(tailOf(f, this.readMax.activity) ?? ''));
+    // Its helpers (subagents), each under the step that started it (t-2109): Claude Code keeps a helper's transcript
+    // beside the session's, `<session>/subagents/agent-<id>.jsonl`, and its meta names that step (`toolUseId`)
+    // (measured 2026-11-10 on this machine: `agent-<17 hex>.meta.json` = {agentType, isBuiltIn, description, toolUseId,
+    // spawnDepth, requestShape, …, finished}). A layout it doesn't find leaves the session's own steps, never fewer.
+    const dir = join(f.slice(0, -'.jsonl'.length), 'subagents');
+    let metas = [];
+    // The body writes there: a meta is only ever a plain file, never followed through a link, read to META_MAX.
+    try { metas = readdirSync(dir).slice(0, 500).filter((n) => /^agent-[A-Za-z0-9_-]{1,64}\.meta\.json$/.test(n)); } catch { return cards; }
+    const helpers = metas.map((n) => { try { const st = lstatSync(join(dir, n)); if (!st.isFile()) return null; let t = st.mtimeMs; try { const transcript = lstatSync(join(dir, n.replace('.meta.json', '.jsonl'))); if (transcript.isFile()) t = transcript.mtimeMs; } catch { /* no transcript */ } return { n, t }; } catch { return null; } }).filter(Boolean).sort((a, b) => b.t - a.t).slice(0, 20);
+    for (const { n } of helpers) {
+      const agent = n.slice('agent-'.length, -'.meta.json'.length);
+      let meta;
+      try { meta = JSON.parse(readFrom(join(dir, n), 0, META_MAX).text); } catch { continue; }
+      // Its step, when the session's window still holds it; else its steps stand on their own (never dropped).
+      const parent = typeof meta?.toolUseId === 'string' && cards.some((c) => c.id === meta.toolUseId) ? meta.toolUseId : null;
+      // A helper's transcript is read from its end, at most HELPER_READ_MAX: its newest steps.
+      cards.push(...claudeCards(jsonLines(tailOf(join(dir, `agent-${agent}.jsonl`), this.readMax.helper) ?? ''), `${agent}:`, parent ?? undefined));
     }
-    return [];
+    // In the order they happened, so a host's "newest 100" keeps the newest of the body's and its helpers' alike.
+    return cards.map((c, i) => [c, i]).sort((x, y) => ((Date.parse(x[0].at) || 0) - (Date.parse(y[0].at) || 0) || x[1] - y[1])).map(([c]) => c);
+  }
+
+
+  /**
+   * Its last sign of life (t-2109): when its transcript was last written, and how many tokens it has written so far
+   * (each assistant message's output_tokens once, its largest). Read as it grows, at most SIGN_READ_MAX a pass, from
+   * where the last pass of this process stopped (SIGN_MEMO); its tokens are said only once it's caught up.
+   */
+  signOfLife(body) {
+    const f = this.transcriptOf(body);
+    if (!f) return null;
+    let st;
+    try { st = lstatSync(f); if (!st.isFile()) return null; } catch { return null; }
+    // Kept for the process, by file: a body host makes a runner each beat, so a memo of its own would start over.
+    const memos = SIGN_MEMO;
+    let m = memos.get(f);
+    if (!m || st.ino !== m.ino || st.dev !== m.dev || st.size < (m.size ?? m.offset)) m = { ino: st.ino, dev: st.dev, offset: 0, seen: new Map(), rest: '' };
+    if (st.size > m.offset) {
+      const { text, next } = readFrom(f, m.offset, this.readMax.sign);
+      const parts = (m.rest + text).split('\n');
+      // The last part is a line not yet ended: kept for the next read (dropped if it's grown past any real line).
+      const last = parts.pop() ?? '';
+      m.rest = last.length > REST_MAX ? '' : last;
+      for (const l of parts) { try { claudeTokens([JSON.parse(l)], m.seen); } catch { /* not a line of JSON */ } }
+      m.offset = next;
+    }
+    m.size = st.size;
+    memos.delete(f); memos.set(f, m);
+    if (memos.size > 64) memos.delete(memos.keys().next().value);
+    let tokens = 0;
+    for (const n of m.seen.values()) tokens += n;
+    // Its tokens only once it's read to the end: a count of part of it isn't its total.
+    return { at: new Date(st.mtimeMs).toISOString(), ...(m.seen.size && m.offset >= st.size ? { tokens } : {}) };
   }
 
   end(body, env) {
@@ -639,7 +721,31 @@ export class CodexRunner {
   /** Its tool steps as activity cards (activity.mjs), from its events: item ids repeat per run, so they carry its id. */
   tickerAction(body) { return codexActionNow(tickerLines(join(this.runsDir, body.id, 'events.jsonl'))); }
 
-  activity(body) { return codexCards(this.events(body.id), `${body.id}:`); }
+  activity(body) {
+    // Its newest ACTIVITY_READ_MAX of events (t-2109), never the whole of a long run each pass.
+    const file = join(this.runsDir, body.id, 'events.jsonl');
+    let stat;
+    try { stat = statSync(file); } catch { return []; }
+    let memo = CODEX_CARD_TIMES.get(file);
+    if (!memo || memo.ino !== stat.ino || stat.size < memo.size) memo = {ino: stat.ino, times: new Map()};
+    memo.size = stat.size;
+    // Codex events have no timestamp: keep when each card was first observed, never retime old cards on a reread.
+    const at = new Date().toISOString();
+    const cards = codexCards(jsonLines(tailOf(file, ACTIVITY_READ_MAX) ?? ''), `${body.id}:`, (id) => {
+      if (!memo.times.has(id)) memo.times.set(id, at);
+      return memo.times.get(id);
+    });
+    const retained = new Set(cards.slice(-1000).map(c => c.id));
+    for (const id of memo.times.keys()) if (!retained.has(id)) memo.times.delete(id);
+    CODEX_CARD_TIMES.delete(file); CODEX_CARD_TIMES.set(file, memo);
+    if (CODEX_CARD_TIMES.size > 64) CODEX_CARD_TIMES.delete(CODEX_CARD_TIMES.keys().next().value);
+    return cards;
+  }
+
+  /** Its last sign of life (t-2109): when its events were last written. Codex says its tokens only at a turn's end. */
+  signOfLife(body) {
+    try { return { at: new Date(statSync(join(this.runsDir, body.id, 'events.jsonl')).mtimeMs).toISOString() }; } catch { return null; }
+  }
 
   events(id) {
     try {

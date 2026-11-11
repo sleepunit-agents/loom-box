@@ -101,7 +101,7 @@ import { CODEX_WONT, codexDeny, nativeRecoveryConfiguration, nativeRunnerConfigu
 import { cancelReservedLaunch, launchAttempt, launchWorkerAlive, launchWorkerIdentity, readLaunch, recoverLaunchReceipt, reserveLaunch } from './launch-journal.mjs';
 import { launchInjectedNative, observeNativeLaunch, superviseNativeLaunch } from './native-launch.mjs';
 import { raiseAlert } from './alerthook.mjs';
-import { changed as changedCards } from './activity.mjs';
+import { baseCard, changed as changedCards, cleanAlive, stepParts } from './activity.mjs';
 import { keepKey, keepSession, keyFile } from './bodyhost.mjs';
 import { spawnCap } from './spawn.mjs';
 import { continuationOutbox } from './continuation-outbox.mjs';
@@ -109,7 +109,7 @@ import { admit, allocatorOf, capacityGate, forecastBurn, logShadow, readReadings
 import { readRelays } from './relay.mjs';
 import { householdOwners, membersOf, ownersOf } from './owners.mjs';
 import { approvalsFake, approvalsRun, approvalsRunAsync, approvalsWhy } from './approvals-call.mjs';
-import { OWNER_SEAT, carriesSession, hostKeyOf, mint, noteSender, resetSigned, principalOf, putWakeFor, resetActsFor, seatOf, takeWakeContext, verify } from './principal.mjs';
+import { OWNER_SEAT, carriesSession, hostKeyOf, mint, noteSender, resetSigned, principalOf, putWakeFor, resetActsFor, seatOf, takeWakeContext, verify, wordsShown } from './principal.mjs';
 
 const DAY_MS = 86_400_000;
 export const MAX_TEXT = 40_000;
@@ -1576,16 +1576,125 @@ async function activityPass(env, c, d) {
   let rec, r;
   try { rec = readBody(env, c.body); r = d.runner(rec.harness, rec.local); } catch { return; }
   if (typeof r.activity !== 'function') return;
-  const cards = r.activity(bodyOf(c.body, rec)) ?? [];
+  const body = bodyOf(c.body, rec);
+  const nowMs = (() => { try { return d.now().getTime(); } catch { return Date.now(); } })();
+  // A thread core said is gone (409) is told nothing for a while (it may be unarchived), nor read: its cards wait, untold.
+  if (held(c, 'noThread', nowMs)) return;
+  // Its newest CARDS_KEPT only: what's older was told already, and its words aren't worked out again each pass.
+  const cards = shownCards(env, c, (r.activity(body) ?? []).slice(-CARDS_KEPT));
   const { out, next } = changedCards(cards, c.cardsSent ?? {});
-  if (!out.length) return;
-  // Refused for good (no live thread, or a card core won't take): they're marked told, so they aren't sent again.
-  try { await d.core.activity({ conversation: c.conversation, run: c.run, cards: out }); } catch (e) {
-    if (e?.status !== 409 && e?.status !== 400) throw e;
-    d.warn(`${c.conversation}: core took none of ${out.length} activity cards (${e.message}); they're not sent again`);
+  let alive = null;
+  try { alive = cleanAlive(r.signOfLife?.(body)); } catch { /* it can't say */ }
+  const old = held(c, 'oldCore', nowMs);
+  // Its last sign of life goes when it moved, at most every ALIVE_MS when alone (core's working line); never to a core
+  // that refused it.
+  const sendAlive = !!alive && !old && (alive.at !== c.aliveSent?.at || alive.tokens !== c.aliveSent?.tokens) && (out.length > 0 || nowMs - (c.aliveSent?.told ?? 0) >= ALIVE_MS);
+  // A core from before t-2109 is told plain cards only, without words between steps.
+  const told = old ? out.filter((x) => x.tool !== 'text').map(baseCard) : out;
+  if (!told.length && !sendAlive) { if (out.length) saveSent(env, c, next, null); return; }
+  const post = (cs, a) => d.core.activity({ conversation: c.conversation, run: c.run, cards: cs, ...(a ? { alive: a } : {}) });
+  // Refused for good (no live thread, or a card core won't take): they're marked told, so they aren't sent again. A 409
+  // (no live thread) holds the conversation for HOLD_MS. A 400 that says core doesn't know the further parts (an older
+  // core: unknown keys, or no cards beside a sign of life) is told the plain cards, and held to plain ones for HOLD_MS.
+  // In batches of at most POST_MAX of JSON (core takes 1 MB a post; an older core 64 KB, which refuses with 413).
+  try { for (const [k, batch] of batches(told).entries()) await post(batch, sendAlive && k === 0 ? alive : null); } catch (e) {
+    if (e?.status !== 409 && e?.status !== 400 && e?.status !== 413) throw e;
+    let status = e.status;
+    const hold = status === 409 ? { noThread: nowMs } : {};
+    let retold = false;
+    if ((e.status === 413 || (e.status === 400 && OLD_CORE.test(String(e.message ?? '')))) && !old) {
+      hold.oldCore = nowMs;
+      const plain = out.filter((x) => x.tool !== 'text').map(baseCard);
+      try { if (plain.length) { for (const b of batches(plain)) await post(b, null); retold = true; } } catch (e2) {
+        if (![400, 409, 413].includes(e2?.status)) throw e2;
+        status = e2.status;
+        if (status === 409) hold.noThread = nowMs;
+      }
+    }
+    if (!retold) d.warn(`${c.conversation}: core took none of ${out.length} activity cards${sendAlive ? ' and its sign of life' : ''} (${e.message}); ${status === 409 ? 'they wait for the thread to reopen' : "they're not sent again"}`);
+    // A refused sign of life counts as told: it isn't posted again until it moves, past the throttle.
+    // A 409's cards weren't taken but aren't refused either: they stay untold, so they go once the hold is over.
+    saveSent(env, c, status === 409 ? (c.cardsSent ?? {}) : next, sendAlive ? alive : null, nowMs, hold);
+    return;
   }
-  locked(env, () => { const x = loadConv(env, c.conversation); if (x && x.body === c.body) { x.cardsSent = next; saveConv(env, x); } });
+  saveSent(env, c, next, sendAlive ? alive : null, nowMs);
 }
+
+/**
+ * A body's cards as anyone outside its house may see them (t-2109): every card through the one gate (stepParts); its
+ * words only where it works for the owner alone. Delivery's activityPass and a session house's terminal status
+ * (sessionhost.mjs) both show cards only through this.
+ */
+export function shownCards(env, c, cards) {
+  // The body's own words between steps only where it works for the owner alone (t-2109): never where someone else is
+  // in the conversation, whose words its own might carry. Read from its principal now (principalOf: a former owner
+  // counts as a person), as localForeign reads it, never from the stored field alone.
+  // Not while a reset is pending (its body was started before it: what it heard then isn't known to be the owner's),
+  // nor for a body whose rules were made for a person.
+  const ownersAlone = !c.resetPending && !c.bodyRules?.grantFor && !(c.bodyRules?.members?.length) && wordsShown(env, c);
+  // Every card through the one gate (activity.mjs stepParts), made here or reported by a house. Where someone else is
+  // in the conversation, a step's words (its command, output, diff, plan items) don't go either: theirs could be in
+  // them. Its label, tool, state, result line and times do (Jonathan, 2026-11-10: other people summarized).
+  // A house's command detail must match the same raw read-only allowlist as a local command. Its body's own prose
+  // is trusted for the owner alone, where it could already post the text as a message (coordinator, 2026-11-10).
+  // Shell labels are fixed even there. Where anyone else is, every label is fixed, decided here, never by the house.
+  // Where someone else is, a parent is only one of these cards' ids (a house's own word otherwise could say anything).
+  const ids = new Set(cards.map((x) => x?.id));
+  return cards.filter((x) => x && (x.tool !== 'text' || ownersAlone)).map((x) => {
+    // Its words aren't even read where they won't go (a diff is worked out only when it's read).
+    const { fixed, ...parts } = stepParts(x, undefined, { words: ownersAlone });
+    if (ownersAlone) return { ...baseCard(x), ...parts, ...(['Bash', 'command_execution'].includes(x.tool) ? { summary: fixed?.startsWith('Ran a command') ? fixed : 'Ran a command' } : {}) };
+    // Where someone else is: its fixed label (set where the card was made, never derived from its words), else "Did a
+    // step"; no words of any kind (its label, command, diff, plan items); its state, result phrase, times and nesting.
+    const { detail: _d, body: _b, items: _i, parent, ...plain } = parts;
+    return { ...baseCard(x), summary: fixed ?? 'Did a step', ...plain, ...(parent && ids.has(parent) ? { parent } : {}) };
+  });
+}
+
+/** How many of a body's newest cards each pass reads (t-2109): core's view shows its newest 100. */
+export const CARDS_KEPT = 200;
+
+/** At most how much JSON one activity post carries (t-2109): half core's cap, so a full card always fits. */
+const POST_MAX = 512 * 1024;
+/** Cards in posts of at most POST_MAX of JSON each (one card a post at least); none for none. */
+function batches(cards) {
+  const out = [];
+  let cur = [], size = 0;
+  for (const c of cards) {
+    const n = Buffer.byteLength(JSON.stringify(c)) + 1; // bytes, as sent (UTF-8)
+    if (cur.length && size + n > POST_MAX) { out.push(cur); cur = []; size = 0; }
+    cur.push(c); size += n;
+  }
+  if (cur.length || !out.length) out.push(cur);
+  return out;
+}
+
+/** Whether a conversation's activity is still held (`noThread`, `oldCore` on its record): for HOLD_MS after it was. */
+const held = (c, kind, nowMs) => Number.isFinite(c.activityHeld?.[kind]) && nowMs - c.activityHeld[kind] < HOLD_MS;
+
+/** What was told of a conversation's cards and its sign of life, on its record (only while its body is the same). */
+function saveSent(env, c, next, alive, nowMs = Date.now(), hold = {}) {
+  locked(env, () => {
+    const x = loadConv(env, c.conversation);
+    if (!x || x.body !== c.body) return;
+    x.cardsSent = next;
+    if (alive) x.aliveSent = { at: alive.at, ...(alive.tokens === undefined ? {} : { tokens: alive.tokens }), told: nowMs };
+    // A hold is kept on the record, so a delivery worker in another process keeps it too (t-2109).
+    if (Object.keys(hold).length) x.activityHeld = { ...(x.activityHeld ?? {}), ...hold };
+    saveConv(env, x);
+  });
+}
+/** At most how often a body's sign of life alone is told (t-2109), and the conversations whose core refused it. */
+const ALIVE_MS = 20_000;
+const HOLD_MS = 10 * 60_000;
+/**
+ * How a core from before t-2109 refuses the further parts, in its own words (loom src/comms.ts postActivity before
+ * t-2109): "bad-input: card N has unknown keys: …" for a card's new field, and "bad-input: cards is a list of 1-50" for
+ * a sign of life with no cards (an older core reads no `alive`); core.mjs puts "core refused comms/activity: " before
+ * it. Any other refusal isn't an older core's. Core pins both wordings in its own tests (loom
+ * src/comms-agents.integration.test.ts, t-2109), so a change there fails there first.
+ */
+const OLD_CORE = /(?:^|: )bad-input: (?:card \d+ has unknown keys\b|cards is a list of 1-\d+)/;
 
 const newRun = () => `run-${randomBytes(6).toString('hex')}`;
 

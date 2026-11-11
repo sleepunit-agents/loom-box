@@ -50,7 +50,7 @@ const SHAPES = [
   /\bpypi-[A-Za-z0-9_-]{16,}/g,
   /\b(?:SK|AC)[0-9a-f]{32}\b/g, // Twilio
   /\bhf_[A-Za-z0-9]{20,}/g, // Hugging Face
-  /-----BEGIN [A-Z ]{0,40}PRIVATE KEY-----[\s\S]{0,4000}?(?:-----END [A-Z ]{0,40}PRIVATE KEY-----|$)/g,
+  /-----BEGIN [A-Z ]{0,40}PRIVATE KEY(?: BLOCK)?-----[\s\S]{0,4000}?(?:-----END [A-Z ]{0,40}PRIVATE KEY(?: BLOCK)?-----|$)/g,
 ];
 
 /** Words that name a secret: a NAME=value's, a flag's, a query parameter's, a `key: value`'s. */
@@ -312,7 +312,7 @@ export function cutTo(s, n) {
 }
 
 /** Any word of `s` that names a private file (privateFile) shows as PRIVATE_FILE: in a description, a pattern. */
-const privateWords = (s) => s.split(/(\s+)/).map((w) => (/[/.\\]/.test(w) && privateFile(w) ? PRIVATE_FILE : w)).join('');
+export const privateWords = (s) => s.split(/(\s+)/).map((w) => (/[/.\\]/.test(w) && privateFile(w) ? PRIVATE_FILE : w)).join('');
 
 /**
  * The one gate (t-1944): a variable part of a label, as it may be shown, or GONE. It's redacted; on one printable line;
@@ -434,6 +434,9 @@ const WHY = [
   [/SyntaxError/, () => 'syntax error'],
   [/Traceback \(most recent call last\)/, () => 'Python error'],
 ];
+
+/** failWhy's fixed phrases, for a fixed label's tail (activity.mjs FIXED): each WHY answer that isn't a count. */
+export const WHY_WORDS = Object.freeze(WHY.map(([, f]) => { try { return f(['', '2']); } catch { return null; } }).filter((w) => typeof w === 'string' && !/^\d/.test(w)));
 
 /** `exit 1: 3 tests failed`, `exit 127: command not found`, `no such file`, or null. */
 export function failWhy({ exit, output } = {}) {

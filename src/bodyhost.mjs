@@ -22,6 +22,81 @@ import { nativeHistoryRoot } from './native-history.mjs';
 import { nativePendingInbox } from './native-inbox.mjs';
 
 /**
+ * At most how many bytes of cards one report carries (t-2109): a report goes through core's 1 MB cap with its packed
+ * session part (PART_CHARS) and its final beside them, and a card's diff may be ~96 KB.
+ */
+export const CARDS_MAX = 256 * 1024;
+/** At most how many bytes a whole report carries (t-2109): core takes 1 MB a call, with room for the call around it. */
+export const REPORT_MAX = 900 * 1024;
+/** At most how many characters of packed session parts a report carries (one part is at most PART_CHARS). */
+export const PACKED_MAX = 400 * 1024;
+/**
+ * A report's cards trimmed so the whole report fits in `max` bytes (t-2109): one report carries every body's, beside
+ * packed session parts and finals, so several threads in one house share one budget. The newest cards, across its
+ * bodies, are kept; each body's keep their order. Anything else in the report is never trimmed.
+ */
+export function fitCards(report, max) {
+  fitFinals(report);
+  const all = [];
+  for (const [id, b] of Object.entries(report.bodies ?? {})) if (Array.isArray(b.cards)) b.cards.forEach((c, i) => all.push({ id, i, at: Date.parse(c?.at ?? '') || 0, n: Buffer.byteLength(JSON.stringify(c)) + 1 }));
+  const total = Buffer.byteLength(JSON.stringify(report));
+  if (total <= max) return report;
+  // Each nonempty array has one fewer separator than cards. Start from exact empty arrays.
+  const populated = Object.values(report.bodies ?? {}).filter((b) => Array.isArray(b.cards) && b.cards.length).length;
+  let room = max - (total - all.reduce((k, x) => k + x.n, 0) + populated);
+  const keep = new Set(), keptBodies = new Set();
+  // A card that doesn't fit stops its own body's older ones only (each keeps its newest), not the other bodies'.
+  const stopped = new Set();
+  for (const x of all.sort((p, q) => (p.at < q.at ? 1 : p.at > q.at ? -1 : q.i - p.i))) { if (stopped.has(x.id)) continue; const cost = x.n - (keptBodies.has(x.id) ? 0 : 1); if (cost > room) { stopped.add(x.id); continue; } room -= cost; keptBodies.add(x.id); keep.add(`${x.id}\0${x.i}`); }
+  for (const [id, b] of Object.entries(report.bodies)) if (Array.isArray(b.cards)) b.cards = b.cards.filter((_, i) => keep.has(`${id}\0${i}`));
+  return report;
+}
+/**
+ * The session parts a report carries: at most PACKED_MAX of them, the longest waiting first (each beat sends the next
+ * ones), so a report with several bodies packing at once still fits core's cap (t-2109); at least one, whatever its size.
+ */
+export function packedParts(packing, history) {
+  const packed = {};
+  let size = 0;
+  for (const [id, p] of [...packing].sort((x, y) => x[1].since - y[1].since)) {
+    const n = String(p.parts[p.next] ?? '').length;
+    if (Object.keys(packed).length && size + n > PACKED_MAX) continue;
+    size += n;
+    packed[id] = { part: p.next, parts: p.parts.length, data: p.parts[p.next], ...(history ? { pending: p.pending } : {}), ...(p.omitted ? { omitted: p.omitted } : {}) };
+  }
+  return packed;
+}
+/** At most how many bytes of finals a report carries in all (each is at most 40000 characters): FINALS_MAX. */
+export const FINALS_MAX = 300 * 1024;
+/**
+ * A report's finals, cut evenly when together they'd pass FINALS_MAX (t-2109): every idle body sends its final each
+ * beat, so many in one house could crowd out a packed part. A cut one says so. Below the cap, untouched.
+ */
+export function fitFinals(report) {
+  // Measured as sent: JSON, where a control character takes 6 bytes.
+  const sent = (s) => Buffer.byteLength(JSON.stringify(s));
+  const finals = Object.values(report.bodies ?? {}).filter((b) => typeof b.final === 'string');
+  if (finals.reduce((k, b) => k + sent(b.final), 0) <= FINALS_MAX) return report;
+  const keep = Math.floor((FINALS_MAX / finals.length - 64) / 6); // UTF-16 units: at most 6 bytes each, as JSON
+  for (const b of finals) if (sent(b.final) > FINALS_MAX / finals.length) {
+    let t = b.final.slice(0, Math.max(0, keep));
+    if (/[\ud800-\udbff]$/.test(t)) t = t.slice(0, -1);
+    b.final = `${t}\n… (cut to fit: ${finals.length} finals in one report)`;
+  }
+  return report;
+}
+/** The newest of `cards` whose JSON fits in `max` bytes, in their order (none dropped from the middle). */
+export function newestWithin(cards, max) {
+  let size = 0, k = cards.length;
+  while (k > 0) {
+    const n = Buffer.byteLength(JSON.stringify(cards[k - 1])) + 1;
+    if (size + n > max) break;
+    size += n; k--;
+  }
+  return cards.slice(k);
+}
+
+/**
  * Whether this house has its box's login for a harness: the box sets the login's env only for the harnesses the house
  * file declares (house.mjs, "harnesses"). A body on a harness the house didn't declare would run with no login.
  */
@@ -216,23 +291,25 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
       else if ((status === 'idle' || status === 'ended') && b.turn === undefined) { try { b.turn = r.turn?.({ id, ...(b.slot ? { slot: b.slot } : {}) }) ?? null; } catch { b.turn = null; } }
       const turn = status === 'idle' || status === 'ended' ? b.turn : null;
       // A Comms thread's body: its tool steps, the newest 100, read from its harness's own record (activity.mjs).
-      const cards = b.activity ? (() => { try { return (r.activity?.({ id, ...(b.slot ? { slot: b.slot } : {}) }) ?? []).slice(-100); } catch { return []; } })() : null;
+      // At most CARDS_MAX of them in all (t-2109: a diff can be large): the newest kept, so a report always fits core's cap.
+      const cards = b.activity ? (() => { try { return newestWithin((r.activity?.({ id, ...(b.slot ? { slot: b.slot } : {}) }) ?? []).slice(-100), CARDS_MAX); } catch { return []; } })() : null;
+      // And its last sign of life (t-2109): when its record last moved, its tokens so far.
+      const alive = b.activity ? (() => { try { return r.signOfLife?.({ id, ...(b.slot ? { slot: b.slot } : {}) }) ?? null; } catch { return null; } })() : null;
       let final;
       if (status === 'idle' || status === 'ended') {
         try { final = r.final?.({ id, ...(b.slot ? { slot: b.slot } : {}) })?.slice(0, 40000); } catch { /* retry next sync */ }
       }
       let tickerAction;
       if (status === 'working') { try { tickerAction = r.tickerAction?.({ id, ...(b.slot ? { slot: b.slot } : {}) }); } catch { /* unavailable */ } }
-      bodies[id] = { ...(tickerAction ? { tickerAction, tickerObservedAt: new Date(now()).toISOString() } : {}), harness: b.harness, status, ...(slot?.session ? { session: slot.session } : {}), feedable: !!r.inbox, pending, ...(turn ? { turn } : {}), ...(typeof final === 'string' ? { final } : {}), ...(cards ? { cards } : {}) };
+      bodies[id] = { ...(tickerAction ? { tickerAction, tickerObservedAt: new Date(now()).toISOString() } : {}), harness: b.harness, status, ...(slot?.session ? { session: slot.session } : {}), feedable: !!r.inbox, pending, ...(turn ? { turn } : {}), ...(typeof final === 'string' ? { final } : {}), ...(cards ? { cards } : {}), ...(alive ? { alive } : {}) };
     }
     await reportUsage(turnsOver);
-    const packed = {};
-    for (const [id, p] of [...packing]) {
-      packed[id] = { part: p.next, parts: p.parts.length, data: p.parts[p.next], ...(history ? { pending: p.pending } : {}), ...(p.omitted ? { omitted: p.omitted } : {}) };
-    }
+    const packed = packedParts(packing, history);
     let got;
     const sent = acks;
-    try { got = await client('body-sync', { hostKey: key, report: { bodies, done, packed, inboxAck: sent, caps: ['parts', 'native-admission', ...(history ? ['native-history'] : [])], starting: [...new Set([...launching.keys(), ...uncertain.keys(), ...Object.keys(done)])] } }); } catch (e) { log(`sync failed: ${e.message}`); await sleep(SYNC_MS); continue; }
+    const report = { bodies, done, packed, inboxAck: sent, caps: ['parts', 'native-admission', ...(history ? ['native-history'] : [])], starting: [...new Set([...launching.keys(), ...uncertain.keys(), ...Object.keys(done)])] };
+    fitCards(report, REPORT_MAX);
+    try { got = await client('body-sync', { hostKey: key, report }); } catch (e) { log(`sync failed: ${e.message}`); await sleep(SYNC_MS); continue; }
     if (typeof got.hostKey === 'string') key = got.hostKey;
     // Answered: what it acknowledged is the runtime's to forget now. (A lost answer: they go again next beat.)
     if (acks === sent) acks = {};
