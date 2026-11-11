@@ -165,7 +165,7 @@ import { join } from 'node:path';
 import { readModels, resolveFor, setModels } from './models.mjs';
 import { endBody, feedBody, listBodies, resumeBody, startBody } from './bodies.mjs';
 import { PART_RAW, joinParts, partsOf } from './blobs.mjs';
-import { answerLoop, continuationCall, deliver, listConvs, post, releaseBody, staleRuns, send, sendOutcome, sendStatus, tick, workingConversations, workingPrint } from './delivery.mjs';
+import { answerLoop, contextBoundary, continuationCall, deliver, listConvs, post, releaseBody, staleRuns, send, sendOutcome, sendStatus, tick, workingConversations, workingPrint } from './delivery.mjs';
 import { coreFrom } from './core.mjs';
 import { watchBridges } from './nowboard.mjs';
 import { reviewStatus, reviewTick, runReview } from './review.mjs';
@@ -539,6 +539,14 @@ async function main(argv, env) {
     case 'body': return body(rest, env, json);
     case 'deliver': return delivery(rest, env, json);
     case 'review': return reviewCli(rest, env, json);
+    case 'context-boundary': {
+      const conversation = flag(rest, '--conversation') || ownConversation(env);
+      const msg = { conversation, key: bodyKeyFor(env, conversation), session: env.CLAUDE_CODE_SESSION_ID || env.CODEX_THREAD_ID || undefined, note: await textOf(rest, '--note') };
+      const answer = env.LOOM_URL && env.LOOM_TOKEN_FILE
+        ? await pieceCall(env, flag(rest, '--piece'))('context-boundary', msg) : contextBoundary(env, msg);
+      if (answer?.ok === false) throw new Fail(answer.error ?? answer.reason ?? 'task boundary refused');
+      out(answer); return;
+    }
     case 'continuation': {
       const action = rest[0];
       if (!['issue', 'enqueue', 'status'].includes(action)) throw new Fail('usage: loom runtime continuation issue|enqueue|status [--conversation cv] [--handle cont] [--id report] [--text words]', 2);

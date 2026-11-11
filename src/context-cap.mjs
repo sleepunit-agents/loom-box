@@ -1,5 +1,6 @@
 // Cooperative cap: a context observation requests one handoff at a tool boundary.
 // A handoff is explicit; a normal final response still completes the job.
+export const TASK_BOUNDARY = 'When a task is complete and more authorized work remains, pipe a handoff of at most 12,000 characters to `loom runtime context-boundary --note -`, then end this turn without starting more work. The runtime keeps this conversation and resumes the job in a fresh session after acknowledgment. If the whole job is complete, return the actual result instead.';
 export const HANDOFF_MARKER = 'LOOM_CONTEXT_HANDOFF\n';
 export const HANDOFF_REQUEST = 'The runtime observed the job context cap. Stop new work at the next safe boundary. Write your handoff as your final response, beginning exactly LOOM_CONTEXT_HANDOFF on its own line. Include the original goal, completed work, remaining steps, repositories and worktree paths, branch heads and PRs, test/review results, blockers and required host steps. Keep it under 12,000 characters. Do not present this as completion. The runtime saves this note and continues the same job in a fresh session.';
 export function contextCapOf(env, conversation) {

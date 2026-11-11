@@ -1,4 +1,4 @@
-import { contextCapOf, HANDOFF_REQUEST, handoffText } from './context-cap.mjs';
+import { contextCapOf, HANDOFF_REQUEST, TASK_BOUNDARY, handoffText } from './context-cap.mjs';
 import { observation } from './ticker.mjs';
 // Delivery (loom docs/specs/agent-runtime.md, section 5): anything addressed to an agent arrives the same way.
 //
@@ -966,6 +966,10 @@ export function releaseBody(env, ref) {
   return locked(env, () => {
     const released = [];
     for (const c of listConvs(env)) {
+      if (c.contextSuccessor?.r.body === ref) {
+        c.contextSuccessor.cancelled = true;
+        saveConv(env, c); released.push(c.conversation); continue;
+      }
       if (c.body !== ref && c.retiring?.body !== ref) continue;
       if (c.body === ref) { delete c.body; delete c.idleSince; delete c.nativeRetirement; forgetRunKey(env, c); }
       if (c.retiring?.body === ref) delete c.retiring;
@@ -1135,6 +1139,7 @@ function startBrief(c, msgs, run, sends, rules = { sections: [] }) {
     ...(sends ? [how, TURN_FOLLOW_THROUGH] : []),
     ...(sends === 'post' ? [relay] : []),
     ...(c.spawn ? [`This is a spawned job. Your final response is automatically returned to the asking conversation${c.spawn.origin ? ` (${c.spawn.origin}, run ${c.spawn.origin_run})` : ''}. Put your report in your final response.`] : []),
+    ...(['scheduled', 'agent'].includes(c.kind) ? [TASK_BOUNDARY] : []),
     OWNER_STEPS,
   ].join('\n');
   const tail = `\n${render(msgs)}`;
@@ -1167,7 +1172,7 @@ export const OWNER_STEPS = 'When you need your owner\'s say on something loom ca
 const TURN_FOLLOW_THROUGH = 'Your final response alone does not send a reply to this conversation. For substantial work, send a brief progress update, then keep working. Before ending, send the result or current blocker with the command above and check its receipt; do not claim delivery without it. If authorized work remains, continue now or arrange a concrete continuation using the installed work/wake tools and record where it resumes. A progress message alone does not finish the work. Write this run\'s conversation_digest before ending.';
 
 /** What a resumed body is given: new messages, its new run, and the reply/continuation contract again. */
-const resumeBrief = (c, msgs, run, sends) => `(${c.venue}: ${c.label ?? c.place}. This run is ${run}: call identity with {conversation: "${c.conversation}", run: "${run}"} again.${returnHow(c) ? ` ${returnHow(c)}` : ''})\n\n${nativeRecoveryNotice(c) ? nativeRecoveryNotice(c) + '\n\n' : ''}${sends ? `${replyHow(c, sends)}\n${TURN_FOLLOW_THROUGH}\n\n` : ''}${render(msgs)}`;
+const resumeBrief = (c, msgs, run, sends) => `(${c.venue}: ${c.label ?? c.place}. This run is ${run}: call identity with {conversation: "${c.conversation}", run: "${run}"} again.${returnHow(c) ? ` ${returnHow(c)}` : ''})\n\n${nativeRecoveryNotice(c) ? nativeRecoveryNotice(c) + '\n\n' : ''}${sends ? `${replyHow(c, sends)}\n${TURN_FOLLOW_THROUGH}\n\n` : ''}${['scheduled', 'agent'].includes(c.kind) ? TASK_BOUNDARY + '\n\n' : ''}${render(msgs)}`;
 
 function open(d, x, mem) {
   if (x.sealed) return d.sealer.open(Buffer.from(x.sealed, 'base64')).toString('utf-8');
@@ -1243,6 +1248,7 @@ function plan(env, cv, d, mem) {
   // (the runtime restarted under it) leaves it to go back on the queue (abandon), never only in that process's memory.
   const begin = (op) => { c.starting = { ...mark(now), ...(op.msgs?.length ? { msgs: op.msgs } : {}) }; saveConv(env, c); return { cv, mark: c.starting.op, ...op }; };
   const st = statusOf(env, c, d);
+  if (cancelContext(env, c)) return begin({ type: 'context-cancel', body: c.body });
   // The owner reset it (resetPrincipal): the body that heard what came before ends, its session not kept.
   if (c.resetPending && (st === 'working' || st === 'idle')) return begin({ type: 'reseat', body: c.body });
   if (c.resetPending && st === 'none') delete c.resetPending;
@@ -1251,7 +1257,7 @@ function plan(env, cv, d, mem) {
       const rec = readBody(env, c.body), runner = d.runner(rec.harness, rec.local);
       const note = collectContextHandoff(c, runner, bodyOf(c.body, rec), d);
       if (note) {
-        c.contextCap.note = d.sealer.seal(Buffer.from(note)).toString('base64');
+        c.contextCap.note ??= d.sealer.seal(Buffer.from(note)).toString('base64');
         return begin({ type: 'context-rotate', body: c.body });
       }
     } catch (e) { return wait(`context handoff held: ${e.message}`); }
@@ -2000,7 +2006,7 @@ function shadowAdmission(env, c, r, at, enforced = false) {
   } catch { /* a shadow log line, never a reason a start fails */ }
 }
 
-export function commitStartedConversation(env, op, { run, senderHash, bodyRules, way, houseLaunch, nativeRecovery }, r, pending, at, localKey) {
+export function commitStartedConversation(env, op, { run, senderHash, bodyRules, way, houseLaunch, nativeRecovery, contextPrepare }, r, pending, at, localKey) {
   const keys = op.msgs.map(x => x.key);
   return locked(env, () => {
     const c = loadConv(env, op.cv);
@@ -2014,6 +2020,16 @@ export function commitStartedConversation(env, op, { run, senderHash, bodyRules,
       requeue(c, [...stillMine(c, op.msgs), ...pending]);
       saveConv(env, c);
       return false;
+    }
+    if (contextPrepare) {
+      if (c.contextSuccessor?.r.body === r.body) return true;
+      if (c.body !== contextPrepare.predecessor || c.contextCap?.run !== contextPrepare.run || r.inputUncertain) return false;
+      c.contextSuccessor = { r, run, senderHash, bodyRules, way, at, contextPrepare };
+      if (houseLaunch) c.launchAcks = [...(c.launchAcks ?? []).filter(h => h.id !== houseLaunch.id), houseLaunch];
+      delete c.starting;
+      c.waiting = 'context handoff waits for successor acknowledgment';
+      saveConv(env, c); syncConversation(env, op.cv);
+      return true;
     }
     c.body = r.body;
     c.run = run;
@@ -2261,7 +2277,7 @@ function preparedLaunch(env, op, d, context) {
       if (previous && previous.id !== id && readLaunch(env, previous.id)?.state !== 'refused') throw Object.assign(Error('its previous native start remains unresolved'), { nativePending: true });
       c.starting.prepared = { id, harness, intentHash, bodySpec: prepared,
         recoveryConfiguration: nativeRecoveryConfiguration(runner), snapshot: context.snapshot() };
-      if (context.local) keepKey(env, op.cv, context.runKey);
+      if (context.local && !op.contextPrepare) keepKey(env, op.cv, context.runKey);
       saveConv(env, c);
     });
     if (configuration) return superviseNativeLaunch(env, { id, ...intent });
@@ -2271,6 +2287,21 @@ function preparedLaunch(env, op, d, context) {
 
 async function executeOne(env, op, d, mem) {
   const now = () => d.now().getTime();
+  if (op.type === 'context-cancel') {
+    const c = loadConv(env, op.cv), stage = c?.contextSuccessor;
+    if (!ours(c, op) || !stage) return;
+    const rec = readBody(env, stage.r.body), runner = d.runner(rec.harness, rec.local), body = bodyOf(stage.r.body, rec);
+    runner.end(body);
+    if (runner.stopped ? !runner.stopped(body) : runner.status(body) === 'working') throw new RetirementPending();
+    endAndForget(env, stage.r, d);
+    locked(env, () => {
+      const current = loadConv(env, op.cv);
+      if (!ours(current, op) || current.contextSuccessor?.r.body !== stage.r.body) return;
+      delete current.contextSuccessor; delete current.retiring; delete current.starting;
+      saveConv(env, current);
+    });
+    return;
+  }
   if (op.type === 'context-request') {
     const c = loadConv(env, op.cv);
     if (!ours(c, op) || c.body !== op.body) return;
@@ -2290,7 +2321,8 @@ async function executeOne(env, op, d, mem) {
     try { return await rotateContext(env, op, d); }
     catch (e) {
       if (e instanceof RetirementPending) throw e;
-      d.warn(`context rotation for ${op.cv} waits for durable storage: ${e.message}`);
+      d.warn(`context rotation for ${op.cv} held: ${e.message}`);
+      locked(env, () => { const c = loadConv(env, op.cv); if (ours(c, op)) { c.waiting = `context handoff held: ${e.message}`; saveConv(env, c); } });
       throw new RetirementPending();
     }
   }
@@ -2348,7 +2380,8 @@ async function executeOne(env, op, d, mem) {
     return;
   }
   if (op.type === 'quota') return quotaOp(env, op, d);
-  const c0 = loadConv(env, op.cv);
+  const stored = loadConv(env, op.cv);
+  const c0 = op.contextPrepare ? { ...stored, body: undefined, slot: undefined, home: undefined, fallback: undefined } : stored;
   const run = newRun();
   const keys = op.msgs.map((x) => x.key);
   let restored = [];
@@ -2366,6 +2399,10 @@ async function executeOne(env, op, d, mem) {
     const sends = posts(v0) ? 'post' : recordsOnly(v0) ? 'record' : null;
     // Its rules (policy.mjs): what it's told and what it may use. Any that can't be had is no body (fail closed).
     rules = await rulesFor(c0, [...(c0.contextAuthority ?? []), ...msgs.filter((x) => !isNote(x))], rulesDeps(d, v0, c0), { ...(c0.contextFloor ? { narrowing: c0.contextFloor } : {}), platform: posts(v0), core: coreAdapted(v0), principal: principalOf(env, c0), ownerSpoke: c0.actsFor?.owner === true });
+    if (c0.contextModel) {
+      validateContextFloor(env, stored);
+      if (gatesMoved({ ...c0, bodyRules: c0.contextFloor }, d)) throw Object.assign(new DeliveryError('context continuation waits for unchanged predecessor standing restrictions', 503), { held: true });
+    }
     if (c0.spawn?.ruleSource) {
       const source = c0.spawn.ruleSource;
       const venue = await venueOf(d, source.venue);
@@ -2425,6 +2462,7 @@ async function executeOne(env, op, d, mem) {
     const lb = c0.local ? localBodiesOf(env) : null;
     if (c0.local && !lb?.agents.includes(c0.agent)) throw new DeliveryError(`the runtime runs no local bodies for ${c0.agent} now (LOOM_RUNTIME_LOCAL_BODIES)`, 403);
     const bodyEnv = d.bodyEnv(runKey, op.cv);
+    if (op.contextPrepare) { delete bodyEnv.LOOM_BODY_KEY; delete bodyEnv.LOOM_BODY_CONVERSATION; }
     if (local && lb?.path) bodyEnv.PATH = lb.path;
     const bodyDeps = { runner: (h) => d.runner(h, local), accounts: d.accounts, now: d.now, fetchImpl: d.fetchImpl, bodyEnv };
     bodyDeps.commitPrepared = (prepared, native, at) => locked(env, () => {
@@ -2445,7 +2483,7 @@ async function executeOne(env, op, d, mem) {
       return commitPreparedBody(env, prepared, native, at);
     });
     bodyDeps.launch = preparedLaunch(env, op, d, { local, runKey, snapshot: () => launchSnapshot ??= {
-      run, senderHash: keyHash(runKey).toString('hex'), bodyRules: savedBodyRules(rules, now()),
+      run, senderHash: keyHash(runKey).toString('hex'), bodyRules: savedBodyRules(rules, now()), ...(op.contextPrepare ? { contextPrepare: op.contextPrepare } : {}),
       ...(c0.nativeRecovery ? { nativeRecovery: c0.nativeRecovery.id } : {}),
       way: { how: way.how, home: !!way.home, ...(way.file ? { file: way.file } : {}), ...(way.failover ? { failover: way.failover } : {}), ...(base.gate ? { gated: true } : {}) },
     } });
@@ -2485,7 +2523,7 @@ async function executeOne(env, op, d, mem) {
       // A capacity failover (slice 4) starts gated too: only on a model whose account has headroom, as routeOf found.
       const gate = (!c0.spawn?.assignment || way.failover === 'capacity') && workerGate(env, c0, d);
       if (gate) base.gate = gate;
-      const go = (avoid) => startBody(env, { ...base, place: c0.place, avoid, brief: startBrief(briefContext, [...notes, ...msgs], run, sends, rules) }, bodyDeps);
+      const go = (avoid) => startBody(env, { ...base, place: c0.place, avoid, brief: op.contextPrepare ? [...rules.sections, { text: msgs.map(x => x.text).join('\n') }] : startBrief(briefContext, [...notes, ...msgs], run, sends, rules) }, bodyDeps);
       try { r = await go(way.avoid); } catch (e) {
         // A Codex that won't run this body where it would run (a house's: only its host can tell, at the start;
         // runners.mjs, CODEX_WONT): started again off Codex now, never a failed start (t-1924).
@@ -2514,7 +2552,7 @@ async function executeOne(env, op, d, mem) {
         if (way.home) rmSync(slotFile(env, op.cv), { force: true });
       });
     }
-    const snapshot = launchSnapshot ?? { run, senderHash: keyHash(runKey).toString('hex'), bodyRules: savedBodyRules(rules, now()), way: { how: way.how, home: !!way.home, ...(way.failover ? { failover: way.failover } : {}), ...(base.gate ? { gated: true } : {}) }, ...(c0.nativeRecovery ? { nativeRecovery: c0.nativeRecovery.id } : {}) };
+    const snapshot = launchSnapshot ?? { run, senderHash: keyHash(runKey).toString('hex'), bodyRules: savedBodyRules(rules, now()), ...(op.contextPrepare ? { contextPrepare: op.contextPrepare } : {}), way: { how: way.how, home: !!way.home, ...(way.failover ? { failover: way.failover } : {}), ...(base.gate ? { gated: true } : {}) }, ...(c0.nativeRecovery ? { nativeRecovery: c0.nativeRecovery.id } : {}) };
     const keep = commitStartedConversation(env, op, snapshot, r, pending, now(), local ? runKey : undefined);
     if (!keep) endAndForget(env, r, d);
     else {
@@ -2547,6 +2585,16 @@ async function executeOne(env, op, d, mem) {
         saveConv(env, c);
       });
       return { pending: true };
+    }
+    if (op.contextPrepare) {
+      locked(env, () => {
+        const c = loadConv(env, op.cv);
+        if (!ours(c, op)) return;
+        delete c.starting;
+        c.waiting = `context handoff held: successor could not start: ${String(e.message).slice(0, 300)}`;
+        saveConv(env, c);
+      });
+      return;
     }
     // A new worker job whose every model with room is kept for conversations (allocator.mjs, t-2037): it waits, its
     // messages queued, and is looked at again within 15 minutes (or at the reset, if sooner). Not out of quota: no
@@ -2763,11 +2811,62 @@ function validContextModel(pin) {
     && pin.model.length > 0 && pin.model.length <= 200 && !/\s|[\x00-\x1f\x7f]/.test(pin.model);
 }
 
+function cancelContext(env, c) {
+  return c.contextSuccessor && (c.contextSuccessor.cancelled || c.resetPending || c.control || !c.contextCap || c.contextSuccessor.contextPrepare.predecessor !== c.body ||
+    JSON.stringify(c.contextPrincipal) !== JSON.stringify(principalOf(env, c)));
+}
+
+function validateContextFloor(env, c) {
+  if (c.contextModel && (!c.contextFloor || !c.contextPrincipal || !c.contextProfile)) throw Error('context continuation requires its complete saved restriction snapshot');
+  const floor = c.contextFloor ?? c.bodyRules;
+  const valid = r => r && typeof r.guest === 'boolean' && typeof r.key === 'string' && r.key.length > 0 &&
+    Array.isArray(r.deny) && r.deny.every(x => typeof x === 'string' && x.length > 0) &&
+    Array.isArray(r.readers) && r.readers.every(x => typeof x === 'string');
+  if (!valid(c.bodyRules) || !valid(floor)) throw Error('context continuation requires valid predecessor bodyRules');
+  if (c.body && seatMoved(env, c)) throw Error('context continuation principal no longer matches the predecessor seat');
+  if (c.contextPrincipal && JSON.stringify(c.contextPrincipal) !== JSON.stringify(principalOf(env, c))) throw Error('context continuation principal changed');
+  if (c.contextProfile && JSON.stringify(c.contextProfile) !== JSON.stringify({ conversation: c.profile ?? null, body: c.body ? readBody(env, c.body).profile ?? null : c.contextProfile.body })) throw Error('context continuation profile changed');
+  const rec = c.body ? readBody(env, c.body) : null;
+  if (rec?.guest === true && !floor.guest || (rec?.deny ?? []).some(x => !floor.deny.includes(x))) throw Error('context floor omits predecessor restrictions');
+  if (c.contextProfile && (c.contextProfile.conversation !== null || c.contextProfile.body !== null)) throw Error('context continuation requires a profile-aware runner before inheriting a non-default profile');
+  if (c.resetPending) throw Error('context continuation waits for principal reset');
+}
+
 async function rotateContext(env, op, d) {
   const before = loadConv(env, op.cv);
   if (!ours(before, op) || before.body !== op.body || !before.contextCap?.note) return;
   const predecessor = readBody(env, op.body);
   if (!validContextModel(predecessor)) throw Error('context continuation requires valid predecessor model metadata');
+  validateContextFloor(env, before);
+  if (gatesMoved({ ...before, bodyRules: before.contextFloor ?? before.bodyRules }, d)) throw Error('context continuation standing restrictions changed');
+  if (!before.contextSuccessor) {
+    const digest = createHash('sha256').update(d.sealer.open(Buffer.from(before.contextCap.note, 'base64'))).digest('hex');
+    const contextPrepare = { predecessor: op.body, run: before.contextCap.run, digest };
+    const note = d.sealer.open(Buffer.from(before.contextCap.note, 'base64')).toString('utf8');
+    locked(env, () => {
+      const c = loadConv(env, op.cv);
+      if (!ours(c, op)) return;
+      c.contextModel = { model: predecessor.model, harness: predecessor.harness };
+      c.contextFloor ??= structuredClone(c.bodyRules);
+      c.contextPrincipal ??= principalOf(env, c);
+      c.contextProfile ??= { conversation: c.profile ?? null, body: predecessor.profile ?? null };
+      const voices = c.runMsgs?.msgs?.filter(x => !isNote(x)).map(({ from, tier, owner, tierUnread, wakeFor, local }) => ({ from, tier, owner, tierUnread, wakeFor, local })) ?? [];
+      c.contextAuthority = [...new Map([...(c.contextAuthority ?? []), ...voices].map(v => [JSON.stringify(v), v])).values()];
+      saveConv(env, c); syncConversation(env, op.cv);
+    });
+    const key = `accept-${contextPrepare.run}`;
+    const text = `CONTEXT ACCEPTANCE ONLY. The predecessor is idle and retains this conversation until you acknowledge. Read the handoff below. Do no task work and call no tools in this acceptance turn. Your entire final response must be exactly LOOM_CONTEXT_ACCEPT ${digest}. The runtime will then retire the predecessor and resume this same fresh session with permission to continue.\n\n${note}`;
+    return executeOne(env, { ...op, type: 'start', body: undefined, contextPrepare,
+      msgs: [{ key, id: key, note: true, contextContinuation: true, kind: 'message', sealed: d.sealer.seal(Buffer.from(text)).toString('base64') }] }, d, new Map());
+  }
+  const successor = before.contextSuccessor;
+  if (successor.contextPrepare.predecessor !== op.body || successor.contextPrepare.run !== before.contextCap.run) throw Error('successor lineage changed');
+  if (successor.contextPrepare.digest !== createHash('sha256').update(d.sealer.open(Buffer.from(before.contextCap.note, 'base64'))).digest('hex')) throw Error('successor acknowledged another handoff');
+  const sr = readBody(env, successor.r.body), runner = d.runner(sr.harness, sr.local), body = bodyOf(successor.r.body, sr);
+  const state = runner.status(body);
+  if (state !== 'idle' && state !== 'ended') throw Error('successor has not acknowledged');
+  if (runner.final?.(body)?.trim() !== `LOOM_CONTEXT_ACCEPT ${successor.contextPrepare.digest}`) throw Error('successor acknowledgment is missing or invalid');
+  if (runner.turn?.(body)?.worked === true) throw Error('successor attempted work during acceptance');
   syncConversation(env, op.cv);
   // Existing retirement owns stop acknowledgement, inbox reconciliation and durable packing.
   const saved = await retire(env, op.cv, op.body, d, true);
@@ -2777,7 +2876,7 @@ async function rotateContext(env, op, d) {
     const handoff = c.contextCap;
     const old = readBody(env, op.body);
     c.contextModel = { model: old.model, harness: old.harness };
-    c.contextFloor = c.bodyRules;
+    c.contextFloor = structuredClone(c.bodyRules);
     const voices = c.runMsgs?.msgs?.filter(x => !isNote(x)).map(({ from, tier, owner, tierUnread, wakeFor, local }) => ({ from, tier, owner, tierUnread, wakeFor, local })) ?? [];
     if (voices.length) c.contextAuthority = [...new Map([...(c.contextAuthority ?? []), ...voices].map(v => [JSON.stringify(v), v])).values()];
     const file = slotFile(env, op.cv);
@@ -2792,8 +2891,12 @@ async function rotateContext(env, op, d) {
     const text = 'Continue the same job in this fresh session from the saved handoff below. Verify branch heads before changing anything. Read the original conversation for the assignment if needed.\n\n' + d.sealer.open(Buffer.from(handoff.note, 'base64')).toString('utf-8');
     const key = `context-${handoff.run}`;
     requeue(c, [...saved.pending, { key, id: key, note: true, contextContinuation: true, kind: 'message', at: d.now().toISOString(), sealed: d.sealer.seal(Buffer.from(text)).toString('base64') }]);
-    c.body = undefined; delete c.slot; delete c.idleSince; delete c.contextCap; delete c.starting;
-    forgetRunKey(env, c);
+    c.body = successor.r.body; c.run = successor.run; c.sendKey = successor.senderHash;
+    c.bodyRules = successor.bodyRules;
+    delete c.slot; delete c.idleSince; delete c.contextCap; delete c.starting; delete c.contextSuccessor;
+    // The accepted session is idle; normal delivery packs/resumes it with the actual work.
+    c.runMsgs = { run: c.run, msgs: [], lost: [] };
+    delete c.waiting;
     saveConv(env, c); syncConversation(env, op.cv);
   });
 }
@@ -3425,6 +3528,11 @@ export async function tick(env, o = {}, only, mem = new Map()) {
       const recovery = claimPreparedRecovery(c, now);
       if (recovery) { ops.push(recovery); saveConv(env, c); continue; }
       if (c.starting && !isStarting(c, now)) { abandon(c, now); dirty = true; }
+      if (!c.starting && cancelContext(env, c)) {
+        c.starting = mark(now);
+        ops.push({ cv: c.conversation, mark: c.starting.op, type: 'context-cancel', body: c.body });
+        saveConv(env, c); continue;
+      }
       if (c.retiring) {
         if (!c.starting) {
           c.starting = mark(now);
@@ -3469,7 +3577,7 @@ export async function tick(env, o = {}, only, mem = new Map()) {
             const rec = readBody(env, c.body), runner = d.runner(rec.harness, rec.local);
             const note = collectContextHandoff(c, runner, bodyOf(c.body, rec), d);
             if (note) {
-              c.contextCap.note = d.sealer.seal(Buffer.from(note)).toString('base64');
+              c.contextCap.note ??= d.sealer.seal(Buffer.from(note)).toString('base64');
               c.starting = mark(now);
               ops.push({ cv: c.conversation, mark: c.starting.op, type: 'context-rotate', body: c.body });
               saveConv(env, c); continue;
@@ -3842,6 +3950,22 @@ export function inspectClockContinuation(env, { handle, statement, agent, schedu
 }
 
 // Holder boundary. There is deliberately no body-callable bind.
+export function contextBoundary(env, { conversation, key, session, note }, o = {}) {
+  const d = depsOf(env, o);
+  return locked(env, () => {
+    const c = loadConv(env, conversation);
+    if (!c || (o.caller && (o.caller.kind !== 'agent' || o.caller.agent !== c.agent))) throw new StateError('only its own body may rotate context', 403);
+    const problem = holderProblem(env, d, c, { key, session }, 'requests a task boundary', o.caller);
+    if (problem) throw new StateError(problem, 403);
+    if (!['scheduled', 'agent'].includes(c.kind)) throw new StateError('task boundaries rotate jobs only', 400);
+    if (typeof note !== 'string' || !note.trim() || note.length > 12000) throw new StateError('task boundary requires a nonempty handoff of at most 12000 characters', 400);
+    if (c.starting || c.contextSuccessor) throw new StateError('context handoff already in progress', 409);
+    c.contextCap = { body: c.body, run: c.run, asked: d.now().getTime(), requested: true, boundary: true, note: d.sealer.seal(Buffer.from(note.trim())).toString('base64') };
+    saveConv(env, c); syncConversation(env, conversation);
+    return { ok: true, state: 'handoff-saved', instruction: 'End this turn now without starting more work. The runtime holds your session until a successor acknowledges.' };
+  });
+}
+
 export function continuationCall(env, { action, conversation, key, session, handle, id, text }, o = {}) {
   const d = depsOf(env, o), c = loadConv(env, conversation);
   if (!c) throw new StateError('no continuation conversation here', 403);
@@ -4056,7 +4180,7 @@ export function resetPrincipal(env, conversation, { agent, approval } = {}) {
     rmSync(slotFile(env, conversation), { force: true });
     rmSync(homeFile(env, conversation), { force: true });
     delete c.slot; delete c.home; delete c.fallback;
-    delete c.contextCap; delete c.contextFloor; delete c.contextAuthority; delete c.contextModel;
+    delete c.contextCap; delete c.contextPrincipal; delete c.contextProfile; delete c.contextFloor; delete c.contextAuthority; delete c.contextModel;
     // The run that heard what came before speaks no more: its key is gone now, not when its body is ended.
     if (c.body) { c.resetPending = true; forgetRunKey(env, c); }
     // A reset is activity: the record (and the reset it holds) outlives any continuation issued before it (t-2004).
