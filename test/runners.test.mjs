@@ -766,10 +766,12 @@ test('final snapshot excludes mid-scan appends and drops them after intermediate
   const fs = (await import('node:fs')).default;
   const { syncBuiltinESMExports } = await import('node:module');
   const h = harness();
-  for (const slice of [64, 1024]) {
+  for (const slice of [256, 1024]) {
   const file = join(h.D, `append-truncate-${slice}.jsonl`);
   const event = text => JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text }] } }) + '\n';
-  const first = event('first');
+  const initial = event('first');
+  // At 256 bytes, the second slice has room for both appended messages if remaining bytes are not subtracted.
+  const first = initial + (slice === 256 ? ' '.repeat(256 - Buffer.byteLength(initial)) + '\n' : '');
   const surviving = first + event('surviving');
   writeFileSync(file, first);
   const runner = new ClaudeRunner({ readMax: { final: slice } });
