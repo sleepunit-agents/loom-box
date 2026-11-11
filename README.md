@@ -968,3 +968,6 @@ A lost attached launcher does not end its container. The box observes the physic
 After physical exit, stateful houses retain their local state until the control plane acknowledges its upload. A private atomic completion receipt records only bookkeeping and phase, never a prompt, run key or secret value. Uploads and terminal reports retry, including across a runner restart; a lost reply after a committed report is reconciled against the next authoritative poll. Cleanup follows these acknowledgements. Polls include the box’s own active house bookkeeping so an adopted service or slot retains its state requirements. An older control plane that cannot supply those requirements leaves collection pending and keeps the local data.
 
 Pending collection appears as “Saving state” or “Finishing” on the Runtime page and CLI. The physically ended house is not offered new model work or counted as a running guest container while its local state is retained.
+
+Job context profiles, native token reporting and the handoff threshold:
+[docs/context-cost.md](docs/context-cost.md).

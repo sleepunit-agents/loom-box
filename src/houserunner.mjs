@@ -401,6 +401,7 @@ function cleanReport(r) {
       status: ['working', 'idle', 'ended', 'unknown'].includes(b.status) ? b.status : 'unknown',
       ...(typeof b.session === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{3,127}$/.test(b.session) ? { session: b.session } : {}),
       ...(ACTIONS.has(b.tickerAction) && Number.isFinite(Date.parse(b.tickerObservedAt)) ? { tickerAction: b.tickerAction, tickerObservedAt: b.tickerObservedAt } : {}),
+      ...(Number.isSafeInteger(b.contextTokens) && b.contextTokens > 0 && b.contextTokens <= 10000000 ? { contextTokens: b.contextTokens } : {}),
       feedable: b.feedable === true,
       pending: Array.isArray(b.pending) ? b.pending.filter((k) => typeof k === 'string' && k.length <= 64).slice(0, 64) : [],
       // A Comms thread's body's tool steps (activity.mjs), checked here as core will check them.
@@ -971,7 +972,7 @@ export class HouseRunner {
     const needs = o.needs ?? [];
     const seat = hostKeyOf(o.seat ?? OWNER_SEAT, needs);
     const parts = isParts(o.brief);
-    const ask = { attempt: id, harness: this.harness, model: o.model, deny: o.deny ?? [], ...(parts ? { parts: o.brief } : { brief: o.brief }), key: o.env?.LOOM_BODY_KEY,
+    const ask = { attempt: id, harness: this.harness, model: o.model, deny: o.deny ?? [], ...(o.env?.LOOM_BODY_PROFILE === 'work' ? { profile: 'work' } : {}), ...(parts ? { parts: o.brief } : { brief: o.brief }), key: o.env?.LOOM_BODY_KEY,
       ...(o.env?.LOOM_BODY_CONVERSATION ? { conversation: o.env.LOOM_BODY_CONVERSATION } : {}), ...(o.activity ? { activity: true } : {}),
       ...(resume ? { resume: resume.session, files: o.files ?? [] } : {}) };
     const intent = JSON.stringify({ agent: o.agent, seat, ask });
@@ -1108,7 +1109,7 @@ export class HouseRunner {
     // gets one (an older host would start the body without them).
     const parts = isParts(o.brief);
     const rid = randomBytes(8).toString('hex');
-    const ask = { harness: this.harness, model: o.model, deny: o.deny ?? [], ...(parts ? { parts: o.brief } : { brief: o.brief }), key: o.env?.LOOM_BODY_KEY, ...(o.env?.LOOM_BODY_CONVERSATION ? { conversation: o.env.LOOM_BODY_CONVERSATION } : {}), ...(o.activity ? { activity: true } : {}), ...(resume ? { resume: resume.session, files: o.files ?? [] } : {}) };
+    const ask = { harness: this.harness, model: o.model, deny: o.deny ?? [], ...(o.env?.LOOM_BODY_PROFILE === 'work' ? { profile: 'work' } : {}), ...(parts ? { parts: o.brief } : { brief: o.brief }), key: o.env?.LOOM_BODY_KEY, ...(o.env?.LOOM_BODY_CONVERSATION ? { conversation: o.env.LOOM_BODY_CONVERSATION } : {}), ...(o.activity ? { activity: true } : {}), ...(resume ? { resume: resume.session, files: o.files ?? [] } : {}) };
     const sealed = this.transit.seal(Buffer.from(JSON.stringify(ask)));
     // Asked of the house warm() gave, only while it's still the agent's house (not drained since): else warm again.
     let house;
@@ -1235,6 +1236,7 @@ export class HouseRunner {
   }
   /** How its turn went, as its house's host reports it: null from a host that doesn't say. */
   turn(body) { return this.entry(body)?.turn ?? null; }
+  context(body) { return this.entry(body)?.contextTokens ?? null; }
   final(body) {
     const s = this.entry(body)?.finalSealed;
     return s ? this.sealer.open(Buffer.from(s, 'base64')).toString('utf-8') : null;
