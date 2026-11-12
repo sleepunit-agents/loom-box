@@ -20,9 +20,9 @@ test('allowlist drops paths, native calls, prompt and extra fields; invalid numb
   assert.deepEqual(numericJob({ ...row(), file: '/private/path', content: 'PRIVATE', nativeCalls: 'SECRET' }), row());
   for (const bad of [{ calls: -1 }, { cacheRead: Infinity }, { totalTokens: 1 }, { models: ['model with prompt text'] }, { start: 'yesterday' }, { session: '../escape' }]) assert.throws(() => numericJob({ ...row(), ...bad }));
 });
-test('poll attributes to enrolled caller and recorded house, dedupes retries and stale copies', () => {
+test('report attributes to enrolled caller and recorded house, dedupes retries and stale copies', () => {
   const { env, box, h } = setup();
-  const send = report => api(env, fx, { caller: box, path: 'poll', body: { jobUsage: report } });
+  const send = report => api(env, fx, { caller: box, path: 'job-usage-report', body: report });
   const report = { house: h.id, jobs: [{ ...row(), agent: 'mark', box: 'other', content: 'SECRET' }] };
   assert.equal(send(report).status, 200); assert.equal(send(report).status, 200);
   assert.equal(send({ house: h.id, jobs: [row('session-a', 1)] }).status, 200);
@@ -31,7 +31,7 @@ test('poll attributes to enrolled caller and recorded house, dedupes retries and
   assert.doesNotMatch(JSON.stringify(kept), /SECRET|other|mark/);
   assert.equal(send({ house: 'h-999', jobs: [row()] }).status, 403);
   assert.equal(send({ house: h.id, jobs: Array(101).fill(row()) }).status, 400);
-  assert.equal(api(env, fx, { caller: { kind: 'piece', subject: 'unknown' }, path: 'poll', body: { jobUsage: report } }).status, 403);
+  assert.equal(api(env, fx, { caller: { kind: 'piece', subject: 'unknown' }, path: 'job-usage-report', body: report }).status, 403);
 });
 test('a box cannot report a house assigned to another box; invalid batch is atomic', () => {
   const s = { boxes: { a: {}, b: {} }, houses: { 'h-1': { box: 'b', agent: 'art' } } };
@@ -46,8 +46,8 @@ test('native scanner sends numbers in bounded chunks, skips symlinks and propaga
   for (let i = 0; i < 101; i++) writeFileSync(join(dir, 'native', 'claude-projects', `${i}.jsonl`), transcript(`session-${i}`));
   const calls = [];
   await reportBoxJobs({ call: async (path, body) => { calls.push({ path, body }); } }, root);
-  assert.deepEqual(calls.map(c => c.body.jobUsage.jobs.length), [100, 1]);
-  assert.equal(calls[0].path, 'poll');
+  assert.deepEqual(calls.map(c => c.body.jobs.length), [100, 1]);
+  assert.equal(calls[0].path, 'job-usage-report');
   assert.doesNotMatch(JSON.stringify(calls), /PRIVATE|claude-projects|file|content/);
   await assert.rejects(reportHouseJobs({ call: async () => { throw Error('offline'); } }, 'h-1', dir), /offline/);
   assert.match(readFileSync(join(dir, 'native', 'claude-projects', '0.jsonl'), 'utf8'), /PRIVATE/);
@@ -62,7 +62,7 @@ test('merged ranking filters before limiting, Central start day, same-box local 
 });
 test('API serves retained reports, limits agents to their own and refuses boxes', async () => {
   const { env, owner, agent, box, h } = setup();
-  api(env, fx, { caller: box, path: 'poll', body: { jobUsage: { house: h.id, jobs: [row()] } } });
+  api(env, fx, { caller: box, path: 'job-usage-report', body: { house: h.id, jobs: [row()] } });
   const r = await api(env, fx, { caller: owner, path: 'job-usage', body: { day: 'all' } });
   assert.equal(r.status, 200); assert.equal(r.body.jobs[0].box, 'local'); assert.equal(r.body.jobs[0].totalTokens, 12);
   assert.equal((await api(env, fx, { caller: agent, path: 'job-usage', body: { day: 'all' } })).body.jobs.length, 1);
@@ -75,7 +75,7 @@ test('retained slot enriches session with conversation and preserves agent isola
   const { saveConv } = await import('../src/delivery.mjs');
   const { env, owner, h, box } = setup();
   saveConv(env, { conversation: 'cv-123456abcdef', agent: 'art', slot: { harness: 'claude', session: 'session-a' } });
-  api(env, fx, { caller: box, path: 'poll', body: { jobUsage: { house: h.id, jobs: [row()] } } });
+  api(env, fx, { caller: box, path: 'job-usage-report', body: { house: h.id, jobs: [row()] } });
   const r = await api(env, fx, { caller: owner, path: 'job-usage', body: { day: 'all' } });
   assert.equal(r.body.jobs[0].conversation, 'cv-123456abcdef');
   assert.equal(r.body.jobs[0].currentRun, undefined);
@@ -137,7 +137,7 @@ test('live house slot from host report enriches identity without a persisted bod
     report: { bodies: { deadbeef: { harness: 'claude', status: 'working', session: 'session-a' } }, done: {}, caps: ['parts', 'native-admission', 'native-history'], starting: [] } } });
   assert.equal(sync.status, 200, JSON.stringify(sync.body));
   saveConv(env, { conversation: 'cv-123456abcdef', agent: 'art', body: `claude:${id}`, run: 'run-123456abcdef' });
-  api(env, fx, { caller: box, path: 'poll', body: { jobUsage: { house: h.id, jobs: [row()] } } });
+  api(env, fx, { caller: box, path: 'job-usage-report', body: { house: h.id, jobs: [row()] } });
   const r = await api(env, fx, { caller: owner, path: 'job-usage', body: { day: 'all' } });
   assert.equal(r.body.jobs[0].conversation, 'cv-123456abcdef'); assert.equal(r.body.jobs[0].currentRun, 'run-123456abcdef');
 });
@@ -150,4 +150,18 @@ test('same session on two boxes remains two overlapping rows; same-box retries r
 
 test('runtime model ids with provider paths and context suffixes remain numeric-reportable', () => {
   assert.deepEqual(numericJob({ ...row(), models: ['openai/gpt-6', 'claude-opus-4-6[1m]'] }).models, ['openai/gpt-6', 'claude-opus-4-6[1m]']);
+});
+
+test('numeric reports cannot consume pending login work or a pasted sign-in code', () => {
+  const { env, owner, box, h } = setup();
+  const call = (caller, path, body = {}) => { const r = api(env, fx, { caller, path, body }); assert.equal(r.status, 200, JSON.stringify(r.body)); return r.body; };
+  env.XDG_RUNTIME_DIR = join(env.HOME, 'run');
+  const login = call(owner, 'login-start', { box: 'local', harness: 'claude' });
+  call(box, 'job-usage-report', { house: h.id, jobs: [row()] });
+  assert.equal(call(box, 'poll').logins[0].id, login.id);
+  call(box, 'login-report', { id: login.id, state: 'waiting', link: 'https://claude.com/cai/oauth/authorize?code=true', kind: 'paste-code' });
+  call(owner, 'login-code', { id: login.id, code: 'abcdefgh#state123' });
+  call(box, 'job-usage-report', { house: h.id, jobs: [row()] });
+  assert.equal(call(box, 'poll').logins[0].code, 'abcdefgh#state123');
+  assert.equal(call(box, 'poll').logins.length, 0);
 });

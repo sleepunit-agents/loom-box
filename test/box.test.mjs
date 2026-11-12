@@ -967,7 +967,7 @@ test('final numeric snapshot survives a lost poll reply and runner restart befor
   const original = client.call.bind(client); let dropped = false;
   client.call = async (path, body) => {
     const answer = await original(path, body);
-    if (body.jobUsage && !dropped) { dropped = true; throw Error('numeric snapshot committed but reply lost'); }
+    if (path === 'job-usage-report' && !dropped) { dropped = true; throw Error('numeric snapshot committed but reply lost'); }
     return answer;
   };
   try {

@@ -24,7 +24,7 @@ export async function houseJobUsage(dir) {
 // A poll is bounded; every chunk must be acknowledged before a house may clean up.
 export async function reportHouseJobs(client, house, dir) {
   const jobs = await houseJobUsage(dir);
-  for (let i = 0; i < jobs.length; i += 100) await client.call('poll', { jobUsage: { house, jobs: jobs.slice(i, i + 100) } });
+  for (let i = 0; i < jobs.length; i += 100) await client.call('job-usage-report', { house, jobs: jobs.slice(i, i + 100) });
 }
 export async function reportBoxJobs(client, root) {
   let dirs;

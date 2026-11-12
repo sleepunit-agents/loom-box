@@ -30,7 +30,8 @@ An explicit `--root` remains an offline scan and cannot use agent/box filters.
 
 Each box's existing health polling loop samples its houses' durable native roots
 once a minute. It sends batches of at most 100 allowlisted numeric session rows
-on authenticated polls. The runtime verifies that the house belongs to that box
+through the same authenticated box client on a dedicated job-usage-report endpoint.
+Unlike a poll, this endpoint cannot consume pending sign-in codes or work assignments. The runtime verifies that the house belongs to that box
 and derives the agent from its own house record. Unknown fields and native file
 paths never enter the retained snapshots. A final acknowledged sample precedes
 native cleanup; failures retain the house for retry. Reports remain in the
@@ -53,5 +54,8 @@ the runtime runner on every reporting box. Verify an active house on each box,
 then its final snapshot after cleanup, using `usage jobs --day all --box <id>`.
 Existing deleted histories cannot be recovered by this feature; explicit archive
 roots can still be measured offline. No house-image update is needed for boxes
-whose houses already have the durable native-history mount. Old service houses
-without that mount are not measured by the box scanner.
+whose houses already have the durable native-history mount. Service houses without the durable mount remain unmeasured. This is an unresolved
+review blocker: adding a mount backed by saved service state would export new
+transcript contents through state upload and change continuity on service moves.
+A service reporter needs a separate design that preserves existing history and
+sends numbers only. This draft must not ship until that gap is resolved.

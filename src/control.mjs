@@ -729,7 +729,7 @@ export function poll(env, effects, caller, body = {}) {
   return out;
 }
 
-function pollState(env, effects, caller, { facts, sessions, harnesses, machineHarnesses, usage, loginsRunning, runtime, reportOnly, jobUsage } = {}) {
+function pollState(env, effects, caller, { facts, sessions, harnesses, machineHarnesses, usage, loginsRunning, runtime, reportOnly } = {}) {
   const f = facts === undefined ? null : listOf(facts, 'facts', FACT, 32);
   const running = runningReport(loginsRunning);
   const rt = runtimeReport(runtime);
@@ -740,7 +740,6 @@ function pollState(env, effects, caller, { facts, sessions, harnesses, machineHa
     ? Object.fromEntries(Object.entries(sessions).filter(([k, v]) => SESSION_KEY.test(k) && typeof v === 'boolean').slice(0, 20)) : null;
   return update(env, (s) => {
     const b = boxOf(s, caller);
-    if (jobUsage !== undefined) acceptJobUsage(s, caller.subject, jobUsage, now(effects));
     if (f) b.facts = f;
     // A box may make itself report-only (joined with --report-only); only the owner may undo it.
     // Once: the box asks (joined with --report-only), and the owner's word after that stands, off included.
@@ -1826,7 +1825,14 @@ const OWNER_ONLY = {
 };
 /** The box's own owner's (assertBoxOwner): its logins and Update now. */
 export const BOX_OWNER_ONLY = { 'login-start': loginStart, 'login-code': loginCode, 'login-cancel': loginCancel, 'box-update-now': boxUpdateNow };
-const BOX_ONLY = { hello, poll, claim, report, 'native-collection': nativeCollection, 'collection-status': collectionStatus, 'build-check': buildCheck, 'build-report': buildReport, 'save-state': saveState, 'state-part': statePart, 'remote-report': remoteReport, 'login-report': loginReport };
+function reportJobUsage(env, effects, caller, body) {
+  return update(env, s => {
+    boxOf(s, caller);
+    acceptJobUsage(s, caller.subject, body, now(effects));
+    return { ok: true };
+  });
+}
+const BOX_ONLY = { 'job-usage-report': reportJobUsage, hello, poll, claim, report, 'native-collection': nativeCollection, 'collection-status': collectionStatus, 'build-check': buildCheck, 'build-report': buildReport, 'save-state': saveState, 'state-part': statePart, 'remote-report': remoteReport, 'login-report': loginReport };
 
 /** One API call, as loom's piece API hands it over: {caller, path, body} → {status, body}. */
 export function api(env, effects, { caller, path, body }) {
