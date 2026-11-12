@@ -55,6 +55,12 @@ for(const boundary of ['reserved-before-publication','before-house-receipt','aft
   const root=scratch('delivery-controller-death-'),home=join(root,'controller'),house=join(root,'house'),place='dm:os-controller-death',cv=cvOf('art','slack',place);
   const env={PATH:process.env.PATH,HOME:home,LOOM_HOME:join(home,'.config/loom'),LOOM_BOX_HOME:join(root,'state'),LOOM_BOX_DATA:join(root,'data'),LOOM_BOX_LOCAL_NAME:'one',
     LOOM_RUNTIME_ACCOUNTS:'none',LOOM_RUNTIME_SCORECARDS:'off',LOOM_RUNTIME_TOKEN_FILE:join(root,'runtime-token')};
+  // The Claude stand-in needs its fixture directory explicitly, just as a real
+  // job declares each secret. Codex remains unprofiled in these legacy cases.
+  if (harness === 'claude') {
+    env.LOOM_RUNTIME_JOB_PROFILES = join(root,'profiles.json');
+    writeFileSync(env.LOOM_RUNTIME_JOB_PROFILES,JSON.stringify({v:1,jobs:{[JSON.stringify(['art','slack','live',place])]:{v:1,mcp:[],tools:[],skills:[],secrets:['FAKE_HARNESS']}}}));
+  }
   mkdirSync(env.LOOM_HOME,{recursive:true});writeFileSync(env.LOOM_RUNTIME_TOKEN_FILE,'fixture-runtime-token\n');env.LOOM_BIN=fakeLoomBin(root);
   const sends=join(root,'sends');mkdirSync(sends);const priorSend=process.env.FAKE_SEND;process.env.FAKE_SEND=sends;env.FAKE_SEND=sends;
   const server=await serverFor(env,boundary==='before-house-receipt');env.LOOM_RUNTIME_LOOM_URL=server.url;

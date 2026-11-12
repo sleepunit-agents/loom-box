@@ -1,3 +1,5 @@
+import { durableJson } from './durable-json.mjs';
+import { isWork, selectedProfile, restrictedEnv, claudeWorkArgs, minimalProfile, profileNotice, cleanProfileFloor, unknownProfileFloor, mergeProfileFloors } from './work-profile.mjs';
 // Runners (loom docs/specs/agent-runtime.md, section 3): one interface over the harnesses a body runs in.
 //
 // A runner runs bodies on one harness, on this machine (loom's own, or inside a house):
@@ -38,7 +40,7 @@ import { nativeHistoryEnv, validateNativeHistoryOptions } from './native-history
 import { createHash, randomBytes } from 'node:crypto';
 import { chmodSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { lastContext } from './context-cap.mjs';
 import { keptReading } from './statusline.mjs';
@@ -191,6 +193,7 @@ export class ClaudeRunner {
         for (const name of [`${session}.jsonl`, session]) if (existsSync(join(this.roots.projects, p, name))) keep.push({ root: 'projects', rel: join(p, name) });
       }
     }
+    if (keep.length && existsSync(this.floorPath(`session-${session}`))) keep.push({ root: 'projects', rel: join('.loom-profile-floors', `session-${session}.json`) });
     const drop = body?.id && /^[A-Za-z0-9-]{4,64}$/.test(body.id) ? [join(this.jobsDir, String(body.id).slice(0, 8))] : [];
     return { keep, drop };
   }
@@ -222,16 +225,58 @@ export class ClaudeRunner {
     return found ? lastToolUse(found) : { tool: '', what: '' };
   }
 
-  launch({ brief, model, cwd, env, deny = [], resume, launchToken }) {
+  floorPath(key) {
+    if (!/^[A-Za-z0-9._-]+$/.test(key)) throw new RunnerError('invalid profile floor key');
+    return join(this.roots.projects, '.loom-profile-floors', `${key}.json`);
+  }
+  readFloor(key) {
+    try {
+      const value = JSON.parse(readFileSync(this.floorPath(key), 'utf8'));
+      return cleanProfileFloor(value) ?? unknownProfileFloor();
+    } catch (e) {
+      if (e.code === 'ENOENT') return null;
+      return { deny: [], disabled: [], unknown: true };
+    }
+  }
+  saveFloor(key, floor) { durableJson(this.floorPath(key), floor); }
+
+  bindFloor(token, id, session) {
+    const floor = this.readFloor(`launch-${token}`);
+    if (!floor) return;
+    this.saveFloor(`body-${id}`, floor);
+    if (session) this.saveFloor(`session-${session}`, floor);
+  }
+
+  profileFloor(body) {
+    const session = this.slotOf(body)?.session;
+    const floor = this.readFloor(`body-${body.id}`) ?? (session ? this.readFloor(`session-${session}`) : null);
+    return cleanProfileFloor(floor) ?? unknownProfileFloor();
+  }
+
+  launch({ brief, model, cwd, env, deny = [], resume, launchToken, profileFloor }) {
     const token = launchToken === undefined ? this.token() : stableLaunchToken(launchToken);
+    const incoming = env ?? process.env;
+    const selected = selectedProfile(incoming);
+    let floor = selected ? (resume ? this.readFloor(`session-${resume}`) : { deny: [], disabled: [] }) : null;
+    if (selected && profileFloor !== undefined) floor = mergeProfileFloors(floor, profileFloor);
+    if (selected && (!floor || floor.unknown)) {
+      incoming.LOOM_BODY_PROFILE = JSON.stringify(minimalProfile());
+      incoming.LOOM_BODY_PROFILE_PROBLEM = 'JOB PROFILE PROBLEM: continuation has no saved source restriction floor; using minimal profile (no tools, MCP, skills or secrets).';
+      floor = { deny: floor?.deny ?? [], disabled: floor?.disabled ?? [], unknown: true };
+    }
+    const effective = isWork(incoming) ? restrictedEnv(incoming, selectedProfile(incoming)) : incoming;
+    if (profileNotice(effective)) brief = `${profileNotice(effective)}\n\n${brief}`;
     const nl = brief.indexOf('\n');
     const prompt = nl < 0 ? `${brief}\n${ClaudeRunner.TOKEN_LINE.replace('{token}', token)}\n`
       : `${brief.slice(0, nl)}\n${ClaudeRunner.TOKEN_LINE.replace('{token}', token)}\n${brief.slice(nl + 1)}`;
     // A Codex body's key, inherited by a launcher started under one: a Claude body must never key its inbox on it.
     // Nor a Codex thread's id (a launcher running under Codex has one): `send` names a Claude body's own session.
-    const { SHUTTLE_BODY: _drop, CODEX_THREAD_ID: _thread, ...clean } = env ?? process.env;
+    const { SHUTTLE_BODY: _drop, CODEX_THREAD_ID: _thread, ...clean } = effective;
+    if (isWork(clean) && this.args.length) throw new RunnerError('job profiles cannot combine custom Claude arguments');
     const before = new Set((this.agents(clean) ?? []).map((a) => a.id));
-    const argv = ['--bg', ...(model ? ['--model', model] : []), ...this.statusLine(), ...this.args, ...(deny.length ? ['--disallowedTools', ...deny] : []), ...(resume ? ['--resume', resume] : [])];
+    const workArgs = claudeWorkArgs(clean, cwd, this.jobsDir, floor ?? undefined);
+    if (floor) { floor.deny = [...new Set([...floor.deny, ...deny])]; this.saveFloor(`launch-${token}`, floor); }
+    const argv = ['--bg', ...(model ? ['--model', model] : []), ...this.statusLine(), ...this.args, ...workArgs, ...(deny.length ? ['--disallowedTools', ...deny] : []), ...(resume ? ['--resume', resume] : [])];
     const r = this.run(this.claude, argv, { cwd, env: clean, input: prompt, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 60_000 });
     if (r.error || r.status !== 0) {
       const message = `claude --bg didn't start: ${(r.stderr || r.error?.message || '').trim().split('\n').pop() || `exit ${r.status}`}`;
@@ -247,6 +292,7 @@ export class ClaudeRunner {
       if (found.length === 1) {
         const a = found[0];
         const session = a.sessionId ?? this.job(a.id)?.sessionId;
+        this.bindFloor(token, a.id, session);
         const body = { id: a.id, harness: 'claude', model, ...(session ? { slot: { harness: 'claude', session } } : {}) };
         this.inbox?.open(a.id, { venue: 'runtime', chan: a.id, bridge: 'runtime' });
         return body;
@@ -285,6 +331,7 @@ export class ClaudeRunner {
     const found = [...new Map(rows.filter(a => a?.id && (this.job(a.id)?.intent ?? '').includes(marker)).map(a => [a.id, a])).values()];
     if (found.length !== 1) return { state: 'pending' };
     const a = found[0], session = a.sessionId ?? this.job(a.id)?.sessionId;
+    this.bindFloor(token, a.id, session);
     return { state: 'ready', body: { id: a.id, harness: 'claude', model, ...(session ? { slot: { harness: 'claude', session } } : {}) } };
   }
   resume(slot, o) {
@@ -339,7 +386,7 @@ export class ClaudeRunner {
     if (!f) return null;
     let fd, st, checkpoint;
     try {
-      checkpoint = openFinalCheckpoint(this.jobsDir, body, this.slotOf(body)?.session, f);
+      checkpoint = openFinalCheckpoint(this.jobsDir, body, basename(f, '.jsonl'), f);
       fd = openSync(f, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
       st = fstatSync(fd);
       if (!st.isFile()) return null;
@@ -400,14 +447,24 @@ export class ClaudeRunner {
 
   /** Its session's transcript, the newest of that name under projects; null when there's none. */
   transcriptOf(body) {
-    const session = this.slotOf(body)?.session;
-    if (typeof session !== 'string' || !SESSION.test(session)) return null;
-    return dirs(this.roots.projects).map((p) => join(this.roots.projects, p, `${session}.jsonl`)).filter((f) => existsSync(f))
-      .sort((x, y) => statSync(y).mtimeMs - statSync(x).mtimeMs)[0] ?? null;
+    // Prefer the native fork, but keep the recorded transcript readable when a
+    // stale/mismatched daemon record names history that does not exist. The
+    // checkpoint independently verifies ownership of the selected transcript.
+    for (const session of new Set([this.slotOf(body)?.session, body.slot?.session])) {
+      if (typeof session !== 'string' || !SESSION.test(session)) continue;
+      const found = dirs(this.roots.projects).map((p) => join(this.roots.projects, p, `${session}.jsonl`)).filter((f) => existsSync(f))
+        .sort((x, y) => statSync(y).mtimeMs - statSync(x).mtimeMs)[0];
+      if (found) return found;
+    }
+    return null;
   }
 
   slotOf(body) {
-    const session = body.slot?.session ?? this.job(body.id)?.sessionId;
+    const session = this.job(body.id)?.sessionId ?? body.slot?.session;
+    if (session && body.id) {
+      const floor = this.readFloor(`body-${body.id}`);
+      if (floor) this.saveFloor(`session-${session}`, floor);
+    }
     return session ? { harness: 'claude', session } : null;
   }
 
@@ -668,6 +725,7 @@ export class CodexRunner {
   }
 
   planOf(deny, cwd, env) {
+    if (isWork(env)) return { why: "work profiles don't support Codex yet; refusing launch instead of widening the profile" };
     if (this.profile) return { why: `LOOM_RUNTIME_CODEX_PROFILE is set (${String(this.profile).slice(0, 64)}): a Codex profile can turn a denied tool server back on, so the codex runner runs no body under one; unset it` };
     const off = codexDeny(deny);
     if (off.error) return { why: off.error };

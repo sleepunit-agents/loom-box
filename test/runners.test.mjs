@@ -445,9 +445,10 @@ test('a body is asked of the runtime: it picks the model, starts it through the 
   const acct = (name, provider, usage = {}) => ({ name, provider, harness: provider === 'anthropic' ? 'claude' : 'codex', kind: 'login', agents: ['art'], credentials: [{ kind: 'login', status: 'valid' }], usage });
   const o = { runner: (h) => runners[h], accounts: staticAccounts({ accounts: [acct('max', 'anthropic', { '7d': 0.99 }), acct('pro', 'openai')] }), now: () => new Date('2026-11-02T12:00:00Z') };
   // opus is preferred but out of quota: the body runs on gpt, through the codex runner.
-  const b = await startBody(env, { agent: 'art', brief: 'the wake', venue: 'wake', place: 'schedule:reflect' }, o);
+  const b = await startBody(env, { agent: 'art', brief: 'the wake', venue: 'wake', place: 'schedule:reflect', deny:['mcp__github'] }, o);
   assert.deepEqual([b.body, b.model, b.harness, b.family, b.kind, b.account], ['codex:x0000000', 'gpt', 'codex', 'openai', 'scheduled', 'pro']);
-  assert.deepEqual(seen[0], ['start', 'codex', 'gpt', 'the wake']);
+  assert.deepEqual(seen[0].slice(0, 3), ['start', 'codex', 'gpt']);
+  assert.equal(seen[0][3], 'the wake');
   // The record has no brief.
   const rec = readBody(env, b.body);
   assert.equal(JSON.stringify(rec).includes('the wake'), false);
@@ -457,12 +458,19 @@ test('a body is asked of the runtime: it picks the model, starts it through the 
   endBody(env, b.body, o);
   assert.equal(feedBody(env, b.body, { text: 'x' }, o).fed, false);
   // Resumed by its id: the same harness (its slot is a Codex thread), the model chosen again.
-  const r = await resumeBody(env, { body: b.body, brief: 'next' }, o);
+  const r = await resumeBody(env, { body: b.body, brief: 'next', deny:['Read(private)'] }, o);
   assert.deepEqual([r.harness, r.model, r.resumed, r.slot.session], ['codex', 'gpt', 'codex:x0000000', 's-x0000000']);
-  // Resumed from a slot another machine kept.
+  const continued=await resumeBody(env,{slot:r.slot,agent:'art',venue:'wake',brief:'slotnext',deny:['Write(other)']},o);
+  assert.deepEqual(continued.deny,['mcp__github','Read(private)','Write(other)']);
+  // Resumed from a slot another machine kept. Its unproved deny floor stays minimal.
+  env.LOOM_RUNTIME_JOB_PROFILES=join(env.HOME,'unknown-profiles.json');
+  writeFileSync(env.LOOM_RUNTIME_JOB_PROFILES,JSON.stringify({v:1,jobs:{[JSON.stringify(['art','session','live',null])]:{v:1,mcp:[],tools:['Read'],skills:[],secrets:['UNAVAILABLE_PROFILE_SECRET']}}}));
   const s = await resumeBody(env, { slot: { harness: 'claude', session: 'abc' }, agent: 'art', venue: 'session', brief: 'hi' }, { ...o, accounts: staticAccounts({ accounts: [acct('max', 'anthropic')] }) });
   assert.deepEqual([s.harness, s.model, s.kind], ['claude', 'opus', 'live']);
   assert.deepEqual(seen.at(-1), ['resume', 'claude', 'opus', 'abc']);
+  assert.equal(s.restrictionUnknown,true);assert.deepEqual(JSON.parse(s.profile).tools,[]);
+  const again=await resumeBody(env,{body:s.body,brief:'again'},{...o,accounts:staticAccounts({accounts:[acct('max','anthropic')]})});
+  assert.equal(again.restrictionUnknown,true);assert.deepEqual(JSON.parse(again.profile).tools,[]);
   forgetBody(env, b.body);
   assert.throws(() => readBody(env, b.body), /no body/);
   await assert.rejects(startBody(env, { agent: 'art', brief: ' ', venue: 'wake' }, o), /needs a brief/);
@@ -473,7 +481,9 @@ test('a body is asked of the runtime: it picks the model, starts it through the 
 test('loom-runtime body start: the CLI a source calls, end to end on a stand-in Claude Code', () => {
   const h = harness();
   const env = { ...h.env, HOME: h.D, LOOM_BOX_LOCAL_NAME: 'one', LOOM_BOX_HOME: join(h.D, 'state'), LOOM_BOX_DATA: join(h.D, 'data'),
-    LOOM_RUNTIME_CLAUDE: join(here, 'fake-claude.mjs'), LOOM_RUNTIME_CLAUDE_JOBS: join(h.D, 'jobs'), LOOM_RUNTIME_ACCOUNTS: 'none', LOOM_RUNTIME_SCORECARDS: 'off' };
+    LOOM_RUNTIME_CLAUDE: join(here, 'fake-claude.mjs'), LOOM_RUNTIME_CLAUDE_JOBS: join(h.D, 'jobs'), LOOM_RUNTIME_ACCOUNTS: 'none', LOOM_RUNTIME_SCORECARDS: 'off',
+    LOOM_RUNTIME_BODY_ENV: 'FAKE_HARNESS', LOOM_RUNTIME_JOB_PROFILES: join(h.D, 'profiles.json') };
+  writeFileSync(env.LOOM_RUNTIME_JOB_PROFILES, JSON.stringify({ v: 1, jobs: { [JSON.stringify(['art', 'wake', 'scheduled', null])]: { v: 1, mcp: [], tools: [], skills: [], secrets: ['FAKE_HARNESS'] } } }));
   mkdirSync(join(h.D, 'work'));
   const cli = (args, input) => spawnSync(process.execPath, [join(here, '..', 'src', 'cli.mjs'), ...args], { env, input, encoding: 'utf-8', cwd: join(h.D, 'work') });
   const r = cli(['body', 'start', '--agent', 'art', '--venue', 'wake', '--prefer', 'claude-sonnet-5', '--model-need', 'coordinator: test Claude runner integration', '--brief', '-', '--json'], 'run the knowledge lane\nnow');

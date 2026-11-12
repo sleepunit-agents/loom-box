@@ -1,3 +1,4 @@
+import { PROFILE_TARGET, applyApprovedProfile } from './profile-amendment.mjs';
 import { syncProblems } from './houserunner.mjs';
 import { checkLoginExpiry, loginExpiryAsks, loginExpiry } from './login-expiry.mjs';
 // The Boxes tab on loom's page (loom docs/extensions.md, "The page"): the
@@ -90,6 +91,11 @@ function grantApproved(env, st, c, fields) {
   const id = String(fields.id ?? '');
   const asker = String(fields.agent ?? '');
   const target = String(fields.target ?? '');
+  if (PROFILE_TARGET.test(target)) {
+    try { applyApprovedProfile(env, {id, agent: asker, target}, (id, target, agent) => spendGrant(env, id, target, agent));
+      return {ok: true, message: 'The job profile now includes the allowed capability.', page: ''};
+    } catch (e) {return {ok: false, message: `Job profile unchanged: ${e.message}`, page: ''};}
+  }
   const g = grantTarget(target);
   if (!/^a-[0-9a-f]{8}$/.test(id) || !AGENT_ID.test(asker) || !g || !grantPathsOk(g.paths)) return { ok: false, message: 'That isn\'t a grant approval.', page: 'permissions' };
   const agents = householdOf(env)?.agents ?? [];

@@ -1,3 +1,6 @@
+const profileTransport = env => env?.LOOM_BODY_PROFILE !== undefined ? { profile: env.LOOM_BODY_PROFILE, profileProblem: env.LOOM_BODY_PROFILE_PROBLEM } : {};
+import { PROFILE_CAP, CONTEXT_PROFILE_CAP, cleanProfileFloor, unknownProfileFloor, profileHostProblem } from './work-profile.mjs';
+const profileRequestProblem = (ask, report) => (ask.profileFloor !== undefined && !report?.caps?.includes(CONTEXT_PROFILE_CAP)) || profileHostProblem(ask.profile, report);
 import { ACTIONS, observation } from './ticker.mjs';
 // Bodies in the agent's own warm house (loom docs/specs/bridges.md, "Bodies before the one service"; agent-runtime.md,
 // section 5), ported from shuttle's bodies.py: delivery says who to wake and for what; a body host in the agent's
@@ -407,6 +410,7 @@ export function cleanReport(r) {
       ...(typeof b.session === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{3,127}$/.test(b.session) ? { session: b.session } : {}),
       ...(ACTIONS.has(b.tickerAction) && Number.isFinite(Date.parse(b.tickerObservedAt)) ? { tickerAction: b.tickerAction, tickerObservedAt: b.tickerObservedAt } : {}),
       ...(Number.isSafeInteger(b.contextTokens) && b.contextTokens > 0 && b.contextTokens <= 10000000 ? { contextTokens: b.contextTokens } : {}),
+      ...(r?.caps?.includes(CONTEXT_PROFILE_CAP) ? { profileFloor: cleanProfileFloor(b.profileFloor) ?? unknownProfileFloor() } : {}),
       feedable: b.feedable === true,
       pending: Array.isArray(b.pending) ? b.pending.filter((k) => typeof k === 'string' && k.length <= 64).slice(0, 64) : [],
       // A Comms thread's body's tool steps (activity.mjs), checked here as core will check them.
@@ -427,7 +431,7 @@ export function cleanReport(r) {
     else done[rid] = { ...attempt, error: String(d.error ?? 'its host couldn\'t start it').slice(0, 300), ...(r?.caps?.includes('native-admission') && d.nativeNotStarted === true ? { nativeNotStarted: true } : {}) };
   }
   // What this host can do beyond the first version's: `parts`, a brief that names the agent's files (briefs.mjs).
-  const caps = Array.isArray(r?.caps) ? r.caps.filter((c) => c === 'parts' || c === 'native-admission' || c === 'native-history') : [];
+  const caps = Array.isArray(r?.caps) ? r.caps.filter((c) => c === CONTEXT_PROFILE_CAP || c === PROFILE_CAP || c === 'parts' || c === 'native-admission' || c === 'native-history') : [];
   const startingUnknown = caps.includes('native-admission') && (!Array.isArray(r?.starting) || r.starting.some(id => !RID.test(id)));
   const starting = caps.includes('native-admission') && Array.isArray(r?.starting) ? [...new Set(r.starting.filter(id => RID.test(id)))] : [];
   return { bodies, done, caps, starting, startingUnknown };
@@ -1037,7 +1041,7 @@ export class HouseRunner {
     const needs = o.needs ?? [];
     const seat = hostKeyOf(o.seat ?? OWNER_SEAT, needs);
     const parts = isParts(o.brief);
-    const ask = { attempt: id, harness: this.harness, model: o.model, deny: o.deny ?? [], ...(parts ? { parts: o.brief } : { brief: o.brief }), key: o.env?.LOOM_BODY_KEY,
+    const ask = { attempt: id, harness: this.harness, model: o.model, deny: o.deny ?? [], ...profileTransport(o.env), ...(o.profileFloor !== undefined ? { profileFloor: o.profileFloor } : {}), ...(parts ? { parts: o.brief } : { brief: o.brief }), key: o.env?.LOOM_BODY_KEY,
       ...(o.env?.LOOM_BODY_CONVERSATION ? { conversation: o.env.LOOM_BODY_CONVERSATION } : {}), ...(o.activity ? { activity: true } : {}),
       ...(resume ? { resume: resume.session, files: o.files ?? [] } : {}) };
     const intent = JSON.stringify({ agent: o.agent, seat, ask });
@@ -1057,9 +1061,10 @@ export class HouseRunner {
       if (host.house !== house || !houseTakes(this.env, house)) throw Object.assign(new RunnerError('its house stopped before launch reservation'), { nativeNotStarted: true });
       if (!host.report?.caps?.includes('native-admission')) throw Object.assign(new RunnerError('its body host needs the native admission protocol; update its house runtime'), { nativeNotStarted: true, hostUpgradeRequired: true });
       if (load(this.env).houses[house]?.nativeHistory?.v === 1 && !host.report?.caps?.includes('native-history')) throw Object.assign(new RunnerError('its body host needs durable native history; update its house runtime'), { nativeNotStarted: true, hostUpgradeRequired: true });
+      if (profileRequestProblem(ask, host.report)) throw Object.assign(new RunnerError('its body host cannot enforce job profiles; update its house runtime'), { nativeNotStarted: true, hostUpgradeRequired: true });
       if (parts && !host.report?.caps?.includes('parts')) throw Object.assign(new RunnerError('its body host cannot read this brief'), { nativeNotStarted: true });
       const record = { v: 1, id, intentHash, harness: this.harness, agent: o.agent, seat, house, rid: id.slice(0, 16),
-        state: 'reserved', at: this.now().getTime(), sealed: this.transit.seal(Buffer.from(JSON.stringify(ask))),
+        ...(ask.profile !== undefined ? { profileRequired: true } : {}), ...(ask.profileFloor !== undefined ? { contextProfileRequired: true } : {}), state: 'reserved', at: this.now().getTime(), sealed: this.transit.seal(Buffer.from(JSON.stringify(ask))),
         ...(o.model ? { model: o.model } : {}), ...(resume ? { slot: { harness: resume.harness, session: resume.session } } : {}) };
       writeHouseLaunch(this.env, record);
       return houseLaunchHandle(record);
@@ -1098,6 +1103,8 @@ export class HouseRunner {
         record.state = 'refused'; record.reason = 'its house stopped before request publication'; delete record.sealed;
         writeHouseLaunch(this.env, record); return record.state;
       }
+      if (record.profileRequired && !x.report?.caps?.includes(PROFILE_CAP)) throw Object.assign(new RunnerError('its body host lost job profile support before publication'), { nativeNotStarted: record.state === 'reserved', hostUpgradeRequired: true });
+      if (record.contextProfileRequired && !x.report?.caps?.includes(CONTEXT_PROFILE_CAP)) throw Object.assign(new RunnerError('its body host lost context profile support before publication'), { nativeNotStarted: record.state === 'reserved', hostUpgradeRequired: true });
       const request = x.req?.[record.rid];
       if (request && request.launch !== record.id) throw new RunnerError('house launch request id is already occupied');
       // Persist irrevocable publication intent first. Losing a transient host
@@ -1174,7 +1181,7 @@ export class HouseRunner {
     // gets one (an older host would start the body without them).
     const parts = isParts(o.brief);
     const rid = randomBytes(8).toString('hex');
-    const ask = { harness: this.harness, model: o.model, deny: o.deny ?? [], ...(parts ? { parts: o.brief } : { brief: o.brief }), key: o.env?.LOOM_BODY_KEY, ...(o.env?.LOOM_BODY_CONVERSATION ? { conversation: o.env.LOOM_BODY_CONVERSATION } : {}), ...(o.activity ? { activity: true } : {}), ...(resume ? { resume: resume.session, files: o.files ?? [] } : {}) };
+    const ask = { harness: this.harness, model: o.model, deny: o.deny ?? [], ...profileTransport(o.env), ...(o.profileFloor !== undefined ? { profileFloor: o.profileFloor } : {}), ...(parts ? { parts: o.brief } : { brief: o.brief }), key: o.env?.LOOM_BODY_KEY, ...(o.env?.LOOM_BODY_CONVERSATION ? { conversation: o.env.LOOM_BODY_CONVERSATION } : {}), ...(o.activity ? { activity: true } : {}), ...(resume ? { resume: resume.session, files: o.files ?? [] } : {}) };
     const sealed = this.transit.seal(Buffer.from(JSON.stringify(ask)));
     // Asked of the house warm() gave, only while it's still the agent's house (not drained since): else warm again.
     let house;
@@ -1186,11 +1193,13 @@ export class HouseRunner {
       const asked = hostLocked(this.env, () => {
         const h = loadHost(this.env, o.agent, seat);
         if (h.house !== house) return false;
+        if (profileRequestProblem(ask, h.report)) return 'profile-old';
         if (parts && !h.report?.caps?.includes('parts')) return 'old';
         (h.req ??= {})[rid] = { at: this.now().getTime(), sealed };
         writeJson(hostFile(this.env, o.agent, seat), h);
         return true;
       });
+      if (asked === 'profile-old') throw Object.assign(new RunnerError('its body host cannot enforce job profiles; update its house runtime'), { nativeNotStarted: true, hostUpgradeRequired: true });
       if (asked === 'old') throw new RunnerError(`${o.agent}'s house ${house} runs a body host too old to read its brief files: update the house's loom-runtime`);
       if (asked) break;
       await sleep(this.poll);
@@ -1262,6 +1271,11 @@ export class HouseRunner {
     return entry;
   }
 
+  profileFloor(body) {
+    const host = this.rec(body);
+    if (!host?.report?.caps?.includes(CONTEXT_PROFILE_CAP)) throw new RunnerError('context continuation requires a profile-aware body host; update its house runtime');
+    return cleanProfileFloor(this.entry(body)?.profileFloor) ?? unknownProfileFloor();
+  }
   status(body) { return this.entry(body)?.status ?? 'unknown'; }
   tickerObservation(body) {
     const rec = this.rec(body), entry = this.entry(body);

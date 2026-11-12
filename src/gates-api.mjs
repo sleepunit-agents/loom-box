@@ -9,7 +9,7 @@ import { coreFrom } from './core.mjs';
 const ok = (stdout) => ({ exit: 0, stdout, stderr: '' });
 const no = (stderr, exit = 1) => ({ exit, stdout: '', stderr: `${stderr}\n` });
 
-export async function runFor(env, caller, argv, store = loomStore(env), core = coreFrom(env, { timeoutMs: 8_000 }), relayDeps = undefined, proof = {}) {
+export async function runFor(env, caller, argv, store = loomStore(env), core = coreFrom(env, { timeoutMs: 8_000 }), relayDeps = undefined, proof = {}, profileDeps = undefined) {
   if (!Array.isArray(argv) || !argv.every((a) => typeof a === 'string')) return no('argv is a list of strings', 2);
   const [a, b, ...rest] = argv;
   // The now board's one read: the caller's bridges (nowboard.mjs).
@@ -45,6 +45,14 @@ export async function runFor(env, caller, argv, store = loomStore(env), core = c
     const h = await import('./hostverbs.mjs');
     const r = b === 'result' ? h.hostResult(env, caller, rest, proof, await hostDeps(env)) : await h.hostRequest(env, caller, argv.slice(1), proof, await hostDeps(env));
     return r.ok ? ok(`${JSON.stringify(r)}\n`) : no(r.reason, r.usage ? 2 : 1);
+  }
+  if (a === 'profile' && b === 'request') {
+    const args = argv.slice(2), flag = n => {const i = args.indexOf(n); return i < 0 ? undefined : args[i + 1];};
+    if (args.length !== 6 || new Set(args.filter((_, i) => i % 2 === 0)).size !== 3 || !['--conversation', '--field', '--name'].every(n => args.includes(n))) return no('profile request --conversation cv-… --field mcp|tools|skills|secrets --name NAME', 2);
+    try {
+      const {requestForBody} = await import('./profile-amendment.mjs');
+      return ok(`${JSON.stringify(await requestForBody(env, caller, {conversation: flag('--conversation'), field: flag('--field'), name: flag('--name')}, proof, profileDeps ?? await hostDeps(env)))}\n`);
+    } catch (e) {return no(e.message);}
   }
   if (a === 'grants' && b === 'list' && (rest.length === 0 || (rest.length === 1 && rest[0] === '--json'))) {
     try { return ok(`${JSON.stringify(grantsFor(store.get(GRANTS, KEY)?.doc, caller.agent))}\n`); }

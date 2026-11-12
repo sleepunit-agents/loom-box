@@ -778,6 +778,15 @@ async function main(argv, env) {
       writeFileSync(dest, data, { flag: 'wx', mode: 0o600 });
       return out({ path: realpathSync(dest), name: first.name, size: first.size, sha256: first.sha256 });
     }
+    case 'profile': {
+      const mine = ownConversation(env);
+      if (!mine || rest.length !== 5 || rest[0] !== 'request' || !['--field', '--name'].every(n => rest.includes(n))) throw new Fail('profile request --field mcp|tools|skills|secrets --name NAME (from its own body)', 2);
+      const argv = ['profile', ...rest, '--conversation', mine], proof = bodyProof(env, mine);
+      if (env.LOOM_URL && env.LOOM_TOKEN_FILE) return runAnswer(await pieceCall(env)('run', {argv, ...proof}));
+      const {loadConv} = await import('./delivery.mjs');
+      const {runFor} = await import('./gates-api.mjs');
+      return runAnswer(await runFor(env, {kind: 'agent', agent: loadConv(env, mine)?.agent}, argv, undefined, undefined, undefined, proof));
+    }
     case 'host': {
       // A host verb (hostverbs.mjs, t-2096): from a body, its own conversation proved as a relay proves it. In a house
       // through the piece API; a body on loom's machine here. Only ever this body's own conversation.

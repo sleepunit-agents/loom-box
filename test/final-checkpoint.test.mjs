@@ -118,6 +118,18 @@ test('final checkpoint refuses mismatched job ownership, job links and disappear
   assert.equal(fs.existsSync(d.checkpoint),false);assert.equal(fs.existsSync(join(d.dir+'.old','.loom-final')),false);
 });
 
+test('native fork transcript takes precedence and binds its source floor', () => {
+  const f = fixture(), b = f.entries[0], r = f.runner;
+  r.saveFloor(`body-${b.id}`, { deny: ['Read(/private)'], disabled: ['blocked'] });
+  fs.writeFileSync(join(b.dir, 'state.json'), JSON.stringify({ sessionId: 'forked-session' }));
+  fs.writeFileSync(join(f.projectsDir, 'p/forked-session.jsonl'), event('fork final'));
+  assert.equal(r.final(b), 'fork final');
+  assert.equal(r.slotOf(b).session, 'forked-session');
+  assert.deepEqual(r.readFloor('session-forked-session'), { deny: ['Read(/private)'], disabled: ['blocked'] });
+  fs.rmSync(join(f.projectsDir, 'p/forked-session.jsonl'));
+  assert.equal(r.final(b), 'last 界 🐟', 'missing native history falls back to the recorded transcript');
+});
+
 
 test('final checkpoint preserves escaped unpaired surrogates in assistant text', () => {
   const f=fixture(),b=f.entries[0];
