@@ -1887,6 +1887,10 @@ export function api(env, effects, { caller, path, body }) {
       return import('./spawn.mjs').then(async (m) => ({ status: 200, body: await m.spawnCall(env, caller, b, { detach: true }) })).catch(apiError);
     }
     // No bind operation is exposed: only trusted clock admission may bind a grant.
+    if (path === 'context-boundary') {
+      if (caller.kind !== 'agent') fail('task boundaries belong to a body', 403);
+      return import('./delivery.mjs').then(m => ({ status: 200, body: m.contextBoundary(env, { conversation: b.conversation, key: b.key, session: b.session, note: b.note }, { caller }) })).catch(apiError);
+    }
     if (['continuation-issue', 'continuation-enqueue', 'continuation-status'].includes(path)) {
       if (caller.kind !== 'agent') fail('continuations belong to a body, as its own agent', 403);
       return import('./delivery.mjs').then((m) => ({ status: 200, body: m.continuationCall(env, {

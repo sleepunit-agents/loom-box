@@ -164,6 +164,12 @@
         "name": "LOOM_RUNTIME_JOB_PROFILES",
         "label": "Job profile declarations",
         "hint": "Runtime-owned JSON store path. Missing or invalid declarations select no MCP, tools, skills or secrets and a visible problem; no off override."
+      },
+      {
+        "name": "LOOM_RUNTIME_CONTEXT_CAP",
+        "label": "Job context before a fresh session handoff",
+        "default": "150000",
+        "hint": "Scheduled and spawned jobs only; 20000–2000000 tokens; off disables. Cooperative handoff at a safe tool boundary; see docs/context-continuation.md."
       }
     ],
     "services": [
