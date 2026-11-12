@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
-import { mkdirSync, writeFileSync, existsSync, rmSync } from 'node:fs';
+import { mkdirSync, writeFileSync, existsSync, rmSync, readdirSync, readlinkSync, symlinkSync } from 'node:fs';
 import { scratch } from './scratch.mjs';
 import { update } from '../src/state.mjs';
 import { deliveryDir, saveConv, shortCallGate } from '../src/delivery.mjs';
@@ -211,6 +211,8 @@ test('a new unspecified one-shot uses runtime default rather than an old body mo
   const opts = { warn: () => {}, call: async () => ({ model: 'm', harness: 'codex' }), run: async (_bin, _argv, o) => {
     runs++;
     assert.notEqual(o.env.CODEX_HOME, env.CODEX_HOME);
+    assert.deepEqual(readdirSync(o.env.CODEX_HOME), ['auth.json']);
+    assert.equal(readlinkSync(join(o.env.CODEX_HOME, 'auth.json')), join(env.CODEX_HOME, 'auth.json'));
     assert.equal(existsSync(join(o.env.CODEX_HOME, 'config.toml')), false);
     return { status: 0, stdout: JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'ok' } }) };
   } };
@@ -226,3 +228,19 @@ test('a new unspecified one-shot uses runtime default rather than an old body mo
   await assert.rejects(runOneShot(env, { input: 'p', cwd: tree }, opts), /configuration outside/);
   assert.equal(runs, 1);
  });
+
+test('cold review rejects physical project config through symlink cwd and uninspectable layers', async () => {
+  const env = setup(), tree = join(env.HOME, 'physical', 'sub'), alias = join(env.HOME, 'alias');
+  mkdirSync(tree, { recursive: true });
+  mkdirSync(join(env.HOME, 'physical', '.codex'));
+  writeFileSync(join(env.HOME, 'physical', '.codex', 'config.toml'), '');
+  symlinkSync(join(env.HOME, 'physical'), alias);
+  let runs = 0;
+  const opts = { warn: () => {}, call: async () => ({ model: 'm', harness: 'codex' }), run: async () => { runs++; } };
+  await assert.rejects(runOneShot(env, { input: 'p', cwd: join(alias, 'sub') }, opts), /configuration outside/);
+  rmSync(join(env.HOME, 'physical', '.codex'), { recursive: true });
+  // A loop yields ELOOP looking up config.toml, even under root: not ENOENT.
+  symlinkSync('.codex', join(tree, '.codex'));
+  await assert.rejects(runOneShot(env, { input: 'p', cwd: tree }, opts), /configuration outside/);
+  assert.equal(runs, 0);
+});

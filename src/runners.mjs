@@ -36,7 +36,7 @@
 import { spawn as nodeSpawn, spawnSync } from 'node:child_process';
 import { nativeHistoryEnv, validateNativeHistoryOptions } from './native-history.mjs';
 import { createHash, randomBytes } from 'node:crypto';
-import { chmodSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -550,8 +550,14 @@ export function codexDeny(deny) {
  */
 export function codexLayers(cwd, { realHome, userHome, systemDir = '/etc/codex' } = {}) {
   const there = (p) => { try { lstatSync(p); return true; } catch (e) { return !['ENOENT', 'ENOTDIR'].includes(e.code); } };
+  const lexical = resolve(cwd ?? process.cwd());
+  let physical;
+  try { physical = realpathSync(lexical); } catch (e) {
+    if (!['ENOENT', 'ENOTDIR'].includes(e.code)) return [lexical];
+    physical = lexical; // A nonexistent cwd cannot execute; retain lexical layer checks.
+  }
   const dirsUp = [];
-  for (let d = resolve(cwd ?? process.cwd()); ; d = dirname(d)) { dirsUp.push(d); if (dirname(d) === d) break; }
+  for (let d = physical; ; d = dirname(d)) { dirsUp.push(d); if (dirname(d) === d) break; }
   const rootAt = dirsUp.findIndex((d) => there(join(d, '.git')));
   const found = [];
   dirsUp.forEach((d, i) => {
