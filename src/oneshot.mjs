@@ -63,7 +63,7 @@ export async function runOneShot(env, { input, cwd, prefer = [], modelNeed, time
         mkdirSync(childEnv.CLAUDE_CONFIG_DIR);
       }
       if (pick.harness === 'codex') {
-        if (codexLayers(cwd, { realHome: env.CODEX_HOME || join(env.HOME, '.codex') }).length) fail('Codex configuration outside the fresh home prevents a cold one-shot');
+        if (codexLayers(cwd, { realHome: env.CODEX_HOME || join(env.HOME, '.codex'), userHome: env.HOME }).length) fail('Codex configuration outside the fresh home prevents a cold one-shot');
         const home = join(dir, 'codex'); mkdirSync(home);
         symlinkSync(join(env.CODEX_HOME || join(env.HOME, '.codex'), CRED_FILE.codex), join(home, CRED_FILE.codex));
         childEnv.CODEX_HOME = home;

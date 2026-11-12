@@ -197,3 +197,32 @@ test('a new unspecified one-shot uses runtime default rather than an old body mo
  },run:async(bin,argv)=>{assert.equal(argv[argv.indexOf('-m')+1],'gpt-6.1-sol');return {status:0,stdout:JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'ok'}})};}});
  assert.equal(result,'ok'); assert.deepEqual(preference,[]);
 });
+
+ test('managed Codex login home permits only the user config above a frozen tree', async () => {
+  const env = setup();
+  env.CODEX_HOME = join(env.HOME, 'runtime-managed');
+  mkdirSync(env.CODEX_HOME);
+  writeFileSync(join(env.CODEX_HOME, 'auth.json'), '{}');
+  mkdirSync(join(env.HOME, '.codex'));
+  writeFileSync(join(env.HOME, '.codex', 'config.toml'), '[mcp_servers.writer]\ncommand="writer"\n');
+  const tree = join(env.HOME, 'scratch', 'tree');
+  mkdirSync(tree, { recursive: true });
+  let runs = 0;
+  const opts = { warn: () => {}, call: async () => ({ model: 'm', harness: 'codex' }), run: async (_bin, _argv, o) => {
+    runs++;
+    assert.notEqual(o.env.CODEX_HOME, env.CODEX_HOME);
+    assert.equal(existsSync(join(o.env.CODEX_HOME, 'config.toml')), false);
+    return { status: 0, stdout: JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'ok' } }) };
+  } };
+  assert.equal(await runOneShot(env, { input: 'p', cwd: tree }, opts), 'ok');
+  for (const at of [tree, join(env.HOME, 'scratch')]) {
+    mkdirSync(join(at, '.codex'), { recursive: true });
+    writeFileSync(join(at, '.codex', 'config.toml'), '');
+    await assert.rejects(runOneShot(env, { input: 'p', cwd: tree }, opts), /configuration outside/);
+    rmSync(join(at, '.codex'), { recursive: true });
+  }
+  // If HOME itself is the project root, its .codex is a project layer.
+  mkdirSync(join(env.HOME, '.git'));
+  await assert.rejects(runOneShot(env, { input: 'p', cwd: tree }, opts), /configuration outside/);
+  assert.equal(runs, 1);
+ });

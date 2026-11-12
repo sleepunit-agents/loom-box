@@ -543,9 +543,12 @@ export function codexDeny(deny) {
  * throwaway home). So they're never parsed here, only looked for: from the cwd up to /, whatever the root, and in
  * /etc/codex. The one exception is the real Codex home's own config.toml (`realHome`, the one the made home replaces)
  * when it sits above the project root, where Codex never reads it as a project's: ~/.codex above ~/Art.
+ * A runtime-managed CODEX_HOME can differ from the user's HOME/.codex. Callers may name that
+ * userHome too: above the project root it is still a user config, not a project layer.
+ * Neither exception applies at or within the project root.
  * → the paths found ([] for none). A path that can't be looked at counts as found.
  */
-export function codexLayers(cwd, { realHome, systemDir = '/etc/codex' } = {}) {
+export function codexLayers(cwd, { realHome, userHome, systemDir = '/etc/codex' } = {}) {
   const there = (p) => { try { lstatSync(p); return true; } catch (e) { return !['ENOENT', 'ENOTDIR'].includes(e.code); } };
   const dirsUp = [];
   for (let d = resolve(cwd ?? process.cwd()); ; d = dirname(d)) { dirsUp.push(d); if (dirname(d) === d) break; }
@@ -554,7 +557,7 @@ export function codexLayers(cwd, { realHome, systemDir = '/etc/codex' } = {}) {
   dirsUp.forEach((d, i) => {
     const f = join(d, '.codex', 'config.toml');
     const aboveRoot = i > (rootAt < 0 ? 0 : rootAt);
-    if (aboveRoot && realHome && resolve(realHome) === join(d, '.codex')) return;
+    if (aboveRoot && [realHome, userHome && join(userHome, '.codex')].filter(Boolean).some(home => resolve(home) === join(d, '.codex'))) return;
     if (there(f)) found.push(f);
   });
   for (const n of ['config.toml', 'managed_config.toml', 'requirements.toml']) if (there(join(systemDir, n))) found.push(join(systemDir, n));
