@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
-import { mkdirSync, writeFileSync, existsSync, rmSync } from 'node:fs';
+import { mkdirSync, writeFileSync, existsSync, rmSync, readdirSync, readlinkSync, symlinkSync } from 'node:fs';
 import { scratch } from './scratch.mjs';
 import { update } from '../src/state.mjs';
 import { deliveryDir, saveConv, shortCallGate } from '../src/delivery.mjs';
@@ -196,4 +196,114 @@ test('a new unspecified one-shot uses runtime default rather than an old body mo
   return {ok:true};
  },run:async(bin,argv)=>{assert.equal(argv[argv.indexOf('-m')+1],'gpt-6.1-sol');return {status:0,stdout:JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'ok'}})};}});
  assert.equal(result,'ok'); assert.deepEqual(preference,[]);
+});
+
+function managedCodexHome(env, home = join(env.HOME, 'managed')) {
+  env.CODEX_HOME = home;
+  mkdirSync(home);
+  writeFileSync(join(home, 'auth.json'), '{}');
+}
+function codexOptions(onRun = () => {}) {
+  return { warn: () => {}, call: async () => ({ model: 'm', harness: 'codex' }), run: async (...args) => {
+    onRun(...args);
+    return { status: 0, stdout: JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'ok' } }) };
+  } };
+}
+
+test('managed Codex login home permits only the user config above a frozen tree', async () => {
+  const env = setup();
+  managedCodexHome(env, join(env.HOME, 'runtime-managed'));
+  mkdirSync(join(env.HOME, '.codex'));
+  writeFileSync(join(env.HOME, '.codex', 'config.toml'), '[mcp_servers.writer]\ncommand="writer"\n');
+  const tree = join(env.HOME, 'scratch', 'tree');
+  mkdirSync(tree, { recursive: true });
+  let runs = 0;
+  const opts = codexOptions((_bin, _argv, o) => {
+    runs++;
+    assert.notEqual(o.env.CODEX_HOME, env.CODEX_HOME);
+    assert.deepEqual(readdirSync(o.env.CODEX_HOME), ['auth.json']);
+    assert.equal(readlinkSync(join(o.env.CODEX_HOME, 'auth.json')), join(env.CODEX_HOME, 'auth.json'));
+    assert.equal(existsSync(join(o.env.CODEX_HOME, 'config.toml')), false);
+  });
+  assert.equal(await runOneShot(env, { input: 'p', cwd: tree }, opts), 'ok');
+  for (const at of [tree, join(env.HOME, 'scratch')]) {
+    mkdirSync(join(at, '.codex'), { recursive: true });
+    writeFileSync(join(at, '.codex', 'config.toml'), '');
+    await assert.rejects(runOneShot(env, { input: 'p', cwd: tree }, opts), /configuration outside/);
+    rmSync(join(at, '.codex'), { recursive: true });
+  }
+  // If HOME itself is the project root, its .codex is a project layer.
+  mkdirSync(join(env.HOME, '.git'));
+  await assert.rejects(runOneShot(env, { input: 'p', cwd: tree }, opts), /configuration outside/);
+  assert.equal(runs, 1);
+});
+
+test('cold review rejects physical project config through symlink cwd and uninspectable layers', async () => {
+  const env = setup(), tree = join(env.HOME, 'physical', 'sub'), alias = join(env.HOME, 'alias');
+  mkdirSync(tree, { recursive: true });
+  mkdirSync(join(env.HOME, 'physical', '.codex'));
+  writeFileSync(join(env.HOME, 'physical', '.codex', 'config.toml'), '');
+  symlinkSync(join(env.HOME, 'physical'), alias);
+  let runs = 0;
+  const opts = { warn: () => {}, call: async () => ({ model: 'm', harness: 'codex' }), run: async () => { runs++; } };
+  await assert.rejects(runOneShot(env, { input: 'p', cwd: join(alias, 'sub') }, opts), /configuration outside/);
+  rmSync(join(env.HOME, 'physical', '.codex'), { recursive: true });
+  // A loop yields ELOOP looking up config.toml, even under root: not ENOENT.
+  symlinkSync('.codex', join(tree, '.codex'));
+  await assert.rejects(runOneShot(env, { input: 'p', cwd: tree }, opts), /configuration outside/);
+  assert.equal(runs, 0);
+});
+
+test('managed cold review canonicalizes aliased HOME and still refuses physical project layers', async () => {
+  const env = setup(), physical = env.HOME, alias = join(physical, 'alias-home');
+  symlinkSync(physical, alias);
+  env.HOME = alias;
+  managedCodexHome(env, join(alias, 'managed'));
+  mkdirSync(join(alias, '.codex'));
+  writeFileSync(join(alias, '.codex', 'config.toml'), '');
+  const tree = join(alias, 'frozen'); mkdirSync(tree);
+  let runs = 0;
+  const opts = codexOptions(() => { runs++; });
+  assert.equal(await runOneShot(env, { input: 'p', cwd: tree }, opts), 'ok');
+  mkdirSync(join(tree, '.codex')); writeFileSync(join(tree, '.codex', 'config.toml'), '');
+  await assert.rejects(runOneShot(env, { input: 'p', cwd: tree }, opts), /configuration outside/);
+  assert.equal(runs, 1);
+});
+
+test('symlinked user .codex is replaced, while another ancestor alias to it is rejected', async () => {
+  const env = setup(), settings = join(env.HOME, 'settings'), tree = join(env.HOME, 'parent', 'tree');
+  managedCodexHome(env, join(env.HOME, 'managed'));
+  mkdirSync(settings); writeFileSync(join(settings, 'config.toml'), '');
+  symlinkSync(settings, join(env.HOME, '.codex'));
+  mkdirSync(tree, { recursive: true });
+  let runs = 0;
+  const opts = codexOptions(() => { runs++; });
+  assert.equal(await runOneShot(env, { input: 'p', cwd: tree }, opts), 'ok');
+  symlinkSync(settings, join(env.HOME, 'parent', '.codex'));
+  await assert.rejects(runOneShot(env, { input: 'p', cwd: tree }, opts), /configuration outside/);
+  assert.equal(runs, 1);
+});
+
+test('uninspectable user config fails closed even above the frozen tree', async () => {
+  const env = setup(), tree = join(env.HOME, 'frozen');
+  managedCodexHome(env, join(env.HOME, 'managed'));
+  mkdirSync(tree);
+  symlinkSync('.codex', join(env.HOME, '.codex'));
+  let launched = false;
+  await assert.rejects(runOneShot(env, { input: 'p', cwd: tree }, {
+    warn: () => {}, call: async () => ({ model: 'm', harness: 'codex' }), run: async () => { launched = true; },
+  }), /configuration outside/);
+  assert.equal(launched, false);
+});
+
+test('uninspectable user config file target fails closed before the home exception', async () => {
+  const env = setup(), tree = join(env.HOME, 'frozen');
+  managedCodexHome(env, join(env.HOME, 'managed'));
+  mkdirSync(tree); mkdirSync(join(env.HOME, '.codex'));
+  symlinkSync('config.toml', join(env.HOME, '.codex', 'config.toml'));
+  let launched = false;
+  await assert.rejects(runOneShot(env, { input: 'p', cwd: tree }, {
+    warn: () => {}, call: async () => ({ model: 'm', harness: 'codex' }), run: async () => { launched = true; },
+  }), /configuration outside/);
+  assert.equal(launched, false);
 });

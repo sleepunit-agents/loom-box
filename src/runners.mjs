@@ -36,7 +36,7 @@
 import { spawn as nodeSpawn, spawnSync } from 'node:child_process';
 import { nativeHistoryEnv, validateNativeHistoryOptions } from './native-history.mjs';
 import { createHash, randomBytes } from 'node:crypto';
-import { chmodSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -543,22 +543,56 @@ export function codexDeny(deny) {
  * throwaway home). So they're never parsed here, only looked for: from the cwd up to /, whatever the root, and in
  * /etc/codex. The one exception is the real Codex home's own config.toml (`realHome`, the one the made home replaces)
  * when it sits above the project root, where Codex never reads it as a project's: ~/.codex above ~/Art.
+ * A runtime-managed CODEX_HOME can differ from the user's HOME/.codex. Callers may name that
+ * userHome too: above the project root it is still a user config, not a project layer.
+ * Neither exception applies at or within the project root.
  * → the paths found ([] for none). A path that can't be looked at counts as found.
  */
-export function codexLayers(cwd, { realHome, systemDir = '/etc/codex' } = {}) {
-  const there = (p) => { try { lstatSync(p); return true; } catch (e) { return !['ENOENT', 'ENOTDIR'].includes(e.code); } };
-  const dirsUp = [];
-  for (let d = resolve(cwd ?? process.cwd()); ; d = dirname(d)) { dirsUp.push(d); if (dirname(d) === d) break; }
-  const rootAt = dirsUp.findIndex((d) => there(join(d, '.git')));
-  const found = [];
-  dirsUp.forEach((d, i) => {
-    const f = join(d, '.codex', 'config.toml');
-    const aboveRoot = i > (rootAt < 0 ? 0 : rootAt);
-    if (aboveRoot && realHome && resolve(realHome) === join(d, '.codex')) return;
-    if (there(f)) found.push(f);
+export function codexLayers(cwd, { realHome, userHome, systemDir = '/etc/codex' } = {}) {
+  const lexical = resolve(cwd ?? process.cwd());
+  const ancestors = (start) => {
+    const dirs = [];
+    for (let d = start; ; d = dirname(d)) { dirs.push(d); if (dirname(d) === d) break; }
+    return dirs;
+  };
+  const presentOrUnreadable = (p) => { try { lstatSync(p); return true; } catch (e) { return !['ENOENT', 'ENOTDIR'].includes(e.code); } };
+  // Existing runner callers supply no userHome: preserve their lexical walk,
+  // lstat semantics and home exception before any config lookup.
+  if (userHome === undefined) {
+    const dirs = ancestors(lexical), rootAt = dirs.findIndex(d => presentOrUnreadable(join(d, '.git')));
+    const found = dirs.filter((d, i) => !(i > (rootAt < 0 ? 0 : rootAt) && realHome && resolve(realHome) === join(d, '.codex')))
+      .map(d => join(d, '.codex', 'config.toml')).filter(presentOrUnreadable);
+    for (const n of ['config.toml', 'managed_config.toml', 'requirements.toml']) if (presentOrUnreadable(join(systemDir, n))) found.push(join(systemDir, n));
+    return found;
+  }
+  const inspect = (p) => {
+    try { lstatSync(p); } catch (e) { return ['ENOENT', 'ENOTDIR'].includes(e.code) ? 'absent' : 'error'; }
+    // Once a directory entry exists, every target-resolution failure blocks.
+    try { statSync(p); return 'present'; } catch { return 'error'; }
+  };
+  let physical;
+  try { physical = realpathSync(lexical); } catch (e) {
+    if (!['ENOENT', 'ENOTDIR'].includes(e.code)) return [lexical];
+    physical = lexical;
+  }
+  const homes = [realHome, userHome && join(userHome, '.codex')].filter(Boolean).flatMap(home => {
+    const path = resolve(home);
+    if (path !== join(dirname(path), '.codex')) return [];
+    // Compare parent identities, never the .codex symlink target.
+    try { return [path, join(realpathSync(dirname(path)), '.codex')]; } catch { return []; }
   });
-  for (const n of ['config.toml', 'managed_config.toml', 'requirements.toml']) if (there(join(systemDir, n))) found.push(join(systemDir, n));
-  return found;
+  const found = new Set();
+  for (const start of new Set([lexical, physical])) {
+    const dirs = ancestors(start), rootAt = dirs.findIndex(d => inspect(join(d, '.git')) !== 'absent');
+    dirs.forEach((d, i) => {
+      const f = join(d, '.codex', 'config.toml'), state = inspect(f);
+      if (state === 'error') { found.add(f); return; }
+      if (i > (rootAt < 0 ? 0 : rootAt) && homes.includes(join(d, '.codex'))) return;
+      if (state === 'present') found.add(f);
+    });
+  }
+  for (const n of ['config.toml', 'managed_config.toml', 'requirements.toml']) if (inspect(join(systemDir, n)) !== 'absent') found.add(join(systemDir, n));
+  return [...found];
 }
 
 /** What a made Codex home links from the real one: its login, and what tells the body how to work. Never its config. */

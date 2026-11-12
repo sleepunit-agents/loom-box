@@ -4,7 +4,7 @@
 // and starts it through the runner interface (test obligation 1's runtime side, with a fake runner).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readFileSync, readdirSync, readlinkSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, readlinkSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -792,4 +792,70 @@ test('final snapshot excludes mid-scan appends and drops them after intermediate
     truncate ? 'truncation above initial size never keeps removed words' : 'the next scan reads deferred appends without further writes');
   assert.equal(snapshot, 'first', 'one scan is bounded to its initial descriptor snapshot');
   }
+});
+
+
+test('Codex layers checks lexical and physical chains with independent roots', () => {
+  const D = scratch('layers-union-'), user = join(D, 'lex'), physical = join(D, 'physical');
+  mkdirSync(join(user, '.codex'), { recursive: true });
+  mkdirSync(join(physical, 'sub'), { recursive: true });
+  writeFileSync(join(user, '.codex', 'config.toml'), '');
+  symlinkSync(physical, join(user, 'link'));
+  const cwd = join(user, 'link', 'sub'), opts = { userHome: user, systemDir: join(D, 'etc') };
+  // Without a lexical root, HOME is above the fallback cwd and exempt.
+  assert.deepEqual(codexLayers(cwd, opts), []);
+  mkdirSync(join(user, '.git'));
+  assert.ok(codexLayers(cwd, opts).includes(join(user, '.codex', 'config.toml')));
+  mkdirSync(join(physical, '.codex'));
+  writeFileSync(join(physical, '.codex', 'config.toml'), '');
+  assert.ok(codexLayers(cwd, opts).includes(join(physical, '.codex', 'config.toml')));
+});
+
+test('Codex layers blocks dangling config targets before the user home exception', () => {
+  const D = scratch('layers-dangling-'), cwd = join(D, 'tree');
+  mkdirSync(cwd); mkdirSync(join(D, '.codex'));
+  const config = join(D, '.codex', 'config.toml');
+  symlinkSync('missing', config);
+  assert.ok(codexLayers(cwd, { userHome: D, systemDir: join(D, 'etc') }).includes(config));
+});
+
+test('Codex layers without userHome retains lexical checks and home exception ordering', () => {
+  const D = scratch('layers-legacy-'), real = join(D, '.codex'), physical = join(D, 'physical');
+  mkdirSync(real); mkdirSync(physical);
+  symlinkSync(physical, join(D, 'alias'));
+  const config = join(real, 'config.toml');
+  symlinkSync('missing', config);
+  const opts = { realHome: real, systemDir: join(D, 'etc') };
+  assert.deepEqual(codexLayers(join(D, 'alias'), opts), []);
+  assert.ok(codexLayers(D, opts).includes(config));
+  const runner = new CodexRunner({ codexHome: real, runsDir: join(D, 'runs'), systemDir: opts.systemDir });
+  assert.match(runner.planOf(['mcp__handoff'], D, {}).why, /would read/);
+  rmSync(config); symlinkSync('config.toml', config);
+  assert.deepEqual(codexLayers(join(D, 'alias'), opts), []);
+  assert.equal(runner.planOf(['mcp__handoff'], join(D, 'alias'), {}).why?.includes('would read') ?? false, false);
+});
+
+test('Codex layers keeps a lexical realHome exception through an aliased parent without userHome', () => {
+  const D = scratch('layers-legacy-alias-'), physical = join(D, 'physical'), alias = join(D, 'alias');
+  mkdirSync(join(physical, '.codex'), { recursive: true });
+  mkdirSync(join(physical, 'tree'));
+  writeFileSync(join(physical, '.codex', 'config.toml'), '');
+  symlinkSync(physical, alias);
+  assert.deepEqual(codexLayers(join(alias, 'tree'), { realHome: join(alias, '.codex'), systemDir: join(D, 'etc') }), []);
+});
+
+test('Codex layers blocks HOME equal to cwd and HOME inside a git tree', () => {
+  const D = scratch('layers-home-inside-'), home = join(D, 'home'), cwd = join(home, 'tree');
+  mkdirSync(cwd, { recursive: true }); mkdirSync(join(home, '.codex'));
+  const config = join(home, '.codex', 'config.toml'); writeFileSync(config, '');
+  const opts = { userHome: home, systemDir: join(D, 'etc') };
+  assert.ok(codexLayers(home, opts).includes(config));
+  mkdirSync(join(D, '.git'));
+  assert.ok(codexLayers(cwd, opts).includes(config));
+});
+
+test('Codex layers fails closed when cwd realpath loops', () => {
+  const D = scratch('layers-cwd-loop-'), cwd = join(D, 'loop');
+  symlinkSync('loop', cwd);
+  assert.deepEqual(codexLayers(cwd, { userHome: D, systemDir: join(D, 'etc') }), [cwd]);
 });
