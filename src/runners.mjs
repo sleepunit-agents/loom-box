@@ -40,7 +40,7 @@ import { nativeHistoryEnv, validateNativeHistoryOptions } from './native-history
 import { createHash, randomBytes } from 'node:crypto';
 import { chmodSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { lastContext } from './context-cap.mjs';
 import { keptReading } from './statusline.mjs';
@@ -380,7 +380,7 @@ export class ClaudeRunner {
     if (!f) return null;
     let fd, st, checkpoint;
     try {
-      checkpoint = openFinalCheckpoint(this.jobsDir, body, this.slotOf(body)?.session, f);
+      checkpoint = openFinalCheckpoint(this.jobsDir, body, basename(f, '.jsonl'), f);
       fd = openSync(f, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
       st = fstatSync(fd);
       if (!st.isFile()) return null;
@@ -441,10 +441,16 @@ export class ClaudeRunner {
 
   /** Its session's transcript, the newest of that name under projects; null when there's none. */
   transcriptOf(body) {
-    const session = this.slotOf(body)?.session;
-    if (typeof session !== 'string' || !SESSION.test(session)) return null;
-    return dirs(this.roots.projects).map((p) => join(this.roots.projects, p, `${session}.jsonl`)).filter((f) => existsSync(f))
-      .sort((x, y) => statSync(y).mtimeMs - statSync(x).mtimeMs)[0] ?? null;
+    // Prefer the native fork, but keep the recorded transcript readable when a
+    // stale/mismatched daemon record names history that does not exist. The
+    // checkpoint independently verifies ownership of the selected transcript.
+    for (const session of new Set([this.slotOf(body)?.session, body.slot?.session])) {
+      if (typeof session !== 'string' || !SESSION.test(session)) continue;
+      const found = dirs(this.roots.projects).map((p) => join(this.roots.projects, p, `${session}.jsonl`)).filter((f) => existsSync(f))
+        .sort((x, y) => statSync(y).mtimeMs - statSync(x).mtimeMs)[0];
+      if (found) return found;
+    }
+    return null;
   }
 
   slotOf(body) {
