@@ -2,6 +2,8 @@ import { load, localBoxName, StateError } from './state.mjs';
 import { usageJobs, defaultUsageRoots } from './job-usage.mjs';
 import { numericJob, mergeJobUsage } from './box-job-usage.mjs';
 import { listConvs } from './delivery.mjs';
+import { runnerFor } from './runners.mjs';
+import { HouseRunner } from './houserunner.mjs';
 import { readBody, listBodies } from './bodies.mjs';
 
 export async function jobUsageReport(env, caller, options = {}) {
@@ -11,15 +13,26 @@ export async function jobUsageReport(env, caller, options = {}) {
   const who = caller.kind === 'agent' ? caller.agent : agent;
   const s = load(env), localBox = Object.keys(s.boxes).find(k => s.boxes[k].local) ?? localBoxName(env);
   const identities = new Map();
+  const slots = new Map();
+  function nativeSlot(body) {
+    if (!body) return null;
+    if (slots.has(body.body)) return slots.get(body.body);
+    let slot = body.slot;
+    try {
+      const runner = body.house ? new HouseRunner(env, body.harness) : runnerFor(body.harness, env);
+      slot = runner.slotOf({ id: body.body.split(':')[1], ...body }) ?? slot;
+    } catch { /* retain the last committed identity */ }
+    slots.set(body.body, slot); return slot;
+  }
   for (const body of listBodies(env, { accounts: [], runner: () => ({ status: () => 'unknown' }) })) {
-    const slot = body.slot;
+    const slot = nativeSlot(body);
     if (slot?.session && slot?.harness) identities.set(`${body.agent}:${slot.harness}:${slot.session}`, {});
   }
   for (const c of listConvs(env)) {
     let body;
     try { if (c.body) body = readBody(env, c.body); } catch { /* no native identity yet */ }
-    for (const slot of [c.slot, c.home, body?.slot]) if (slot?.session && slot?.harness) {
-      identities.set(`${c.agent}:${slot.harness}:${slot.session}`, { conversation: c.conversation, ...(slot === body?.slot && c.run ? { currentRun: c.run } : {}) });
+    for (const slot of [c.slot, c.home, nativeSlot(body)]) if (slot?.session && slot?.harness) {
+      identities.set(`${c.agent}:${slot.harness}:${slot.session}`, { conversation: c.conversation, ...(slot === nativeSlot(body) && c.run ? { currentRun: c.run } : {}) });
     }
   }
   const reports = [];

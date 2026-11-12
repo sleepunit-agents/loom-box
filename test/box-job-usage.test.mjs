@@ -122,3 +122,32 @@ test('standalone body owns local native history; local box name filters and curr
   const associated = (await query()).body.jobs[0];
   assert.equal(associated.conversation, 'cv-123456abcdef'); assert.equal(associated.currentRun, 'run-123456abcdef');
 });
+
+test('live house slot from host report enriches identity without a persisted body.slot', async () => {
+  const { registerTaskHost } = await import('../src/houserunner.mjs');
+  const { commitPreparedBody } = await import('../src/bodies.mjs');
+  const { saveConv } = await import('../src/delivery.mjs');
+  const { update } = await import('../src/state.mjs');
+  const { env, owner, box, h } = setup();
+  const host = registerTaskHost(env, 'art', h.id);
+  update(env, s => { Object.assign(s.houses[h.id], { kind: 'body-host', state: 'running', seat: host.seat }); });
+  const id = `${h.id}-deadbeef`;
+  commitPreparedBody(env, { metadata: { agent: 'art', harness: 'claude', instance: 'b'.repeat(24) } }, { harness: 'claude', id, house: h.id, seat: host.seat }, at);
+  const sync = await api(env, fx, { caller: { kind: 'agent', agent: 'art', house: h.id }, path: 'body-sync', body: { hostKey: host.hostKey,
+    report: { bodies: { deadbeef: { harness: 'claude', status: 'working', session: 'session-a' } }, done: {}, caps: ['parts', 'native-admission', 'native-history'], starting: [] } } });
+  assert.equal(sync.status, 200, JSON.stringify(sync.body));
+  saveConv(env, { conversation: 'cv-123456abcdef', agent: 'art', body: `claude:${id}`, run: 'run-123456abcdef' });
+  api(env, fx, { caller: box, path: 'poll', body: { jobUsage: { house: h.id, jobs: [row()] } } });
+  const r = await api(env, fx, { caller: owner, path: 'job-usage', body: { day: 'all' } });
+  assert.equal(r.body.jobs[0].conversation, 'cv-123456abcdef'); assert.equal(r.body.jobs[0].currentRun, 'run-123456abcdef');
+});
+
+test('same session on two boxes remains two overlapping rows; same-box retries remain one', () => {
+  const reports = [{ ...row(), box: 'one', agent: 'art' }, { ...row(), box: 'two', agent: 'art' }, { ...row(), box: 'one', agent: 'art' }];
+  const r = mergeJobUsage([], reports, { day: 'all' });
+  assert.equal(r.measuredJobs, 2); assert.deepEqual(r.jobs.map(j => j.box).sort(), ['one', 'two']);
+});
+
+test('runtime model ids with provider paths and context suffixes remain numeric-reportable', () => {
+  assert.deepEqual(numericJob({ ...row(), models: ['openai/gpt-6', 'claude-opus-4-6[1m]'] }).models, ['openai/gpt-6', 'claude-opus-4-6[1m]']);
+});

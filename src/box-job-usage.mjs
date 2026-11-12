@@ -7,7 +7,7 @@ const counts = ['calls', 'startingContext', 'averageContext', 'peakContext', 'la
 const id = x => typeof x === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(x);
 const date = x => x === null || typeof x === 'string' && /^\d{4}-\d\d-\d\dT/.test(x) && Number.isFinite(Date.parse(x));
 export function numericJob(row) {
-  if (!row || !id(row.session) || !['claude', 'codex'].includes(row.harness) || !Array.isArray(row.models) || row.models.length > 32 || !row.models.every(id) || !date(row.start) || !date(row.end)) throw new StateError('invalid numeric job usage');
+  if (!row || !id(row.session) || !['claude', 'codex'].includes(row.harness) || !Array.isArray(row.models) || row.models.length > 32 || !row.models.every(x => typeof x === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:/\[\]-]{0,127}$/.test(x)) || !date(row.start) || !date(row.end)) throw new StateError('invalid numeric job usage');
   const out = { session: row.session, harness: row.harness, models: [...row.models], start: row.start, end: row.end };
   for (const k of counts) {
     const n = row[k];
