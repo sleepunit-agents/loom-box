@@ -392,7 +392,7 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
           }
           const profile = selectedProfile(transported);
           const brief = q.parts !== undefined ? composeBrief(q.parts, cwd) : q.brief;
-          const o = { brief, ...(profileFloor !== undefined ? { profileFloor } : {}), model: q.model, deny: q.deny ?? [], cwd, env: { ...(profile ? restrictedEnv({ ...bodyEnv, ...transported }, profile, { deferSecrets: profileFloor !== undefined }) : bodyEnv), LOOM_BODY_MODEL: q.model, ...(q.key ? { LOOM_BODY_KEY: q.key } : {}), ...(cv ? { LOOM_BODY_CONVERSATION: cv } : {}) } };
+          const o = { brief, ...(profileFloor !== undefined ? { profileFloor } : {}), model: q.model, deny: q.deny ?? [], cwd, env: { ...(profile ? restrictedEnv({ ...bodyEnv, ...transported }, profile, { deferSecrets: !!q.resume || profileFloor !== undefined }) : bodyEnv), LOOM_BODY_MODEL: q.model, ...(q.key ? { LOOM_BODY_KEY: q.key } : {}), ...(cv ? { LOOM_BODY_CONVERSATION: cv } : {}) } };
           // Kept by its conversation before the body starts, so its first `send` finds it.
           if (cv) keepKey(env, cv, q.key);
           let written = [];

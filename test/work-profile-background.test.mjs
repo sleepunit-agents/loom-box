@@ -9,7 +9,7 @@ import {minimalProfile} from '../src/work-profile.mjs';
 import {houseWorld, until} from './delivery-world.mjs';
 import {load} from '../src/state.mjs';
 const pause = ms => new Promise(r => setTimeout(r, ms));
-async function finished(runner, body, denied = false) {
+async function finished(runner, body, forbidden) {
   const deadline = Date.now() + 90000;
   while (Date.now() < deadline) {
     body.slot=runner.slotOf({id:body.id}) ?? body.slot;
@@ -21,12 +21,18 @@ async function finished(runner, body, denied = false) {
       if(at<0) {await pause(200);continue;}
       const current=rows.slice(at);
       const assistants=current.filter(r => r.type === 'assistant' && r.message?.usage);
-      const result=denied ? current.some(r => r.type === 'user' && Array.isArray(r.message?.content) && r.message.content.some(c => c.type === 'tool_result' && c.is_error)) : assistants.at(-1)?.message?.stop_reason === 'end_turn' && Array.isArray(assistants.at(-1)?.message?.content) && assistants.at(-1).message.content.some(c=>c.type==='text' && c.text);
-      if (result) return rows;
+      const result=forbidden ? deniedRead(current, forbidden) : assistants.at(-1)?.message?.stop_reason === 'end_turn' && Array.isArray(assistants.at(-1)?.message?.content) && assistants.at(-1).message.content.some(c=>c.type==='text' && c.text);
+      if (result) return forbidden ? current : rows;
     }
     await pause(200);
   }
   throw Error('background profile fixture timed out');
+}
+const blocks = (rows, type) => rows.filter(r => r.type === type && Array.isArray(r.message?.content)).flatMap(r => r.message.content);
+const successfulResult = (rows, text) => blocks(rows, 'user').some(c => c.type === 'tool_result' && !c.is_error && JSON.stringify(c.content).includes(text));
+function deniedRead(rows, path) {
+  const ids = new Set(blocks(rows, 'assistant').filter(c => c.type === 'tool_use' && c.name === 'Read' && c.input?.file_path === path).map(c => c.id));
+  return blocks(rows, 'user').some(c => c.type === 'tool_result' && ids.has(c.tool_use_id) && c.is_error && /denied|not allowed|permission/i.test(JSON.stringify(c.content)));
 }
 function shape(records) { return records.filter(r => r.type === 'api-request-shape').at(-1)?.shape; }
 function assertShape(s) {
@@ -67,8 +73,8 @@ for (const method of ['start', 'prepare']) test(`native house ${method}: backgro
     body.slot = runner.slotOf(body);
     const rows = await finished(runner, body); assertShape(shape(rows));
     assert.match(JSON.stringify(rows.filter(r => r.type === 'assistant').at(-1)?.message?.content), /CHOSEN-PROFILE/);
-    assert.ok(rows.some(r=>r.type==='user' && Array.isArray(r.message?.content) && r.message.content.some(c=>c.type==='tool_result' && !c.is_error && JSON.stringify(c.content).includes('ALLOWED-READ-CONTENT-CANARY'))), 'declared Read must work');
-    assert.ok(rows.some(r=>r.type==='user' && Array.isArray(r.message?.content) && r.message.content.some(c=>c.type==='tool_result' && !c.is_error && JSON.stringify(c.content).includes('DECLARED-MCP-CONTENT-CANARY'))), 'declared MCP tool must actually execute');
+    assert.ok(successfulResult(rows, 'ALLOWED-READ-CONTENT-CANARY'), 'declared Read must work');
+    assert.ok(successfulResult(rows, 'DECLARED-MCP-CONTENT-CANARY'), 'declared MCP tool must actually execute');
     const firstCalls=readFileSync(mcpCalls,'utf8').split('called').length;
     const first = rows.find(r => r.type === 'assistant')?.message?.usage;
     assert.ok(first);
@@ -84,11 +90,10 @@ for (const method of ['start', 'prepare']) test(`native house ${method}: backgro
     };
     // Exercise the inherited deny in the same house, rather than only checking flags.
     const blocked=await continueHouse(p,`First call mcp__declared__profile_probe. Then try calling Read on ${forbidden} once. Do not use any other tool.`);
-    const denial=await finished(runner,blocked,true);
-    assert.ok(denial.some(r=>r.type==='assistant' && Array.isArray(r.message?.content) && r.message.content.some(c=>c.type==='tool_use' && c.name==='Read')));
-    assert.ok(denial.some(r=>r.type==='user' && Array.isArray(r.message?.content) && r.message.content.some(c=>c.type==='tool_result' && c.is_error)));
+    const denial=await finished(runner,blocked,forbidden);
+    assert.ok(deniedRead(denial, forbidden), 'current forbidden Read must receive its own permission denial');
     assert.doesNotMatch(JSON.stringify(denial),/DENIED-READ-CONTENT-CANARY/);
-    assert.ok(denial.some(r=>r.type==='user' && Array.isArray(r.message?.content) && r.message.content.some(c=>c.type==='tool_result' && !c.is_error && JSON.stringify(c.content).includes('DECLARED-MCP-CONTENT-CANARY'))));
+    assert.ok(successfulResult(denial, 'DECLARED-MCP-CONTENT-CANARY'));
     assert.ok(readFileSync(mcpCalls,'utf8').split('called').length > firstCalls, 'MCP remains callable on continuation');
     // Narrow through the same transport/admission path, retaining native history.
     const commandCanary=join(cwd,'undeclared-command-canary');
@@ -111,4 +116,13 @@ for (const method of ['start', 'prepare']) test(`native house ${method}: backgro
     if (host) { await w.kill({restore: false}); await host; }
     runner.run(runner.claude, ['daemon', 'stop', '--any'], {env:w.houseEnv,stdio:'ignore',timeout:10000});
   }
+});
+
+test('native denial evidence binds the exact Read call to its permission result', () => {
+  const call = { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'read-1', name: 'Read', input: { file_path: '/private' } }] } };
+  const result = (id, content) => ({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: id, is_error: true, content }] } });
+  assert.equal(deniedRead([call, result('read-1', 'Permission denied')], '/private'), true);
+  assert.equal(deniedRead([call, result('other', 'Permission denied')], '/private'), false);
+  assert.equal(deniedRead([call, result('read-1', 'File not found')], '/private'), false);
+  assert.equal(deniedRead([call, result('read-1', 'Permission denied')], '/other'), false);
 });

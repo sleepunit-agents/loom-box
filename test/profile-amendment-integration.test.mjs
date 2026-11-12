@@ -123,3 +123,48 @@ test('new request directories are durable before a card is filed', async () => {
     await requestForBody({LOOM_RUNTIME_JOB_PROFILES:file},{kind:'agent',agent:'art'},{conversation:'cv-0123456789ab',field:'tools',name:'Read'},{key:'fixture',session:'fixture'},d);
   } finally {fs.fsyncSync=real;syncBuiltinESMExports();rmSync(root,{recursive:true,force:true});}
 });
+
+test('public profile command forwards its own proof and publishes the exact amendment card', async () => {
+  const { createServer } = await import('node:http');
+  const root = mkdtempSync(join(tmpdir(), 'profile-public-command-'));
+  const cv = 'cv-0123456789ab', key = 'k'.repeat(48), session = 'fixture-session';
+  const job = { agent: 'art', venue: 'wake', kind: 'scheduled', place: 'fixture' };
+  const file = join(root, 'profiles.json'), token = join(root, 'token');
+  writeFileSync(token, 'fixture-token');
+  writeFileSync(file, JSON.stringify({ v: 1, jobs: { [jobProfileKey(job)]: minimalProfile() } }));
+  const env = { HOME: root, LOOM_RUNTIME_JOB_PROFILES: file };
+  const expected = amendment(jobProfileKey(job), minimalProfile(), 'tools', 'Read');
+  let card, received;
+  const d = { householdAgent: () => true, heldConv: (_env, conversation, proof) => conversation === cv && proof.key === key && proof.session === session ? { agent: 'art', body: 'claude:fixture', local: true } : null,
+    principalOf: () => ({ owner: true }), readBody: () => ({ ...job, profile: JSON.stringify(minimalProfile()) }),
+    approvalsRun: async (_env, args) => {
+      card = args;
+      assert.deepEqual(JSON.parse(readFileSync(`${file}.requests/${expected.target.split(':')[1]}.json`)), { agent: 'art', amendment: expected });
+      return { status: 0, stdout: JSON.stringify({ id: 'a-12345678', kind: 'grant', state: 'pending', target: args[args.indexOf('--target') + 1] }) };
+    } };
+  const server = createServer(async (req, res) => {
+    try {
+      assert.equal(req.url, '/api/runtime/run'); assert.equal(req.headers.authorization, 'Bearer fixture-token');
+      let text = ''; for await (const chunk of req) text += chunk;
+      received = JSON.parse(text);
+      const result = await runFor(env, { kind: 'agent', agent: 'art' }, received.argv, {}, {}, undefined, received, d);
+      res.setHeader('content-type', 'application/json'); res.end(JSON.stringify(result));
+    } catch (error) { res.statusCode = 500; res.end(JSON.stringify({ error: error.message })); }
+  });
+  try {
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    const result = await new Promise(resolve => execFile(process.execPath, [new URL('../src/cli.mjs', import.meta.url).pathname, 'profile', 'request', '--field', 'tools', '--name', 'Read'], {
+      env: { ...process.env, HOME: root, LOOM_RUNTIME_PIECE: 'runtime', LOOM_URL: `http://127.0.0.1:${server.address().port}/mcp`, LOOM_TOKEN_FILE: token,
+        LOOM_RUNTIME_KEYS_DIR: join(root, 'keys'), LOOM_BODY_CONVERSATION: cv, LOOM_BODY_KEY: key, CLAUDE_CODE_SESSION_ID: session, CODEX_THREAD_ID: '' }, encoding: 'utf8', timeout: 10000,
+    }, (error, stdout, stderr) => resolve({ error, stdout, stderr })));
+    assert.equal(result.error, null, result.stderr);
+    assert.deepEqual(received, { argv: ['profile', 'request', '--field', 'tools', '--name', 'Read', '--conversation', cv], key, session });
+    assert.deepEqual(JSON.parse(result.stdout), { approval: 'a-12345678', state: 'pending', target: expected.target });
+    const flag = name => card[card.indexOf(name) + 1];
+    assert.equal(flag('--target'), expected.target); assert.equal(flag('--kind'), 'grant');
+    assert.equal(flag('--conversation'), cv); assert.equal(flag('--on-behalf'), 'owner');
+    assert.equal(flag('--as'), JSON.stringify({ kind: 'agent', agent: 'art' }));
+    assert.equal(flag('--ask'), 'Allow this job to use the requested capability?');
+    assert.equal(flag('--details'), `Job: ${expected.key}\nAdded declarations:\ntools: Read\nRevision: ${expected.before}`);
+  } finally { await new Promise(resolve => server.close(resolve)); rmSync(root, { recursive: true, force: true }); }
+});

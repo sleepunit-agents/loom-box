@@ -14,7 +14,7 @@ export const commandFlags = {
   oneshot: 'cwd= prefer= model-need= timeout=',
   body: 'agent= venue= venue-kind= prefer= model-need= place= cwd= deny= brief= slot= text= id= json',
   deliver: 'conversation= stdin ref= every= once json', review: 'limit= introspect= scheduled day= json',
-  'context-boundary': 'conversation= note= piece=', continuation: 'conversation= handle= id= text= piece=', send: 'conversation= person= via= text= piece=',
+  profile: 'field= name=', 'context-boundary': 'conversation= note= piece=', continuation: 'conversation= handle= id= text= piece=', send: 'conversation= person= via= text= piece=',
   spawn: 'house= service= agent= brief= prefer= model-need= role= failover title= timeout= text=',
   principal: 'inspect-continuation= agent= scheduled-at= verify house= reset wake conversation= place= for= id= origin-conversation= piece=',
   'task-host': 'brief-stdin', 'session-host': '', 'body-host': 'piece= host-key= beats=',

@@ -99,6 +99,15 @@ function needsMet(env, runner, needs) {
   if (missing.length) fail(`this job's role needs a box with ${missing.join(', ')}, and this machine doesn't have ${missing.length === 1 ? 'it' : 'them'}`, 409);
 }
 
+function retainContextProfile(metadata, options, contextProfile) {
+  if (contextProfile) {
+    options.profileFloor = cleanProfileFloor(contextProfile.floor) ?? unknownProfileFloor();
+    if (metadata.restrictionUnknown) options.profileFloor.unknown = true;
+    metadata.restrictionUnknown = !!metadata.restrictionUnknown || !!options.profileFloor.unknown;
+  }
+  metadata.profile = contextProfile?.declaration ?? options.env.LOOM_BODY_PROFILE;
+}
+
 export async function startBody(env, { agent, brief: b, venue, venueKind, prefer = [], modelNeed, avoid = [], cwd, deny = [], place, guest, local, seat, activity = false, role, pin, gate, needs = [], contextProfile }, o = {}) {
   const d = deps(env, o);
   const text = brief(b);
@@ -116,12 +125,7 @@ export async function startBody(env, { agent, brief: b, venue, venueKind, prefer
   };
   const options = { agent, brief: forRunner(runner, text, cwd), model: pick.model, cwd, env: profileEnv(o.bodyEnv, pick.kind, env, { agent, venue, place }, { deferSecrets: !!runner.remote, nativeSecrets: !!contextProfile, harness: pick.harness, ...(contextProfile ? { frozenProfile: contextProfile.declaration, minimal: !cleanProfileFloor(contextProfile.floor) || !!contextProfile.floor.unknown } : {}) }), deny, ...(seat ? { seat } : {}), ...(needs.length ? { needs } : {}), ...((venue === COMMS_VENUE || activity) ? { activity: true } : {}) };
   if (contextProfile && (!cleanProfileFloor(contextProfile.floor) || contextProfile.floor.unknown)) options.env.LOOM_BODY_PROFILE_PROBLEM = 'JOB PROFILE PROBLEM: context continuation has no valid native restriction provenance; using minimal profile (no tools, MCP, skills or secrets).';
-  if (contextProfile) {
-    options.profileFloor = cleanProfileFloor(contextProfile.floor) ?? unknownProfileFloor();
-    if (metadata.restrictionUnknown) options.profileFloor.unknown = true;
-    metadata.restrictionUnknown = !!metadata.restrictionUnknown || !!options.profileFloor.unknown;
-  }
-  metadata.profile = contextProfile?.declaration ?? options.env.LOOM_BODY_PROFILE;
+  retainContextProfile(metadata, options, contextProfile);
   const prepared = { metadata, why: pick.why, preferred: pick.preferred };
   const body = o.launch ? await o.launch({ runner, harness: pick.harness, options, prepared }) : await runner.start(options);
   const at = d.now().toISOString();
@@ -168,19 +172,14 @@ export async function resumeBody(env, { body: ref, slot, agent, venue, venueKind
     ...(modelNeed ? { modelNeed } : {}), harness: pick.harness, model: pick.model, family: pick.family, ...(pick.account ? { account: pick.account } : {}), ...(pick.accountKey ? { accountKey: pick.accountKey } : {}), ...switchedOf(pick),
     instance: randomBytes(12).toString('hex'), slot, ...(ref ? { resumed: ref } : {}),
   };
-  const options = { agent: who, brief: forRunner(runner, brief(b), cwd), model: pick.model, cwd, env: profileEnv(o.bodyEnv, pick.kind, env, { agent: who, venue: where, place: rec?.place ?? place }, { deferSecrets: !!runner.remote, nativeSecrets: !!contextProfile, harness: pick.harness, forceProfile: !!rec?.profile, minimal: !rec || !!rec.restrictionUnknown, ...(contextProfile ? { frozenProfile: contextProfile.declaration, minimal: !rec || !!rec.restrictionUnknown || !cleanProfileFloor(contextProfile.floor) || !!contextProfile.floor.unknown } : {}) }), deny, ...(seat ? { seat } : {}), ...(needs.length ? { needs } : {}), ...(files ? { files } : {}), ...((where === COMMS_VENUE || activity) ? { activity: true } : {}) };
+  const options = { agent: who, brief: forRunner(runner, brief(b), cwd), model: pick.model, cwd, env: profileEnv(o.bodyEnv, pick.kind, env, { agent: who, venue: where, place: rec?.place ?? place }, { deferSecrets: !!runner.remote, nativeSecrets: true, harness: pick.harness, forceProfile: !!rec?.profile, minimal: !rec || !!rec.restrictionUnknown, ...(contextProfile ? { frozenProfile: contextProfile.declaration, minimal: !rec || !!rec.restrictionUnknown || !cleanProfileFloor(contextProfile.floor) || !!contextProfile.floor.unknown } : {}) }), deny, ...(seat ? { seat } : {}), ...(needs.length ? { needs } : {}), ...(files ? { files } : {}), ...((where === COMMS_VENUE || activity) ? { activity: true } : {}) };
   if (isWork(options.env) && (!rec || rec.restrictionUnknown)) {
     metadata.restrictionUnknown=true;
     options.env=restrictedEnv(options.env,minimalProfile(),{deferSecrets:!!runner.remote});
     options.env.LOOM_BODY_PROFILE_PROBLEM='JOB PROFILE PROBLEM: continuation has no runtime restriction record; using minimal profile (no tools, MCP, skills or secrets).';
   }
   if (contextProfile && (!cleanProfileFloor(contextProfile.floor) || contextProfile.floor.unknown)) options.env.LOOM_BODY_PROFILE_PROBLEM = 'JOB PROFILE PROBLEM: context continuation has no valid native restriction provenance; using minimal profile (no tools, MCP, skills or secrets).';
-  if (contextProfile) {
-    options.profileFloor = cleanProfileFloor(contextProfile.floor) ?? unknownProfileFloor();
-    if (metadata.restrictionUnknown) options.profileFloor.unknown = true;
-    metadata.restrictionUnknown = !!metadata.restrictionUnknown || !!options.profileFloor.unknown;
-  }
-  metadata.profile = contextProfile?.declaration ?? options.env.LOOM_BODY_PROFILE;
+  retainContextProfile(metadata, options, contextProfile);
   const prepared = { metadata, why: pick.why, preferred: pick.preferred };
   const body = o.launch ? await o.launch({ runner, harness: pick.harness, options, resume: slot, prepared }) : await runner.resume(slot, options);
   const at = d.now().toISOString();

@@ -128,3 +128,59 @@ test('a saved context snapshot cannot make missing later native resume provenanc
   assert.equal(target.runner.profileFloor({ id: 'abcd1234' }).unknown, true);
   assert.ok(settings(target.captured()).permissions.deny.includes('Read(/private)'));
 }));
+
+for (const provenance of ['missing', 'corrupt', 'known']) test(`public local resume recovers ${provenance} native provenance before secret validation`, async () => {
+  const root = mkdtempSync(join(tmpdir(), 'profile-public-resume-'));
+  try {
+    const { startBody, resumeBody } = await import('../src/bodies.mjs');
+    const { setModels } = await import('../src/models.mjs');
+    const { staticAccounts } = await import('../src/accounts.mjs');
+    const { jobProfileKey } = await import('../src/work-profile.mjs');
+    const n = native(root), job = { agent: 'art', venue: 'wake', kind: 'scheduled' };
+    const runtime = { HOME: root, LOOM_BOX_DATA: join(root, 'data'), LOOM_BOX_HOME: join(root, 'state'), LOOM_RUNTIME_SCORECARDS: 'off', LOOM_RUNTIME_JOB_PROFILES: join(root, 'profiles.json') };
+    setModels(runtime, { list: [{ id: 'opus', harness: 'claude', family: 'anthropic' }], agent: 'art', prefer: ['opus'] });
+    const p = { ...minimalProfile(), tools: ['Read'], secrets: ['DECLARED_KEY'] };
+    writeFileSync(runtime.LOOM_RUNTIME_JOB_PROFILES, JSON.stringify({ v: 1, jobs: { [jobProfileKey(job)]: p } }));
+    const options = { runner: () => n.runner, accounts: staticAccounts({ accounts: [{ name: 'max', provider: 'anthropic', harness: 'claude', kind: 'login', agents: ['art'], credentials: [{ kind: 'login', status: 'valid' }] }] }), bodyEnv: { HOME: root, DECLARED_KEY: 'available-at-start' } };
+    const first = await startBody(runtime, { ...job, brief: 'start', modelNeed: 'coordinator: public resume provenance fixture', local: true, cwd: root }, options);
+    const floor = n.runner.floorPath(`session-${first.slot.session}`);
+    for (const path of [floor, n.runner.floorPath(`body-${first.body.split(':')[1]}`)]) {
+      if (provenance === 'missing') rmSync(path); else if (provenance === 'corrupt') writeFileSync(path, '{broken');
+    }
+    const resume = () => resumeBody(runtime, { body: first.body, brief: 'ordinary resume', cwd: root }, { ...options, bodyEnv: { HOME: root } });
+    if (provenance === 'known') await assert.rejects(resume(), /secret unavailable: DECLARED_KEY/);
+    else {
+      const resumed = await resume();
+      assert.match(n.captured().input, /no saved source restriction floor/);
+      assert.equal(n.captured().args[n.captured().args.indexOf('--tools') + 1], '');
+      assert.equal(n.captured().env.DECLARED_KEY, undefined);
+      assert.equal(n.runner.profileFloor({ id: resumed.body.split(':')[1] }).unknown, true);
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+for (const provenance of ['missing', 'corrupt', 'known']) test(`house resume recovers ${provenance} native provenance before secret validation`, async () => {
+  const root = mkdtempSync(join(tmpdir(), 'profile-host-resume-'));
+  try {
+    const { runBodyHost } = await import('../src/bodyhost.mjs');
+    const n = native(root), slot = 'prior-session';
+    if (provenance !== 'missing') {
+      n.runner.saveFloor(`session-${slot}`, { deny: ['Write'], disabled: [] });
+      if (provenance === 'corrupt') writeFileSync(n.runner.floorPath(`session-${slot}`), '{broken');
+    }
+    const q = { harness: 'claude', resume: slot, model: 'opus', brief: 'ordinary house resume', profile: JSON.stringify({ ...minimalProfile(), tools: ['Read'], secrets: ['DECLARED_KEY'] }) };
+    let receipt;
+    await runBodyHost({ env: { HOME: root, CLAUDE_SECURESTORAGE_CONFIG_DIR: '/fixture/login', LOOM_BOX_DATA: join(root, 'data') }, cwd: root, hostKey: 'fixture-bootstrap', runner: () => n.runner, beats: 3, sleep: async () => {},
+      client: async (_path, { report }) => {
+        if (report.done.resume) { receipt = report.done.resume; return { exit: true }; }
+        return { req: { resume: q } };
+      } });
+    if (provenance === 'known') assert.match(receipt.error, /secret unavailable: DECLARED_KEY/);
+    else {
+      assert.equal(receipt.id, 'abcd1234');
+      assert.match(n.captured().input, /no saved source restriction floor/);
+      assert.equal(n.captured().args[n.captured().args.indexOf('--tools') + 1], '');
+      assert.equal(n.captured().env.DECLARED_KEY, undefined);
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

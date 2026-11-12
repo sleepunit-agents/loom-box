@@ -21,7 +21,7 @@ export const profileHostProblem = (profile, report) => profile !== undefined && 
 const FIELDS = ['mcp', 'tools', 'skills', 'secrets'];
 const NAME = /^[A-Za-z_][A-Za-z0-9_.-]{0,127}$/;
 export const CLAUDE_TOOLS = new Set(['Task', 'Bash', 'CronCreate', 'CronDelete', 'CronList', 'DesignSync', 'Edit', 'EnterWorktree', 'ExitWorktree', 'ListAgents', 'ListMcpResourcesTool', 'Monitor', 'NotebookEdit', 'PushNotification', 'Read', 'ReadMcpResourceDirTool', 'ReadMcpResourceTool', 'RemoteTrigger', 'ReportFindings', 'ScheduleWakeup', 'SendMessage', 'TaskStop', 'ToolSearch', 'WebSearch', 'Workflow', 'Write']);
-const forbiddenSecret = k => BASE_ENV.includes(k) || (/^(LOOM_|CLAUDE_|CODEX_|NODE_|BASH_|LD_|DYLD_|ENV$)/.test(k) && !['LOOM_URL', 'LOOM_TOKEN', 'LOOM_TOKEN_FILE'].includes(k));
+const forbiddenSecret = k => BASE_ENV.includes(k) || (/^(LOOM_|CLAUDE_|CODEX_|ANTHROPIC_|OPENAI_|NODE_|BASH_|LD_|DYLD_|ENV$|API_TIMEOUT_MS$|HTTPS?_PROXY$|ALL_PROXY$|NO_PROXY$|SSL_CERT_FILE$|SSL_CERT_DIR$)/.test(k) && !['LOOM_URL', 'LOOM_TOKEN', 'LOOM_TOKEN_FILE'].includes(k));
 export const minimalProfile = () => ({ v: 1, mcp: [], tools: [], skills: [], secrets: [] });
 export function validateProfile(p) {
   if (!p || p.v !== 1 || Object.keys(p).some(k => !['v', ...FIELDS].includes(k))) throw Error('invalid job profile version or field');
@@ -44,7 +44,7 @@ export function selectedProfile(env) {
 }
 export function workServers(servers, profile) {
   const p = validateProfile(profile);
-  const missing = p.mcp.filter(n => !servers[n] || servers[n].enabled === false);
+  const missing = p.mcp.filter(n => !Object.hasOwn(servers, n) || !servers[n] || typeof servers[n] !== 'object' || Array.isArray(servers[n]) || servers[n].enabled === false);
   if (missing.length) throw Error(`job profile MCP unavailable: ${missing.join(', ')}`);
   return Object.fromEntries(p.mcp.map(n => [n, servers[n]]));
 }

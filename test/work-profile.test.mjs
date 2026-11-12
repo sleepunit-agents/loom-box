@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, readFileSync, statSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { PROFILE_CAP, profileHostProblem, profileEnv, selectedProfile, minimalProfile, jobProfileKey, validateProfile, restrictedEnv, workServers, claudeWorkArgs } from '../src/work-profile.mjs';
+import { PROFILE_CAP, CONTEXT_PROFILE_CAP, profileHostProblem, profileEnv, selectedProfile, minimalProfile, jobProfileKey, validateProfile, restrictedEnv, workServers, claudeWorkArgs } from '../src/work-profile.mjs';
 import { amendment, commitAmendment } from '../src/profile-amendment.mjs';
 const profile = patch => ({ ...minimalProfile(), ...patch });
 const job = { agent: 'art', venue: 'wake', kind: 'scheduled', place: 'lane:plan' };
@@ -160,7 +160,7 @@ test('remote selection defers secret availability to the destination execution b
   assert.throws(() => restrictedEnv({}, selectedProfile(selected)), /unavailable/);
   assert.equal(restrictedEnv({ HOUSE_ONLY_KEY: 'destination' }, selectedProfile(selected)).HOUSE_ONLY_KEY, 'destination');
 }));
-for (const mode of ['legacy', 'downgrade']) test(`profile host ${mode} rejects before request publication`, async () => {
+for (const capability of [PROFILE_CAP, CONTEXT_PROFILE_CAP]) for (const mode of ['legacy', 'downgrade']) test(`${capability} host ${mode} rejects before request publication`, async () => {
   const { houseWorld, until } = await import('./delivery-world.mjs');
   const { load } = await import('../src/state.mjs');
   const w = houseWorld(); let host;
@@ -168,17 +168,17 @@ for (const mode of ['legacy', 'downgrade']) test(`profile host ${mode} rejects b
   const loseCapability = () => {
     const file = join(w.env.LOOM_BOX_DATA || join(w.env.HOME, '.local/share/loom-box'), 'delivery/hosts', `art@${seat}.json`);
     const h = JSON.parse(readFileSync(file, 'utf8'));
-    h.report.caps = h.report.caps.filter(c => c !== PROFILE_CAP);
+    h.report.caps = h.report.caps.filter(c => c !== capability);
     writeFileSync(file, JSON.stringify(h));
   };
   if (mode === 'legacy') w.hr.bound = async () => loseCapability();
-  const o = { agent: 'art', brief: 'must not run', model: 'opus', seat, env: { LOOM_BODY_PROFILE: JSON.stringify(minimalProfile()) } };
+  const o = { agent: 'art', brief: 'must not run', model: 'opus', seat, env: { LOOM_BODY_PROFILE: JSON.stringify(minimalProfile()) }, ...(capability === CONTEXT_PROFILE_CAP ? { profileFloor: { deny: ['Read(private)'], disabled: [] } } : {}) };
   try {
     const pending = mode === 'legacy' ? w.hr.start(o) : w.hr.prepareLaunch('9'.repeat(64), o);
     const result = mode === 'legacy' ? assert.rejects(pending, /cannot enforce job profiles/) : pending;
     await until(() => load(w.env).houses['h-1']); host = w.host();
     const reserved = await result;
-    if (mode === 'downgrade') { loseCapability(); assert.throws(() => w.hr.publishPreparedLaunch(reserved), /lost job profile support/); }
+    if (mode === 'downgrade') { loseCapability(); assert.throws(() => w.hr.publishPreparedLaunch(reserved), capability === CONTEXT_PROFILE_CAP ? /lost context profile support/ : /lost job profile support/); }
     assert.equal(Object.keys(w.local.envs).length, 0);
   } finally { if (host) { await w.kill(); await host; } }
 });
@@ -261,30 +261,6 @@ for (const source of ['user', 'project']) test(`native disabledMcpjsonServers in
   assert.throws(() => claudeWorkArgs({HOME:root,LOOM_BODY_PROFILE:JSON.stringify(profile({mcp:['blocked'],secrets:['mcp.blocked']}))},root,join(root,'jobs')), /unavailable/);
 }));
 
-for (const mode of ['legacy', 'downgrade']) test(`context profile host ${mode} rejects floor transport before publication`, async () => {
-  const { CONTEXT_PROFILE_CAP } = await import('../src/work-profile.mjs');
-  const { houseWorld, until } = await import('./delivery-world.mjs');
-  const { load } = await import('../src/state.mjs');
-  const w = houseWorld(); let host;
-  const seat = 'owner.cv-abcdef123456';
-  const loseCapability = () => {
-    const file = join(w.env.LOOM_BOX_DATA || join(w.env.HOME, '.local/share/loom-box'), 'delivery/hosts', `art@${seat}.json`);
-    const h = JSON.parse(readFileSync(file, 'utf8'));
-    h.report.caps = h.report.caps.filter(c => c !== CONTEXT_PROFILE_CAP);
-    writeFileSync(file, JSON.stringify(h));
-  };
-  if (mode === 'legacy') w.hr.bound = async () => loseCapability();
-  const o = { agent: 'art', brief: 'must not run', model: 'opus', seat, env: { LOOM_BODY_PROFILE: JSON.stringify(minimalProfile()) }, profileFloor: { deny: ['Read(private)'], disabled: [] } };
-  try {
-    const pending = mode === 'legacy' ? w.hr.start(o) : w.hr.prepareLaunch('7'.repeat(64), o);
-    const result = mode === 'legacy' ? assert.rejects(pending, /cannot enforce job profiles/) : pending;
-    await until(() => load(w.env).houses['h-1']); host = w.host();
-    const reserved = await result;
-    if (mode === 'downgrade') { loseCapability(); assert.throws(() => w.hr.publishPreparedLaunch(reserved), /lost context profile support/); }
-    assert.equal(Object.keys(w.local.envs).length, 0);
-  } finally { if (host) { await w.kill(); await host; } }
-});
-
 test('context native floor traverses the sealed request and validated house report without packing', async () => {
   const { houseWorld, until } = await import('./delivery-world.mjs');
   const { load } = await import('../src/state.mjs');
@@ -315,3 +291,22 @@ test('native context secret deferral preserves local configuration selection and
   assert.deepEqual(selectedProfile(corrupt), minimalProfile());
   assert.match(corrupt.LOOM_BODY_PROFILE_PROBLEM, /invalid transported/);
 }));
+
+for (const name of ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'OPENAI_BASE_URL', 'API_TIMEOUT_MS', 'HTTPS_PROXY', 'SSL_CERT_FILE']) test(`provider launch control ${name} cannot be a job secret`, () => fixture(root => {
+  const p = profile({ secrets: [name] });
+  assert.throws(() => validateProfile(p), /configure the harness/);
+  const file = join(root, 'profiles.json');
+  writeFileSync(file, JSON.stringify({ v: 1, jobs: { [jobProfileKey(job)]: p } }));
+  const selected = profileEnv({ HOME: root, [name]: 'canary' }, job.kind, { LOOM_RUNTIME_JOB_PROFILES: file }, job);
+  assert.deepEqual(selectedProfile(selected), minimalProfile());
+  assert.match(selected.LOOM_BODY_PROFILE_PROBLEM, /configure the harness/);
+  assert.equal(selected[name], undefined);
+}));
+test('declared MCP needs its own data server definition, never a prototype property', () => {
+  for (const name of ['constructor', 'toString', '__proto__']) {
+    const p = profile({ mcp: [name], secrets: [`mcp.${name}`] });
+    assert.throws(() => workServers({}, p), /unavailable/);
+    for (const value of [null, 'bad', [], 1]) assert.throws(() => workServers({ [name]: value }, p), /unavailable/);
+    assert.deepEqual(workServers({ [name]: { command: 'fixture' } }, p), { [name]: { command: 'fixture' } });
+  }
+});
