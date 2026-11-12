@@ -198,24 +198,33 @@ test('a new unspecified one-shot uses runtime default rather than an old body mo
  assert.equal(result,'ok'); assert.deepEqual(preference,[]);
 });
 
- test('managed Codex login home permits only the user config above a frozen tree', async () => {
+function managedCodexHome(env, home = join(env.HOME, 'managed')) {
+  env.CODEX_HOME = home;
+  mkdirSync(home);
+  writeFileSync(join(home, 'auth.json'), '{}');
+}
+function codexOptions(onRun = () => {}) {
+  return { warn: () => {}, call: async () => ({ model: 'm', harness: 'codex' }), run: async (...args) => {
+    onRun(...args);
+    return { status: 0, stdout: JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'ok' } }) };
+  } };
+}
+
+test('managed Codex login home permits only the user config above a frozen tree', async () => {
   const env = setup();
-  env.CODEX_HOME = join(env.HOME, 'runtime-managed');
-  mkdirSync(env.CODEX_HOME);
-  writeFileSync(join(env.CODEX_HOME, 'auth.json'), '{}');
+  managedCodexHome(env, join(env.HOME, 'runtime-managed'));
   mkdirSync(join(env.HOME, '.codex'));
   writeFileSync(join(env.HOME, '.codex', 'config.toml'), '[mcp_servers.writer]\ncommand="writer"\n');
   const tree = join(env.HOME, 'scratch', 'tree');
   mkdirSync(tree, { recursive: true });
   let runs = 0;
-  const opts = { warn: () => {}, call: async () => ({ model: 'm', harness: 'codex' }), run: async (_bin, _argv, o) => {
+  const opts = codexOptions((_bin, _argv, o) => {
     runs++;
     assert.notEqual(o.env.CODEX_HOME, env.CODEX_HOME);
     assert.deepEqual(readdirSync(o.env.CODEX_HOME), ['auth.json']);
     assert.equal(readlinkSync(join(o.env.CODEX_HOME, 'auth.json')), join(env.CODEX_HOME, 'auth.json'));
     assert.equal(existsSync(join(o.env.CODEX_HOME, 'config.toml')), false);
-    return { status: 0, stdout: JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'ok' } }) };
-  } };
+  });
   assert.equal(await runOneShot(env, { input: 'p', cwd: tree }, opts), 'ok');
   for (const at of [tree, join(env.HOME, 'scratch')]) {
     mkdirSync(join(at, '.codex'), { recursive: true });
@@ -227,7 +236,7 @@ test('a new unspecified one-shot uses runtime default rather than an old body mo
   mkdirSync(join(env.HOME, '.git'));
   await assert.rejects(runOneShot(env, { input: 'p', cwd: tree }, opts), /configuration outside/);
   assert.equal(runs, 1);
- });
+});
 
 test('cold review rejects physical project config through symlink cwd and uninspectable layers', async () => {
   const env = setup(), tree = join(env.HOME, 'physical', 'sub'), alias = join(env.HOME, 'alias');
@@ -249,16 +258,12 @@ test('managed cold review canonicalizes aliased HOME and still refuses physical 
   const env = setup(), physical = env.HOME, alias = join(physical, 'alias-home');
   symlinkSync(physical, alias);
   env.HOME = alias;
-  env.CODEX_HOME = join(alias, 'managed');
-  mkdirSync(env.CODEX_HOME);
-  writeFileSync(join(env.CODEX_HOME, 'auth.json'), '{}');
+  managedCodexHome(env, join(alias, 'managed'));
   mkdirSync(join(alias, '.codex'));
   writeFileSync(join(alias, '.codex', 'config.toml'), '');
   const tree = join(alias, 'frozen'); mkdirSync(tree);
   let runs = 0;
-  const opts = { warn: () => {}, call: async () => ({ model: 'm', harness: 'codex' }), run: async () => {
-    runs++; return { status: 0, stdout: JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'ok' } }) };
-  } };
+  const opts = codexOptions(() => { runs++; });
   assert.equal(await runOneShot(env, { input: 'p', cwd: tree }, opts), 'ok');
   mkdirSync(join(tree, '.codex')); writeFileSync(join(tree, '.codex', 'config.toml'), '');
   await assert.rejects(runOneShot(env, { input: 'p', cwd: tree }, opts), /configuration outside/);
@@ -267,15 +272,12 @@ test('managed cold review canonicalizes aliased HOME and still refuses physical 
 
 test('symlinked user .codex is replaced, while another ancestor alias to it is rejected', async () => {
   const env = setup(), settings = join(env.HOME, 'settings'), tree = join(env.HOME, 'parent', 'tree');
-  env.CODEX_HOME = join(env.HOME, 'managed');
-  mkdirSync(env.CODEX_HOME); writeFileSync(join(env.CODEX_HOME, 'auth.json'), '{}');
+  managedCodexHome(env, join(env.HOME, 'managed'));
   mkdirSync(settings); writeFileSync(join(settings, 'config.toml'), '');
   symlinkSync(settings, join(env.HOME, '.codex'));
   mkdirSync(tree, { recursive: true });
   let runs = 0;
-  const opts = { warn: () => {}, call: async () => ({ model: 'm', harness: 'codex' }), run: async () => {
-    runs++; return { status: 0, stdout: JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'ok' } }) };
-  } };
+  const opts = codexOptions(() => { runs++; });
   assert.equal(await runOneShot(env, { input: 'p', cwd: tree }, opts), 'ok');
   symlinkSync(settings, join(env.HOME, 'parent', '.codex'));
   await assert.rejects(runOneShot(env, { input: 'p', cwd: tree }, opts), /configuration outside/);
@@ -284,8 +286,7 @@ test('symlinked user .codex is replaced, while another ancestor alias to it is r
 
 test('uninspectable user config fails closed even above the frozen tree', async () => {
   const env = setup(), tree = join(env.HOME, 'frozen');
-  env.CODEX_HOME = join(env.HOME, 'managed');
-  mkdirSync(env.CODEX_HOME); writeFileSync(join(env.CODEX_HOME, 'auth.json'), '{}');
+  managedCodexHome(env, join(env.HOME, 'managed'));
   mkdirSync(tree);
   symlinkSync('.codex', join(env.HOME, '.codex'));
   let launched = false;
@@ -297,8 +298,7 @@ test('uninspectable user config fails closed even above the frozen tree', async 
 
 test('uninspectable user config file target fails closed before the home exception', async () => {
   const env = setup(), tree = join(env.HOME, 'frozen');
-  env.CODEX_HOME = join(env.HOME, 'managed');
-  mkdirSync(env.CODEX_HOME); writeFileSync(join(env.CODEX_HOME, 'auth.json'), '{}');
+  managedCodexHome(env, join(env.HOME, 'managed'));
   mkdirSync(tree); mkdirSync(join(env.HOME, '.codex'));
   symlinkSync('config.toml', join(env.HOME, '.codex', 'config.toml'));
   let launched = false;

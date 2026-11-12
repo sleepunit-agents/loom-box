@@ -549,35 +549,50 @@ export function codexDeny(deny) {
  * → the paths found ([] for none). A path that can't be looked at counts as found.
  */
 export function codexLayers(cwd, { realHome, userHome, systemDir = '/etc/codex' } = {}) {
-  const inspect = (p) => { try { lstatSync(p); statSync(p); return 'present'; } catch (e) { return ['ENOENT', 'ENOTDIR'].includes(e.code) ? 'absent' : 'error'; } };
-  const there = p => inspect(p) !== 'absent';
   const lexical = resolve(cwd ?? process.cwd());
+  const ancestors = (start) => {
+    const dirs = [];
+    for (let d = start; ; d = dirname(d)) { dirs.push(d); if (dirname(d) === d) break; }
+    return dirs;
+  };
+  const presentOrUnreadable = (p) => { try { lstatSync(p); return true; } catch (e) { return !['ENOENT', 'ENOTDIR'].includes(e.code); } };
+  // Existing runner callers supply no userHome: preserve their lexical walk,
+  // lstat semantics and home exception before any config lookup.
+  if (userHome === undefined) {
+    const dirs = ancestors(lexical), rootAt = dirs.findIndex(d => presentOrUnreadable(join(d, '.git')));
+    const found = dirs.filter((d, i) => !(i > (rootAt < 0 ? 0 : rootAt) && realHome && resolve(realHome) === join(d, '.codex')))
+      .map(d => join(d, '.codex', 'config.toml')).filter(presentOrUnreadable);
+    for (const n of ['config.toml', 'managed_config.toml', 'requirements.toml']) if (presentOrUnreadable(join(systemDir, n))) found.push(join(systemDir, n));
+    return found;
+  }
+  const inspect = (p) => {
+    try { lstatSync(p); } catch (e) { return ['ENOENT', 'ENOTDIR'].includes(e.code) ? 'absent' : 'error'; }
+    // Once a directory entry exists, every target-resolution failure blocks.
+    try { statSync(p); return 'present'; } catch { return 'error'; }
+  };
   let physical;
   try { physical = realpathSync(lexical); } catch (e) {
     if (!['ENOENT', 'ENOTDIR'].includes(e.code)) return [lexical];
-    physical = lexical; // A nonexistent cwd cannot execute; retain lexical layer checks.
+    physical = lexical;
   }
   const homes = [realHome, userHome && join(userHome, '.codex')].filter(Boolean).flatMap(home => {
     const path = resolve(home);
     if (path !== join(dirname(path), '.codex')) return [];
-    // Compare the user directory, not the .codex target: the latter may itself
-    // be a symlink, but an unrelated ancestor alias must not earn an exception.
-    try { return [join(realpathSync(dirname(path)), '.codex')]; } catch { return []; }
+    // Compare parent identities, never the .codex symlink target.
+    try { return [path, join(realpathSync(dirname(path)), '.codex')]; } catch { return []; }
   });
-  const dirsUp = [];
-  for (let d = physical; ; d = dirname(d)) { dirsUp.push(d); if (dirname(d) === d) break; }
-  const rootAt = dirsUp.findIndex((d) => there(join(d, '.git')));
-  const found = [];
-  dirsUp.forEach((d, i) => {
-    const f = join(d, '.codex', 'config.toml');
-    const aboveRoot = i > (rootAt < 0 ? 0 : rootAt);
-    const state = inspect(f);
-    if (state === 'error') { found.push(f); return; }
-    if (aboveRoot && homes.includes(join(d, '.codex'))) return;
-    if (state === 'present') found.push(f);
-  });
-  for (const n of ['config.toml', 'managed_config.toml', 'requirements.toml']) if (there(join(systemDir, n))) found.push(join(systemDir, n));
-  return found;
+  const found = new Set();
+  for (const start of new Set([lexical, physical])) {
+    const dirs = ancestors(start), rootAt = dirs.findIndex(d => inspect(join(d, '.git')) !== 'absent');
+    dirs.forEach((d, i) => {
+      const f = join(d, '.codex', 'config.toml'), state = inspect(f);
+      if (state === 'error') { found.add(f); return; }
+      if (i > (rootAt < 0 ? 0 : rootAt) && homes.includes(join(d, '.codex'))) return;
+      if (state === 'present') found.add(f);
+    });
+  }
+  for (const n of ['config.toml', 'managed_config.toml', 'requirements.toml']) if (inspect(join(systemDir, n)) !== 'absent') found.add(join(systemDir, n));
+  return [...found];
 }
 
 /** What a made Codex home links from the real one: its login, and what tells the body how to work. Never its config. */
