@@ -1,5 +1,6 @@
 const profileTransport = env => env?.LOOM_BODY_PROFILE !== undefined ? { profile: env.LOOM_BODY_PROFILE, profileProblem: env.LOOM_BODY_PROFILE_PROBLEM } : {};
 import { PROFILE_CAP, CONTEXT_PROFILE_CAP, cleanProfileFloor, unknownProfileFloor, profileHostProblem } from './work-profile.mjs';
+const profileRequestProblem = (ask, report) => (ask.profileFloor !== undefined && !report?.caps?.includes(CONTEXT_PROFILE_CAP)) || profileHostProblem(ask.profile, report);
 import { ACTIONS, observation } from './ticker.mjs';
 // Bodies in the agent's own warm house (loom docs/specs/bridges.md, "Bodies before the one service"; agent-runtime.md,
 // section 5), ported from shuttle's bodies.py: delivery says who to wake and for what; a body host in the agent's
@@ -1060,7 +1061,7 @@ export class HouseRunner {
       if (host.house !== house || !houseTakes(this.env, house)) throw Object.assign(new RunnerError('its house stopped before launch reservation'), { nativeNotStarted: true });
       if (!host.report?.caps?.includes('native-admission')) throw Object.assign(new RunnerError('its body host needs the native admission protocol; update its house runtime'), { nativeNotStarted: true, hostUpgradeRequired: true });
       if (load(this.env).houses[house]?.nativeHistory?.v === 1 && !host.report?.caps?.includes('native-history')) throw Object.assign(new RunnerError('its body host needs durable native history; update its house runtime'), { nativeNotStarted: true, hostUpgradeRequired: true });
-      if ((ask.profileFloor !== undefined && !host.report?.caps?.includes(CONTEXT_PROFILE_CAP)) || profileHostProblem(ask.profile, host.report)) throw Object.assign(new RunnerError('its body host cannot enforce job profiles; update its house runtime'), { nativeNotStarted: true, hostUpgradeRequired: true });
+      if (profileRequestProblem(ask, host.report)) throw Object.assign(new RunnerError('its body host cannot enforce job profiles; update its house runtime'), { nativeNotStarted: true, hostUpgradeRequired: true });
       if (parts && !host.report?.caps?.includes('parts')) throw Object.assign(new RunnerError('its body host cannot read this brief'), { nativeNotStarted: true });
       const record = { v: 1, id, intentHash, harness: this.harness, agent: o.agent, seat, house, rid: id.slice(0, 16),
         ...(ask.profile !== undefined ? { profileRequired: true } : {}), ...(ask.profileFloor !== undefined ? { contextProfileRequired: true } : {}), state: 'reserved', at: this.now().getTime(), sealed: this.transit.seal(Buffer.from(JSON.stringify(ask))),
@@ -1192,7 +1193,7 @@ export class HouseRunner {
       const asked = hostLocked(this.env, () => {
         const h = loadHost(this.env, o.agent, seat);
         if (h.house !== house) return false;
-        if ((ask.profileFloor !== undefined && !h.report?.caps?.includes(CONTEXT_PROFILE_CAP)) || profileHostProblem(ask.profile, h.report)) return 'profile-old';
+        if (profileRequestProblem(ask, h.report)) return 'profile-old';
         if (parts && !h.report?.caps?.includes('parts')) return 'old';
         (h.req ??= {})[rid] = { at: this.now().getTime(), sealed };
         writeJson(hostFile(this.env, o.agent, seat), h);

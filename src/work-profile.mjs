@@ -1,6 +1,6 @@
 // Job declarations are selected by the runtime, never from a prompt or the house's environment.
-import { readFileSync, mkdirSync, writeFileSync, renameSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { readFileSync, mkdirSync, writeFileSync, renameSync, statSync } from 'node:fs';
+import { join, resolve, dirname } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 
 export const PROFILE_CAP = 'job-profile-v1';
@@ -96,6 +96,34 @@ export function privateJson(dir, value) {
   writeFileSync(tmp, body, { mode: 0o600, flag: 'wx' }); renameSync(tmp, file);
   return file;
 }
+// Claude reads shared settings at cwd, and local settings at the owned repository
+// root (the main checkout for worktrees), in addition to legacy cwd-local settings.
+function localSettingsRoots(cwd, home) {
+  if (!cwd) return [];
+  const here = resolve(cwd), roots = [here];
+  if (process.platform === 'win32') return roots;
+  const owned = p => { try { return statSync(p).uid === process.getuid(); } catch (e) { if (e.code === 'ENOENT') return true; throw e; } };
+  for (let dir = here; ; dir = dirname(dir)) {
+    const marker = join(dir, '.git');
+    let info;
+    try { info = statSync(marker); } catch (e) { if (!['ENOENT', 'ENOTDIR'].includes(e.code)) throw e; }
+    if (info) {
+      if (dir === resolve(home) || ![dir, marker, join(dir, '.claude')].every(owned)) break;
+      let root = dir;
+      if (info.isFile()) {
+        const match = /^gitdir: (.+)\s*$/.exec(readFileSync(marker, 'utf8').trim());
+        if (!match) throw Error('cannot resolve job profile repository settings');
+        const gitdir = resolve(dir, match[1]);
+        try { root = dirname(resolve(gitdir, readFileSync(join(gitdir, 'commondir'), 'utf8').trim())); }
+        catch (e) { if (e.code !== 'ENOENT') throw e; }
+      }
+      if ([root, join(root, '.git'), join(root, '.claude')].every(owned)) roots.push(root);
+      break;
+    }
+    if (dirname(dir) === dir) break;
+  }
+  return [...new Set(roots)];
+}
 export function claudeWorkArgs(env, cwd, jobsDir, floor = { deny: [], disabled: [] }) {
   const p = selectedProfile(env);
   if (!p) return [];
@@ -105,7 +133,7 @@ export function claudeWorkArgs(env, cwd, jobsDir, floor = { deny: [], disabled: 
   const project = cwd ? json(join(cwd, '.mcp.json')) : {};
   const scoped = conf.projects?.[resolve(cwd || home)] ?? {};
   const configDir = env.CLAUDE_CONFIG_DIR || join(home, '.claude');
-  const layers = [json(join(configDir, 'settings.json')), ...(cwd ? [json(join(cwd, '.claude/settings.json')), json(join(cwd, '.claude/settings.local.json'))] : [])];
+  const layers = [json(join(configDir, 'settings.json')), ...(cwd ? [json(join(cwd, '.claude/settings.json')), ...localSettingsRoots(cwd, home).map(root => json(join(root, '.claude/settings.local.json')))] : [])];
   const disabled = new Set([...floor.disabled, ...[conf, scoped, project, ...layers].flatMap(c => [...(c.disabledMcpServers ?? []), ...(c.disabledMcpjsonServers ?? []), ...Object.entries(c.mcpServers ?? {}).filter(([,v]) => v?.enabled === false).map(([n]) => n)])]);
   const all = Object.fromEntries(Object.entries({ ...conf.mcpServers, ...scoped.mcpServers, ...project.mcpServers }).filter(([name]) => !disabled.has(name)));
   const servers = workServers(all, p);

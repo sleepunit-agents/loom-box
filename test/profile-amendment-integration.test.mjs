@@ -175,3 +175,24 @@ test('public profile command forwards its own proof and publishes the exact amen
     assert.equal(flag('--details'), `Job: ${expected.key}\nAdded declarations:\ntools: Read\nRevision: ${expected.before}`);
   } finally { await new Promise(resolve => server.close(resolve)); rmSync(root, { recursive: true, force: true }); }
 });
+
+test('owner callback visibly refuses missing flock without publishing a profile', async () => {
+  const cp = await import('node:child_process'), mutable = cp.default, original = mutable.spawnSync;
+  const root = mkdtempSync(join(tmpdir(), 'profile-no-flock-')), file = join(root, 'profiles.json');
+  try {
+    const key = jobProfileKey({ agent: 'art', venue: 'wake', kind: 'scheduled' }), initial = { v: 1, jobs: { [key]: minimalProfile() } };
+    const a = amendment(key, minimalProfile(), 'tools', 'Read');
+    writeFileSync(file, JSON.stringify(initial)); fs.mkdirSync(`${file}.requests`);
+    writeFileSync(`${file}.requests/${a.target.split(':')[1]}.json`, JSON.stringify({ agent: 'art', amendment: a }));
+    let missing = false;
+    mutable.spawnSync = (command, ...args) => {
+      if (command !== '/usr/bin/flock') return original(command, ...args);
+      missing = true; return { status: null, error: Object.assign(new Error('spawn flock ENOENT'), { code: 'ENOENT' }) };
+    }; syncBuiltinESMExports();
+    const result = act({ HOME: root, LOOM_RUNTIME_JOB_PROFILES: file, LOOM_RUNTIME_TEST_STORE: {}, LOOM_RUNTIME_TEST_APPROVALS: { spend: () => '' } }, {},
+      { action: 'grant-approved', fields: { id: 'a-12345678', agent: 'art', target: a.target }, caller: { kind: 'owner', agents: '*' } });
+    assert.equal(missing, true); assert.equal(result.ok, false);
+    assert.match(result.message, /Job profile unchanged:.*cannot acquire its kernel lock/);
+    assert.deepEqual(JSON.parse(readFileSync(file)), initial);
+  } finally { mutable.spawnSync = original; syncBuiltinESMExports(); rmSync(root, { recursive: true, force: true }); }
+});

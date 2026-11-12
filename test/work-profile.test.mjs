@@ -310,3 +310,23 @@ test('declared MCP needs its own data server definition, never a prototype prope
     assert.deepEqual(workServers({ [name]: { command: 'fixture' } }, p), { [name]: { command: 'fixture' } });
   }
 });
+
+for (const worktree of [false, true]) test(`nested cwd retains repository local denies and disabled servers${worktree ? ' from main checkout' : ''}`, () => fixture(root => {
+  const home = join(root, 'home'), repo = join(root, 'repo'), cwd = join(repo, 'packages/api'), main = worktree ? join(root, 'main') : repo;
+  mkdirSync(home); mkdirSync(join(cwd, '.claude'), { recursive: true }); mkdirSync(join(main, '.claude'), { recursive: true });
+  if (worktree) {
+    const gitdir = join(main, '.git/worktrees/fixture'); mkdirSync(gitdir, { recursive: true });
+    writeFileSync(join(repo, '.git'), `gitdir: ${gitdir}\n`); writeFileSync(join(gitdir, 'commondir'), '../..\n');
+  } else mkdirSync(join(repo, '.git'));
+  writeFileSync(join(main, '.claude/settings.local.json'), JSON.stringify({ permissions: { deny: ['Read(/root-private)'] }, disabledMcpServers: ['blocked'] }));
+  writeFileSync(join(cwd, '.claude/settings.json'), JSON.stringify({ permissions: { deny: ['Write(/cwd-private)'] } }));
+  writeFileSync(join(cwd, '.claude/settings.local.json'), JSON.stringify({ permissions: { deny: ['Bash(rm *)'] } }));
+  // Shared repository-root settings do not apply to a nested launch; preserve the native scopes.
+  writeFileSync(join(main, '.claude/settings.json'), JSON.stringify({ permissions: { deny: ['Read(/not-applicable)'] } }));
+  const env = { HOME: home, LOOM_BODY_PROFILE: JSON.stringify(profile({ tools: ['Read'] })) }, floor = { deny: [], disabled: [] };
+  const args = claudeWorkArgs(env, cwd, join(root, 'jobs'), floor);
+  assert.deepEqual(new Set(JSON.parse(readFileSync(args[args.indexOf('--settings') + 1])).permissions.deny), new Set(['Write(/cwd-private)', 'Bash(rm *)', 'Read(/root-private)', 'Skill']));
+  assert.deepEqual(floor.disabled, ['blocked']);
+  writeFileSync(join(cwd, '.mcp.json'), JSON.stringify({ mcpServers: { blocked: { command: 'must-not-run' } } }));
+  assert.throws(() => claudeWorkArgs({ ...env, LOOM_BODY_PROFILE: JSON.stringify(profile({ mcp: ['blocked'], secrets: ['mcp.blocked'] })) }, cwd, join(root, 'jobs')), /unavailable/);
+}));
