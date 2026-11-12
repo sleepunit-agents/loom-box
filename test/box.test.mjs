@@ -953,3 +953,41 @@ test('startup sweeps assigned and historical house waits once per runtime', asyn
   await box.tick(); await box.tick();
   assert.deepEqual(calls,[['loom-house-h-811','loom-house-h-812','loom-house-h-800']]);
 });
+
+test('final numeric snapshot survives a lost poll reply and runner restart before native cleanup', async () => {
+  agentRepo(repo); setAgent(); podmanCfg({ run: 'sleep' });
+  const logs = [];
+  r = runner(env, client, { loomUrl: 'http://loom.test/mcp', reportJobs: async () => {}, log: m => logs.push(m) });
+  const h = up();
+  await r.tick(); await until(() => house(h.id).state === 'running');
+  await until(() => existsSync(join(fake, 'runs', `loom-house-${h.id}.pid`)));
+  const file = join(env.LOOM_BOX_DATA, 'houses', h.id, 'native', 'claude-projects', 'test.jsonl');
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, JSON.stringify({ type: 'assistant', sessionId: 'usage-session', timestamp: '2026-11-12T14:00:00Z', message: { id: 'msg', model: 'claude-test', content: 'PRIVATE', usage: { input_tokens: 10, output_tokens: 2 } } }) + '\n');
+  const original = client.call.bind(client); let dropped = false;
+  client.call = async (path, body) => {
+    const answer = await original(path, body);
+    if (body.jobUsage && !dropped) { dropped = true; throw Error('numeric snapshot committed but reply lost'); }
+    return answer;
+  };
+  try {
+    spawnSync(env.LOOM_BOX_PODMAN, ['stop', `loom-house-${h.id}`], { env: { PATH: env.PATH, HOME: env.HOME } });
+    await until(() => dropped); await until(() => logs.some(m => m.includes('numeric snapshot committed')));
+    assert.ok(existsSync(file)); assert.equal(house(h.id).state, 'running');
+    const fresh = runner(env, client, { loomUrl: 'http://loom.test/mcp', reportJobs: async () => {}, log: () => {} });
+    await fresh.tick(); await until(() => ['done', 'failed', 'stopped'].includes(house(h.id).state)).catch(() => { throw Error(JSON.stringify({ logs, house: house(h.id) })); });
+    assert.equal(existsSync(file), false);
+    const snapshots = Object.values(load(env).boxes.one.jobUsage);
+    assert.equal(snapshots.length, 1); assert.equal(snapshots[0].totalTokens, 12);
+    assert.doesNotMatch(JSON.stringify(snapshots), /PRIVATE|test.jsonl/);
+  } finally { spawnSync(env.LOOM_BOX_PODMAN, ['stop', `loom-house-${h.id}`], { env: { PATH: env.PATH, HOME: env.HOME } }); }
+});
+
+test('periodic job sampling runs beside polls and retries at the next health interval', async () => {
+  let now = 1000000, calls = 0;
+  const box = runner(env, client, { loomUrl: 'http://loom.test/mcp', clock: () => now,
+    reportJobs: async () => { calls++; if (calls === 1) throw Error('offline'); }, sampleHealth: () => null, sampleUnits: () => null, bootInfo: () => null, log: () => {} });
+  await box.tick(); await box.settled(); assert.equal(calls, 1);
+  await box.tick(); await box.settled(); assert.equal(calls, 1);
+  now += 60000; await box.tick(); await box.settled(); assert.equal(calls, 2);
+});

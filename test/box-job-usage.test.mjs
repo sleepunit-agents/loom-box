@@ -70,3 +70,55 @@ test('API serves retained reports, limits agents to their own and refuses boxes'
   assert.equal((await api(env, fx, { caller: agent, path: 'job-usage', body: { agent: 'mark' } })).status, 403);
   assert.equal((await api(env, fx, { caller: box, path: 'job-usage', body: {} })).status, 403);
 });
+
+test('retained slot enriches session with conversation and preserves agent isolation', async () => {
+  const { saveConv } = await import('../src/delivery.mjs');
+  const { env, owner, h, box } = setup();
+  saveConv(env, { conversation: 'cv-123456abcdef', agent: 'art', slot: { harness: 'claude', session: 'session-a' } });
+  api(env, fx, { caller: box, path: 'poll', body: { jobUsage: { house: h.id, jobs: [row()] } } });
+  const r = await api(env, fx, { caller: owner, path: 'job-usage', body: { day: 'all' } });
+  assert.equal(r.body.jobs[0].conversation, 'cv-123456abcdef');
+  assert.equal(r.body.jobs[0].currentRun, undefined);
+});
+
+test('default CLI routes filters to the runtime rather than scanning its own house', async () => {
+  const { createServer } = await import('node:http');
+  const { spawn, spawnSync } = await import('node:child_process');
+  const dir = scratch('usage-cli-'), tokenFile = join(dir, 'token');
+  writeFileSync(tokenFile, 'test-token');
+  let request;
+  const server = createServer(async (req, res) => {
+    const chunks = []; for await (const c of req) chunks.push(c);
+    request = { url: req.url, body: JSON.parse(Buffer.concat(chunks)) };
+    res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ jobs: [{ box: 'remote-box' }] }));
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const child = spawn(process.execPath, ['src/cli.mjs', 'usage', 'jobs', '--agent', 'art', '--box', 'wunder', '--day', 'all', '--limit', '1'], { cwd: new URL('..', import.meta.url), env: { ...process.env, LOOM_URL: `http://127.0.0.1:${server.address().port}/mcp`, LOOM_TOKEN_FILE: tokenFile } });
+    let stdout = '', stderr = ''; child.stdout.on('data', x => { stdout += x; }); child.stderr.on('data', x => { stderr += x; });
+    const code = await new Promise(resolve => child.on('close', resolve));
+    assert.equal(code, 0, stderr); assert.equal(JSON.parse(stdout).jobs[0].box, 'remote-box');
+    const offline = spawnSync(process.execPath, ['src/cli.mjs', 'usage', 'jobs', '--root', dir, '--agent', 'art'], { cwd: new URL('..', import.meta.url), encoding: 'utf8' });
+    assert.equal(offline.status, 2); assert.match(offline.stderr, /require the runtime report/);
+    assert.match(request.url, /\/job-usage$/); assert.deepEqual(request.body, { agent: 'art', box: 'wunder', day: 'all', limit: 1 });
+  } finally { await new Promise(resolve => server.close(resolve)); }
+});
+
+test('standalone body owns local native history; local box name filters and current-run enriches', async () => {
+  const { commitPreparedBody } = await import('../src/bodies.mjs');
+  const { saveConv } = await import('../src/delivery.mjs');
+  const { update } = await import('../src/state.mjs');
+  const { env, agent } = setup();
+  update(env, s => { s.boxes.local.name = 'Art machine'; });
+  const file = join(env.HOME, '.claude', 'projects', 'session.jsonl');
+  mkdirSync(join(env.HOME, '.claude', 'projects'), { recursive: true });
+  writeFileSync(file, JSON.stringify({ type: 'assistant', sessionId: 'session-a', timestamp: at, message: { id: 'msg', model: 'claude-test', usage: { input_tokens: 10, output_tokens: 2 } } }));
+  const native = { harness: 'claude', session: 'session-a' };
+  commitPreparedBody(env, { metadata: { agent: 'art', harness: 'claude', local: true, instance: 'a'.repeat(24) } }, { id: 'abcdef12', harness: 'claude', slot: native }, at);
+  const query = () => api(env, fx, { caller: agent, path: 'job-usage', body: { box: 'Art machine', day: 'all' } });
+  const standalone = await query(); assert.equal(standalone.body.jobs.length, 1);
+  assert.equal(standalone.body.jobs[0].agent, 'art'); assert.equal(standalone.body.jobs[0].totalTokens, 12); assert.equal(standalone.body.jobs[0].boxName, 'Art machine');
+  saveConv(env, { conversation: 'cv-123456abcdef', agent: 'art', body: 'claude:abcdef12', run: 'run-123456abcdef' });
+  const associated = (await query()).body.jobs[0];
+  assert.equal(associated.conversation, 'cv-123456abcdef'); assert.equal(associated.currentRun, 'run-123456abcdef');
+});

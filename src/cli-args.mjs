@@ -23,7 +23,7 @@ export const commandFlags = {
   place: 'piece=', host: 'approval= conversation= since= lines= cause= why= alert= days= hours= piece=', 'host-exec': 'once', file: 'conversation= out= piece=',
   relay: 'agent= house= service= to= say= why= reply-to= from= approval= conversation= json', relays: 'thread= json',
   'secrets-map': 'json', gates: 'json agent= from= stdin force', policy: 'json agent=',
-  accounts: 'json', logins: 'json', login: '', usage: 'harness= session= root= day= timezone= limit= json', help: '',
+  accounts: 'json', logins: 'json', login: '', usage: 'harness= session= root= day= timezone= limit= agent= box= json', help: '',
 };
 
 export function checkArgs(argv) {

@@ -2,7 +2,7 @@ import { load, localBoxName, StateError } from './state.mjs';
 import { usageJobs, defaultUsageRoots } from './job-usage.mjs';
 import { numericJob, mergeJobUsage } from './box-job-usage.mjs';
 import { listConvs } from './delivery.mjs';
-import { readBody } from './bodies.mjs';
+import { readBody, listBodies } from './bodies.mjs';
 
 export async function jobUsageReport(env, caller, options = {}) {
   const { agent, box, day, timezone, limit = 10 } = options;
@@ -11,6 +11,10 @@ export async function jobUsageReport(env, caller, options = {}) {
   const who = caller.kind === 'agent' ? caller.agent : agent;
   const s = load(env), localBox = Object.keys(s.boxes).find(k => s.boxes[k].local) ?? localBoxName(env);
   const identities = new Map();
+  for (const body of listBodies(env, { accounts: [], runner: () => ({ status: () => 'unknown' }) })) {
+    const slot = body.slot;
+    if (slot?.session && slot?.harness) identities.set(`${body.agent}:${slot.harness}:${slot.session}`, {});
+  }
   for (const c of listConvs(env)) {
     let body;
     try { if (c.body) body = readBody(env, c.body); } catch { /* no native identity yet */ }
@@ -30,7 +34,7 @@ export async function jobUsageReport(env, caller, options = {}) {
   // unassociated terminal histories on loom's machine.
   const local = (await usageJobs({ roots: defaultUsageRoots(env), day: 'all', limit: Infinity })).jobs.map(numericJob).map(r => {
     const matches = [...identities].filter(([key]) => key.endsWith(`:${r.harness}:${r.session}`));
-    return { ...r, ...(matches.length === 1 ? { agent: matches[0][0].split(':')[0], ...matches[0][1] } : {}) };
+    return { ...r, boxName: s.boxes[localBox]?.name ?? localBox, ...(matches.length === 1 ? { agent: matches[0][0].split(':')[0], ...matches[0][1] } : {}) };
   }).filter(r => !who || r.agent === who);
   return mergeJobUsage(local, reports, { day, timezone, limit, agent: who, box, localBox });
 }
