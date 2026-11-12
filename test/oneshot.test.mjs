@@ -264,3 +264,20 @@ test('managed cold review canonicalizes aliased HOME and still refuses physical 
   await assert.rejects(runOneShot(env, { input: 'p', cwd: tree }, opts), /configuration outside/);
   assert.equal(runs, 1);
 });
+
+test('symlinked user .codex is replaced, while another ancestor alias to it is rejected', async () => {
+  const env = setup(), settings = join(env.HOME, 'settings'), tree = join(env.HOME, 'parent', 'tree');
+  env.CODEX_HOME = join(env.HOME, 'managed');
+  mkdirSync(env.CODEX_HOME); writeFileSync(join(env.CODEX_HOME, 'auth.json'), '{}');
+  mkdirSync(settings); writeFileSync(join(settings, 'config.toml'), '');
+  symlinkSync(settings, join(env.HOME, '.codex'));
+  mkdirSync(tree, { recursive: true });
+  let runs = 0;
+  const opts = { warn: () => {}, call: async () => ({ model: 'm', harness: 'codex' }), run: async () => {
+    runs++; return { status: 0, stdout: JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'ok' } }) };
+  } };
+  assert.equal(await runOneShot(env, { input: 'p', cwd: tree }, opts), 'ok');
+  symlinkSync(settings, join(env.HOME, 'parent', '.codex'));
+  await assert.rejects(runOneShot(env, { input: 'p', cwd: tree }, opts), /configuration outside/);
+  assert.equal(runs, 1);
+});

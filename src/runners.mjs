@@ -557,7 +557,11 @@ export function codexLayers(cwd, { realHome, userHome, systemDir = '/etc/codex' 
     physical = lexical; // A nonexistent cwd cannot execute; retain lexical layer checks.
   }
   const homes = [realHome, userHome && join(userHome, '.codex')].filter(Boolean).flatMap(home => {
-    try { return [realpathSync(home)]; } catch { return []; } // An uninspectable home earns no exception.
+    const path = resolve(home);
+    if (path !== join(dirname(path), '.codex')) return [];
+    // Compare the user directory, not the .codex target: the latter may itself
+    // be a symlink, but an unrelated ancestor alias must not earn an exception.
+    try { return [join(realpathSync(dirname(path)), '.codex')]; } catch { return []; }
   });
   const dirsUp = [];
   for (let d = physical; ; d = dirname(d)) { dirsUp.push(d); if (dirname(d) === d) break; }
