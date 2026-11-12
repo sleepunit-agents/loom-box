@@ -21,7 +21,7 @@ export const profileHostProblem = (profile, report) => profile !== undefined && 
 const FIELDS = ['mcp', 'tools', 'skills', 'secrets'];
 const NAME = /^[A-Za-z_][A-Za-z0-9_.-]{0,127}$/;
 export const CLAUDE_TOOLS = new Set(['Task', 'Bash', 'CronCreate', 'CronDelete', 'CronList', 'DesignSync', 'Edit', 'EnterWorktree', 'ExitWorktree', 'ListAgents', 'ListMcpResourcesTool', 'Monitor', 'NotebookEdit', 'PushNotification', 'Read', 'ReadMcpResourceDirTool', 'ReadMcpResourceTool', 'RemoteTrigger', 'ReportFindings', 'ScheduleWakeup', 'SendMessage', 'TaskStop', 'ToolSearch', 'WebSearch', 'Workflow', 'Write']);
-const forbiddenSecret = k => BASE_ENV.includes(k) || (/^(LOOM_|CLAUDE_|CODEX_|ANTHROPIC_|OPENAI_|NODE_|BASH_|LD_|DYLD_|ENV$|API_TIMEOUT_MS$|SSL_CERT_FILE$|SSL_CERT_DIR$)/.test(k) && !['LOOM_URL', 'LOOM_TOKEN', 'LOOM_TOKEN_FILE'].includes(k)) || /^(https?_proxy|all_proxy|no_proxy)$/i.test(k);
+const forbiddenSecret = k => BASE_ENV.includes(k) || (/^(LOOM_|CLAUDE_|CODEX_|ANTHROPIC_|OPENAI_|NODE_|BASH_|LD_|DYLD_|ENV$|DISABLE_AUTOUPDATER$|API_TIMEOUT_MS$|SSL_CERT_FILE$|SSL_CERT_DIR$)/.test(k) && !['LOOM_URL', 'LOOM_TOKEN', 'LOOM_TOKEN_FILE'].includes(k)) || /^(https?_proxy|all_proxy|no_proxy)$/i.test(k);
 export const minimalProfile = () => ({ v: 1, mcp: [], tools: [], skills: [], secrets: [] });
 export function validateProfile(p) {
   if (!p || p.v !== 1 || Object.keys(p).some(k => !['v', ...FIELDS].includes(k))) throw Error('invalid job profile version or field');
