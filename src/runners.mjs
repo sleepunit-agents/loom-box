@@ -549,7 +549,8 @@ export function codexDeny(deny) {
  * → the paths found ([] for none). A path that can't be looked at counts as found.
  */
 export function codexLayers(cwd, { realHome, userHome, systemDir = '/etc/codex' } = {}) {
-  const there = (p) => { try { lstatSync(p); return true; } catch (e) { return !['ENOENT', 'ENOTDIR'].includes(e.code); } };
+  const inspect = (p) => { try { lstatSync(p); return 'present'; } catch (e) { return ['ENOENT', 'ENOTDIR'].includes(e.code) ? 'absent' : 'error'; } };
+  const there = p => inspect(p) !== 'absent';
   const lexical = resolve(cwd ?? process.cwd());
   let physical;
   try { physical = realpathSync(lexical); } catch (e) {
@@ -570,8 +571,10 @@ export function codexLayers(cwd, { realHome, userHome, systemDir = '/etc/codex' 
   dirsUp.forEach((d, i) => {
     const f = join(d, '.codex', 'config.toml');
     const aboveRoot = i > (rootAt < 0 ? 0 : rootAt);
+    const state = inspect(f);
+    if (state === 'error') { found.push(f); return; }
     if (aboveRoot && homes.includes(join(d, '.codex'))) return;
-    if (there(f)) found.push(f);
+    if (state === 'present') found.push(f);
   });
   for (const n of ['config.toml', 'managed_config.toml', 'requirements.toml']) if (there(join(systemDir, n))) found.push(join(systemDir, n));
   return found;

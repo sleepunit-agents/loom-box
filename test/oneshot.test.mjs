@@ -281,3 +281,16 @@ test('symlinked user .codex is replaced, while another ancestor alias to it is r
   await assert.rejects(runOneShot(env, { input: 'p', cwd: tree }, opts), /configuration outside/);
   assert.equal(runs, 1);
 });
+
+test('uninspectable user config fails closed even above the frozen tree', async () => {
+  const env = setup(), tree = join(env.HOME, 'frozen');
+  env.CODEX_HOME = join(env.HOME, 'managed');
+  mkdirSync(env.CODEX_HOME); writeFileSync(join(env.CODEX_HOME, 'auth.json'), '{}');
+  mkdirSync(tree);
+  symlinkSync('.codex', join(env.HOME, '.codex'));
+  let launched = false;
+  await assert.rejects(runOneShot(env, { input: 'p', cwd: tree }, {
+    warn: () => {}, call: async () => ({ model: 'm', harness: 'codex' }), run: async () => { launched = true; },
+  }), /configuration outside/);
+  assert.equal(launched, false);
+});
