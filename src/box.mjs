@@ -26,6 +26,7 @@ import { PART_RAW, joinParts, partsOf } from './blobs.mjs';
 import { boxSessions } from './remote.mjs';
 import { sessionsBusy } from './busy.mjs';
 import { bootInfo, SAMPLE_MS, unitSampler } from './watch.mjs';
+import { reportHouseJobs, reportBoxJobs } from './box-job-usage.mjs';
 import { sampleHealth } from './health.mjs';
 import { harnessStatus, machineClaudeStatus, LOGIN_HARNESSES, loginDir, pruneLoginDir, startLogin, sweepCliContainers } from './logins.mjs';
 import { COLLECTION_TIMEOUT, collectNativeHistory } from './native-collection-client.mjs';
@@ -472,7 +473,7 @@ function rootless(env) {
 export function runner(env, client, { loomUrl, labels = [], log = (m) => process.stderr.write(`loom-box: ${m}\n`), hasSocket = (p) => existsSync(p), hasCdi = () => CDI_SPECS.some((p) => existsSync(p)), upgrade = maybeUpgrade,
   machineLogin = false, machineStatus = () => machineClaudeStatus(env), status = (agents, force) => harnessStatus(env, { agents, force }), login = (h, o) => startLogin(env, h, o), codexUsage = () => null, clock = () => Date.now(), secureChannel = true,
   sweep = () => sweepCliContainers(env), runtime = () => ({ commit: ownCommit(), piece: ownPiece() }),
-  buildOf = (c) => buildNow(env, c), houseImage = (id) => imageOf(env, id), sampleUnits: unitsImpl = undefined, bootInfo: bootImpl = undefined, sampleHealth: healthImpl = undefined, reportOnly = undefined, collectionGiveUpMs = collectionGiveUpOf(env),
+  buildOf = (c) => buildNow(env, c), houseImage = (id) => imageOf(env, id), sampleUnits: unitsImpl = undefined, bootInfo: bootImpl = undefined, sampleHealth: healthImpl = undefined, reportJobs: jobsImpl = undefined, reportOnly = undefined, collectionGiveUpMs = collectionGiveUpOf(env),
   reapWaits = async names => { await waitForHouseWaits(reapHouseWaits(podman(env), names, '/proc', process.kill, env.PATH)); } }) {
   const houses = new Map(); // id -> { child, dir, stopAt? }
   // This runner, as the control plane tells it from one before it: a login handed to another run is one a restart
@@ -732,6 +733,7 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
       keepEnding(e);
       if (d.stateful === null) throw Error('the control plane has not supplied this house’s state requirements yet');
       if (d.native && !d.nativeUploaded) {
+        await reportHouseJobs(client, d.id, e.dir);
         let receipt;
         if (d.nativeNotStarted) receipt = await client.call('native-collection', { id: d.id, phase: 'not-started', physical: 'not-started' });
         else {
@@ -903,12 +905,18 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
   const sampleUnits = unitsImpl ?? unitSampler(env);
   const readBoot = bootImpl ?? (() => bootInfo());
   // The units' sample and health's (its 5 s window) run beside the polls, each sent with the first poll after it's done.
+  const takeJobs = jobsImpl ?? (() => reportBoxJobs(client, pathJoin(dataDir(env), 'houses')));
+  let jobsAt = -Infinity, jobsBusy = false;
   const takeHealth = healthImpl ?? (() => sampleHealth());
   let unitsAt = 0, unitsDone = null, unitsBusy = false, healthAt = 0, healthDone = null, healthBusy = false;
   // Report-only (joined with --report-only): it says so on every poll, and takes nothing.
   let reportOnlyHere = reportOnly;
   if (reportOnlyHere === undefined) { try { reportOnlyHere = !!JSON.parse(readFileSync(configPath(env), 'utf-8')).reportOnly; } catch { reportOnlyHere = false; } }
   function watchReport() {
+    if (!jobsBusy && clock() - jobsAt >= SAMPLE_MS) {
+      jobsAt = clock(); jobsBusy = true;
+      Promise.resolve().then(takeJobs).catch(e => log(`job usage: ${e.message}`)).finally(() => { jobsBusy = false; });
+    }
     const out = {};
     if (reportOnlyHere) out.reportOnly = true;
     try { const b = readBoot(); if (b) out.boot = b; } catch { /* left out */ }
@@ -927,7 +935,7 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
     return out;
   }
   /** For a test: the units' sample under way, done. */
-  async function settled() { while (unitsBusy || healthBusy) await new Promise((r) => setTimeout(r, 5)); }
+  async function settled() { while (unitsBusy || healthBusy || jobsBusy) await new Promise((r) => setTimeout(r, 5)); }
 
   async function tick({ wait = true } = {}) {
     // Which remote sessions here are mid-turn (busy.mjs): loom shows it on the agents' cards (t-1624).

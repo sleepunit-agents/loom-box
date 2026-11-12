@@ -1,3 +1,4 @@
+import { acceptJobUsage } from './box-job-usage.mjs';
 import { hostStopLock, hasHostSession, nativeCollectionExchange } from './houserunner.mjs';
 import { checkLoginExpiry } from './login-expiry.mjs';
 // The control plane's half of the runtime (loom docs/specs/runtime.md): what
@@ -1824,7 +1825,14 @@ const OWNER_ONLY = {
 };
 /** The box's own owner's (assertBoxOwner): its logins and Update now. */
 export const BOX_OWNER_ONLY = { 'login-start': loginStart, 'login-code': loginCode, 'login-cancel': loginCancel, 'box-update-now': boxUpdateNow };
-const BOX_ONLY = { hello, poll, claim, report, 'native-collection': nativeCollection, 'collection-status': collectionStatus, 'build-check': buildCheck, 'build-report': buildReport, 'save-state': saveState, 'state-part': statePart, 'remote-report': remoteReport, 'login-report': loginReport };
+function reportJobUsage(env, effects, caller, body) {
+  return update(env, s => {
+    boxOf(s, caller);
+    acceptJobUsage(s, caller.subject, body, now(effects));
+    return { ok: true };
+  });
+}
+const BOX_ONLY = { 'job-usage-report': reportJobUsage, hello, poll, claim, report, 'native-collection': nativeCollection, 'collection-status': collectionStatus, 'build-check': buildCheck, 'build-report': buildReport, 'save-state': saveState, 'state-part': statePart, 'remote-report': remoteReport, 'login-report': loginReport };
 
 /** One API call, as loom's piece API hands it over: {caller, path, body} → {status, body}. */
 export function api(env, effects, { caller, path, body }) {
@@ -1844,6 +1852,9 @@ export function api(env, effects, { caller, path, body }) {
     if (caller.kind === 'piece') fail(`a box can't ${path || 'do that'}`, 403);
     if (caller.kind !== 'owner' && caller.kind !== 'agent') fail('not for you', 403);
     // A body host, in its agent's house, as that house's own token (houserunner.mjs).
+    if (path === 'job-usage') {
+      return import('./job-usage-report.mjs').then(m => m.jobUsageReport(env, caller, b)).then(body => ({ status: 200, body })).catch(apiError);
+    }
     if (path === 'body-health') return import('./houserunner.mjs').then(m => ({ status: 200, body: m.bodyHealth(env, caller, b) })).catch(apiError);
     if (path === 'body-sync') {
       if (caller.kind !== 'agent') fail('body-sync is a body host\'s, in its agent\'s house', 403);
