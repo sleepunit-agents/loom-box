@@ -294,3 +294,16 @@ test('uninspectable user config fails closed even above the frozen tree', async 
   }), /configuration outside/);
   assert.equal(launched, false);
 });
+
+test('uninspectable user config file target fails closed before the home exception', async () => {
+  const env = setup(), tree = join(env.HOME, 'frozen');
+  env.CODEX_HOME = join(env.HOME, 'managed');
+  mkdirSync(env.CODEX_HOME); writeFileSync(join(env.CODEX_HOME, 'auth.json'), '{}');
+  mkdirSync(tree); mkdirSync(join(env.HOME, '.codex'));
+  symlinkSync('config.toml', join(env.HOME, '.codex', 'config.toml'));
+  let launched = false;
+  await assert.rejects(runOneShot(env, { input: 'p', cwd: tree }, {
+    warn: () => {}, call: async () => ({ model: 'm', harness: 'codex' }), run: async () => { launched = true; },
+  }), /configuration outside/);
+  assert.equal(launched, false);
+});

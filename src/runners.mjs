@@ -549,7 +549,7 @@ export function codexDeny(deny) {
  * → the paths found ([] for none). A path that can't be looked at counts as found.
  */
 export function codexLayers(cwd, { realHome, userHome, systemDir = '/etc/codex' } = {}) {
-  const inspect = (p) => { try { lstatSync(p); return 'present'; } catch (e) { return ['ENOENT', 'ENOTDIR'].includes(e.code) ? 'absent' : 'error'; } };
+  const inspect = (p) => { try { lstatSync(p); statSync(p); return 'present'; } catch (e) { return ['ENOENT', 'ENOTDIR'].includes(e.code) ? 'absent' : 'error'; } };
   const there = p => inspect(p) !== 'absent';
   const lexical = resolve(cwd ?? process.cwd());
   let physical;
