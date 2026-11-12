@@ -1,3 +1,4 @@
+import { acceptJobUsage } from './box-job-usage.mjs';
 import { hostStopLock, hasHostSession, nativeCollectionExchange } from './houserunner.mjs';
 import { checkLoginExpiry } from './login-expiry.mjs';
 // The control plane's half of the runtime (loom docs/specs/runtime.md): what
@@ -728,7 +729,7 @@ export function poll(env, effects, caller, body = {}) {
   return out;
 }
 
-function pollState(env, effects, caller, { facts, sessions, harnesses, machineHarnesses, usage, loginsRunning, runtime, reportOnly } = {}) {
+function pollState(env, effects, caller, { facts, sessions, harnesses, machineHarnesses, usage, loginsRunning, runtime, reportOnly, jobUsage } = {}) {
   const f = facts === undefined ? null : listOf(facts, 'facts', FACT, 32);
   const running = runningReport(loginsRunning);
   const rt = runtimeReport(runtime);
@@ -739,6 +740,7 @@ function pollState(env, effects, caller, { facts, sessions, harnesses, machineHa
     ? Object.fromEntries(Object.entries(sessions).filter(([k, v]) => SESSION_KEY.test(k) && typeof v === 'boolean').slice(0, 20)) : null;
   return update(env, (s) => {
     const b = boxOf(s, caller);
+    if (jobUsage !== undefined) acceptJobUsage(s, caller.subject, jobUsage, now(effects));
     if (f) b.facts = f;
     // A box may make itself report-only (joined with --report-only); only the owner may undo it.
     // Once: the box asks (joined with --report-only), and the owner's word after that stands, off included.
@@ -1844,6 +1846,9 @@ export function api(env, effects, { caller, path, body }) {
     if (caller.kind === 'piece') fail(`a box can't ${path || 'do that'}`, 403);
     if (caller.kind !== 'owner' && caller.kind !== 'agent') fail('not for you', 403);
     // A body host, in its agent's house, as that house's own token (houserunner.mjs).
+    if (path === 'job-usage') {
+      return import('./job-usage-report.mjs').then(m => m.jobUsageReport(env, caller, b)).then(body => ({ status: 200, body })).catch(apiError);
+    }
     if (path === 'body-health') return import('./houserunner.mjs').then(m => ({ status: 200, body: m.bodyHealth(env, caller, b) })).catch(apiError);
     if (path === 'body-sync') {
       if (caller.kind !== 'agent') fail('body-sync is a body host\'s, in its agent\'s house', 403);

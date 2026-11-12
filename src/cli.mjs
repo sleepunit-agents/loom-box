@@ -91,7 +91,7 @@
 //   loom runtime usage report --harness claude|codex < output.jsonl    how full its account is, from the harness's run
 //                                                                      output (stream-json, or a Codex rollout)
 //   loom runtime usage report --harness claude --session <id>         … from a Claude session's status line (usage statusline)
-//   loom runtime usage jobs [--root PATH]... [--day YYYY-MM-DD|all] [--timezone TZ] [--limit N]  native token traffic
+//   loom runtime usage jobs [--root PATH]... [--day YYYY-MM-DD|all] [--timezone TZ] [--limit N] [--agent a] [--box b]  native token traffic
 //   loom runtime usage statusline                                      a Claude status line command: keeps its rate limits
 // Permissions (agent-runtime.md, section 6; the runtime is the grants authority, and holds the gates):
 //   loom runtime grants ask | list [--json] | seed [--dry-run] [--force] | set <piece> <agents|*> [--paths p,p] | paired <a> <b>
@@ -903,7 +903,10 @@ async function main(argv, env) {
         for (let i = 1; i < rest.length; i++) if (rest[i] === '--root') roots.push(rest[++i]);
         const limit = Number(flag(rest, '--limit') ?? 10);
         if (!Number.isInteger(limit) || limit < 1 || limit > 10000 || roots.some(r => !r)) throw new Fail('usage jobs: --limit 1–10000, --root PATH (repeatable)', 2);
-        return out(await usageJobs({ ...(roots.length ? { roots } : {}), day: flag(rest, '--day'), timezone: flag(rest, '--timezone'), limit }));
+        const options = { day: flag(rest, '--day'), timezone: flag(rest, '--timezone'), limit, agent: flag(rest, '--agent'), box: flag(rest, '--box') };
+        if (!roots.length) return out(await ownerOrRemote(env)('job-usage', options));
+        if (options.agent || options.box) throw new Fail('--agent and --box require the runtime report (no --root)', 2);
+        return out(await usageJobs({ roots, day: options.day, timezone: options.timezone, limit }));
       }
       // A Claude session's status line (statusline.mjs): its rate limits kept by session, for `report --session`.
       if (rest[0] === 'statusline') {
