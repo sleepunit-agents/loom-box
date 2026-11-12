@@ -464,7 +464,7 @@ test('a body is asked of the runtime: it picks the model, starts it through the 
   assert.deepEqual(continued.deny,['mcp__github','Read(private)','Write(other)']);
   // Resumed from a slot another machine kept. Its unproved deny floor stays minimal.
   env.LOOM_RUNTIME_JOB_PROFILES=join(env.HOME,'unknown-profiles.json');
-  writeFileSync(env.LOOM_RUNTIME_JOB_PROFILES,JSON.stringify({v:1,jobs:{[JSON.stringify(['art','session','live',null])]:{v:1,mcp:[],tools:['Read'],skills:[],secrets:[]}}}));
+  writeFileSync(env.LOOM_RUNTIME_JOB_PROFILES,JSON.stringify({v:1,jobs:{[JSON.stringify(['art','session','live',null])]:{v:1,mcp:[],tools:['Read'],skills:[],secrets:['UNAVAILABLE_PROFILE_SECRET']}}}));
   const s = await resumeBody(env, { slot: { harness: 'claude', session: 'abc' }, agent: 'art', venue: 'session', brief: 'hi' }, { ...o, accounts: staticAccounts({ accounts: [acct('max', 'anthropic')] }) });
   assert.deepEqual([s.harness, s.model, s.kind], ['claude', 'opus', 'live']);
   assert.deepEqual(seen.at(-1), ['resume', 'claude', 'opus', 'abc']);

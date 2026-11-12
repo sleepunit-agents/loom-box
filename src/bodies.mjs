@@ -162,7 +162,7 @@ export async function resumeBody(env, { body: ref, slot, agent, venue, venueKind
     ...(modelNeed ? { modelNeed } : {}), harness: pick.harness, model: pick.model, family: pick.family, ...(pick.account ? { account: pick.account } : {}), ...(pick.accountKey ? { accountKey: pick.accountKey } : {}), ...switchedOf(pick),
     instance: randomBytes(12).toString('hex'), slot, ...(ref ? { resumed: ref } : {}),
   };
-  const options = { agent: who, brief: forRunner(runner, brief(b), cwd), model: pick.model, cwd, env: profileEnv(o.bodyEnv, pick.kind, env, { agent: who, venue: where, place: rec?.place ?? place }, { deferSecrets: !!runner.remote, harness: pick.harness, forceProfile: !!rec?.profile }), deny, ...(seat ? { seat } : {}), ...(needs.length ? { needs } : {}), ...(files ? { files } : {}), ...((where === COMMS_VENUE || activity) ? { activity: true } : {}) };
+  const options = { agent: who, brief: forRunner(runner, brief(b), cwd), model: pick.model, cwd, env: profileEnv(o.bodyEnv, pick.kind, env, { agent: who, venue: where, place: rec?.place ?? place }, { deferSecrets: !!runner.remote, harness: pick.harness, forceProfile: !!rec?.profile, minimal: !rec || !!rec.restrictionUnknown }), deny, ...(seat ? { seat } : {}), ...(needs.length ? { needs } : {}), ...(files ? { files } : {}), ...((where === COMMS_VENUE || activity) ? { activity: true } : {}) };
   if (isWork(options.env) && (!rec || rec.restrictionUnknown)) {
     metadata.restrictionUnknown=true;
     options.env=restrictedEnv(options.env,minimalProfile(),{deferSecrets:!!runner.remote});

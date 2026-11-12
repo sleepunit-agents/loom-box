@@ -72,7 +72,7 @@ export function profileEnv(env, kind, settings = process.env, job = {}, options 
     const { LOOM_BODY_PROFILE: _marker, LOOM_BODY_PROFILE_PROBLEM: _notice, ...legacy } = env ?? process.env;
     return legacy;
   }
-  return { ...restrictedEnv(clean, selected.profile, options), ...(selected.problem ? { LOOM_BODY_PROFILE_PROBLEM: selected.problem } : {}) };
+  return { ...restrictedEnv(clean, options.minimal ? minimalProfile() : selected.profile, options), ...(selected.problem ? { LOOM_BODY_PROFILE_PROBLEM: selected.problem } : {}) };
 }
 export function profileNotice(env) { return [env?.LOOM_BODY_PROFILE_PROBLEM, ...(isWork(env) ? ['If a capability is missing, request its permanent owner approval with loom runtime profile request --field mcp|tools|skills|secrets --name NAME. Do not work around the profile.'] : [])].filter(Boolean).join('\n'); }
 const json = file => { try { return JSON.parse(readFileSync(file, 'utf8')); } catch (e) { if (e.code === 'ENOENT') return {}; throw Error('cannot read job profile MCP configuration'); } };
