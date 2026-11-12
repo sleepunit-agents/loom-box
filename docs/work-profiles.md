@@ -96,10 +96,9 @@ The background executable test uses the actual Claude --bg runner through both
 house admission paths and a narrowed continuation; it is opt-in because it spends
 model calls. Its host transport is in-process; it does not prove a deployed image.
 
-Rollout remains HOLD after the scoped third-pass review reached its three-round
-bound still BLOCKING. Every final finding was folded, including a working declared
-MCP conformance fixture that exposed the safe-mode defect. Those final folds have
-no fresh independent clearance; passing executable checks does not supply it. The source deny and disabled-server
+Rollout remains HOLD until the current reviewed heads have fresh independent
+clearance and the coordinator clears deployment. Passing executable checks does
+not replace independent review. The source deny and disabled-server
 floor is saved before native admission, retained with the native session (including
 forked session ids), and packed with its continuity history. A different config
 directory or house unions the old floor with its current sources. Unknown floors
