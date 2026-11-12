@@ -244,3 +244,23 @@ test('cold review rejects physical project config through symlink cwd and uninsp
   await assert.rejects(runOneShot(env, { input: 'p', cwd: tree }, opts), /configuration outside/);
   assert.equal(runs, 0);
 });
+
+test('managed cold review canonicalizes aliased HOME and still refuses physical project layers', async () => {
+  const env = setup(), physical = env.HOME, alias = join(physical, 'alias-home');
+  symlinkSync(physical, alias);
+  env.HOME = alias;
+  env.CODEX_HOME = join(alias, 'managed');
+  mkdirSync(env.CODEX_HOME);
+  writeFileSync(join(env.CODEX_HOME, 'auth.json'), '{}');
+  mkdirSync(join(alias, '.codex'));
+  writeFileSync(join(alias, '.codex', 'config.toml'), '');
+  const tree = join(alias, 'frozen'); mkdirSync(tree);
+  let runs = 0;
+  const opts = { warn: () => {}, call: async () => ({ model: 'm', harness: 'codex' }), run: async () => {
+    runs++; return { status: 0, stdout: JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'ok' } }) };
+  } };
+  assert.equal(await runOneShot(env, { input: 'p', cwd: tree }, opts), 'ok');
+  mkdirSync(join(tree, '.codex')); writeFileSync(join(tree, '.codex', 'config.toml'), '');
+  await assert.rejects(runOneShot(env, { input: 'p', cwd: tree }, opts), /configuration outside/);
+  assert.equal(runs, 1);
+});

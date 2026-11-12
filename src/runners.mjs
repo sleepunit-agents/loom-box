@@ -556,6 +556,9 @@ export function codexLayers(cwd, { realHome, userHome, systemDir = '/etc/codex' 
     if (!['ENOENT', 'ENOTDIR'].includes(e.code)) return [lexical];
     physical = lexical; // A nonexistent cwd cannot execute; retain lexical layer checks.
   }
+  const homes = [realHome, userHome && join(userHome, '.codex')].filter(Boolean).flatMap(home => {
+    try { return [realpathSync(home)]; } catch { return []; } // An uninspectable home earns no exception.
+  });
   const dirsUp = [];
   for (let d = physical; ; d = dirname(d)) { dirsUp.push(d); if (dirname(d) === d) break; }
   const rootAt = dirsUp.findIndex((d) => there(join(d, '.git')));
@@ -563,7 +566,7 @@ export function codexLayers(cwd, { realHome, userHome, systemDir = '/etc/codex' 
   dirsUp.forEach((d, i) => {
     const f = join(d, '.codex', 'config.toml');
     const aboveRoot = i > (rootAt < 0 ? 0 : rootAt);
-    if (aboveRoot && [realHome, userHome && join(userHome, '.codex')].filter(Boolean).some(home => resolve(home) === join(d, '.codex'))) return;
+    if (aboveRoot && homes.includes(join(d, '.codex'))) return;
     if (there(f)) found.push(f);
   });
   for (const n of ['config.toml', 'managed_config.toml', 'requirements.toml']) if (there(join(systemDir, n))) found.push(join(systemDir, n));
