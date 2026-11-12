@@ -194,7 +194,7 @@ test('Claude preserves distinct denies from user, project and local settings', (
 
 test('semantic invalidity selects minimal access and a visible diagnostic before launch', () => fixture(root => {
   const file = join(root, 'profiles.json');
-  for (const bad of [{ tools: ['UnknownTool'] }, {tools:['Skill']}, { secrets: ['NODE_OPTIONS'] }, { secrets: ['CLAUDE_CONFIG_DIR'] }, { mcp: ['loom'] }]) {
+  for (const bad of [{ tools: ['UnknownTool'] }, {tools:['Skill']}, { secrets: ['NODE_OPTIONS'] }, ...['LD_PRELOAD', 'LD_LIBRARY_PATH', 'DYLD_INSERT_LIBRARIES', 'DYLD_LIBRARY_PATH'].map(name => ({ secrets: [name] })), { secrets: ['CLAUDE_CONFIG_DIR'] }, { mcp: ['loom'] }]) {
     writeFileSync(file, JSON.stringify({ v: 1, jobs: { [jobProfileKey(job)]: profile(bad) } }));
     const env = profileEnv({ HOME: root }, 'scheduled', { LOOM_RUNTIME_JOB_PROFILES: file }, job);
     assert.deepEqual(selectedProfile(env), minimalProfile());
