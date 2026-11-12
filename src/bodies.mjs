@@ -100,6 +100,7 @@ function needsMet(env, runner, needs) {
 }
 
 function retainContextProfile(metadata, options, contextProfile) {
+  if (contextProfile && (!cleanProfileFloor(contextProfile.floor) || contextProfile.floor.unknown)) options.env.LOOM_BODY_PROFILE_PROBLEM = 'JOB PROFILE PROBLEM: context continuation has no valid native restriction provenance; using minimal profile (no tools, MCP, skills or secrets).';
   if (contextProfile) {
     options.profileFloor = cleanProfileFloor(contextProfile.floor) ?? unknownProfileFloor();
     if (metadata.restrictionUnknown) options.profileFloor.unknown = true;
@@ -110,6 +111,7 @@ function retainContextProfile(metadata, options, contextProfile) {
 
 export async function startBody(env, { agent, brief: b, venue, venueKind, prefer = [], modelNeed, avoid = [], cwd, deny = [], place, guest, local, seat, activity = false, role, pin, gate, needs = [], contextProfile }, o = {}) {
   const d = deps(env, o);
+  if (place != null && typeof place !== 'string') fail('a job place is a string');
   const text = brief(b);
   if (typeof venue !== 'string' || !/^[a-z][a-z0-9-]{0,39}$/.test(venue)) fail('which venue (wake, relay, session, discord, slack, …)');
   const pick = await resolveFor(env, { agent, venue, venueKind, prefer, modelNeed, avoid, role, pin, gate, conversation: o.bodyEnv?.LOOM_BODY_CONVERSATION, accounts: d.accounts, now: d.now(), fetchImpl: d.fetchImpl });
@@ -118,13 +120,12 @@ export async function startBody(env, { agent, brief: b, venue, venueKind, prefer
   // Comms and interactive terminal bodies expose their native tool steps as activity cards (activity.mjs).
   // Whose house (t-1952): a house's runner seats it there; a local one has no houses.
   const metadata = {
-    agent, venue, kind: pick.kind, ...(place ? { place: String(place).slice(0, 200) } : {}),
+    agent, venue, kind: pick.kind, ...(place != null ? { place } : {}),
     // What it was started with of its rules (tool names, never the brief): for the owner's `loom runtime bodies`.
     ...(deny.length ? { deny: [...deny] } : {}), ...(guest ? { guest: true } : {}), ...(local ? { local: true } : {}),
     ...(modelNeed ? { modelNeed } : {}), harness: pick.harness, model: pick.model, family: pick.family, ...(pick.account ? { account: pick.account } : {}), ...(pick.accountKey ? { accountKey: pick.accountKey } : {}), ...switchedOf(pick), instance: randomBytes(12).toString('hex'),
   };
   const options = { agent, brief: forRunner(runner, text, cwd), model: pick.model, cwd, env: profileEnv(o.bodyEnv, pick.kind, env, { agent, venue, place }, { deferSecrets: !!runner.remote, nativeSecrets: !!contextProfile, harness: pick.harness, ...(contextProfile ? { frozenProfile: contextProfile.declaration, minimal: !cleanProfileFloor(contextProfile.floor) || !!contextProfile.floor.unknown } : {}) }), deny, ...(seat ? { seat } : {}), ...(needs.length ? { needs } : {}), ...((venue === COMMS_VENUE || activity) ? { activity: true } : {}) };
-  if (contextProfile && (!cleanProfileFloor(contextProfile.floor) || contextProfile.floor.unknown)) options.env.LOOM_BODY_PROFILE_PROBLEM = 'JOB PROFILE PROBLEM: context continuation has no valid native restriction provenance; using minimal profile (no tools, MCP, skills or secrets).';
   retainContextProfile(metadata, options, contextProfile);
   const prepared = { metadata, why: pick.why, preferred: pick.preferred };
   const body = o.launch ? await o.launch({ runner, harness: pick.harness, options, prepared }) : await runner.start(options);
@@ -141,6 +142,7 @@ export function feedBody(env, ref, message, o = {}) {
 /** A body continued: by its id (its slot, from the harness), or by a slot ({harness, session}) another machine kept. */
 export async function resumeBody(env, { body: ref, slot, agent, venue, venueKind, brief: b, prefer = [], modelNeed, cwd, deny = [], files, place, guest, local, seat, activity = false, role, pin, needs = [], contextProfile }, o = {}) {
   const d = deps(env, o);
+  if (place != null && typeof place !== 'string') fail('a job place is a string');
   let rec = null;
   if (ref) {
     rec = readBody(env, ref);
@@ -167,7 +169,7 @@ export async function resumeBody(env, { body: ref, slot, agent, venue, venueKind
   const runner = d.runner(slot.harness, here);
   needsMet(env, runner, needs);
   const metadata = {
-    agent: who, venue: where, kind: pick.kind, ...((rec?.place ?? place) ? { place: rec?.place ?? place } : {}),
+    agent: who, venue: where, kind: pick.kind, ...((rec?.place ?? place) != null ? { place: rec?.place ?? place } : {}),
     ...(deny.length ? { deny: [...deny] } : {}), ...(guest ? { guest: true } : {}), ...(here ? { local: true } : {}),
     ...(modelNeed ? { modelNeed } : {}), harness: pick.harness, model: pick.model, family: pick.family, ...(pick.account ? { account: pick.account } : {}), ...(pick.accountKey ? { accountKey: pick.accountKey } : {}), ...switchedOf(pick),
     instance: randomBytes(12).toString('hex'), slot, ...(ref ? { resumed: ref } : {}),
@@ -178,7 +180,6 @@ export async function resumeBody(env, { body: ref, slot, agent, venue, venueKind
     options.env=restrictedEnv(options.env,minimalProfile(),{deferSecrets:!!runner.remote});
     options.env.LOOM_BODY_PROFILE_PROBLEM='JOB PROFILE PROBLEM: continuation has no runtime restriction record; using minimal profile (no tools, MCP, skills or secrets).';
   }
-  if (contextProfile && (!cleanProfileFloor(contextProfile.floor) || contextProfile.floor.unknown)) options.env.LOOM_BODY_PROFILE_PROBLEM = 'JOB PROFILE PROBLEM: context continuation has no valid native restriction provenance; using minimal profile (no tools, MCP, skills or secrets).';
   retainContextProfile(metadata, options, contextProfile);
   const prepared = { metadata, why: pick.why, preferred: pick.preferred };
   const body = o.launch ? await o.launch({ runner, harness: pick.harness, options, resume: slot, prepared }) : await runner.resume(slot, options);

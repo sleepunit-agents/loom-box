@@ -292,7 +292,7 @@ test('native context secret deferral preserves local configuration selection and
   assert.match(corrupt.LOOM_BODY_PROFILE_PROBLEM, /invalid transported/);
 }));
 
-for (const name of ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'OPENAI_BASE_URL', 'API_TIMEOUT_MS', 'HTTPS_PROXY', 'SSL_CERT_FILE']) test(`provider launch control ${name} cannot be a job secret`, () => fixture(root => {
+for (const name of ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'OPENAI_BASE_URL', 'API_TIMEOUT_MS', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy', 'SSL_CERT_FILE']) test(`provider launch control ${name} cannot be a job secret`, () => fixture(root => {
   const p = profile({ secrets: [name] });
   assert.throws(() => validateProfile(p), /configure the harness/);
   const file = join(root, 'profiles.json');

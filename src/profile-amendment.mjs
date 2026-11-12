@@ -1,7 +1,7 @@
 import { durableJson } from './durable-json.mjs';
 // Runtime half of the approvals contract. Only the trusted approvals adapter calls
 // commitAmendment, under its owner-only grant executor. No body-facing apply endpoint.
-import { readFileSync, mkdirSync, openSync, closeSync } from 'node:fs';
+import { readFileSync, mkdirSync, openSync, closeSync, fsyncSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -38,7 +38,12 @@ export function commitAmendment(file, a) {
     const previous = validateProfile(a.previous);
     const checked = amendment(a.key, previous, a.field, a.name);
     if (checked.target !== a.target || checked.before !== a.before || hash(checked.profile) !== hash(next)) throw Error('amendment does not match approved target');
-    if (store.applied?.[a.target]) return { applied: false, already: true };
+    if (store.applied?.[a.target]) {
+      // A prior callback may have died after rename but before syncing its directory.
+      const parent = openSync(dirname(file), 'r');
+      try { fsyncSync(parent); } finally { closeSync(parent); }
+      return { applied: false, already: true };
+    }
     if (hash(current) !== a.before) throw Error('job profile changed since approval; request a fresh amendment');
     store.jobs[a.key] = next;
     (store.applied ??= {})[a.target] = true;

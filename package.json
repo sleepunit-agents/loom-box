@@ -163,7 +163,7 @@
       {
         "name": "LOOM_RUNTIME_JOB_PROFILES",
         "label": "Job profile declarations",
-        "hint": "Runtime-owned JSON store path. Claude jobs with missing or invalid declarations select no MCP, tools, skills or secrets and a visible problem; no off override. Codex jobs without a matching declaration retain their existing environment and brief; declared Codex profiles fail closed."
+        "hint": "Claude: missing/invalid declarations launch visibly minimal. Unprofiled Codex keeps its environment and brief; declared Codex fails closed. No off override."
       },
       {
         "name": "LOOM_RUNTIME_CONTEXT_CAP",

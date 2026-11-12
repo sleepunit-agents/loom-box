@@ -105,7 +105,14 @@ test('profile publication interrupted before or after rename recovers atomically
       const saved=JSON.parse(readFileSync(file));assert.deepEqual(saved.jobs.other,other);
       assert.deepEqual(saved.jobs[key].tools,stage==='before'?[]:['Read']);
       assert.equal(Boolean(saved.applied?.[a.target]),stage==='after');
-      const result=commitAmendment(file,a);assert.equal(result.applied,stage==='before');
+      const synced=[],sync=fs.fsyncSync;
+      let result;
+      try {
+        fs.fsyncSync=fd=>{synced.push(fs.readlinkSync(`/proc/self/fd/${fd}`));return sync(fd);};syncBuiltinESMExports();
+        result=commitAmendment(file,a);
+      } finally {fs.fsyncSync=sync;syncBuiltinESMExports();}
+      assert.equal(result.applied,stage==='before');
+      assert.ok(synced.includes(root),'retry completes the publication directory fsync before acknowledging');
       assert.deepEqual(JSON.parse(readFileSync(file)).jobs.other,other);
     } finally {rmSync(root,{recursive:true,force:true});}
   }
