@@ -45,6 +45,14 @@ gets a visible minimal-profile fallback because its prior restriction floor is u
 minimal fallback rather than silently losing a declared tool. Named skills use
 the explicit preloading path above.
 
+Context-cap rotations freeze this declaration and carry the native source floor
+into the fresh acceptance session and every later resume. Houses additionally
+negotiate `context-profile-v1` before receiving that floor. The controller reads
+it from the predecessor without stopping its writer; only successor acknowledgment
+permits retirement. Missing/corrupt provenance remains visibly minimal across
+later rotations, before any declared secret availability is checked. See
+[context continuation](context-continuation.md).
+
 The runtime sets `CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1`: background requests otherwise
 advertise the provider advisor despite `--tools`. Native request traces can also
 contain `DeferredToolPlaceholder` (provider schema placeholder) and `EndConversation`
@@ -52,7 +60,7 @@ contain `DeferredToolPlaceholder` (provider schema placeholder) and `EndConversa
 the executable test explicitly distinguishes these intrinsic harness controls.
 
 Codex profiled jobs fail closed with the visible reason "work profiles don't support
-Codex yet". Codex profile support is outside this PR; null owns that follow-up.
+Codex yet". Codex profile support is outside this PR; taskstore t-2168 owns that follow-up.
 Codex jobs without a matching declaration retain their existing environment and
 brief through the public start and resume paths, including legacy continuations.
 An unreadable or malformed configured store remains fail-closed; a previously

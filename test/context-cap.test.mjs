@@ -443,3 +443,84 @@ test('a later rotation refuses malformed current rules even when an older saved 
   await tick(w.env, w.o); c = loadConv(w.env, first.conversation);
   assert.equal(c.body, old); assert.equal(c.contextHandoffs.length, 1); assert.match(c.waiting, /bodyRules/);
 });
+
+
+test('context profile declaration and native floor survive acceptance, restart, resume and a second rotation', async () => {
+  const { jobProfileKey, minimalProfile } = await import('../src/work-profile.mjs');
+  const { readBody } = await import('../src/bodies.mjs');
+  const w = world(); w.o.venues = () => ({ slack: { kind: 'agent', send: ['adapter'] } });
+  const file = join(w.env.HOME, 'profiles.json'); w.env.LOOM_RUNTIME_JOB_PROFILES = file;
+  const declaration = { ...minimalProfile(), tools: ['Read'] };
+  const key = jobProfileKey({ agent: 'art', venue: 'slack', kind: 'agent', place: 'context-profile' });
+  writeFileSync(file, JSON.stringify({ v: 1, jobs: { [key]: declaration } }));
+  const first = await deliver(w.env, w.msg('context-profile', 'Do work'), w.o);
+  let c = loadConv(w.env, first.conversation), old = c.body;
+  assert.deepEqual(JSON.parse(readBody(w.env, old).profile), declaration);
+  const floor = { deny: ['Read(/private-a)'], disabled: ['blocked'] };
+  w.runner.floors[old.split(':')[1]] = floor;
+  w.runner.context = () => 160000; w.runner.final = () => HANDOFF_MARKER + 'Keep restrictions';
+  await tick(w.env, w.o); w.runner.finish(old);
+  // Controller options reconstructed; declaration store now widens. The frozen selection wins.
+  writeFileSync(file, JSON.stringify({ v: 1, jobs: { [key]: { ...declaration, tools: ['Read', 'Bash'] } } }));
+  await beat(w, { ...w.o });
+  c = loadConv(w.env, first.conversation);
+  assert.notEqual(c.body, old, JSON.stringify(c));
+  assert.deepEqual(c.contextNativeFloor, floor);
+  const id = c.body.split(':')[1];
+  assert.deepEqual(JSON.parse(w.runner.envs[id].LOOM_BODY_PROFILE), declaration);
+  assert.deepEqual(w.runner.floors[id], floor);
+  assert.equal(readBody(w.env, c.body).profile, c.contextProfile.body);
+  // The accepted session accumulates additional native restrictions before rotating again.
+  w.runner.floors[id] = { deny: [...floor.deny, 'Bash(rm *)'], disabled: [...floor.disabled, 'later'] };
+  old = c.body;
+  w.runner.final = () => HANDOFF_MARKER + 'Second rotation';
+  await tick(w.env, { ...w.o }); w.runner.finish(old); await beat(w, { ...w.o });
+  c = loadConv(w.env, first.conversation);
+  assert.notEqual(c.body, old, JSON.stringify(c));
+  assert.equal(c.contextHandoffs.length, 2);
+  assert.deepEqual(w.runner.floors[c.body.split(':')[1]], { deny: ['Read(/private-a)', 'Bash(rm *)'], disabled: ['blocked', 'later'] });
+  assert.deepEqual(JSON.parse(w.runner.envs[c.body.split(':')[1]].LOOM_BODY_PROFILE), declaration);
+});
+
+for (const missing of [null, { deny: 'bad', disabled: [] }, { deny: [], disabled: [], unknown: true }, { deny: [], disabled: [], runtimeUnknown: true }]) test(`context native provenance ${JSON.stringify(missing)} stays visibly minimal before unavailable secrets`, async () => {
+  const { readBody } = await import('../src/bodies.mjs');
+  const w = world(); w.o.venues = () => ({ slack: { kind: 'agent', send: ['adapter'] } });
+  const first = await deliver(w.env, w.msg('unknown-context', 'Do work'), w.o);
+  let c = loadConv(w.env, first.conversation), old = c.body;
+  // A frozen declaration with an unavailable secret must not resolve it on the unknown path.
+  const path = join(w.env.LOOM_BOX_DATA, 'bodies', old.replace(':', '-') + '.json');
+  const rec = readBody(w.env, old);
+  const declaration = { v: 1, mcp: [], tools: ['Read'], skills: [], secrets: ['UNAVAILABLE'] };
+  writeFileSync(path, JSON.stringify({ ...rec, profile: JSON.stringify(declaration), ...(missing?.runtimeUnknown ? { restrictionUnknown: true } : {}) }));
+  w.runner.profileFloor = () => missing;
+  w.runner.context = () => 160000; w.runner.final = () => HANDOFF_MARKER + 'Unknown provenance';
+  await tick(w.env, w.o); w.runner.finish(old); await beat(w, { ...w.o });
+  c = loadConv(w.env, first.conversation);
+  assert.notEqual(c.body, old, JSON.stringify(c));
+  let env = w.runner.envs[c.body.split(':')[1]];
+  assert.deepEqual(JSON.parse(env.LOOM_BODY_PROFILE).secrets, []);
+  assert.deepEqual(JSON.parse(env.LOOM_BODY_PROFILE).tools, []);
+  assert.match(env.LOOM_BODY_PROFILE_PROBLEM, /minimal/);
+  assert.equal(readBody(w.env, c.body).restrictionUnknown, true);
+  assert.equal(c.contextNativeFloor.unknown, true);
+  old = c.body; w.runner.final = () => HANDOFF_MARKER + 'Still unknown';
+  await tick(w.env, { ...w.o }); w.runner.finish(old); await beat(w, { ...w.o });
+  c = loadConv(w.env, first.conversation);
+  assert.notEqual(c.body, old, JSON.stringify(c));
+  env = w.runner.envs[c.body.split(':')[1]];
+  assert.deepEqual(JSON.parse(env.LOOM_BODY_PROFILE).tools, []);
+  assert.match(env.LOOM_BODY_PROFILE_PROBLEM, /minimal/);
+});
+
+test('a runner without native floor support holds context rotation without stopping the predecessor', async () => {
+  const w = world(); w.o.venues = () => ({ slack: { kind: 'agent', send: ['adapter'] } });
+  const first = await deliver(w.env, w.msg('old-profile-runner', 'Work'), w.o);
+  const old = loadConv(w.env, first.conversation).body;
+  delete w.runner.profileFloor;
+  w.runner.context = () => 160000; w.runner.final = () => HANDOFF_MARKER + 'Need support';
+  await tick(w.env, w.o); w.runner.finish(old); await tick(w.env, w.o);
+  const c = loadConv(w.env, first.conversation);
+  assert.equal(c.body, old); assert.equal(c.contextSuccessor, undefined);
+  assert.match(c.waiting, /profile-aware/);
+  assert.equal(w.log.filter(x => x[0] === 'end').length, 0);
+});

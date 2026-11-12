@@ -1,5 +1,5 @@
 import { durableJson } from './durable-json.mjs';
-import { isWork, selectedProfile, restrictedEnv, claudeWorkArgs, minimalProfile, profileNotice } from './work-profile.mjs';
+import { isWork, selectedProfile, restrictedEnv, claudeWorkArgs, minimalProfile, profileNotice, cleanProfileFloor, unknownProfileFloor, mergeProfileFloors } from './work-profile.mjs';
 // Runners (loom docs/specs/agent-runtime.md, section 3): one interface over the harnesses a body runs in.
 //
 // A runner runs bodies on one harness, on this machine (loom's own, or inside a house):
@@ -232,8 +232,7 @@ export class ClaudeRunner {
   readFloor(key) {
     try {
       const value = JSON.parse(readFileSync(this.floorPath(key), 'utf8'));
-      if (!value || !['deny', 'disabled'].every(k => Array.isArray(value[k]) && value[k].every(x => typeof x === 'string'))) throw new Error('invalid floor');
-      return value;
+      return cleanProfileFloor(value) ?? unknownProfileFloor();
     } catch (e) {
       if (e.code === 'ENOENT') return null;
       return { deny: [], disabled: [], unknown: true };
@@ -248,11 +247,18 @@ export class ClaudeRunner {
     if (session) this.saveFloor(`session-${session}`, floor);
   }
 
-  launch({ brief, model, cwd, env, deny = [], resume, launchToken }) {
+  profileFloor(body) {
+    const session = this.slotOf(body)?.session;
+    const floor = this.readFloor(`body-${body.id}`) ?? (session ? this.readFloor(`session-${session}`) : null);
+    return cleanProfileFloor(floor) ?? unknownProfileFloor();
+  }
+
+  launch({ brief, model, cwd, env, deny = [], resume, launchToken, profileFloor }) {
     const token = launchToken === undefined ? this.token() : stableLaunchToken(launchToken);
     const incoming = env ?? process.env;
     const selected = selectedProfile(incoming);
     let floor = selected ? (resume ? this.readFloor(`session-${resume}`) : { deny: [], disabled: [] }) : null;
+    if (selected && profileFloor !== undefined) floor = mergeProfileFloors(floor, profileFloor);
     if (selected && (!floor || floor.unknown)) {
       incoming.LOOM_BODY_PROFILE = JSON.stringify(minimalProfile());
       incoming.LOOM_BODY_PROFILE_PROBLEM = 'JOB PROFILE PROBLEM: continuation has no saved source restriction floor; using minimal profile (no tools, MCP, skills or secrets).';

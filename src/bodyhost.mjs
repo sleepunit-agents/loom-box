@@ -1,4 +1,4 @@
-import { PROFILE_CAP, selectedProfile, restrictedEnv, minimalProfile } from './work-profile.mjs';
+import { PROFILE_CAP, CONTEXT_PROFILE_CAP, cleanProfileFloor, unknownProfileFloor, selectedProfile, restrictedEnv, minimalProfile } from './work-profile.mjs';
 // The body host (shuttle's bodies.py Host, ported): runs in an agent's own warm house, as the house's task
 // (houserunner.mjs, hostTask), and wakes the bodies the runtime asks for with the house's own runner: its harness,
 // logged in on its box; its repo, its cwd, its secrets; its agent's loom token. A body's environment is the house's,
@@ -318,13 +318,13 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
       if (status === 'working') { try { tickerAction = r.tickerAction?.({ id, ...(b.slot ? { slot: b.slot } : {}) }); } catch { /* unavailable */ } }
       let contextTokens;
       try { contextTokens = r.context?.({ id, ...(b.slot ? { slot: b.slot } : {}) }); } catch { /* no observation */ }
-      bodies[id] = { ...(Number.isSafeInteger(contextTokens) && contextTokens > 0 ? { contextTokens } : {}), ...(tickerAction ? { tickerAction, tickerObservedAt: new Date(now()).toISOString() } : {}), harness: b.harness, status, ...(slot?.session ? { session: slot.session } : {}), feedable: !!r.inbox, pending, ...(turn ? { turn } : {}), ...(typeof final === 'string' ? { final } : {}), ...(cards ? { cards } : {}), ...(alive ? { alive } : {}) };
+      bodies[id] = { ...(b.harness === 'claude' ? { profileFloor: (() => { try { return cleanProfileFloor(r.profileFloor?.({ id, ...(b.slot ? { slot: b.slot } : {}) })) ?? unknownProfileFloor(); } catch { return unknownProfileFloor(); } })() } : {}), ...(Number.isSafeInteger(contextTokens) && contextTokens > 0 ? { contextTokens } : {}), ...(tickerAction ? { tickerAction, tickerObservedAt: new Date(now()).toISOString() } : {}), harness: b.harness, status, ...(slot?.session ? { session: slot.session } : {}), feedable: !!r.inbox, pending, ...(turn ? { turn } : {}), ...(typeof final === 'string' ? { final } : {}), ...(cards ? { cards } : {}), ...(alive ? { alive } : {}) };
     }
     await reportUsage(turnsOver);
     const packed = packedParts(packing, history);
     let got;
     const sent = acks;
-    const report = { bodies, done, packed, inboxAck: sent, caps: [PROFILE_CAP, 'parts', 'native-admission', ...(history ? ['native-history'] : [])], starting: [...new Set([...launching.keys(), ...uncertain.keys(), ...Object.keys(done)])] };
+    const report = { bodies, done, packed, inboxAck: sent, caps: [PROFILE_CAP, CONTEXT_PROFILE_CAP, 'parts', 'native-admission', ...(history ? ['native-history'] : [])], starting: [...new Set([...launching.keys(), ...uncertain.keys(), ...Object.keys(done)])] };
     fitCards(report, REPORT_MAX);
     try { got = await client('body-sync', checkedSyncRequest(key, report)); } catch (e) {
       syncFailures++;
@@ -385,9 +385,14 @@ export async function runBodyHost({ client, runner, env = process.env, hostKey, 
           // A brief in parts names the agent's own files (briefs.mjs): read here, from its repo (this house's cwd).
           // A file that isn't there fails the start: never a body without what its brief must carry.
           const transported = q.profile !== undefined ? { LOOM_BODY_PROFILE: q.profile, ...(q.profileProblem ? { LOOM_BODY_PROFILE_PROBLEM: q.profileProblem } : {}) } : q.harness === 'claude' ? { LOOM_BODY_PROFILE: JSON.stringify(minimalProfile()), LOOM_BODY_PROFILE_PROBLEM: 'JOB PROFILE PROBLEM: missing transported job profile; using minimal profile (no tools, MCP, skills or secrets).' } : {};
+          const profileFloor = q.profileFloor !== undefined ? cleanProfileFloor(q.profileFloor) ?? unknownProfileFloor() : undefined;
+          if (profileFloor?.unknown) {
+            transported.LOOM_BODY_PROFILE = JSON.stringify(minimalProfile());
+            transported.LOOM_BODY_PROFILE_PROBLEM = 'JOB PROFILE PROBLEM: context continuation has unknown native restriction provenance; using minimal profile (no tools, MCP, skills or secrets).';
+          }
           const profile = selectedProfile(transported);
           const brief = q.parts !== undefined ? composeBrief(q.parts, cwd) : q.brief;
-          const o = { brief, model: q.model, deny: q.deny ?? [], cwd, env: { ...(profile ? restrictedEnv({ ...bodyEnv, ...transported }, profile) : bodyEnv), LOOM_BODY_MODEL: q.model, ...(q.key ? { LOOM_BODY_KEY: q.key } : {}), ...(cv ? { LOOM_BODY_CONVERSATION: cv } : {}) } };
+          const o = { brief, ...(profileFloor !== undefined ? { profileFloor } : {}), model: q.model, deny: q.deny ?? [], cwd, env: { ...(profile ? restrictedEnv({ ...bodyEnv, ...transported }, profile, { deferSecrets: profileFloor !== undefined }) : bodyEnv), LOOM_BODY_MODEL: q.model, ...(q.key ? { LOOM_BODY_KEY: q.key } : {}), ...(cv ? { LOOM_BODY_CONVERSATION: cv } : {}) } };
           // Kept by its conversation before the body starts, so its first `send` finds it.
           if (cv) keepKey(env, cv, q.key);
           let written = [];

@@ -1,3 +1,4 @@
+import { cleanProfileFloor, unknownProfileFloor, mergeProfileFloors } from './work-profile.mjs';
 import { contextCapOf, HANDOFF_REQUEST, TASK_BOUNDARY, handoffText } from './context-cap.mjs';
 import { observation } from './ticker.mjs';
 // Delivery (loom docs/specs/agent-runtime.md, section 5): anything addressed to an agent arrives the same way.
@@ -2487,7 +2488,7 @@ async function executeOne(env, op, d, mem) {
       ...(c0.nativeRecovery ? { nativeRecovery: c0.nativeRecovery.id } : {}),
       way: { how: way.how, home: !!way.home, ...(way.file ? { file: way.file } : {}), ...(way.failover ? { failover: way.failover } : {}), ...(base.gate ? { gated: true } : {}) },
     } });
-    const base = { activity: true, agent: c0.agent, venue: c0.venue, venueKind: c0.kind, prefer: c0.spawn?.prefer ? [c0.spawn.prefer] : [], modelNeed: c0.spawn?.modelNeed, cwd: local ? lb.cwd : d.cwd, deny: rules.deny, guest: rules.guest, ...(local ? { local: true } : {}), ...(rules.seat ? { seat: rules.seat } : {}), ...jobModel(c0), ...(Array.isArray(c0.spawn?.role?.needs) && c0.spawn.role.needs.length ? { needs: c0.spawn.role.needs } : {}) };
+    const base = { activity: true, agent: c0.agent, venue: c0.venue, venueKind: c0.kind, prefer: c0.spawn?.prefer ? [c0.spawn.prefer] : [], modelNeed: c0.spawn?.modelNeed, cwd: local ? lb.cwd : d.cwd, deny: rules.deny, guest: rules.guest, ...(local ? { local: true } : {}), ...(c0.contextProfile?.body !== null && c0.contextProfile?.body !== undefined ? { contextProfile: { declaration: c0.contextProfile.body, floor: c0.contextNativeFloor } } : {}), ...(rules.seat ? { seat: rules.seat } : {}), ...jobModel(c0), ...(Array.isArray(c0.spawn?.role?.needs) && c0.spawn.role.needs.length ? { needs: c0.spawn.role.needs } : {}) };
     // Out of quota (t-1907): which session this run continues, on which harness. Its home slot, when the harness it
     // switched away from has room again; its own slot, when that one's harness has room; else a fresh body elsewhere.
     // A deny list Codex can't keep (a tool within a server, a built-in: runners.mjs, codexDeny) keeps this body off
@@ -2828,7 +2829,7 @@ function validateContextFloor(env, c) {
   if (c.contextProfile && JSON.stringify(c.contextProfile) !== JSON.stringify({ conversation: c.profile ?? null, body: c.body ? readBody(env, c.body).profile ?? null : c.contextProfile.body })) throw Error('context continuation profile changed');
   const rec = c.body ? readBody(env, c.body) : null;
   if (rec?.guest === true && !floor.guest || (rec?.deny ?? []).some(x => !floor.deny.includes(x))) throw Error('context floor omits predecessor restrictions');
-  if (c.contextProfile && (c.contextProfile.conversation !== null || c.contextProfile.body !== null)) throw Error('context continuation requires a profile-aware runner before inheriting a non-default profile');
+  if (c.contextProfile && c.contextProfile.conversation !== null) throw Error('context continuation requires a profile-aware runner before inheriting a non-default profile');
   if (c.resetPending) throw Error('context continuation waits for principal reset');
 }
 
@@ -2843,9 +2844,17 @@ async function rotateContext(env, op, d) {
     const digest = createHash('sha256').update(d.sealer.open(Buffer.from(before.contextCap.note, 'base64'))).digest('hex');
     const contextPrepare = { predecessor: op.body, run: before.contextCap.run, digest };
     const note = d.sealer.open(Buffer.from(before.contextCap.note, 'base64')).toString('utf8');
+    let nativeFloor;
+    if (predecessor.profile != null) {
+      const runner = d.runner(predecessor.harness, predecessor.local);
+      if (typeof runner.profileFloor !== 'function') throw Error('context continuation requires a profile-aware runner');
+      nativeFloor = cleanProfileFloor(runner.profileFloor(bodyOf(op.body, predecessor))) ?? unknownProfileFloor();
+      if (predecessor.restrictionUnknown) nativeFloor.unknown = true;
+    }
     locked(env, () => {
       const c = loadConv(env, op.cv);
       if (!ours(c, op)) return;
+      if (nativeFloor) c.contextNativeFloor = c.contextNativeFloor ? mergeProfileFloors(c.contextNativeFloor, nativeFloor) : nativeFloor;
       c.contextModel = { model: predecessor.model, harness: predecessor.harness };
       c.contextFloor ??= structuredClone(c.bodyRules);
       c.contextPrincipal ??= principalOf(env, c);
@@ -4180,7 +4189,7 @@ export function resetPrincipal(env, conversation, { agent, approval } = {}) {
     rmSync(slotFile(env, conversation), { force: true });
     rmSync(homeFile(env, conversation), { force: true });
     delete c.slot; delete c.home; delete c.fallback;
-    delete c.contextCap; delete c.contextPrincipal; delete c.contextProfile; delete c.contextFloor; delete c.contextAuthority; delete c.contextModel;
+    delete c.contextCap; delete c.contextPrincipal; delete c.contextProfile; delete c.contextNativeFloor; delete c.contextFloor; delete c.contextAuthority; delete c.contextModel;
     // The run that heard what came before speaks no more: its key is gone now, not when its body is ended.
     if (c.body) { c.resetPending = true; forgetRunKey(env, c); }
     // A reset is activity: the record (and the reset it holds) outlives any continuation issued before it (t-2004).

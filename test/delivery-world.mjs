@@ -36,7 +36,8 @@ export function fakeRunner(log, root, harness = 'claude', { inboxDir } = {}) {
     harness, roots, inbox: inboxDir ? inbox(inboxDir) : null, failStart: null, failResume: null, envs: {}, denies: {}, dead: new Set(), delay: 0,
     // Whose house each body was seated in (t-1952): the seat delivery gave. `houses` (seat -> house id), when a test
     // sets it, makes this runner report its bodies as in those houses, as a house's runner does.
-    seats: {}, houses: null,
+    seats: {}, houses: null, floors: {},
+    profileFloor: b => r.floors[b.id] ?? { deny: [], disabled: [] },
     where(o) { const seat = o.seat ?? 'owner'; return r.houses ? { seat, house: r.houses[seat] ?? 'h-99' } : {}; },
     start(o) {
       if (r.failStart) throw Object.assign(new RunnerError(r.failStart), { nativeNotStarted: true });
@@ -46,6 +47,7 @@ export function fakeRunner(log, root, harness = 'claude', { inboxDir } = {}) {
       writeFileSync(tfile(session[id]), `transcript of ${id}: ${o.brief}\n`);
       log.push(['start', id, o.brief]);
       r.envs[id] = o.env;
+      r.floors[id] = structuredClone(o.profileFloor ?? { deny: [], disabled: [] });
       r.denies[id] = o.deny ?? [];
       r.seats[id] = o.seat;
       state[id] = 'working';
@@ -58,6 +60,7 @@ export function fakeRunner(log, root, harness = 'claude', { inboxDir } = {}) {
       session[id] = slot.session;
       log.push(['resume', id, slot.session, existsSync(tfile(slot.session)) ? readFileSync(tfile(slot.session), 'utf-8') : null, o.brief]);
       r.envs[id] = o.env;
+      r.floors[id] = structuredClone(o.profileFloor ?? { deny: [], disabled: [] });
       r.denies[id] = o.deny ?? [];
       r.seats[id] = o.seat;
       state[id] = 'working';
@@ -232,9 +235,10 @@ export function houseWorld({ sealer, claimMs = 5000, warmMs = 5000, harness = 'c
   mkdirSync(sess, { recursive: true });
   const transcript = (id) => join(sess, `s-${id}.jsonl`);
   const local = {
-    harness, roots: { sess }, startDelay: 0, envs: {}, briefs: {}, denies: {}, transcript,
+    harness, roots: { sess }, startDelay: 0, envs: {}, briefs: {}, denies: {}, floors: {}, transcript,
+    profileFloor: b => local.floors[b.id] ?? { deny: [], disabled: [] },
     inbox: { pending: () => [], taken: () => [], close() {}, remove() {} },
-    async start(o) { local.startsEntered = (local.startsEntered ?? 0) + 1; if (local.startDelay) await sleep(local.startDelay); const id = `b000000${n++}`; st[id] = 'working'; local.envs[id] = o.env; local.briefs[id] = o.brief; local.denies[id] = o.deny; started.push(id); writeFileSync(transcript(id), `transcript of ${id}\n`); return { id, harness }; },
+    async start(o) { local.startsEntered = (local.startsEntered ?? 0) + 1; if (local.startDelay) await sleep(local.startDelay); const id = `b000000${n++}`; st[id] = 'working'; local.envs[id] = o.env; local.briefs[id] = o.brief; local.denies[id] = o.deny; local.floors[id] = structuredClone(o.profileFloor ?? { deny: [], disabled: [] }); started.push(id); writeFileSync(transcript(id), `transcript of ${id}\n`); return { id, harness }; },
     status: (b) => st[b.id] ?? 'unknown', slotOf: (b) => ({ harness, session: `s-${b.id}` }),
     feed(b, m) { fed.push([b.id, m.id, m.text]); return { fed: true }; },
     end(b) { ended.push(b.id); st[b.id] = 'ended'; },

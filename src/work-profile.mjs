@@ -4,6 +4,18 @@ import { join, resolve } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 
 export const PROFILE_CAP = 'job-profile-v1';
+export const CONTEXT_PROFILE_CAP = 'context-profile-v1';
+// A bounded, data-only native floor; missing/corrupt provenance never means unrestricted.
+export function cleanProfileFloor(value) {
+  if (!value || typeof value !== 'object' || !['deny', 'disabled'].every(k => Array.isArray(value[k]) && value[k].length <= 4096 && value[k].every(x => typeof x === 'string' && x.length > 0 && x.length <= 4096)) || (value.unknown !== undefined && typeof value.unknown !== 'boolean')) return null;
+  return { deny: [...new Set(value.deny)], disabled: [...new Set(value.disabled)], ...(value.unknown ? { unknown: true } : {}) };
+}
+export const unknownProfileFloor = () => ({ deny: [], disabled: [], unknown: true });
+export function mergeProfileFloors(...values) {
+  const floors = values.map(v => cleanProfileFloor(v) ?? unknownProfileFloor());
+  return { deny: [...new Set(floors.flatMap(f => f.deny))], disabled: [...new Set(floors.flatMap(f => f.disabled))], ...(floors.some(f => f.unknown) ? { unknown: true } : {}) };
+}
+
 export const profileHostProblem = (profile, report) => profile !== undefined && !report?.caps?.includes(PROFILE_CAP)
   ? 'its body host cannot enforce job profiles; update its house runtime' : null;
 const FIELDS = ['mcp', 'tools', 'skills', 'secrets'];
@@ -67,12 +79,13 @@ export function restrictedEnv(env, profile, { deferSecrets = false } = {}) {
 export function profileEnv(env, kind, settings = process.env, job = {}, options = {}) {
   const source = { ...(!options.deferSecrets ? Object.fromEntries(['CLAUDE_CONFIG_DIR', 'CODEX_HOME'].filter(k => settings[k] !== undefined).map(k => [k, settings[k]])) : {}), ...(env ?? process.env) };
   const { LOOM_BODY_PROFILE: _old, LOOM_BODY_PROFILE_PROBLEM: _problem, ...clean } = source;
-  const selected = selectProfile(settings, { ...job, kind });
+  const frozen = { LOOM_BODY_PROFILE: options.frozenProfile };
+  const selected = options.frozenProfile !== undefined ? { profile: selectedProfile(frozen), declared: true, problem: frozen.LOOM_BODY_PROFILE_PROBLEM } : selectProfile(settings, { ...job, kind });
   if (options.harness === 'codex' && !selected.declared && !options.forceProfile) {
     const { LOOM_BODY_PROFILE: _marker, LOOM_BODY_PROFILE_PROBLEM: _notice, ...legacy } = env ?? process.env;
     return legacy;
   }
-  return { ...restrictedEnv(clean, options.minimal ? minimalProfile() : selected.profile, options), ...(selected.problem ? { LOOM_BODY_PROFILE_PROBLEM: selected.problem } : {}) };
+  return { ...restrictedEnv(clean, options.minimal ? minimalProfile() : selected.profile, { ...options, deferSecrets: options.deferSecrets || options.nativeSecrets }), ...(selected.problem ? { LOOM_BODY_PROFILE_PROBLEM: selected.problem } : {}) };
 }
 export function profileNotice(env) { return [env?.LOOM_BODY_PROFILE_PROBLEM, ...(isWork(env) ? ['If a capability is missing, request its permanent owner approval with loom runtime profile request --field mcp|tools|skills|secrets --name NAME. Do not work around the profile.'] : [])].filter(Boolean).join('\n'); }
 const json = file => { try { return JSON.parse(readFileSync(file, 'utf8')); } catch (e) { if (e.code === 'ENOENT') return {}; throw Error('cannot read job profile MCP configuration'); } };

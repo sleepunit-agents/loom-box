@@ -44,6 +44,13 @@ Missing or malformed predecessor body rules refuse rotation before successor
 launch. The saved floor, principal, profile markers and model pin are durable.
 A changed principal or standing restriction holds instead of widening access.
 
-Non-default profile markers currently hold before launch: this branch does not
-implement the separate work-profile runner contract. It never silently drops a
-profile it cannot propagate.
+Claude work-profile continuations freeze the selected declaration and read the
+native accumulated deny/disabled-server floor before successor launch, without
+stopping or packing the predecessor. The snapshot is durable across controller
+restarts and is carried through native admission and sealed house requests on
+acceptance and later resumes. Native session floors accumulate further restrictions
+and travel with packed history. Unknown or missing native provenance selects a
+visible minimal profile before resolving any declared secrets, and remains unknown
+on later resumes and rotations. Houses must advertise `context-profile-v1` in
+addition to `job-profile-v1`; old hosts hold before launch or publication. Other
+conversation profile markers still hold before launch rather than being dropped.

@@ -86,3 +86,45 @@ test('restriction metadata alone never masquerades as native session history', (
   const n = native(root); n.runner.saveFloor('session-empty-session', {deny: ['Read'], disabled: []});
   assert.deepEqual(packSession(n.runner, {harness:'claude', session:'empty-session'}), []);
 }));
+
+test('fresh context successor carries a floor without packing or resuming the predecessor', () => fixture(root => {
+  const source = native(join(root, 'source'));
+  const old = source.runner.start({ brief: 'old', cwd: root, env: env(root, root), deny: ['Read(/private)'] });
+  source.runner.saveFloor(`body-${old.id}`, { deny: ['Read(/private)'], disabled: ['blocked'] });
+  const floor = source.runner.profileFloor(old);
+  const target = native(join(root, 'target'));
+  const fresh = target.runner.start({ brief: 'accept only', cwd: root, env: env(root, root), profileFloor: floor });
+  assert.equal(target.captured().args.includes('--resume'), false);
+  assert.ok(settings(target.captured()).permissions.deny.includes('Read(/private)'));
+  assert.deepEqual(target.runner.profileFloor(fresh), floor);
+  const files = packSession(target.runner, fresh.slot, fresh);
+  const third = native(join(root, 'third')); restoreFiles(third.runner, files);
+  third.runner.resume(fresh.slot, { brief: 'continue after restart and house transfer', cwd: root, env: env(root, root), profileFloor: floor });
+  assert.ok(settings(third.captured()).permissions.deny.includes('Read(/private)'));
+  assert.deepEqual(third.runner.profileFloor({ id: 'abcd1234' }).disabled, ['blocked']);
+  const declaredBlocked = { ...env(root, root), LOOM_BODY_PROFILE: JSON.stringify({ ...minimalProfile(), mcp: ['blocked'], secrets: ['mcp.blocked'] }) };
+  writeFileSync(join(root, '.claude.json'), JSON.stringify({ mcpServers: { blocked: { command: 'must-not-launch' } } }));
+  assert.throws(() => third.runner.start({ brief: 'second rotation', cwd: root, env: declaredBlocked, profileFloor: floor }), /unavailable/);
+}));
+
+test('unknown transported context floor selects minimal before unavailable secrets and stays unknown in history', () => fixture(root => {
+  const target = native(root);
+  const input = { ...env(root, root), LOOM_BODY_PROFILE: JSON.stringify({ ...minimalProfile(), tools: ['Read'], secrets: ['MISSING_KEY'] }) };
+  const fresh = target.runner.start({ brief: 'accept', cwd: root, env: input, profileFloor: { deny: ['Write'], disabled: [], unknown: true } });
+  assert.match(target.captured().input, /minimal profile/);
+  assert.equal(target.captured().args[target.captured().args.indexOf('--tools') + 1], '');
+  assert.equal(target.runner.profileFloor(fresh).unknown, true);
+  target.runner.resume(fresh.slot, { brief: 'continue', cwd: root, env: { ...input } });
+  assert.equal(target.runner.profileFloor(fresh).unknown, true);
+  assert.ok(settings(target.captured()).permissions.deny.includes('Write'));
+}));
+
+test('a saved context snapshot cannot make missing later native resume provenance known', () => fixture(root => {
+  const target = native(root), floor = { deny: ['Read(/private)'], disabled: ['blocked'] };
+  target.runner.resume({ harness: 'claude', session: 'missing-session' }, { brief: 'later resume', cwd: root, profileFloor: floor,
+    env: { ...env(root, root), LOOM_BODY_PROFILE: JSON.stringify({ ...minimalProfile(), tools: ['Read'], secrets: ['UNAVAILABLE'] }) } });
+  assert.equal(target.captured().args[target.captured().args.indexOf('--tools') + 1], '');
+  assert.match(target.captured().input, /minimal profile/);
+  assert.equal(target.runner.profileFloor({ id: 'abcd1234' }).unknown, true);
+  assert.ok(settings(target.captured()).permissions.deny.includes('Read(/private)'));
+}));

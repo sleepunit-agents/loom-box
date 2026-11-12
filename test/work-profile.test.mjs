@@ -260,3 +260,58 @@ for (const source of ['user', 'project']) test(`native disabledMcpjsonServers in
   writeFileSync(join(root,'.mcp.json'), JSON.stringify({mcpServers:{blocked:{command:'must-not-run'}}}));
   assert.throws(() => claudeWorkArgs({HOME:root,LOOM_BODY_PROFILE:JSON.stringify(profile({mcp:['blocked'],secrets:['mcp.blocked']}))},root,join(root,'jobs')), /unavailable/);
 }));
+
+for (const mode of ['legacy', 'downgrade']) test(`context profile host ${mode} rejects floor transport before publication`, async () => {
+  const { CONTEXT_PROFILE_CAP } = await import('../src/work-profile.mjs');
+  const { houseWorld, until } = await import('./delivery-world.mjs');
+  const { load } = await import('../src/state.mjs');
+  const w = houseWorld(); let host;
+  const seat = 'owner.cv-abcdef123456';
+  const loseCapability = () => {
+    const file = join(w.env.LOOM_BOX_DATA || join(w.env.HOME, '.local/share/loom-box'), 'delivery/hosts', `art@${seat}.json`);
+    const h = JSON.parse(readFileSync(file, 'utf8'));
+    h.report.caps = h.report.caps.filter(c => c !== CONTEXT_PROFILE_CAP);
+    writeFileSync(file, JSON.stringify(h));
+  };
+  if (mode === 'legacy') w.hr.bound = async () => loseCapability();
+  const o = { agent: 'art', brief: 'must not run', model: 'opus', seat, env: { LOOM_BODY_PROFILE: JSON.stringify(minimalProfile()) }, profileFloor: { deny: ['Read(private)'], disabled: [] } };
+  try {
+    const pending = mode === 'legacy' ? w.hr.start(o) : w.hr.prepareLaunch('7'.repeat(64), o);
+    const result = mode === 'legacy' ? assert.rejects(pending, /cannot enforce job profiles/) : pending;
+    await until(() => load(w.env).houses['h-1']); host = w.host();
+    const reserved = await result;
+    if (mode === 'downgrade') { loseCapability(); assert.throws(() => w.hr.publishPreparedLaunch(reserved), /lost context profile support/); }
+    assert.equal(Object.keys(w.local.envs).length, 0);
+  } finally { if (host) { await w.kill(); await host; } }
+});
+
+test('context native floor traverses the sealed request and validated house report without packing', async () => {
+  const { houseWorld, until } = await import('./delivery-world.mjs');
+  const { load } = await import('../src/state.mjs');
+  const { cleanReport } = await import('../src/houserunner.mjs');
+  const w = houseWorld(); let host;
+  const floor = { deny: ['Read(private)'], disabled: ['blocked'] };
+  try {
+    const pending = w.hr.start({ agent: 'art', brief: 'accept', model: 'opus', env: { LOOM_BODY_PROFILE: JSON.stringify(minimalProfile()) }, profileFloor: floor });
+    await until(() => load(w.env).houses['h-1']); host = w.host();
+    const body = { ...await pending, agent: 'art' };
+    await until(() => JSON.stringify(w.hr.profileFloor(body)) === JSON.stringify(floor));
+    assert.deepEqual(w.local.floors[body.id.split('.').at(-1)] ?? Object.values(w.local.floors)[0], floor);
+    assert.deepEqual(w.hr.profileFloor(body), floor);
+    const bad = cleanReport({ caps: ['context-profile-v1'], bodies: { abcd1234: { harness: 'claude', profileFloor: { deny: 'bad', disabled: [] } } } });
+    assert.equal(bad.bodies.abcd1234.profileFloor.unknown, true);
+    assert.equal(Object.keys(w.local.envs).length, 1);
+  } finally { if (host) { await w.kill(); await host; } }
+});
+
+test('native context secret deferral preserves local configuration selection and frozen declaration diagnostics', () => fixture(root => {
+  const config = join(root, 'config'); mkdirSync(config);
+  const declaration = profile({ secrets: ['UNAVAILABLE'] });
+  const selected = profileEnv({ HOME: root }, 'agent', { CLAUDE_CONFIG_DIR: config }, job, { harness: 'claude', nativeSecrets: true, frozenProfile: JSON.stringify(declaration) });
+  assert.equal(selected.CLAUDE_CONFIG_DIR, config);
+  assert.deepEqual(selectedProfile(selected), declaration);
+  assert.throws(() => restrictedEnv(selected, declaration), /unavailable/);
+  const corrupt = profileEnv({ HOME: root }, 'agent', {}, job, { harness: 'claude', nativeSecrets: true, frozenProfile: '{broken' });
+  assert.deepEqual(selectedProfile(corrupt), minimalProfile());
+  assert.match(corrupt.LOOM_BODY_PROFILE_PROBLEM, /invalid transported/);
+}));
