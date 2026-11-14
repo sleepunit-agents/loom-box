@@ -165,6 +165,11 @@
         "label": "Job context before a fresh session handoff",
         "default": "150000",
         "hint": "Scheduled and spawned jobs only; 20000–2000000 tokens; off disables. Cooperative handoff at a safe tool boundary; see docs/context-continuation.md."
+      },
+      {
+        "name": "LOOM_RUNTIME_CONTEXT_BOUNDARY",
+        "label": "Job context before a handoff is asked for at the next finished task",
+        "hint": "Tokens, below the cap; empty means two thirds of the cap; off disables. One request per session; see docs/context-continuation.md."
       }
     ],
     "services": [

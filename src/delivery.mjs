@@ -1,4 +1,4 @@
-import { contextCapOf, HANDOFF_REQUEST, TASK_BOUNDARY, handoffText } from './context-cap.mjs';
+import { contextCapOf, contextBoundaryOf, HANDOFF_REQUEST, BOUNDARY_REQUEST, TASK_BOUNDARY, handoffText } from './context-cap.mjs';
 import { observation } from './ticker.mjs';
 // Delivery (loom docs/specs/agent-runtime.md, section 5): anything addressed to an agent arrives the same way.
 //
@@ -2317,6 +2317,21 @@ async function executeOne(env, op, d, mem) {
     });
     return;
   }
+  if (op.type === 'context-nudge') {
+    const c = loadConv(env, op.cv);
+    if (!ours(c, op) || c.body !== op.body) return;
+    const rec = readBody(env, op.body), runner = d.runner(rec.harness, rec.local);
+    let fed;
+    try { fed = runner.feed(bodyOf(op.body, rec), { id: `boundary-${c.run}`, text: BOUNDARY_REQUEST }); }
+    catch (e) { d.warn(`context boundary feed for ${op.cv}: ${e.message}`); }
+    locked(env, () => {
+      const fresh = loadConv(env, op.cv);
+      if (!ours(fresh, op) || fresh.body !== op.body) return;
+      if (fed?.fed && fresh.contextNudge?.body === op.body) fresh.contextNudge.fed = true;
+      delete fresh.starting; saveConv(env, fresh);
+    });
+    return;
+  }
   if (op.type === 'context-rotate') {
     try { return await rotateContext(env, op, d); }
     catch (e) {
@@ -2893,7 +2908,7 @@ async function rotateContext(env, op, d) {
     requeue(c, [...saved.pending, { key, id: key, note: true, contextContinuation: true, kind: 'message', at: d.now().toISOString(), sealed: d.sealer.seal(Buffer.from(text)).toString('base64') }]);
     c.body = successor.r.body; c.run = successor.run; c.sendKey = successor.senderHash;
     c.bodyRules = successor.bodyRules;
-    delete c.slot; delete c.idleSince; delete c.contextCap; delete c.starting; delete c.contextSuccessor;
+    delete c.slot; delete c.idleSince; delete c.contextCap; delete c.contextNudge; delete c.starting; delete c.contextSuccessor;
     // The accepted session is idle; normal delivery packs/resumes it with the actual work.
     c.runMsgs = { run: c.run, msgs: [], lost: [] };
     delete c.waiting;
@@ -3559,15 +3574,24 @@ export async function tick(env, o = {}, only, mem = new Map()) {
           try { const rec = readBody(env, c.body); const r = d.runner(rec.harness, rec.local); gone = typeof r.alive === 'function' && r.alive(bodyOf(c.body, rec)) === false; } catch { gone = false; }
           if (gone) st = 'ended';
         }
-        const cap = contextCapOf(env, c);
-        if (cap && st === 'working' && (c.contextCap?.body !== c.body || c.contextCap.requested === false)) {
+        const cap = contextCapOf(env, c), boundaryAt = contextBoundaryOf(env, c);
+        const capOpen = cap && (c.contextCap?.body !== c.body || c.contextCap.requested === false);
+        // One nudge per body, and none once a handoff is under way: the cap stays the backstop.
+        const boundaryOpen = boundaryAt && c.contextCap?.body !== c.body && c.contextNudge?.body !== c.body;
+        if (st === 'working' && (capOpen || boundaryOpen)) {
           try {
             const rec = readBody(env, c.body), runner = d.runner(rec.harness, rec.local);
             const tokens = runner.context?.(bodyOf(c.body, rec));
-            if (Number.isSafeInteger(tokens) && tokens >= cap) {
+            if (capOpen && Number.isSafeInteger(tokens) && tokens >= cap) {
               c.contextCap = { body: c.body, run: c.run, tokens, asked: now, requested: false };
               c.starting = mark(now);
               ops.push({ cv: c.conversation, mark: c.starting.op, type: 'context-request', body: c.body, tokens });
+              saveConv(env, c); continue;
+            }
+            if (boundaryOpen && Number.isSafeInteger(tokens) && tokens >= boundaryAt) {
+              c.contextNudge = { body: c.body, run: c.run, tokens, asked: now, fed: false };
+              c.starting = mark(now);
+              ops.push({ cv: c.conversation, mark: c.starting.op, type: 'context-nudge', body: c.body, tokens });
               saveConv(env, c); continue;
             }
           } catch { /* an unavailable observation never invents a cap event */ }
@@ -4180,7 +4204,7 @@ export function resetPrincipal(env, conversation, { agent, approval } = {}) {
     rmSync(slotFile(env, conversation), { force: true });
     rmSync(homeFile(env, conversation), { force: true });
     delete c.slot; delete c.home; delete c.fallback;
-    delete c.contextCap; delete c.contextPrincipal; delete c.contextProfile; delete c.contextFloor; delete c.contextAuthority; delete c.contextModel;
+    delete c.contextCap; delete c.contextNudge; delete c.contextPrincipal; delete c.contextProfile; delete c.contextFloor; delete c.contextAuthority; delete c.contextModel;
     // The run that heard what came before speaks no more: its key is gone now, not when its body is ended.
     if (c.body) { c.resetPending = true; forgetRunKey(env, c); }
     // A reset is activity: the record (and the reset it holds) outlives any continuation issued before it (t-2004).
