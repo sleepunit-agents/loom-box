@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { existsSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
-import { contextCapOf, lastContext, handoffText, HANDOFF_MARKER } from '../src/context-cap.mjs';
+import { contextCapOf, contextBoundaryOf, lastContext, handoffText, HANDOFF_MARKER, HANDOFF_REQUEST, BOUNDARY_REQUEST, TASK_BOUNDARY } from '../src/context-cap.mjs';
 import { world } from './delivery-world.mjs';
 import { setModels } from '../src/models.mjs';
 import { deliver, tick, loadConv, saveConv, contextBoundary } from '../src/delivery.mjs';
@@ -442,4 +442,65 @@ test('a later rotation refuses malformed current rules even when an older saved 
   c = loadConv(w.env, first.conversation); c.bodyRules = {}; saveConv(w.env, c);
   await tick(w.env, w.o); c = loadConv(w.env, first.conversation);
   assert.equal(c.body, old); assert.equal(c.contextHandoffs.length, 1); assert.match(c.waiting, /bodyRules/);
+});
+test('boundary mark defaults to two thirds of the cap, follows the cap, and can be set or turned off', () => {
+  assert.equal(contextBoundaryOf({}, { kind: 'agent' }), 100000);
+  assert.equal(contextBoundaryOf({ LOOM_RUNTIME_CONTEXT_CAP: '600000' }, { kind: 'scheduled' }), 400000);
+  assert.equal(contextBoundaryOf({ LOOM_RUNTIME_CONTEXT_CAP: '600000', LOOM_RUNTIME_CONTEXT_BOUNDARY: '420000' }, { kind: 'agent' }), 420000);
+  assert.equal(contextBoundaryOf({}, { kind: 'live' }), null);
+  assert.equal(contextBoundaryOf({ LOOM_RUNTIME_CONTEXT_CAP: 'off' }, { kind: 'agent' }), null);
+  for (const raw of ['off', '0', '9999', '150000', '200000', '1.5', 'bad']) assert.equal(contextBoundaryOf({ LOOM_RUNTIME_CONTEXT_BOUNDARY: raw }, { kind: 'agent' }), null, raw);
+});
+test('the standing brief tells a job to keep its session; rotation is asked for once, by measured context', async () => {
+  const w = world({}, { inboxDir: true }); w.o.venues = () => ({ slack: { kind: 'agent', send: ['adapter'] } });
+  const first = await deliver(w.env, w.msg('nudge', 'Do several tasks'), w.o);
+  let c = loadConv(w.env, first.conversation); const old = c.body, id = old.split(':')[1];
+  const brief = w.log.find(x => x[0] === 'start')[2];
+  assert.ok(brief.includes(TASK_BOUNDARY));
+  assert.match(brief, /Do not rotate on your own/);
+  assert.doesNotMatch(brief, /When a task is complete and more authorized work remains/);
+  // Below the mark: finished tasks alone never draw a request.
+  w.runner.context = () => 99999; w.runner.final = () => null;
+  await tick(w.env, w.o); await tick(w.env, w.o);
+  assert.equal(w.log.filter(x => x[0] === 'feed').length, 0);
+  // Past the mark, below the cap: one boundary request, no cap handoff, the body keeps working.
+  w.runner.context = () => 120000;
+  await tick(w.env, w.o); await tick(w.env, w.o); await tick(w.env, w.o);
+  const feeds = w.log.filter(x => x[0] === 'feed');
+  assert.equal(feeds.length, 1, JSON.stringify(feeds));
+  assert.equal(feeds[0][2], BOUNDARY_REQUEST);
+  c = loadConv(w.env, first.conversation);
+  assert.equal(c.body, old); assert.equal(c.contextCap, undefined); assert.equal(c.starting, undefined);
+  assert.deepEqual({ body: c.contextNudge.body, fed: c.contextNudge.fed, tokens: c.contextNudge.tokens }, { body: old, fed: true, tokens: 120000 });
+  // The body finishes its task and rotates itself; the successor carries the note and starts unasked.
+  assert.equal(contextBoundary(w.env, { conversation: c.conversation, key: w.runner.envs[id].LOOM_BODY_KEY, session: 's-' + id, note: 'Task two merged. Next: task three at HEAD def.' }, w.o).state, 'handoff-saved');
+  w.runner.context = () => 1000; w.runner.finish(old); await beat(w);
+  c = loadConv(w.env, first.conversation);
+  assert.notEqual(c.body, old); assert.equal(c.contextHandoffs.length, 1); assert.equal(c.contextNudge, undefined);
+  assert.match(w.log.filter(x => x[0] === 'resume').at(-1)[4], /Task two merged/);
+  assert.ok(w.log.filter(x => x[0] === 'resume').at(-1)[4].includes(TASK_BOUNDARY));
+  // The fresh session gets its own single request when it fills in turn.
+  w.runner.context = () => 130000;
+  await tick(w.env, w.o); await tick(w.env, w.o);
+  assert.equal(w.log.filter(x => x[0] === 'feed' && x[2] === BOUNDARY_REQUEST).length, 2);
+});
+test('the cap still wins: at the cap an immediate handoff is asked for, nudged or not, and off means no nudge', async () => {
+  const w = world({}, { inboxDir: true }); w.o.venues = () => ({ slack: { kind: 'agent', send: ['adapter'] } });
+  const first = await deliver(w.env, w.msg('capwins', 'Long work'), w.o);
+  w.runner.final = () => null; w.runner.context = () => 120000;
+  await tick(w.env, w.o); await tick(w.env, w.o);
+  w.runner.context = () => 160000;
+  await tick(w.env, w.o); await tick(w.env, w.o);
+  assert.deepEqual(w.log.filter(x => x[0] === 'feed').map(x => x[2]), [BOUNDARY_REQUEST, HANDOFF_REQUEST]);
+  assert.equal(loadConv(w.env, first.conversation).contextCap.requested, true);
+  const direct = world({}, { inboxDir: true }); direct.o.venues = () => ({ slack: { kind: 'agent', send: ['adapter'] } });
+  await deliver(direct.env, direct.msg('direct', 'Jumps past both'), direct.o);
+  direct.runner.final = () => null; direct.runner.context = () => 160000;
+  await tick(direct.env, direct.o); await tick(direct.env, direct.o); await tick(direct.env, direct.o);
+  assert.deepEqual(direct.log.filter(x => x[0] === 'feed').map(x => x[2]), [HANDOFF_REQUEST]);
+  const off = world({ LOOM_RUNTIME_CONTEXT_BOUNDARY: 'off' }, { inboxDir: true }); off.o.venues = () => ({ slack: { kind: 'agent', send: ['adapter'] } });
+  await deliver(off.env, off.msg('off', 'No nudge'), off.o);
+  off.runner.final = () => null; off.runner.context = () => 120000;
+  await tick(off.env, off.o); await tick(off.env, off.o);
+  assert.equal(off.log.filter(x => x[0] === 'feed').length, 0);
 });

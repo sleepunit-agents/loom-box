@@ -23,8 +23,29 @@ Missing or malformed predecessor model metadata holds rotation before retirement
 A continuation with an invalid or mismatched pin waits rather than selecting a
 new model.
 
-A body can request rotation at a completed task boundary, below the cap or with the
-cap disabled: pipe its handoff to `loom runtime context-boundary --note -`. This is
+## When a job rotates
+
+Rotation follows measured context, never a count of finished tasks. A fresh session
+reads the brief, the task and the code again before it can work, so a job that
+rotated after every finished task spent most of each short session re-reading
+(measured 2026-11-14 across ten houses: median session eleven minutes, 37 handoffs).
+
+1. Every job's first brief and every resume brief tell the body to keep its session
+   across finished tasks and not to rotate on its own.
+2. At the boundary mark, `LOOM_RUNTIME_CONTEXT_BOUNDARY` (tokens; two thirds of the cap
+   unless set; `off`/`0` disables; a value at or above the cap is ignored), the runtime
+   feeds one request per body: finish the task you are on, then hand off with
+   `loom runtime context-boundary`. A handoff written at a finished task is the good
+   kind: nothing is half done.
+3. At the cap the existing immediate request applies, whether or not the body was asked
+   at the mark. The cap is the backstop for a body that could not finish in time.
+
+Set the cap below the harness's own compaction point, or the harness compacts in place
+before either request is seen. The mark is recorded on the conversation as
+`contextNudge` and cleared at rotation.
+
+The command itself still works without a request, below the cap or with the cap
+disabled: pipe its handoff to `loom runtime context-boundary --note -`. This is
 an authenticated body call (current conversation, run key, harness session and
 agent/house). A nonempty note of at most 12,000 characters is sealed before the
 command returns. The body must then end its current turn without beginning more
