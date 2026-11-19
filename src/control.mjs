@@ -19,7 +19,7 @@ import { joinPoll, joinRequest } from './enroll.mjs';
 import { checkDark, noteReport } from './watch.mjs';
 import { MAX_PARTS, PART_RAW, drop, partsOf, putPart, putWhole, readPart } from './blobs.mjs';
 import { parsePortGrant, parseTailnetGrant } from './house.mjs';
-import { CODE, LOGIN_NAMES, machineClaudeEnabled, scrubCliOutput } from './logins.mjs';
+import { CODE, LOGIN_HARNESSES, LOGIN_NAMES, machineClaudeEnabled, scrubCliOutput } from './logins.mjs';
 import { boxOwner, mayHaveLogin, mayUseLogin, membersOf, ownersAllow } from './owners.mjs';
 
 const TERMINAL = new Set(['done', 'failed', 'stopped', 'lost']);
@@ -202,9 +202,18 @@ export function primaryOf(s, agent, env, nowMs = Date.now()) {
 }
 
 /** Where a house goes, or a StateError saying why nowhere. */
-export function placeHouse(s, agent, { box, needs = [] }, env, nowMs = Date.now()) {
+export function placeHouse(s, agent, { box, needs = [], service } = {}, env, nowMs = Date.now()) {
   const members = membersOf(env);
-  const permitted = Object.entries(s.boxes).filter(([, b]) => mayHost(b, agent, members)).map(([n]) => n);
+  // The logins its house file asks of the box (t-2318): a box that can't mount one of them isn't a place for it. A box
+  // named outright is still taken as named; it says the same at claim.
+  const wants = houseLoginsOf(s, agent, service);
+  const logged = (id) => wants.every((l) => mayUseLogin(s.boxes[id], s.agents?.[agent], agent, l, members));
+  const hosts = Object.entries(s.boxes).filter(([, b]) => mayHost(b, agent, members)).map(([n]) => n);
+  const permitted = box ? hosts : hosts.filter(logged);
+  if (!box && wants.length && !permitted.length) {
+    const lacking = wants.filter((l) => !hosts.some((id) => mayUseLogin(s.boxes[id], s.agents?.[agent], agent, l, members)));
+    fail(`no box that may host ${agent} has a ${(lacking.length ? lacking : wants).map((l) => LOGIN_HARNESSES[l]?.label ?? l).join(' and ')} login ${agent} may use, which its house file asks for: log one in from its page (Boxes, Log in), on a box ${agent}'s owner owns, with the login granted to ${agent}`, 409);
+  }
   if (box) {
     const id = resolveBox(s, box);
     if (!ownersAllow(s.boxes[id], agent, members)) fail(`${boxNameOf(s, id)} is ${boxOwner(s.boxes[id], members)}'s box, and ${agent} isn't their agent (a box's owner can lend it: box-lend)`, 403);
@@ -228,6 +237,13 @@ export function placeHouse(s, agent, { box, needs = [] }, env, nowMs = Date.now(
     if (fits.includes(primary)) return primary;
     if (fits.length > 1) fail(`several boxes have ${needs.join(', ')}: ${fits.map((id) => boxLabelOf(s, id)).join(', ')}. Name one`, 409);
     return fits[0];
+  }
+  if (wants.length) {
+    // The first box of its preference that's up and logged in; else any that is; else the first that's logged in (it
+    // waits for that box). Never one that would only fail at claim for want of a login.
+    const pref = preferenceOf(s, agent, env);
+    const up = (id) => boxUp(s.boxes[id], nowMs, agent);
+    return pref.find((id) => permitted.includes(id) && up(id)) ?? permitted.find(up) ?? pref.find((id) => permitted.includes(id)) ?? permitted[0];
   }
   const primary = primaryOf(s, agent, env, nowMs);
   // The fallback primary is loom's own box: refused too when it isn't the agent's owner's.
@@ -1044,7 +1060,17 @@ export function nativeCollection(env, effects, caller, body) {
 }
 
 /** The box reports on a house. Ending one revokes its token. */
-export function report(env, effects, caller, { id, state, exit, log, build }) {
+/**
+ * The box's own logins an agent's house file asks for (t-2318), as the last box that read it said: by service name, ''
+ * for a task house. Placement (placeHouse) passes over a box that couldn't mount them, so a box that's lost a login
+ * doesn't build house after house that can't start. Unknown (no house of it read yet): every box, as before.
+ */
+export const houseLoginsOf = (s, agent, service) => {
+  const l = s.agents?.[agent]?.houseLogins?.[service || ''];
+  return Array.isArray(l) ? l.filter((x) => LOGIN_NAMES.includes(x)) : [];
+};
+
+export function report(env, effects, caller, { id, state, exit, log, build, logins }) {
   return update(env, (s) => {
     boxOf(s, caller);
     const h = s.houses[id];
@@ -1064,6 +1090,11 @@ export function report(env, effects, caller, { id, state, exit, log, build }) {
     // Only a box that may host the agent, for a house it claimed (and so built): a build that actually ran.
     const tag = buildTag(build, h.agent);
     if (state === 'running' && tag && h.claimedAt && mayHost(s.boxes[caller.subject], h.agent, membersOf(env))) { h.build ??= tag; noteBuild(s, h.agent, tag, h.claimedAt); }
+    // What the house file asks of the box's logins, as the box that claimed it read it (t-2318): placement's.
+    if (Array.isArray(logins) && logins.length <= LOGIN_NAMES.length && logins.every((x) => LOGIN_NAMES.includes(x)) && h.claimedAt && s.agents[h.agent]) {
+      const key = typeof h.service === 'string' ? h.service : '';
+      s.agents[h.agent].houseLogins = { ...(s.agents[h.agent].houseLogins ?? {}), [key]: [...new Set(logins)] };
+    }
     // A house asked to stop stays "stopping" while it's still up.
     if (!(h.state === 'stopping' && state === 'running')) h.state = state;
     h.updated = now(effects);
@@ -1196,7 +1227,7 @@ export function serviceUp(env, effects, caller, body) {
     s.services ??= {};
     const svc = s.services[key];
     if (svc?.want === 'up') return { service: key, box: svc.box, house: svc.house, state: s.houses[svc.house]?.state };
-    const box = placeHouse(s, a, { box: body.box || svc?.box || undefined }, env, Date.parse(now(effects)));
+    const box = placeHouse(s, a, { box: body.box || svc?.box || undefined, service: body.name }, env, Date.parse(now(effects)));
     // Its recent crashes stay: brought back up, a loop still shows as one. Not `unnamed`: only the owner gets here then.
     const next = { agent: a, name: body.name, box, want: 'up', restarts: 0, created: svc?.created ?? now(effects), ...(svc?.crashes?.length ? { crashes: svc.crashes } : {}) };
     s.services[key] = next;
