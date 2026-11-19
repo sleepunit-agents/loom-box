@@ -9,7 +9,7 @@ import { startBody } from '../src/bodies.mjs';
 import { runBodyHost } from '../src/bodyhost.mjs';
 import { api, setAgent } from '../src/control.mjs';
 import { CoreError } from '../src/core.mjs';
-import { deliver, deliveryDir, loadConv, tick } from '../src/delivery.mjs';
+import { deliver, deliveryDir, loadConv, saveConv, tick } from '../src/delivery.mjs';
 import { HouseRunner, bodySync, hostOf } from '../src/houserunner.mjs';
 import { setModels } from '../src/models.mjs';
 import { ageSealer } from '../src/sealed.mjs';
@@ -154,6 +154,9 @@ test('5. without age, the body is still reached from a detached worker (its text
   // The worker, given the text on stdin: it reaches the body (here a house, where no box is logged in: failed, said why).
   const cv = cvOf('art', 'slack', 'dm:N');
   const key = loadConv(w.env, cv).queue[0].key;
+  // The worker runs on the real clock, not the world's (2026-11-02): from 2026-11-16 its sweep found this conversation
+  // idle past the 14-day window and removed it before it ran (t-2318). Its last word is now, as the worker sees it.
+  saveConv(w.env, { ...loadConv(w.env, cv), last: new Date().toISOString() });
   const child = spawn(process.execPath, [join(here, '..', 'src', 'cli.mjs'), 'deliver', 'tick', '--conversation', cv, '--stdin'], { env: { ...w.env, LOOM_RUNTIME_ACCOUNTS: 'none' }, stdio: ['pipe', 'ignore', 'ignore'] });
   child.stdin.end(JSON.stringify({ [key]: 'no age here' }));
   await new Promise((res) => child.on('close', res));

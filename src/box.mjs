@@ -594,7 +594,9 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
       // history root is retained for the ordinary physical recovery pass.
       return;
     }
-    let made = [], logFd, containerEntered = false;
+    // The logins the house file asks for, once read: reported with the house's start or failure, so loom places the
+    // agent's next house only on a box that has them (t-2318), instead of building house after house where it can't start.
+    let made = [], logFd, containerEntered = false, wantLogins;
     try {
       if (!h.service && claimed.nativeHistory?.v !== 1) throw new BoxError('the runtime needs durable native collection support before this house starts; update loom runtime');
       if (claimed.nativeHistory?.v === 1) {
@@ -607,6 +609,7 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
       // the house starts without them, its log says so, and anything else the house file wants and doesn't get still fails.
       const house = withoutWithheld(specFor(parseHouseFile(readFileSync(inside(repo, h.houseFile || 'house/house.json', 'house file'), 'utf-8')), h.service), claimed.withheld,
         (what) => { writeSync(logFd, `loom-box: not for this house's work: ${what}\n`); log(`${h.id}: starting without ${what} (scoped)`); });
+      wantLogins = [...(house.logins ?? [])];
       // Every house gets its own loom token; the rest are what the control plane chose.
       const given = { ...(claimed.secrets || {}), 'loom-token': claimed.token };
       const missing = missingSecrets(house, given);
@@ -671,7 +674,7 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
       if (house.task === 'stdin') { child.stdin.on('error', () => {}); child.stdin.end(h.task); }
       log(`started ${h.id} (${h.agent})`);
       await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
-      await client.call('report', { id: h.id, state: 'running', build: tag }).catch((e) => log(`report ${h.id}: ${e.message}`));
+      await client.call('report', { id: h.id, state: 'running', build: tag, ...(wantLogins ? { logins: wantLogins } : {}) }).catch((e) => log(`report ${h.id}: ${e.message}`));
     } catch (err) {
       if (containerEntered) {
         // Observation/reporting failure after launch cannot authorize cleanup.
@@ -681,7 +684,7 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
       if (claimed.nativeHistory?.v === 1) {
         const e = { dir, completion: { v: 1, id: h.id, agent: h.agent, service: h.service ?? null, slot: h.slot ?? null,
           stateful: false, uploaded: true, reported: false, state: 'failed', code: -1,
-          native: true, nativeNotStarted: true, nativeUploaded: false, secretNames: made, removeContainer: false,
+          native: true, nativeNotStarted: true, nativeUploaded: false, secretNames: made, removeContainer: false, ...(wantLogins ? { logins: wantLogins } : {}),
           log: `the box couldn't start it: ${err.message}${tail(pathJoin(dir, 'log')) ? `\n${tail(pathJoin(dir, 'log'))}` : ''}` } };
         houses.set(h.id, e); await finish(e); return;
       }
@@ -689,7 +692,7 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
       log(`${h.id} failed to start: ${err.message}`);
       // The build's own output is in the house log: send its end along with why.
       const out = tail(pathJoin(dir, 'log'));
-      await client.call('report', { id: h.id, state: 'failed', log: `the box couldn't start it: ${err.message}${out ? `\n${out}` : ''}` }).catch(() => {});
+      await client.call('report', { id: h.id, state: 'failed', ...(wantLogins ? { logins: wantLogins } : {}), log: `the box couldn't start it: ${err.message}${out ? `\n${out}` : ''}` }).catch(() => {});
     } finally {
       if (logFd !== undefined) closeSync(logFd);
     }
@@ -768,7 +771,7 @@ export function runner(env, client, { loomUrl, labels = [], log = (m) => process
         d.uploaded = true; keepEnding(e);
       }
       if (!d.reported) {
-        if (!backendGone) await client.call('report', { id: d.id, state: d.state, exit: d.code ?? -1, log: d.log ?? tail(pathJoin(e.dir, 'log')) });
+        if (!backendGone) await client.call('report', { id: d.id, state: d.state, exit: d.code ?? -1, ...(Array.isArray(d.logins) ? { logins: d.logins } : {}), log: d.log ?? tail(pathJoin(e.dir, 'log')) });
         d.reported = true; keepEnding(e);
       }
       if (d.removeContainer) {

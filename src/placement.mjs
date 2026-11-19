@@ -5,7 +5,8 @@
 //     box (a loan doesn't count for a login) and granted the agent that login (owners.mjs mayUseLogin).
 // The house's own harness login is the only credential a body uses. Its house must declare the harness it runs
 // (its house file's "harnesses"): the box mounts only those logins, and the body host refuses one it has no login for.
-import { boxUp, factsOf, mayHost, meets, preferenceOf } from './control.mjs';
+import { boxUp, factsOf, houseLoginsOf, mayHost, meets, preferenceOf } from './control.mjs';
+import { LOGIN_HARNESSES } from './logins.mjs';
 import { mayUseLogin, membersOf } from './owners.mjs';
 
 /** Whether an agent's body on `harness` may run on box `id`. */
@@ -24,12 +25,21 @@ export function bodyBox(s, agent, harness, env, nowMs = Date.now(), needs = []) 
   const members = membersOf(env);
   // A body whose work needs something of its box (a worker role's needs, t-2092): only a box that has every one.
   const has = (id) => needs.every((n) => meets(factsOf(s.boxes?.[id] ?? {}), n));
-  const fits = (id) => mayRunBody(s, id, agent, harness, members) && has(id);
+  // And every login its house file asks of the box (t-2318): a box logged in to the body's harness but not to one its
+  // house mounts would only fail the house at claim, house after house.
+  const wants = houseLoginsOf(s, agent);
+  const logged = (id) => wants.every((l) => mayUseLogin(s.boxes?.[id], s.agents?.[agent], agent, l, members));
+  const fits = (id) => mayRunBody(s, id, agent, harness, members) && has(id) && logged(id);
   const up = (id) => boxUp(s.boxes?.[id], nowMs, agent);
   const pref = preferenceOf(s, agent, env);
   const all = Object.keys(s.boxes ?? {}).sort();
   const box = pref.find((id) => fits(id) && up(id)) ?? all.find((id) => fits(id) && up(id)) ?? pref.find(fits) ?? all.find(fits);
   if (box) return { box };
+  const runs = Object.keys(s.boxes ?? {}).filter((id) => mayRunBody(s, id, agent, harness, members) && has(id));
+  if (wants.length && runs.length) {
+    const lacking = wants.filter((l) => !runs.some((id) => mayUseLogin(s.boxes[id], s.agents?.[agent], agent, l, members)));
+    return { reason: `no box that may run ${agent}'s ${harness} bodies has a ${(lacking.length ? lacking : wants).map((l) => LOGIN_HARNESSES[l]?.label ?? l).join(' and ')} login ${agent} may use, which its house file asks for (log one in from its page, Boxes; grant the login on the agent's)` };
+  }
   if (needs.length && Object.keys(s.boxes ?? {}).some((id) => mayRunBody(s, id, agent, harness, members))) {
     const missing = needs.filter((n) => !Object.keys(s.boxes ?? {}).some((id) => mayRunBody(s, id, agent, harness, members) && meets(factsOf(s.boxes[id]), n)));
     return { reason: missing.length
